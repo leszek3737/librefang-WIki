@@ -1,254 +1,191 @@
 # Website — workers
 
-# Website Workers Module
+# Website Workers
 
-This module contains two Cloudflare Workers that power the librefang.ai website:
+Two Cloudflare Workers that power the Librefang website's dynamic data: GitHub repository statistics with registry metadata, and a lightweight visit counter.
 
-- **GitHub Stats Worker** — Serves repository statistics, releases, and registry metadata with intelligent caching
-- **Visit Counter Worker** — Tracks page visits and provides aggregated analytics
-
-Both workers use Cloudflare KV for persistence and CORS headers to support cross-origin requests from the dashboard.
-
-## Architecture Overview
+## Architecture
 
 ```mermaid
-graph TB
-    subgraph "Cloudflare Workers"
-        GSW["GitHub Stats Worker<br/>/workers/github-stats-worker"]
-        VCW["Visit Counter Worker<br/>/workers/visit-counter-worker"]
+graph LR
+    subgraph "github-stats-worker"
+        GH_SSE[scheduled handler]
+        GH_HTTP[HTTP handler]
+        MIG[migrateOldKeys]
+        RDS[recordDailyStats]
+        RRC[refreshRegistryCache]
     end
 
-    subgraph "Cloudflare KV"
-        KV["KV Namespace<br/>stats_history, caches, counters"]
+    subgraph "visit-counter-worker"
+        VT_HTTP[HTTP handler]
     end
 
-    subgraph "External APIs"
-        GH["GitHub API"]
-        REG["librefang-registry<br/>GitHub Repo"]
+    subgraph "External"
+        GHA[GitHub API]
+        GH_RAW[GitHub Raw]
     end
 
-    GSW -->|"Scheduled: every cron"| KV
-    GSW -->|"API requests"| GH
-    GSW -->|"Registry refresh"| REG
-    VCW -->|"Track/Read"| KV
+    subgraph "KV Stores"
+        KV_MAIN[(KV)]
+        KV_VISIT[(VISIT_COUNTER)]
+    end
 
-    Dashboard["Dashboard Frontend"] -->|"/api/github"| GSW
-    Dashboard -->|"/api/registry"| GSW
-    Dashboard -->|"/api/releases"| GSW
-    Dashboard -->|"/api/track"| VCW
+    GH_HTTP --> MIG
+    GH_HTTP --> KV_MAIN
+    GH_SSE --> RDS --> MIG
+    GH_SSE --> RRC
+    GH_HTTP --> GHA
+    RRC --> GHA
+    RRC --> GH_RAW
+    VT_HTTP --> KV_VISIT
 ```
 
-## GitHub Stats Worker
+---
 
-**File:** `web/workers/github-stats-worker/index.js`
+## github-stats-worker
 
-This worker provides three API endpoints and two scheduled background tasks.
+Serves cached GitHub stats, releases, and registry data. Runs scheduled tasks to record daily snapshots and keep the registry cache warm.
 
-### API Endpoints
+### HTTP Endpoints
+
+All endpoints return JSON with CORS headers (`Access-Control-Allow-Origin: *`).
 
 #### `GET /api/github`
 
-Returns comprehensive repository statistics including current counts and historical data.
+Returns current repository stats plus the last 30 days of history. Serves from KV cache for 30 minutes. Accepts a `?refresh` query parameter to bypass cache.
 
-**Query Parameters:**
-- `refresh=true` — Bypass cache and fetch fresh data from GitHub
+**Response shape:**
 
-**Response:**
 ```json
 {
-  "stars": 1234,
-  "forks": 56,
-  "issues": 78,
-  "prs": 12,
-  "lastUpdate": "2025-01-15T10:30:00Z",
-  "createdAt": "2024-06-01T00:00:00Z",
-  "downloads": 50000,
+  "stars": 42,
+  "forks": 10,
+  "issues": 5,
+  "prs": 3,
+  "lastUpdate": "2024-01-15T10:00:00Z",
+  "createdAt": "2023-06-01T00:00:00Z",
+  "downloads": 1234,
   "starHistory": [
-    { "date": "2025-01-01", "stars": 1200, "forks": 54, "issues": 75, "prs": 10 },
-    ...
+    { "date": "2024-01-15", "stars": 42, "forks": 10, "issues": 5, "prs": 3 }
   ]
 }
 ```
 
-The `starHistory` array contains the last 30 days of daily snapshots stored in `stats_history`.
-
-#### `GET /api/registry`
-
-Returns a directory listing of the librefang-registry repository. On-demand requests return minimal data (IDs and names only); the scheduled task populates full TOML metadata.
-
-**Query Parameters:**
-- `refresh=true` — Bypass cache
-
-**Response:**
-```json
-{
-  "hands": [{ "id": "...", "name": "...", "description": "", ... }],
-  "channels": [{ "id": "...", "name": "...", "description": "", ... }],
-  "handsCount": 25,
-  "channelsCount": 12,
-  "providersCount": 8,
-  "integrationsCount": 15,
-  "workflowsCount": 10,
-  "agentsCount": 5,
-  "pluginsCount": 20,
-  "fetchedAt": "2025-01-15T12:00:00Z"
-}
-```
+On a cache miss, makes three parallel GitHub API calls (repo info, releases, open PRs) and updates the `stats_history` KV key before responding.
 
 #### `GET /api/releases`
 
-Returns the 20 most recent GitHub releases with download counts.
+Proxies the last 20 GitHub releases. 30-minute KV cache. On upstream failure, serves stale cache rather than returning an error.
 
-**Response:** Raw GitHub releases JSON array.
+#### `GET /api/registry`
 
-### Scheduled Tasks
+Returns counts and names for all registry categories (hands, channels, providers, integrations, workflows, agents, plugins). 1-hour KV cache. Accepts `?refresh` to bypass. On error, falls back to stale cache.
 
-These run via Cloudflare Cron Triggers on the worker.
+**Response shape:**
 
-#### `recordDailyStats`
-
-Runs on a schedule to capture a daily snapshot of repository metrics:
-
-1. Fetches current `stargazers_count`, `forks_count`, `open_issues_count` from GitHub API
-2. Calculates open PR count by parsing the `link` header from the PRs endpoint
-3. Reads existing `stats_history` blob from KV
-4. Runs migration if needed (see below)
-5. Updates or appends today's entry
-6. Trims history to 90 days maximum
-7. Writes updated blob back to KV
-
-#### `refreshRegistryCache`
-
-Runs periodically to refresh registry metadata:
-
-1. Fetches directory listings for all registry categories
-2. Compares counts against cached data — **skips TOML fetch if counts unchanged**
-3. When counts differ, fetches full TOML details in batches of 10 to avoid subrequest limits
-4. Parses TOML fields: `id`, `name`, `description`, `category`, `icon`, `tags`
-5. Extracts i18n sections (`[i18n.zh]`, `[i18n.ja]`, etc.) for localized descriptions
-6. Writes complete registry data to KV
-
-This two-tier approach (lightweight directory listing on demand, full metadata on schedule) optimizes for both latency and detail.
-
-### Caching Strategy
-
-| Data | Cache Duration | KV Keys |
-|------|---------------|---------|
-| GitHub stats | 30 min | `github_stats`, `github_stats_time` |
-| Releases | 30 min | `releases_data`, `releases_data_time` |
-| Registry (listing) | 1 hour | `registry_data`, `registry_data_time` |
-| Daily history | Written daily, kept 90 days | `stats_history` |
-
-All responses include `Cache-Control: public, max-age=300` for CDN caching and `Access-Control-Allow-Origin: *` for cross-origin access.
-
-### KV Storage Schema
-
-**`stats_history`** — JSON blob containing up to 90 daily snapshots:
 ```json
-[
-  { "date": "2025-01-01", "stars": 1200, "forks": 54, "issues": 75, "prs": 10 },
-  { "date": "2025-01-02", "stars": 1205, "forks": 55, "issues": 76, "prs": 11 }
-]
+{
+  "hands": [{ "id": "example", "name": "Example", "description": "", "category": "", "icon": "" }],
+  "channels": [{ "id": "slack", "name": "Slack", "description": "", "category": "", "icon": "" }],
+  "handsCount": 5,
+  "channelsCount": 3,
+  "providersCount": 2,
+  "integrationsCount": 4,
+  "workflowsCount": 1,
+  "agentsCount": 2,
+  "pluginsCount": 3,
+  "fetchedAt": "2024-01-15T10:00:00.000Z"
+}
 ```
 
-**`stats_migration_done`** — Single flag key, value `"1"`, prevents re-running migration.
+### Scheduled Handler
 
-### Migration from Legacy Format
+Triggered by Cloudflare Cron Triggers. Runs two tasks concurrently via `ctx.waitUntil`:
 
-The worker migrates data from the old individual KV key format:
-- `stars_YYYY-MM-DD`
-- `forks_YYYY-MM-DD`
-- `issues_YYYY-MM-DD`
-- `prs_YYYY-MM-DD`
+1. **`recordDailyStats`** — Fetches current star/fork/issue/PR counts from GitHub and appends (or replaces) today's entry in `stats_history`. Keeps a rolling 90-day window.
 
-When `stats_history` has fewer than 7 entries, the migration scans the last 90 days of legacy keys and merges them into the blob. The `stats_migration_done` flag ensures this runs only once.
+2. **`refreshRegistryCache`** — Fetches directory listings from the `librefang-registry` repo, compares counts against the cached data, and only re-fetches TOML files if counts have changed. TOML files are fetched in batches of 10 from `raw.githubusercontent.com`, parsed for metadata (id, name, description, category, icon, tags, i18n sections), and stored as the full registry payload.
 
-## Visit Counter Worker
+### Stats History and Migration
 
-**File:** `web/workers/visit-counter-worker/index.js`
+Stats history is stored as a single JSON array under the `stats_history` KV key, with one entry per day up to 90 days. Each entry:
 
-A lightweight worker for tracking page visits using Cloudflare KV.
+```json
+{ "date": "2024-01-15", "stars": 42, "forks": 10, "issues": 5, "prs": 3 }
+```
 
-### API Endpoints
+**Migration from old format.** The system previously stored individual KV keys like `stars_2024-01-15`, `forks_2024-01-15`, etc. `migrateOldKeys` runs automatically when `stats_history` has fewer than 7 entries and the `stats_migration_done` flag is not set. It scans the last 90 days of old keys, merges them into the blob, deduplicates by date, and sets `stats_migration_done` so it never runs again.
+
+### KV Keys Used
+
+| Key | Content |
+|---|---|
+| `stats_history` | JSON array of daily stat entries (90 days) |
+| `stats_migration_done` | `"1"` after old-format migration completes |
+| `github_stats` | Cached JSON response for `/api/github` |
+| `github_stats_time` | Unix timestamp of last cache write |
+| `releases_data` | Cached JSON response for `/api/releases` |
+| `releases_data_time` | Unix timestamp of last cache write |
+| `registry_data` | Cached JSON response for `/api/registry` |
+| `registry_data_time` | Unix timestamp of last cache write |
+
+### Environment Bindings
+
+| Binding | Type | Purpose |
+|---|---|---|
+| `KV` | KV Namespace | All cached data and stats history |
+| `GITHUB_TOKEN` | Secret (optional) | Increases GitHub API rate limit from 60 to 5,000 requests/hour |
+
+---
+
+## visit-counter-worker
+
+A minimal visit counter that tracks total and daily page views. No authentication or bot filtering — intended for rough traffic estimates displayed on the site.
+
+### HTTP Endpoints
+
+All endpoints include CORS headers.
 
 #### `POST /api/track`
 
-Records a page visit. The request body is ignored; the worker uses `window.location.pathname` from the embedded script.
+Records a page visit. Increments both the total counter and a date-keyed daily counter. Returns `{ success: true, total }`.
 
-**Response:**
+#### `GET /` or `GET /api`
+
+Returns current counts:
+
 ```json
-{ "success": true, "total": 12345 }
-```
-
-#### `GET /api`
-
-Returns current visit statistics.
-
-**Response:**
-```json
-{ "total": 12345, "today": 234, "date": "2025-01-15" }
+{ "total": 1234, "today": 56, "date": "2024-01-15" }
 ```
 
 #### `GET /script.js`
 
-Returns an inline tracking script for embedding in pages.
+Returns a self-executing JavaScript snippet that sends a POST to `https://counter.librefang.ai/api/track` with the current `pathname`. Uses `keepalive: true` so the request survives page navigation.
 
-```javascript
-(function() {
-  var page = window.location.pathname || 'home';
-  fetch('https://counter.librefang.ai/api/track', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ page: page }),
-    keepalive: true
-  }).catch(function() {});
-})();
-```
+### KV Keys Used
 
-The `keepalive: true` option ensures the request completes even if the user navigates away.
+| Key | Content |
+|---|---|
+| `total` | Running total of all visits |
+| `today_YYYY-MM-DD` | Visit count for that specific date |
 
-### KV Storage Schema
+### Environment Bindings
 
-**`total`** — Cumulative visit count across all time
+| Binding | Type | Purpose |
+|---|---|---|
+| `VISIT_COUNTER` | KV Namespace | Visit counters |
 
-**`today_YYYY-MM-DD`** — Daily visit count (one key per day)
+---
 
-## Environment Variables
+## Caching Strategy
 
-Both workers expect these bindings in `wrangler.toml`:
+Both workers follow the same pattern: check a timestamp key alongside the data key, serve from cache if within the TTL, and fall back to stale data on upstream errors rather than surfacing failures to users.
 
-| Binding | Type | Description |
-|---------|------|-------------|
-| `KV` | KV Namespace | Primary storage for GitHub stats worker |
-| `VISIT_COUNTER` | KV Namespace | Storage for visit counter worker |
-| `GITHUB_TOKEN` | Secret | Optional GitHub API token for higher rate limits |
+| Data | TTL | Stale fallback |
+|---|---|---|
+| GitHub stats | 30 min | No (returns fresh error) |
+| Releases | 30 min | Yes |
+| Registry | 1 hour | Yes |
+| Visit counters | None (real-time) | N/A |
 
-## Integration Points
-
-### Dashboard Frontend
-
-The dashboard at `dashboard/src/api.ts` calls these worker endpoints:
-
-- `handleGitHubStats` → `GET /api/github` — Populates the stats display and star history chart
-- `handleRegistry` → `GET /api/registry` — Populates the registry browser
-- `handleReleases` → `GET /api/releases` — Populates the releases page
-
-### Embedded Tracking
-
-Web pages include the visit counter script:
-
-```html
-<script src="https://counter.librefang.ai/script.js"></script>
-```
-
-This fires asynchronously on page load without affecting user experience. The `keepalive` flag ensures tracking survives page navigation.
-
-## Rate Limiting Considerations
-
-The GitHub API has strict rate limits (60 requests/hour for unauthenticated, 5000/hour with token). The caching strategy minimizes API calls:
-
-- Stats and releases use 30-minute cache windows
-- Registry uses 1-hour cache with smart refresh
-- Scheduled tasks spread calls across time rather than bursting on user requests
-
-Without a `GITHUB_TOKEN`, the worker falls back to unauthenticated limits, which should suffice for typical traffic patterns.
+The `?refresh` query parameter on `/api/github` and `/api/registry` bypasses the cache check entirely and forces a fresh fetch from upstream.

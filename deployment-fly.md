@@ -2,76 +2,59 @@
 
 # Deployment — Fly.io
 
-This module provides one-command deployment of LibreFang to [Fly.io](https://fly.io), a platform that runs applications close to users with automatic scaling and persistent storage.
+The `deploy/fly/` module provides a fully automated, one-command deployment pipeline for LibreFang on [Fly.io](https://fly.io). It includes interactive provisioning, configuration, deployment, and teardown — no prior Fly.io setup required.
 
 ## Files
 
 | File | Purpose |
-|------|---------|
-| `deploy/fly/deploy.sh` | One-command deployment script |
-| `deploy/fly/fly.toml` | Fly.io application configuration |
-| `deploy/fly/uninstall.sh` | Cleanup script to remove deployments |
+|---|---|
+| `deploy/fly/deploy.sh` | End-to-end provisioning and deployment script |
+| `deploy/fly/fly.toml` | Fly.io machine/app configuration (image, volumes, HTTP service) |
+| `deploy/fly/uninstall.sh` | Interactive teardown of deployed LibreFang apps |
 
 ## Quick Start
 
 ```bash
+# Deploy
 curl -sL https://raw.githubusercontent.com/librefang/librefang/main/deploy/fly/deploy.sh | bash
+
+# Uninstall
+curl -sL https://raw.githubusercontent.com/librefang/librefang/main/deploy/fly/uninstall.sh | bash
 ```
 
-The script will:
-1. Install `flyctl` if needed
-2. Open a browser for Fly.io authentication
-3. Create a new app (custom or auto-generated name)
-4. Set up a 1GB persistent volume
-5. Configure LLM provider API keys
-6. Deploy LibreFang
+Both scripts are safe to pipe into bash — they are pure shell with no hidden dependencies beyond `flyctl`, `git`, `openssl`, and `python3`.
 
-## Deploy Script (`deploy.sh`)
+## Deployment Pipeline (`deploy.sh`)
 
-### Execution Flow
+The script runs eight sequential stages. Each stage must succeed before the next begins (`set -euo pipefail`).
 
 ```mermaid
 flowchart TD
-    A[Install flyctl] --> B[Authenticate]
-    B --> C[Clone Repo]
-    C --> D[Create App]
-    D --> E[Create Volume]
-    E --> F[Select Providers]
-    F --> G[Set Secrets]
-    G --> H[Deploy]
-    H --> I[Show URLs]
+    A[Check / Install flyctl] --> B[Auth via browser]
+    B --> C[Clone repo to tempdir]
+    C --> D[Name & create Fly app]
+    D --> E[Create 1GB persistent volume]
+    E --> F[Set LLM provider secrets]
+    F --> G[flyctl deploy --remote-only]
+    G --> H[Print URLs & cleanup tempdir]
 ```
 
-### Prerequisites
+### Stage Details
 
-- `flyctl` CLI (installed automatically if missing)
-- Fly.io account (browser-based login via `flyctl auth login`)
-- For API keys: accounts with supported providers (OpenAI, Anthropic, etc.)
+**1. Prerequisite check** — Verifies `flyctl` is on `$PATH`. If missing, downloads and installs it via the official Fly.io installer, then adds `~/.fly/bin` to `$PATH`.
 
-### Interactive Prompts
+**2. Authentication** — Runs `flyctl auth whoami` to test for an existing session. If unauthenticated, opens a browser for OAuth login via `flyctl auth login`.
 
-**App Name**
-- Leave empty for auto-generated name (format: `librefang-<hex>`)
-- Enter a custom name (auto-normalized to lowercase with dashes)
+**3. Clone** — Creates a temporary directory, shallow-clones (`--depth 1`) the LibreFang repository, and `cd`s into it.
 
-**LLM Provider Selection**
-- TUI with arrow keys (`↑`/`↓`), space to toggle, Enter to confirm
-- Press `q` or `Esc` to skip without configuring any providers
-- Providers supported: OpenAI, Anthropic, Google Gemini, Groq, DeepSeek, OpenRouter, Mistral, xAI/Grok
+**4. App creation** — Prompts for an app name. Accepts custom names (sanitized to lowercase alphanumeric with hyphens) or auto-generates one as `librefang-<8-hex-chars>`. Retries on name collision. Updates the `app` field in `fly.toml` via `sed`.
 
-### Environment Variables Set
+**5. Persistent volume** — Creates a 1 GB volume named `librefang_data` in the configured region. This volume is mounted at `/data` inside the container (see `fly.toml` `[mounts]`).
 
-| Variable | Description |
-|----------|-------------|
-| `LIBREFANG_HOME` | Data directory (`/data`) |
-| `LIBREFANG_LISTEN` | Listen address (`0.0.0.0:4545`) |
+**6. LLM provider secrets** — Presents an interactive TUI multi-select menu for eight LLM providers:
 
-### Secrets (Per-Provider)
-
-The script prompts for API keys based on selected providers:
-
-| Provider | Secret Name |
-|----------|-------------|
+| Provider | Environment Variable |
+|---|---|
 | OpenAI | `OPENAI_API_KEY` |
 | Anthropic | `ANTHROPIC_API_KEY` |
 | Google Gemini | `GEMINI_API_KEY` |
@@ -81,128 +64,94 @@ The script prompts for API keys based on selected providers:
 | Mistral | `MISTRAL_API_KEY` |
 | xAI / Grok | `XAI_API_KEY` |
 
-### Output
+For each selected provider, the script prompts for the API key and sets it via `flyctl secrets set`. This stage is optional — pressing `Esc` or `q` skips it entirely.
 
-On success, the script displays:
-```
-✓ LibreFang is live!
+**7. Deploy** — Runs `flyctl deploy` using the modified `fly.toml`, with `--remote-only` so the build happens on Fly's remote builders (no Docker required locally).
 
-  Dashboard:  https://<app-name>.fly.dev
-  API:        https://<app-name>.fly.dev/api/health
-  Manage:     flyctl dashboard --app <app-name>
-```
+**8. Cleanup** — Prints the dashboard URL (`https://<app>.fly.dev`), health check endpoint, and management commands. Removes the temporary clone directory.
 
-## Fly.toml Configuration
+### Default Region
 
-The `fly.toml` file defines how Fly.io runs LibreFang:
+The default region is `nrt` (Tokyo). To change it, modify the `REGION` variable at the top of `deploy.sh` and the `primary_region` in `fly.toml`.
+
+## App Configuration (`fly.toml`)
 
 ```toml
-app = "librefang"
-primary_region = "nrt"  # Tokyo
-```
+app = "librefang"               # Overwritten at deploy time
+primary_region = "nrt"
 
-### Key Settings
+[build]
+image = "ghcr.io/librefang/librefang:latest"   # Pre-built OCI image
 
-| Setting | Value | Purpose |
-|---------|-------|---------|
-| `primary_region` | `nrt` | Tokyo region for deployment |
-| `image` | `ghcr.io/librefang/librefang:latest` | Container image |
-| `internal_port` | `4545` | Port LibreFang listens on |
-| `memory` | `256mb` | VM memory allocation |
-| `cpus` | `1` | Shared CPU (1 core) |
-| `volume_size` | `1GB` | Persistent storage |
+[env]
+LIBREFANG_HOME = "/data"
+LIBREFANG_LISTEN = "0.0.0.0:4545"
 
-### Auto-Scaling
-
-```toml
 [http_service]
-  auto_stop_machines = "suspend"
-  auto_start_machines = true
-  min_machines_running = 1
-```
+internal_port = 4545
+force_https = true
+auto_stop_machines = "suspend"   # Machines suspend on idle
+auto_start_machines = true
+min_machines_running = 1
 
-This configuration:
-- Suspends VMs after 10 minutes of inactivity (saves costs)
-- Automatically starts VMs when requests arrive
-- Keeps at least 1 machine running (reduces cold start latency)
-
-### Persistent Storage
-
-```toml
 [mounts]
-  source = "librefang_data"
-  destination = "/data"
+source = "librefang_data"        # Created by deploy.sh stage 5
+destination = "/data"
+
+[[vm]]
+memory = "256mb"
+cpu_kind = "shared"
+cpus = 1
 ```
 
-Data persists across deployments and restarts via a named volume.
+Key configuration points:
 
-## Uninstall Script (`uninstall.sh`)
+- **Image source**: Deploys from the published GHCR container image, not a local build.
+- **Persistence**: The `librefang_data` volume is mounted at `/data`, which `LIBREFANG_HOME` points to. All mutable state lives here.
+- **HTTP service**: Listens on port `4545` internally, exposed with forced HTTPS and automatic machine management.
+- **VM sizing**: 256 MB shared-CPU — sufficient for the proxy workload. Adjust `[[vm]]` for higher throughput.
 
-Removes LibreFang deployments from your Fly.io account.
+## Uninstallation (`uninstall.sh`)
 
-```bash
-curl -sL https://raw.githubusercontent.com/librefang/librefang/main/deploy/fly/uninstall.sh | bash
-```
+Teardown is the reverse of provisioning:
 
-### Behavior
+1. **Verify `flyctl` and auth** — Same checks as `deploy.sh`.
+2. **Discover apps** — Fetches all apps via `flyctl apps list --json` and filters for names starting with `librefang` using an inline Python script.
+3. **Interactive selection** — Same TUI multi-select pattern as deploy: choose one or more apps to destroy, or cancel with `Esc`/`q`.
+4. **Confirmation** — Requires typing `yes` explicitly. Warns that all data, volumes, and secrets are permanently deleted.
+5. **Destroy** — Calls `flyctl apps destroy <app> --yes` for each selected app.
 
-1. Lists all Fly.io apps with names starting with `librefang`
-2. TUI to select which apps to remove (multi-select supported)
-3. Requires typing `yes` to confirm destruction
-4. Deletes apps, volumes, and secrets
+## TUI Multi-Select Pattern
 
-### Safety Checks
+Both scripts share a terminal UI for multi-selection. Understanding its controls helps when guiding users:
 
-- Only targets apps matching `librefang*` prefix
-- Requires explicit `yes` confirmation
-- Reports failures without stopping (continues to next app)
+| Key | Action |
+|---|---|
+| `↑` / `k` | Move cursor up |
+| `↓` / `j` | Move cursor down |
+| `Space` | Toggle selection on current item |
+| `Enter` | Confirm (selects current item if none toggled) |
+| `Esc` / `q` | Cancel / skip |
+
+The implementation hides the terminal cursor (`\033[?25l`), redraws in-place using `\033[<n>A` to move up, and restores the cursor on exit via a `trap` on `RETURN`.
 
 ## Managing Secrets After Deployment
 
-Add or update API keys without redeploying:
+API keys can be added or rotated at any time without redeploying:
 
 ```bash
-flyctl secrets set OPENAI_API_KEY=sk-... --app <app-name>
-flyctl secrets set ANTHROPIC_API_KEY=sk-ant-... --app <app-name>
+# Add a new provider key
+flyctl secrets set ANTHROPIC_API_KEY=sk-ant-... --app librefang-myapp
+
+# Rotate an existing key
+flyctl secrets set OPENAI_API_KEY=sk-new-key --app librefang-myapp
+
+# List current secrets (names only, values are hidden)
+flyctl secrets list --app librefang-myapp
 ```
 
-List current secrets (names only):
+Fly.io injects secrets as environment variables on the next machine start. If the app is already running with `auto_stop_machines = "suspend"`, you can force a restart:
 
 ```bash
-flyctl secrets list --app <app-name>
+flyctl machines restart --app librefang-myapp
 ```
-
-Remove a secret:
-
-```bash
-flyctl secrets unset PROXY_API_KEY --app <app-name>
-```
-
-## Connection to Main Codebase
-
-```
-deploy/fly/
-├── deploy.sh      → Clones librefang repo, runs flyctl deploy
-├── fly.toml       → Read by flyctl during deployment
-└── uninstall.sh   → Lists/destroys apps created by deploy.sh
-```
-
-The deployment script:
-- References `ghcr.io/librefang/librefang:latest` as the container image
-- Expects the app to listen on port `4545` (configured in `fly.toml`)
-- Stores persistent data in `/data` (configured as `LIBREFANG_HOME`)
-- Uses a pre-built OCI image rather than building from source during deploy
-
-## Troubleshooting
-
-**"App name is already taken"**
-Choose a different name or let the script auto-generate one.
-
-**Deployment fails with image pull error**
-Ensure the container image `ghcr.io/librefang/librefang:latest` exists and your Fly.io account has access to GitHub Packages.
-
-**Volume creation fails**
-Fly.io quotas may limit volumes. Check your dashboard or run `flyctl volumes list`.
-
-**Machine suspended, slow response**
-First request after suspension triggers machine restart (~10-30 seconds). This is expected behavior with `auto_stop_machines = "suspend"`.

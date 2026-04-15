@@ -1,167 +1,153 @@
 # Agent Hands
 
-# LibreFang Hands — Autonomous Capability Packages
+# Agent Hands
 
-Hands are pre-built, domain-complete agent configurations that users activate from a marketplace. Unlike regular agents (where you chat with them), Hands work autonomously for you — you check in on them periodically while they run in the background.
+Hands are pre-built, domain-complete autonomous agent configurations that users activate from a marketplace. Unlike regular agents you chat with interactively, Hands run in the background — you check in on them, not the other way around.
 
-## Overview
+Each Hand is defined by a `HAND.toml` file (with optional `SKILL.md` for agent instructions) and managed at runtime by the `HandRegistry`.
 
-The `librefang-hands` crate provides:
+## Architecture
 
-- **Hand definitions** — parsed from `HAND.toml` files, describing agent capabilities, settings, requirements, and routing metadata
-- **Hand instances** — running activations of a hand, tracking status and spawned agents
-- **Hand registry** — in-memory store managing definitions, instances, and persistence
-- **Requirement checking** — validates that system dependencies (binaries, API keys, environment variables) are available before activation
+```mermaid
+graph TD
+    subgraph "Disk"
+        RT["registry/hands/{id}/HAND.toml"]:::disk
+        WT["workspaces/{id}/HAND.toml"]:::disk
+        ST["hand_state.json"]:::disk
+        AT["registry/agents/{name}/agent.toml"]:::disk
+    end
 
-## Key Types
+    subgraph "HandRegistry (in-memory)"
+        DEF["definitions<br/>DashMap&lt;id, HandDefinition&gt;"]:::mem
+        INST["instances<br/>DashMap&lt;uuid, HandInstance&gt;"]:::mem
+        AIDX["agent_index<br/>agent_id → instance_id"]:::mem
+        BIDX["active_index<br/>hand_id → instance_id"]:::mem
+    end
 
-### HandDefinition
+    RT -->|scan + parse| DEF
+    WT -->|scan + parse| DEF
+    AT -->|base template resolve| DEF
+    DEF -->|activate| INST
+    INST --> AIDX
+    INST --> BIDX
+    INST -->|persist_state| ST
+    ST -->|load_state| INST
 
-The complete configuration for a hand, parsed from `HAND.toml`:
-
-```rust
-pub struct HandDefinition {
-    pub id: String,                      // e.g. "clip"
-    pub version: String,                 // e.g. "1.2.0"
-    pub name: String,                    // Human-readable name
-    pub description: String,
-    pub category: HandCategory,           // Content, Security, Data, etc.
-    pub icon: String,                     // Emoji icon
-    pub tools: Vec<String>,              // Required tools
-    pub skills: Vec<String>,             // Skill allowlist
-    pub mcp_servers: Vec<String>,        // MCP server allowlist
-    pub allowed_plugins: Vec<String>,
-    pub requires: Vec<HandRequirement>,   // Activation prerequisites
-    pub settings: Vec<HandSetting>,      // User-configurable options
-    pub agents: BTreeMap<String, HandAgentManifest>,  // Agent configs by role
-    pub dashboard: HandDashboard,
-    pub routing: HandRouting,             // Keywords for hand selection
-    pub skill_content: Option<String>,   // Bundled SKILL.md content
-    pub agent_skill_content: HashMap<String, String>,  // SKILL-{role}.md content
-    pub metadata: Option<HandMetadata>,   // Frequency, token consumption, warnings
-    pub i18n: HashMap<String, HandI18n>, // Localized strings
-}
-```
-
-### HandInstance
-
-A running activation of a hand:
-
-```rust
-pub struct HandInstance {
-    pub instance_id: Uuid,
-    pub hand_id: String,
-    pub status: HandStatus,              // Active, Paused, Error, Inactive
-    pub agent_ids: BTreeMap<String, AgentId>,  // Spawned agents by role
-    pub coordinator_role: Option<String>, // Which role receives user messages
-    pub config: HashMap<String, serde_json::Value>,  // User settings
-    pub activated_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-```
-
-### HandRegistry
-
-The central manager for all hands:
-
-```rust
-pub struct HandRegistry {
-    definitions: DashMap<String, HandDefinition>,  // hand_id → definition
-    instances: DashMap<Uuid, HandInstance>,        // instance_id → instance
-    agent_index: DashMap<String, Uuid>,            // agent_id → instance_id
-    active_index: DashMap<String, Uuid>,            // hand_id → active instance_id
-    activate_lock: Mutex<()>,                       // Serializes activate/deactivate
-    persist_lock: Mutex<()>,                        // Guards hand_state.json writes
-}
+    classDef disk fill:#f0f0f0,stroke:#666
+    classDef mem fill:#e8f4fd,stroke:#3a86a8
 ```
 
 ## HAND.toml Format
 
-Hands are defined in TOML with two agent configuration formats:
+A `HAND.toml` describes everything about a hand: its identity, agents, requirements, settings, dashboard metrics, and routing hints.
 
-### Single-Agent Format
+### Single-Agent vs Multi-Agent
+
+Hands support two agent declaration formats:
+
+**Single-agent** — use `[agent]` at the top level. Internally stored as role `"main"` with `coordinator = true`:
 
 ```toml
-id = "clip"
-name = "Clip Hand"
-description = "Autonomous video clipping"
-category = "content"
-icon = "✂️"
-tools = ["shell_exec"]
-
-[[requires]]
-key = "ffmpeg"
-label = "FFmpeg must be installed"
-requirement_type = "binary"
-check_value = "ffmpeg"
-
 [agent]
 name = "clip-agent"
-description = "Clips videos"
-system_prompt = "You clip videos..."
-
-[dashboard]
-metrics = []
+description = "Video clip creator"
+system_prompt = "You create video clips."
 ```
 
-### Multi-Agent Format
+**Multi-agent** — use `[agents.<role>]` sections. One agent should be marked `coordinator` (the one receiving user messages). If none is marked, the first by role name is used:
 
 ```toml
-id = "research"
-name = "Research Hand"
-description = "Multi-agent research pipeline"
-category = "content"
-
 [agents.planner]
 coordinator = true
 invoke_hint = "Use planner for task decomposition"
 name = "planner-agent"
-system_prompt = "You plan research tasks..."
+system_prompt = "You plan tasks."
 
 [agents.analyst]
 name = "analyst-agent"
-description = "Analyzes data"
-provider = "groq"
-model = "llama-3.3-70b-versatile"
-system_prompt = "You analyze data..."
+system_prompt = "You analyze data."
 ```
 
-Multi-agent hands can use `base` template references to inherit from agent templates:
+### Model Configuration — Nested vs Legacy Flat
+
+Agents can declare their model config in two ways:
+
+**Nested** (preferred for new hands):
+```toml
+[agents.planner.model]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+max_tokens = 8192
+temperature = 0.5
+system_prompt = "You plan research."
+```
+
+**Legacy flat** (fields at the agent level):
+```toml
+[agents.planner]
+name = "planner-agent"
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+system_prompt = "You plan."
+```
+
+Flat fields are auto-converted to nested format during parsing. The provider/model defaults are the string `"default"`, which the kernel resolves to the user's global default at agent spawn time.
+
+### Base Template Reuse
+
+Multi-agent entries can reference a shared agent template via `base`, avoiding duplication:
 
 ```toml
 [agents.writer]
 coordinator = true
-base = "my-writer-template"  # Loads from agents registry
-system_prompt = "You are a blog post writer."
+base = "generic-chat"          # loaded from registry/agents/generic-chat/agent.toml
+name = "blog-writer"           # overrides base name
+
+[agents.writer.model]
+system_prompt = "You write blog posts."  # overrides base prompt
+# provider, model, max_tokens etc. inherited from base
 ```
 
-## Agent Template Resolution
+Base templates are resolved by `parse_multi_agent_entry`, which loads the template TOML, normalizes flat fields to nested, and deep-merges the hand's overrides on top. Template names are validated against path traversal (`..`, `/`, `\`).
 
-Hands can reuse agent configurations via the `base` field. When a hand agent specifies `base = "template-name"`, the registry:
-
-1. Loads `agents/template-name/agent.toml` from the agents registry directory
-2. Deep-merges the hand's inline fields on top
-
-```mermaid
-graph LR
-    A[HandDefinition HAND.toml] --> B{has base?}
-    B -->|Yes| C[Load agents/{base}/agent.toml]
-    B -->|No| D[Use inline config]
-    C --> E[Deep merge: hand fields win]
-    D --> E
-    E --> F[HandAgentManifest]
-    
-    G[Flat format] --> H[normalize_flat_to_nested]
-    H --> E
-```
-
-The `normalize_flat_to_nested` function converts legacy flat-format agent TOML (where `provider`, `model`, `system_prompt` are top-level scalars) into the nested `[model]` sub-table format before merging. This ensures that hand overlays with nested `[model]` sections correctly override base template fields.
-
-## Settings and User Configuration
-
-Hands declare configurable settings that users fill in when activating:
+### Full Reference
 
 ```toml
+id = "clip"
+version = "1.2.0"
+name = "Clip Hand"
+description = "Autonomous video clip creation"
+category = "content"
+icon = "🎬"
+tools = ["shell_exec"]
+skills = ["video_editing"]
+mcp_servers = []
+allowed_plugins = []
+
+[routing]
+aliases = ["video editor", "clip maker"]
+weak_aliases = ["cut video", "trim"]
+
+[metadata]
+frequency = "on-demand"
+token_consumption = "medium"
+default_active = false
+activation_warning = "Uses FFmpeg for video processing"
+
+[[requires]]
+key = "ffmpeg"
+label = "FFmpeg"
+requirement_type = "binary"
+check_value = "ffmpeg"
+description = "Core video processing engine"
+optional = false
+
+[requires.install]
+macos = "brew install ffmpeg"
+linux_apt = "sudo apt install ffmpeg"
+manual_url = "https://ffmpeg.org/download.html"
+estimated_time = "2-5 min"
+
 [[settings]]
 key = "stt_provider"
 label = "STT Provider"
@@ -177,292 +163,218 @@ label = "Auto-detect"
 value = "groq"
 label = "Groq Whisper"
 provider_env = "GROQ_API_KEY"
-
-[[settings.options]]
-value = "local"
-label = "Local Whisper"
 binary = "whisper"
-```
 
-The `resolve_settings()` function converts user selections into:
+[[dashboard.metrics]]
+label = "Clips created"
+memory_key = "clips_count"
+format = "number"
 
-- A **prompt block** appended to the system prompt (e.g., "STT: Groq Whisper (groq)")
-- A list of **environment variables** the agent subprocess needs (e.g., `GROQ_API_KEY`)
-
-```rust
-pub fn resolve_settings(
-    settings: &[HandSetting],
-    config: &HashMap<String, serde_json::Value>,
-) -> ResolvedSettings {
-    // Returns: prompt_block + env_vars
-}
-```
-
-### Setting Types
-
-| Type | Description | Config Value |
-|------|-------------|--------------|
-| `select` | Choose from options | `"value"` string |
-| `text` | Free-form text input | `"value"` string |
-| `toggle` | Boolean on/off | `"true"` or `"false"` |
-
-## Requirements System
-
-Requirements gate activation — the hand cannot activate until all non-optional requirements are met.
-
-```toml
-[[requires]]
-key = "ffmpeg"
-label = "FFmpeg must be installed"
-requirement_type = "binary"
-check_value = "ffmpeg"
-description = "FFmpeg is the core video processing engine."
-optional = false
-
-[requires.install]
-macos = "brew install ffmpeg"
-windows = "winget install Gyan.FFmpeg"
-linux_apt = "sudo apt install ffmpeg"
-manual_url = "https://ffmpeg.org/download.html"
-estimated_time = "2-5 min"
-```
-
-### Requirement Types
-
-| Type | Check | Example |
-|------|-------|---------|
-| `binary` | Binary exists on PATH | `"ffmpeg"`, `"chromium"` |
-| `env_var` | Environment variable is set | `"HOME"` |
-| `api_key` | API key env var is set | `"OPENAI_API_KEY"` |
-| `any_env_var` | Any of comma-separated vars set | `"GROQ_API_KEY,OPENAI_API_KEY"` |
-
-### Python3 Detection
-
-The `python3` binary check has special handling to avoid false positives from:
-
-- **Windows Store shims** — `python3.exe` that opens the Store instead of running
-- **Python 2 installations** — where `python` exists but is Python 2
-
-It runs `python3 --version` (or `python --version` as fallback) and verifies the output contains "Python 3". The result is cached for the process lifetime via `OnceLock`.
-
-## Hand Lifecycle
-
-```mermaid
-stateDiagram-v2
-    [*] --> Inactive: HandDefinition loaded
-    Inactive --> Active: activate()
-    Active --> Paused: pause()
-    Active --> Inactive: deactivate()
-    Paused --> Active: resume()
-    Paused --> Error: set_error()
-    Error --> Active: resume()
-    Error --> Inactive: deactivate()
-```
-
-### Activation
-
-```rust
-impl HandRegistry {
-    pub fn activate(
-        &self,
-        hand_id: &str,
-        config: HashMap<String, serde_json::Value>,
-    ) -> HandResult<HandInstance>
-}
-```
-
-- Checks requirements are met
-- Serializes via `activate_lock` to prevent race conditions
-- Creates a `HandInstance` with status `Active`
-- Returns the instance; **agent spawning is done by the kernel**
-
-### Multi-Instance Support
-
-The registry supports multiple instances of the same hand. Pass `instance_id: Some(uuid)` to `activate_with_id()` when restoring from persisted state:
-
-```rust
-pub fn activate_with_id(
-    &self,
-    hand_id: &str,
-    config: HashMap<String, serde_json::Value>,
-    instance_id: Option<Uuid>,
-    timestamps: Option<(DateTime<Utc>, DateTime<Utc>)>,
-) -> HandResult<HandInstance>
-```
-
-## Persistence and Recovery
-
-The registry persists active instances to `hand_state.json` so they survive daemon restarts:
-
-```rust
-impl HandRegistry {
-    pub fn persist_state(&self, path: &Path) -> HandResult<()>
-    pub fn load_state(path: &Path) -> Vec<HandStateEntry>
-}
-```
-
-Persisted fields:
-
-- `hand_id`, `instance_id`, `config`, `agent_ids`, `coordinator_role`
-- `status` (Active and Paused are persisted; Error is also persisted so users see what went wrong)
-- `activated_at`, `updated_at`
-
-### Legacy Format Support
-
-The loader handles three format versions:
-
-- **v4**: `PersistedState { version: 4, instances: [...] }`
-- **v2/v3**: `{ "version": 2, "instances": [...] }`
-- **v1**: Bare array `[...]`
-
-Single-agent v1/v2 format (`agent_id: "uuid"`) is converted to multi-agent format (`{"main": uuid}`).
-
-## Internationalization
-
-Hands can provide localized strings for display names, descriptions, and settings:
-
-```toml
 [i18n.zh]
-name = "线索生成"
-description = "自主线索生成"
-
-[i18n.zh.agents.main]
-name = "主协调器"
-description = "协调各个子智能体完成任务"
-
-[i18n.zh.settings.target_industry]
-label = "目标行业"
-description = "聚焦的行业领域"
+name = "剪辑 Hand"
+description = "自主视频剪辑"
 ```
 
-All fields are optional — the English defaults from `[[settings]]` and `[agent]` are used when translations are absent.
+## Core Types
 
-## Registry Operations
+### `HandDefinition`
 
-### Loading Hands from Disk
+The parsed representation of a `HAND.toml`. Key fields:
+
+| Field | Purpose |
+|-------|---------|
+| `id` | Unique identifier (e.g. `"clip"`) |
+| `agents` | `BTreeMap<String, HandAgentManifest>` — role name to agent manifest. Single-agent hands use key `"main"`. |
+| `requires` | `Vec<HandRequirement>` — checked before/during activation |
+| `settings` | `Vec<HandSetting>` — user-facing configuration |
+| `routing` | `HandRouting` — alias keywords for intent matching |
+| `skill_content` | Bundled `SKILL.md` content (populated at load, not in TOML) |
+| `agent_skill_content` | Per-role `SKILL-{role}.md` overrides |
+| `i18n` | `HashMap<String, HandI18n>` — localized strings by language code |
+
+Key methods:
+- **`coordinator()`** → `Option<(&str, &HandAgentManifest)>` — finds the coordinator agent (explicit flag, or first by sort order)
+- **`agent()`** → `Option<&AgentManifest>` — backward-compatible single-agent accessor
+- **`is_multi_agent()`** → `bool` — true when more than one agent is defined
+
+### `HandInstance`
+
+A running instantiation of a `HandDefinition`. Created by `activate()`, tracked in the registry until `deactivate()`.
+
+| Field | Purpose |
+|-------|---------|
+| `instance_id` | `Uuid` — unique per activation |
+| `hand_id` | Which definition this is an instance of |
+| `status` | `Active`, `Paused`, `Error(String)`, or `Inactive` |
+| `agent_ids` | `BTreeMap<String, AgentId>` — role → spawned agent (populated by kernel) |
+| `coordinator_role` | Explicitly persisted coordinator role name |
+| `config` | User's configuration overrides |
+
+Coordinator resolution follows a precedence chain:
+1. Explicit `coordinator_role` if it matches an existing agent
+2. Single-agent case: the only entry
+3. Fallback to role named `"main"`
+4. First agent by BTreeMap sort order
+
+### `HandRequirement`
+
+Declares a prerequisite for activation. `requirement_type` determines the check:
+
+| Type | Check performed |
+|------|----------------|
+| `Binary` | Binary exists on PATH (special cases for `python3` and `chromium`) |
+| `EnvVar` / `ApiKey` | Environment variable is set and non-empty |
+| `AnyEnvVar` | Any of the comma-separated env vars in `check_value` is set |
+
+Optional requirements (`optional = true`) don't block activation. When an active hand has unmet optional requirements, it's reported as **degraded** rather than "requirements not met".
+
+### `HandSetting` and `resolve_settings`
+
+Settings declared in `[[settings]]` are shown in the activation modal. Three types:
+
+- **`Select`** — dropdown with `[[settings.options]]`. Options can declare `provider_env` / `binary` for availability badges.
+- **`Toggle`** — boolean switch (`"true"`/`"false"`).
+- **`Text`** — freeform input. Can declare `env_var` to expose the value.
+
+`resolve_settings(settings, config)` produces:
+- `prompt_block` — a markdown summary of the user's choices to inject into the system prompt
+- `env_vars` — environment variable names the agent's subprocess needs access to (based on selected options)
+
+### `HandError`
 
 ```rust
-pub fn reload_from_disk(&self, home_dir: &Path) -> (usize, usize)
+pub enum HandError {
+    NotFound(String),           // hand_id not in registry
+    AlreadyActive(String),      // hand already has a live instance
+    AlreadyRegistered(String),  // hand_id already in definitions
+    BuiltinHand(String),        // can't uninstall registry hands
+    InstanceNotFound(Uuid),     // instance uuid not found
+    ActivationFailed(String),   // generic activation error
+    TomlParse(String),          // HAND.toml parse failure
+    Io(std::io::Error),         // filesystem error
+    Config(String),             // configuration error
+}
 ```
 
-Scans two locations, with registry entries taking precedence on ID collisions:
+## HandRegistry
 
-1. `registry/hands/{id}/` — Read-only registry (synced from librefang-registry tarball)
-2. `workspaces/{id}/` — User-installed hands (survives daemon restarts)
+Thread-safe (`Send + Sync`) registry managing hand definitions and active instances. All concurrent access uses lock-free `DashMap` for reads; a `Mutex` serializes the check-then-insert in `activate` to prevent duplicate activations.
 
-### Installing Hands
+### Definition Installation
 
-| Method | Use Case | Base Template Resolution |
-|--------|----------|-------------------------|
-| `install_from_path` | Install from filesystem directory | ✅ Yes (via `agents_dir`) |
-| `install_from_content` | API-based install | ❌ No (rejected if base is used) |
-| `install_from_content_persisted` | Dashboard "install from content" | ✅ Yes (resolves `agents_dir`) |
+Three installation paths, all going through `register_definition()` which rejects duplicate IDs:
 
-### Uninstalling Hands
+| Method | Use case | Base templates | Persisted to disk |
+|--------|----------|----------------|-------------------|
+| `install_from_path` | Local directory install | ✅ resolved | No |
+| `install_from_content` | API-based install from raw TOML | ❌ rejected | No |
+| `install_from_content_persisted` | Dashboard "install from content" | ✅ resolved | Yes → `workspaces/{id}/` |
 
-```rust
-pub fn uninstall_hand(&self, home_dir: &Path, hand_id: &str) -> HandResult<()>
+`install_from_content` explicitly rejects hands with `base` references because it has no access to the agents registry directory. Use `install_from_content_persisted` or `install_from_path` when templates are needed.
+
+### Uninstallation
+
+`uninstall_hand(home_dir, hand_id)` enforces three invariants:
+
+1. **NotFound** — hand_id must exist in the registry
+2. **BuiltinHand** — only hands with a `workspaces/{id}/HAND.toml` file can be removed. Registry-sourced hands live under `registry/hands/` and would be recreated on the next sync.
+3. **AlreadyActive** — deactivate before uninstalling. Prevents dangling kernel references.
+
+On success, removes the in-memory definition and deletes the `workspaces/{id}/` directory.
+
+### Hand Discovery
+
+`scan_hands_dir(home_dir)` searches two locations:
+
+1. `home_dir/registry/hands/` — built-in hands from the shared registry tarball (reset on every sync)
+2. `home_dir/workspaces/` — user-installed hands (survive restarts)
+
+Subdirectories of `workspaces/` that aren't hands (e.g. agent workspace directories) are filtered out by the `HAND.toml` existence check. Registry entries take precedence on ID collisions.
+
+Each hand directory can contain:
+- `HAND.toml` (required)
+- `SKILL.md` — shared skill content for all agents
+- `SKILL-{role}.md` — per-agent skill override (e.g. `SKILL-planner.md`)
+
+### Activation Lifecycle
+
+```
+1. Kernel receives activate request
+2. registry.activate(hand_id, config)
+   - Checks definition exists
+   - Checks not already active (via active_index, O(1))
+   - Creates HandInstance with fresh UUID
+   - Inserts into instances, active_index
+3. Kernel spawns agents (single or multi)
+4. registry.set_agents(instance_id, agent_ids, coordinator_role)
+   - Stores role → AgentId mapping
+   - Updates agent_index for O(1) reverse lookup
+5. registry.persist_state(path)
+   - Writes Active/Paused/Error instances to hand_state.json
 ```
 
-Rules:
+The `activate_lock` Mutex ensures two concurrent requests cannot both pass the "already active" check before either inserts.
 
-1. **NotFound** — Hand ID doesn't exist in memory
-2. **BuiltinHand** — Hand lives in `registry/hands/` (would be recreated on next sync)
-3. **AlreadyActive** — A live instance exists (must deactivate first)
-4. **Success** — Removes from memory, deletes `workspaces/{id}/`
+### State Persistence
 
-## Requirement and Settings Availability
+`persist_state()` writes all non-Inactive instances to `hand_state.json` (version 4 format). `load_state()` restores them, supporting backward compatibility with v1–v3 formats:
 
-### Checking Requirements
+| Version | Format |
+|---------|--------|
+| v1 | Bare JSON array of instance objects |
+| v2 | Single `agent_id` field (converted to `{"main": id}`) |
+| v3 | `PersistedState` with versioned schema |
+| v4 | Current — includes `coordinator_role`, `activated_at`, `updated_at` |
 
-```rust
-pub fn check_requirements(&self, hand_id: &str) -> HandResult<Vec<(HandRequirement, bool)>>
-```
-
-Returns each requirement paired with whether it's currently satisfied.
-
-### Checking Settings Availability
-
-```rust
-pub fn check_settings_availability(
-    &self,
-    hand_id: &str,
-    lang: Option<&str>,
-) -> HandResult<Vec<SettingStatus>>
-```
-
-For each setting option, determines availability based on:
-
-- **`provider_env`**: Checks if the env var (or aliases like `GEMINI_API_KEY` → `GOOGLE_API_KEY`) is set
-- **`binary`**: Checks if the binary exists on PATH and is executable
+Errored and inactive instances are skipped during load. Restored instances preserve their original UUID via `activate_with_id()` so deterministic agent IDs remain stable across restarts.
 
 ### Readiness
 
-```rust
-pub fn readiness(&self, hand_id: &str) -> Option<HandReadiness>
-```
-
-Returns a combined view:
+`readiness(hand_id)` computes a snapshot combining requirement checks with runtime state:
 
 ```rust
 pub struct HandReadiness {
-    pub requirements_met: bool,  // All non-optional requirements satisfied
-    pub active: bool,             // Has an Active-status instance
-    pub degraded: bool,           // Active but some requirement unmet
+    pub requirements_met: bool,  // all mandatory reqs satisfied
+    pub active: bool,            // has a running instance
+    pub degraded: bool,          // active but some reqs unmet
 }
 ```
 
-## Integration Points
+Only non-optional requirements gate `requirements_met`. Degraded is true when any requirement (optional or not) is unmet while the hand is active — some features may not work.
 
-### With the Kernel
+### Requirement Checking Details
 
-The kernel is responsible for:
+`check_requirement` performs platform-aware checks:
 
-- **Spawning agents** after `activate()` returns the instance
-- **Killing agents** after `deactivate()`
-- **Updating instance agent IDs** via `set_agents()`
+- **Binary**: walks `PATH` segments, checks file existence and execute bit (Unix). Special cases:
+  - `python3`: actually runs `python3 --version` / `python --version` and checks for "Python 3" in output, with `OnceLock` caching. Falls back to absolute paths (`/usr/bin/python3`, `/usr/local/bin/python3`).
+  - `chromium`: tries `chromium-browser`, `google-chrome`, `google-chrome-stable`, `chrome`, and `CHROME_PATH` env var.
+- **EnvVar / ApiKey**: checks var is set and non-empty. Supports aliases (e.g., `GEMINI_API_KEY` also accepts `GOOGLE_API_KEY`).
+- **AnyEnvVar**: comma-separated list in `check_value`; any one being set is sufficient.
 
-```rust
-// Kernel spawns agents, then:
-registry.set_agents(instance_id, agent_ids, coordinator_role);
+### Settings Availability
 
-// Kernel encounters error, then:
-registry.set_error(instance_id, error_message);
-```
+`check_settings_availability(hand_id, lang)` returns per-option availability status. For each `Select` option:
+- No `provider_env` and no `binary` → always available
+- `provider_env` set → checks env var (with alias support)
+- `binary` set → checks binary on PATH
 
-### With the Router
+Supports i18n: when `lang` is provided, label/description are pulled from `[i18n.{lang}.settings.{key}]` if present, falling back to English.
 
-The router uses hand routing keywords for deterministic hand selection:
+## Relationship to the Kernel
 
-```rust
-pub struct HandRouting {
-    pub aliases: Vec<String>,      // Strong signals (score ×3)
-    pub weak_aliases: Vec<String>, // Weak signals (score ×1)
-}
-```
+The kernel (`src/kernel/mod.rs`) is the primary consumer:
 
-### With the TUI
+| Kernel action | Registry method |
+|---------------|-----------------|
+| Boot | `reload_from_disk(home_dir)` |
+| Activate hand | `activate()` → spawn agents → `set_agents()` |
+| Deactivate hand | `deactivate()` → kill agents |
+| Pause/resume | `pause()` / `resume()` |
+| Find hand by agent | `find_by_agent(agent_id)` |
+| Check dependencies | `readiness(hand_id)` → `check_requirements(hand_id)` |
+| Persist state | `persist_state(path)` |
+| Restore on restart | `load_state(path)` → `activate_with_id()` |
+| Get active agent | `instance.agent_id()` via `list_instances()` |
 
-The TUI uses `list_definitions()` and `list_instances()` to display the hand dashboard.
-
-### With the API
-
-The HTTP API routes use the registry for all hand operations:
-
-- `GET /api/hands` → `list_definitions()`
-- `POST /api/hands/:id/activate` → `activate()`
-- `POST /api/hands/:id/deactivate` → `deactivate()`
-- `GET /api/hands/:id/requirements` → `check_requirements()`
-- `GET /api/hands/:id/settings` → `check_settings_availability()`
-
-## Key Design Decisions
-
-1. **Single-instance by default** — Only one active instance per hand unless `instance_id` is explicitly passed to `activate_with_id()`. This simplifies the common case.
-
-2. **DashMap for concurrent access** — All registry maps use `DashMap` for lock-free concurrent reads. The `activate_lock` mutex only serializes the check-then-insert window for activation.
-
-3. **Reverse indexes** — `agent_index` enables O(1) `find_by_agent()`, and `active_index` enables O(1) "is this hand active?" checks.
-
-4. **Skill content loading** — `SKILL.md` is loaded into `skill_content`; `SKILL-{role}.md` files populate `agent_skill_content` with per-role overrides.
-
-5. **TOML flexibility** — Both flat and wrapped (`[hand]`) formats are supported, with automatic format detection and legacy field conversion.
+The HTTP routes (`src/routes/skills.rs`) use `readiness()` and `check_requirements()` to populate the hands list and dependency check endpoints. The router module (`librefang-kernel-router`) calls `parse_hand_toml()` directly to extract routing keywords from hand definitions for intent matching.

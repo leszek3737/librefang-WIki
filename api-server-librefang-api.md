@@ -1,438 +1,286 @@
 # API Server — librefang-api
 
-# librefang-api — HTTP/WebSocket API Server
-
-The `librefang-api` crate provides the HTTP and WebSocket API layer for the LibreFang Agent OS daemon. It exposes agent management, status queries, chat interaction, OAuth authentication, and OpenAI-compatible endpoints as JSON REST APIs.
+# LibreFang API Server (`librefang-api`)
 
 ## Overview
 
-LibreFang runs as a long-lived daemon with an in-process kernel. The API server provides the primary interface for all clients:
+The `librefang-api` crate is the HTTP/WebSocket API server for the LibreFang Agent OS daemon. It runs the kernel in-process and exposes agent management, status monitoring, chat, and configuration through JSON REST endpoints and WebSocket connections. The CLI, dashboard SPA, and external integrations all communicate through this layer.
 
-- **CLI clients** — authenticate via bearer token or API key
-- **Dashboard SPA** — browser-based UI served by the same process
-- **External integrations** — OpenAI-compatible clients, webhook consumers
-- **Terminal sessions** — WebSocket-based interactive sessions
-
-The server is built on [Axum](https://github.com/tokio-rs/axum), Tokio's most mature web framework, and integrates with the kernel's actor model for agent messaging.
+The crate is built on [Axum](https://github.com/tokio-rs/axum) and provides production-grade middleware for authentication, rate limiting, structured logging, internationalized error messages, and security headers.
 
 ## Architecture
 
 ```mermaid
-graph TB
-    subgraph "librefang-api"
-        WS[WebSocket Handler]
-        REST[REST Routes]
-        MW[Middleware Stack]
-        AUTH[Auth Middleware]
-        OAUTH[OAuth/OIDC Module]
-        OPENAI[OpenAI Compat]
-        WS_PROTO[Stream Dedup<br/>Stream Chunker]
+graph TD
+    Client["CLI / Dashboard / External"] --> Middleware
+    subgraph Middleware ["Middleware Pipeline"]
+        AL["accept_language"] --> RL["request_logging"]
+        RL --> AVH["api_version_headers"]
+        AVH --> AUTH["auth"]
+        AUTH --> SH["security_headers"]
+        SH --> OIDC["oidc_auth_middleware"]
     end
-
-    subgraph "librefang-kernel"
-        KR[Kernel]
-        REG[Agent Registry]
-        CH[Channel Bridge]
-    end
-
-    subgraph "librefang-extensions"
-        VAULT[Vault]
-    end
-
-    subgraph "librefang-runtime"
-        HTTP[HTTP Client]
-        TELEMETRY[Telemetry]
-    end
-
-    WS --> WS_PROTO
-    REST --> MW
-    MW --> AUTH
-    AUTH --> OAUTH
-    AUTH --> VAULT
-    WS --> KR
-    REST --> KR
-    OPENAI --> KR
-    OPENAI --> REG
-    OAUTH --> HTTP
-    WS_PROTO --> KR
-    CH --> KR
+    Middleware --> Routes["Route Handlers"]
+    Routes --> Kernel["librefang-kernel"]
+    AUTH --> AuthState
+    OIDC --> OAuth["oauth module"]
+    OAuth --> IdP["External IdP"]
 ```
 
-## Middleware Stack
+## Module Organization
 
-The middleware module (`middleware.rs`) handles cross-cutting concerns applied to every request.
+| Module | Purpose |
+|---|---|
+| `server` | Server bootstrap, router construction, graceful shutdown |
+| `routes` | HTTP route handlers (agents, config, budget, sessions, etc.) |
+| `middleware` | Auth, logging, version headers, security headers, i18n |
+| `oauth` | OAuth2/OIDC login, callback, token refresh, introspection |
+| `ws` | WebSocket handler for real-time agent chat |
+| `openai_compat` | OpenAI-compatible chat completion endpoint |
+| `webchat` | Embedded chat UI page rendering |
+| `webhook_store` | Webhook subscription CRUD and persistence |
+| `channel_bridge` | External channel (WeChat, WhatsApp, etc.) message bridging |
+| `stream_chunker` | Splits streaming LLM output into SSE-compatible chunks |
+| `stream_dedup` | Deduplication for concurrent stream consumers |
+| `terminal` | PTY/process management for terminal features |
+| `rate_limiter` | In-memory per-IP rate limiting |
+| `password_hash` | Argon2 password hashing and session token management |
+| `validation` | Request body validation helpers |
+| `versioning` | API version negotiation from path and `Accept` headers |
+| `openapi` | OpenAPI 3.0 spec generation (via `utoipa`) |
+| `types` | Shared API types (request/response structs) |
+| `telemetry` | Optional (`telemetry` feature) Prometheus metrics and tracing export |
 
-### Authentication (`auth`)
+## Authentication & Authorization
 
-The `auth` middleware validates requests against multiple credential sources:
+The API supports four authentication mechanisms that are evaluated in a single pass by the `auth` middleware:
 
-```rust
-pub struct AuthState {
-    pub api_key_lock: Arc<tokio::sync::RwLock<String>>,
-    pub active_sessions: Arc<tokio::sync::RwLock<HashMap<String, SessionToken>>>,
-    pub dashboard_auth_enabled: bool,
-    pub user_api_keys: Arc<Vec<ApiUserAuth>>,
-}
+### 1. Static API Keys
+
+Configured via `api_key` in `config.toml`. Multiple keys are supported by separating them with `\n`. Accepted as either `Authorization: Bearer <key>` or `X-API-Key: <key>` header, or as a `?token=<key>` query parameter (for SSE/WebSocket clients that cannot set headers).
+
+When the key is empty or whitespace-only, authentication is disabled entirely (local development mode).
+
+### 2. Per-User API Keys
+
+Role-based API access via `user_api_keys` configuration. Each key is an Argon2 hash that maps to a named user with a specific `UserRole`:
+
+| Role | GET | POST (limited) | POST (all) | Owner-only writes |
+|---|---|---|---|---|
+| `Viewer` | ✅ | ❌ | ❌ | ❌ |
+| `User` | ✅ | ✅ (message, clone, approvals) | ❌ | ❌ |
+| `Admin` | ✅ | ✅ | ✅ | ❌ |
+| `Owner` | ✅ | ✅ | ✅ | ✅ |
+
+**Owner-only write endpoints** (`/api/config`, `/api/config/set`, `/api/config/reload`, `/api/auth/change-password`, `/api/shutdown`) are locked to `Owner` role regardless of method. This list is exact-match only — new endpoints are not silently locked down.
+
+The `AuthenticatedApiUser` struct is inserted into request extensions when a per-user key matches, so downstream handlers can inspect `name` and `role`.
+
+### 3. Dashboard Session Tokens
+
+The dashboard login flow generates random session tokens stored in `AuthState::active_sessions`. These tokens are checked after static keys, with expired sessions pruned on each validation.
+
+### 4. OAuth2/OIDC Tokens
+
+When external auth is enabled, Bearer tokens are validated against configured provider JWKS endpoints. See [OAuth2/OIDC Integration](#oauth2oidc-integration) below.
+
+### Path Normalization
+
+Before any ACL check, paths are normalized:
+- Version prefix stripped: `/api/v1/agents` → `/api/agents`
+- Trailing slashes removed: `/api/agents/` → `/api/agents`
+- Root path preserved: `/` stays `/` (not empty string)
+
+### Public Endpoints
+
+**Always public** (regardless of configuration):
+- `/`, `/logo.png`, `/favicon.ico`
+- `/api/health`, `/api/version`, `/api/versions`
+- `/api/auth/callback`, `/api/auth/dashboard-login`, `/api/auth/dashboard-check`
+- `/api/providers/github-copilot/oauth/*`
+- `/api/mcp/servers/{name}/auth/callback` (GET only)
+- Static assets under `/dashboard/`, `/a2a/`, `/api/uploads/`
+- `/api/auth/login`, `/api/auth/providers`, `/.well-known/agent.json`, `/api/config/schema`
+
+**Dashboard reads** (public unless `require_auth_for_reads` is set):
+- `/api/agents`, `/api/profiles`, `/api/config`, `/api/status`, `/api/models`, `/api/budget`, `/api/approvals`, `/api/skills`, `/api/sessions`, `/api/workflows`, `/api/hands`, etc.
+- `/api/logs/stream` (SSE, read-only)
+
+**Always requires auth**:
+- `/api/health/detail` — returns operational data (panic counts, model IDs, config warnings)
+- All POST/PUT/DELETE/PATCH to non-public endpoints
+
+### `require_auth_for_reads`
+
+When enabled in configuration and any authentication method is configured, the dashboard read endpoints require a valid token. This prevents remote enumeration of agents, config, and budget on publicly reachable deployments. `/api/health` remains public for load balancer probes.
+
+The flag only engages when authentication is actually configured (API key, user API keys, or dashboard username/password). Setting the flag without configuring any auth is a no-op.
+
+## Middleware Pipeline
+
+Requests pass through the middleware stack in order:
+
+```
+accept_language → request_logging → api_version_headers → auth → security_headers → oidc_auth_middleware → handler
 ```
 
-**Credential sources** (checked in order):
-1. **Static API key** — configured in `config.toml`, supports multiple keys separated by newlines
-2. **Bearer token** — `Authorization: Bearer <token>` header
-3. **Query parameter** — `?token=` for SSE clients that cannot set custom headers
-4. **Active sessions** — randomly generated tokens from dashboard login
-5. **Per-user API keys** — hashed credentials with role-based access
+### `accept_language`
 
-**Public endpoints** bypass authentication entirely. These include dashboard assets, health checks, model/provider listings, and OAuth entry points (login, callback):
+Parses the `Accept-Language` header via `librefang_types::i18n::parse_accept_language` and stores the resolved language code in `RequestLanguage` request extension. Sets `Content-Language` on the response.
 
-```rust
-let is_public = path == "/"
-    || path == "/api/health"
-    || (path.starts_with("/dashboard/") && is_get)
-    || (path == "/api/agents" && is_get)  // GET only
-    || path == "/api/auth/callback"       // OAuth entry point
-    // ... more paths
-```
+### `request_logging`
 
-### Role-Based Access Control
+Generates a UUID request ID, logs method/path/status/latency, records HTTP metrics via `librefang_telemetry::metrics::record_http_request`, and injects `x-request-id` into the response.
 
-Per-user API keys support three roles defined in `librefang_kernel::auth::UserRole`:
+Successful GET requests log at `DEBUG` level to reduce noise; all other requests log at `INFO`.
 
-| Role | Access |
-|------|--------|
-| `Viewer` | GET requests only |
-| `User` | GET + limited POST (agent messages, clone, approvals) |
-| `Admin` | Full access |
+### `api_version_headers`
 
-```rust
-fn user_role_allows_request(role: UserRole, method: &Method, path: &str) -> bool {
-    if role >= UserRole::Admin || *method == Method::GET {
-        return true;
-    }
-    if role < UserRole::User {
-        return false;
-    }
-    // User role: only specific POST endpoints
-    if *method == Method::POST {
-        return path.starts_with("/api/agents/")
-            && (path.ends_with("/message") || path.ends_with("/message/stream"))
-            || /* clone, approvals */;
-    }
-    false
-}
-```
+Adds `X-API-Version` to every response. Version is resolved from:
+1. Explicit path prefix (`/api/v1/...`)
+2. `Accept: application/vnd.librefang.<version>+json` header
+3. Default (latest version)
 
-### Security Headers
+Unknown vendor versions on unversioned paths return `406 Not Acceptable`.
 
-Applied to all responses:
+### `auth`
 
-```http
-X-Content-Type-Options: nosniff
-X-Frame-Options: DENY
-Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; ...
-Strict-Transport-Security: max-age=63072000; includeSubDomains
-Referrer-Policy: strict-origin-when-cross-origin
-Cache-Control: no-store, no-cache, must-revalidate
-```
+Full authentication and authorization middleware. See [Authentication & Authorization](#authentication--authorization) above.
 
-### Request Logging
+Security properties:
+- **Constant-time comparison** for all token checks (via `subtle::ConstantTimeEq`) to prevent timing attacks
+- **Loopback-only enforcement** for `/api/shutdown` — checks `ConnectInfo<SocketAddr>` and requires `ip().is_loopback()`
+- **Expired session cleanup** — prunes expired sessions from `active_sessions` on each token check
 
-Routine `GET 2xx` requests log at `DEBUG` level to reduce noise. All other requests log at `INFO` with request ID, method, path, status, and latency in milliseconds.
+### `security_headers`
 
-### API Versioning
+Applied to **all** responses unconditionally:
 
-Responses include `X-API-Version` headers. The server supports both versioned paths (`/api/v1/agents`) and an unversioned alias (`/api/agents`) that routes to the latest version. Content-type negotiation via `Accept: application/vnd.librefang.v1+json` is also supported.
+| Header | Value |
+|---|---|
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `X-XSS-Protection` | `1; mode=block` |
+| `Content-Security-Policy` | Restrictive CSP (self + inline for bundled JS/CSS, Google Fonts) |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `Cache-Control` | `no-store, no-cache, must-revalidate` |
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains` |
 
-## OAuth2/OIDC Authentication
+### `oidc_auth_middleware`
 
-The `oauth.rs` module enables external identity provider integration for single sign-on.
+Extracts Bearer JWT tokens and validates them against configured provider JWKS endpoints. When validation succeeds, `IdTokenClaims` is injected into request extensions. This middleware does **not** block requests — access control is handled by `auth`.
+
+## OAuth2/OIDC Integration
+
+The `oauth` module provides full OAuth2/OIDC login flows supporting multiple providers (Google, GitHub, Azure AD, Keycloak, or any OIDC-compliant provider).
 
 ### Provider Resolution
 
-Providers are resolved either from explicit configuration or via OIDC discovery:
+Providers are resolved from `ExternalAuthConfig`:
 
-```rust
-pub(crate) async fn resolve_providers(
-    config: &ExternalAuthConfig,
-) -> Vec<ResolvedProvider> {
-    // 1. Multi-provider mode: each provider in config.providers
-    for provider in &config.providers {
-        if !provider.auth_url.is_empty() {
-            // Use explicit URLs (e.g., GitHub OAuth2)
-        } else {
-            // OIDC discovery via issuer_url
-        }
-    }
-    // 2. Legacy fallback for single-provider config
-}
-```
+1. **Multi-provider mode**: Iterate `config.providers`, resolving each via OIDC discovery or explicit URLs.
+2. **Legacy fallback**: If no providers are defined but `issuer_url` + `client_id` are set, use those.
 
-### Supported Providers
+Resolution results are `ResolvedProvider` structs containing all endpoints, client ID, scopes, and domain restrictions.
 
-| Provider | Discovery | Auth Method |
-|----------|-----------|-------------|
-| Generic OIDC | `.well-known/openid-configuration` | Authorization Code + PKCE |
-| Google Workspace | OIDC | Authorization Code |
-| GitHub | Explicit URLs | OAuth2 |
-| Azure AD | OIDC | Authorization Code |
-| Keycloak | OIDC | Authorization Code |
+### Caching
 
-### OAuth Flow
+| Cache | TTL | Scope |
+|---|---|---|
+| OIDC discovery | 1 hour | Per issuer URL |
+| JWKS keys | 1 hour | Per JWKS URI |
+| Token store | 24 hours | Per user `sub` |
+
+All caches use `tokio::sync::RwLock<HashMap<...>>` with lazy static initialization.
+
+### CSRF Protection
+
+State tokens are HMAC-SHA256-signed payloads containing provider ID, nonce, and timestamp:
 
 ```
-┌─────────┐                    ┌──────────────┐                    ┌─────────────┐
-│  User   │──GET /auth/login──▶│   LibreFang  │──302 Redirect─────▶│  IdP        │
-│ Browser │                    │   API Server │                    │             │
-└─────────┘                    └──────────────┘                    └─────────────┘
-     │                               ▲                                   │
-     │                               │                                   │
-     │◀───302 /auth/callback─────────┼───────────────────────────────────┘
-     │     ?code=xxx&state=yyy       │     code + state (GET) or POST body
-     │                               │
-     │                               ▼
-     │                    ┌──────────────────┐
-     │                    │ Validate state   │
-     │                    │ Exchange code    │
-     │                    │ Store tokens     │
-     │                    │ Return JWT      │
-     │                    └──────────────────┘
+base64url(json_payload).base64url(hmac_signature)
 ```
 
-### State Token (CSRF Protection)
+- Signing key: `LIBREFANG_STATE_SECRET` env var, or a random per-process key
+- TTL: 10 minutes
+- Verified on callback before code exchange
 
-State tokens are HMAC-signed to prevent CSRF:
+### Login Flow
 
-```rust
-struct OAuthStatePayload {
-    provider: String,
-    nonce: String,
-    ts: u64,  // Timestamp for expiry
-}
-
-fn build_state_token(provider_id: &str) -> String {
-    // payload = base64url(JSON) . base64url(HMAC-SHA256)
-}
-
-fn verify_state_token(state: &str) -> Result<OAuthStatePayload, String> {
-    // 1. Split on "."
-    // 2. Verify HMAC signature
-    // 3. Decode and parse JSON
-    // 4. Check expiry (10 minute TTL)
-}
 ```
+GET /api/auth/login/{provider}
+  → build_state_token(provider_id)
+  → 302 redirect to provider authorization URL
 
-### JWKS Caching
-
-JWT validation uses cached JWKS keysets:
-
-```rust
-static JWKS_CACHE: LazyLock<JwksCache> = LazyLock::new(JwksCache::default);
-const JWKS_CACHE_TTL: Duration = Duration::from_secs(3600);
+GET/POST /api/auth/callback?code=...&state=...
+  → verify_state_token(state)
+  → exchange_code(token_endpoint, code, ...)
+  → validate_jwt_cached(id_token, jwks_uri, audience)
+  → verify nonce matches state token
+  → check allowed_domains
+  → store tokens in TokenStore
+  → return {token, refresh_token, user}
 ```
-
-Keys are cached per JWKS URI for one hour, then refreshed on the next validation attempt.
 
 ### Token Refresh
 
-When access tokens expire, clients exchange refresh tokens for new credentials:
+`POST /api/auth/refresh` accepts a refresh token (from request body or token store lookup) and exchanges it for new access/refresh tokens. When multiple providers are configured, the `provider` field must be specified.
 
-```
-POST /api/auth/refresh
-{
-    "refresh_token": "...",
-    "provider": "google"  // optional if single provider
-}
-```
+### Token Introspection
 
-The server maintains an in-memory token store (`TokenStore`) keyed by user subject (`sub`) for automatic refresh without requiring the client to store the refresh token.
+`POST /api/auth/introspect` follows RFC 7662 conventions, returning `{"active": true/false, ...}` with full claims for valid tokens.
 
-## OpenAI-Compatible API
+### JWT Validation
 
-The `openai_compat.rs` module provides a `/v1/chat/completions` endpoint compatible with OpenAI client libraries.
+Tokens are validated using `jsonwebtoken` with:
+- RSA keys (RS256/RS384/RS512) from JWKS `n`/`e` components
+- EC keys (ES256/ES384) from JWKS `x`/`y` components
+- Audience validation against configured `audience` (or `client_id` as fallback)
+- Expiration enforcement
 
-### Model Resolution
+### Key Types
 
-The `model` field in requests resolves to an agent:
+- **`IdTokenClaims`**: Standard OIDC claims (`sub`, `email`, `name`, `picture`, `roles`, `iss`, `aud`, `nonce`, `exp`, `iat`)
+- **`OidcAudience`**: Supports both single-string and array `aud` values with `contains()` helper
+- **`ResolvedProvider`**: Fully resolved provider with endpoints, client config, and domain restrictions
+- **`TokenStore`**: In-memory store keyed by user `sub`, holding access/refresh tokens with 24h TTL eviction
 
-```rust
-fn resolve_agent(state: &AppState, model: &str) -> Option<(AgentId, String)> {
-    // 1. "librefang:<name>" → find by name
-    if let Some(name) = model.strip_prefix("librefang:") {
-        return state.kernel.agent_registry().find_by_name(name);
-    }
-    // 2. Valid UUID → find by ID
-    if let Ok(id) = model.parse::<AgentId>() {
-        return state.kernel.agent_registry().get(id);
-    }
-    // 3. Plain string → try as agent name
-    state.kernel.agent_registry().find_by_name(model)
-}
-```
+### Domain Restriction
 
-### Message Conversion
+When `allowed_domains` is configured on a provider:
+- Users without an `email` claim are **rejected** (both in callback and middleware)
+- Email domain must match an entry in the allowlist
+- Applied during both login callback and OIDC middleware validation
 
-OpenAI message format converts to internal `Message` format:
+## Connecting to the Kernel
 
-```rust
-fn convert_messages(oai_messages: &[OaiMessage]) -> Vec<Message> {
-    // role: "user" → User, "assistant" → Assistant, "system" → System
-    // content: text → MessageContent::Text
-    //          parts → MessageContent::Blocks (with ContentBlock::Text/Image)
-}
-```
+The API server runs the kernel in the same process. Route handlers receive an `Arc<AppState>` via Axum's `State` extractor, which provides access to `state.kernel` — the kernel instance. From there, handlers call kernel methods like:
 
-### Streaming Response
+- `agent_registry()` — agent CRUD and messaging
+- `config_ref()` / `config_snapshot()` — configuration reads
+- `model_catalog_ref()` — model resolution
+- `metering_ref()` — usage tracking
+- `budget_config()` — budget queries
+- `running_tasks_ref()` — task management
 
-Streaming responses use Server-Sent Events:
+WebSocket handlers (`ws` module) maintain persistent connections for real-time agent chat, calling `inject_attachments_into_session`, `resolve_attachments`, and kernel messaging methods.
 
-```rust
-async fn stream_response(...) -> Result<Sse<...>, String> {
-    let (mut rx, _handle) = kernel.send_message_streaming_with_routing(...).await?;
-    
-    // Stream events:
-    // - role delta (initial)
-    // - text delta
-    // - tool_use_start → tool_call chunk
-    // - tool_input_delta → arguments chunk
-    // - content_complete → finish_reason="stop"
-}
-```
+## Feature Flags
 
-Each chunk follows the OpenAI SSE format:
+| Flag | Effect |
+|---|---|
+| `telemetry` | Enables the `telemetry` module (Prometheus metrics, tracing export, observability stack) |
+
+## Error Responses
+
+All error responses are JSON (`application/json`) with i18n-aware messages. The error structure is:
 
 ```json
-{"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":123,"model":"agent","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
+{"error": "message"}
 ```
 
-## WebSocket Sessions
+Error message language is determined by the `accept_language` middleware and resolved via `librefang_types::i18n::ErrorTranslator`. Two primary auth error keys:
+- `api-error-auth-missing-header` — no credentials provided
+- `api-error-auth-invalid-key` — credentials provided but incorrect
 
-WebSocket connections enable real-time interactive sessions. The `ws.rs` module handles:
-
-- **Agent messaging** — streaming message exchange
-- **Terminal sessions** — PTY-based shell access
-- **Event streaming** — SSE logs and status updates
-
-### Authentication
-
-WebSocket connections authenticate via query parameter (headers unavailable in native WS):
-
-```
-ws://localhost:18789/ws?token=<api_key>
-```
-
-### Stream Deduplication
-
-In multi-replica scenarios, the `stream_dedup.rs` module prevents duplicate events from reaching clients using a sliding window approach:
-
-```rust
-pub struct StreamDedup {
-    window: VecDeque<SentEvent>,
-    seen: HashSet<String>,
-}
-
-impl StreamDedup {
-    pub fn record_sent(&mut self, event_id: &str);
-    pub fn is_duplicate(&mut self, event_id: &str) -> bool;
-}
-```
-
-## Rate Limiting
-
-The `rate_limiter.rs` module implements rate limiting using the Generalized Cell Rate Algorithm (GCRA):
-
-```rust
-pub fn gcra_rate_limit(
-    event_name: &str,
-    calls_per_window: u32,
-    window_secs: u32,
-) -> Result<(), RateLimitError>
-```
-
-## Integration Points
-
-### With Kernel
-
-The API server holds a reference to the kernel and routes requests:
-
-```
-┌────────────────┐    ┌─────────────────────────────────────┐
-│ API Routes     │───▶│ librefang_kernel::Kernel            │
-│                │    │                                     │
-│ GET /api/agents│───▶│ agent_registry().list()            │
-│ POST /message  │───▶│ send_message_with_handle()          │
-│ /ws            │───▶│ send_message_streaming_with_routing│
-└────────────────┘    └─────────────────────────────────────┘
-```
-
-### With Vault
-
-Dashboard credentials and machine fingerprints are stored in the vault:
-
-```rust
-// Authentication flow
-resolve_dashboard_credential() 
-    → vault.unlock() 
-    → vault.load() 
-    → vault.resolve_master_key()
-```
-
-### With Webhook Store
-
-Webhooks are stored encrypted and decoded on demand:
-
-```rust
-// Tool execution
-tool_image_analyze()
-    → webhook_store.encode()
-    → send webhook
-```
-
-## Configuration
-
-API server behavior is controlled via `config.toml`:
-
-```toml
-[api]
-host = "127.0.0.1"      # Bind address
-port = 18789            # Default port
-api_key = ""            # Static API key (empty = auth disabled)
-max_request_size = 10485760  # 10MB
-
-[api.external_auth]
-enabled = false
-issuer_url = "https://accounts.google.com"
-client_id = "..."
-client_secret_env = "LIBREFANG_OAUTH_CLIENT_SECRET"
-
-[api.external_auth.providers]
-# Multiple providers supported
-[[api.external_auth.providers]]
-id = "github"
-display_name = "GitHub"
-auth_url = "https://github.com/login/oauth/authorize"
-token_url = "https://github.com/login/oauth/access_token"
-client_id = "..."
-client_secret_env = "GH_SECRET"
-scopes = ["read:user"]
-```
-
-## Testing
-
-The middleware includes comprehensive integration tests:
-
-```bash
-# Run middleware tests
-cargo test -p librefang-api middleware::tests
-
-# Run OAuth tests
-cargo test -p librefang-api oauth::tests
-
-# Run OpenAI compat tests
-cargo test -p librefang-api openai_compat::tests
-```
-
-Key test scenarios covered:
-- Role-based access control enforcement
-- Path normalization preventing ACL bypass via trailing slashes
-- CSRF protection via state token validation
-- JWKS caching behavior
-- OIDC discovery with fallback
+The `WWW-Authenticate: Bearer` header is set on 401 responses.

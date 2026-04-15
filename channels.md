@@ -2,442 +2,316 @@
 
 # Channels Module (`librefang-channels`)
 
-Provides a **Channel Bridge Layer** that connects 40+ messaging platforms to the LibreFang kernel. Each platform adapter normalises its native message format into a unified `ChannelMessage`, then the bridge dispatches those messages to the appropriate agent. Responses flow back through the same adapter to the original user.
+## Purpose
 
-## Overview
+The channel bridge layer converts messages from 40+ external messaging platforms into unified `ChannelMessage` events, routes them to the appropriate agent, and delivers responses back through the originating platform. Every platform-specific detail — webhook signatures, API quirks, message formats — is absorbed by individual adapters so the rest of the system works against a single interface.
 
-The module is split into two parts:
-
-| Part | Always compiled? | Purpose |
-|------|-----------------|---------|
-| Core infrastructure (`bridge`, `router`, `sanitizer`, `rate_limiter`, `formatter`, `types`, `message_journal`, `sidecar`, `http_client`) | Yes | Bridge logic, routing, security, formatting, crash recovery |
-| Channel adapters (40 individual modules) | No — each gated behind a `channel-xxx` Cargo feature | Platform-specific message normalisation and delivery |
+## Architecture
 
 ```mermaid
-block-beta
-  columns 1
+graph LR
+    subgraph External Platforms
+        T[Telegram]
+        D[Discord]
+        S[Slack]
+        W[WhatsApp]
+        O["40+ others"]
+    end
 
-  block:Telegram
-    columns 1
-    tg_adapter[TelegramAdapter]
-  end
+    subgraph librefang-channels
+        A[Channel Adapters]
+        BM[BridgeManager]
+        R[AgentRouter]
+        RL[RateLimiter]
+        SN[Sanitizer]
+        FM[Formatter]
+        J[Journal]
+    end
 
-  block:Discord
-    columns 1
-    dc_adapter[DiscordAdapter]
-  end
+    subgraph Kernel
+        CBH["ChannelBridgeHandle<br/>(trait, impl in librefang-api)"]
+    end
 
-  block:Slack
-    columns 1
-    sl_adapter[SlackAdapter]
-  end
-
-  block:More_Adapters
-    columns 1
-    more[...]
-  end
-
-  adapters["40+ Channel Adapters<br/>(feature-gated)"]
-  bridge[BridgeManager<br/>dispatch, debounce, RBAC]
-  router[AgentRouter<br/>routing, bindings]
-  sanitizer[InputSanitizer<br/>prompt injection]
-  rate_limiter[ChannelRateLimiter]
-  kernel["librefang-api<br/>(ChannelBridgeHandle impl)"]
-
-  adapters --> bridge
-  bridge --> router
-  bridge --> sanitizer
-  bridge --> rate_limiter
-  bridge --> kernel
+    T & D & S & W & O -->|webhook / poll / ws| A
+    A -->|ChannelMessage stream| BM
+    BM -->|sanitize, rate-limit, route| R
+    BM -->|dispatch| CBH
+    CBH -->|agent response| BM
+    BM -->|formatted response| A
+    A -->|platform API| T & D & S & W & O
 ```
 
 ## Feature Flags
 
-All 40+ channels are gated. The crate's `Cargo.toml` defines a `default` set of popular channels and an `all-channels` metafeature:
+Channel adapters are compiled behind individual Cargo feature flags (`channel-telegram`, `channel-discord`, etc.). The `default` feature enables popular channels; `all-channels` compiles everything.
 
-```toml
-[features]
-default = ["channel-telegram", "channel-discord", "channel-slack", "channel-matrix", "channel-email"]
-all-channels = ["channel-bluesky", "channel-dingtalk", "channel-discord", ...]
-# ... one entry per channel
-```
+Core infrastructure (`bridge`, `router`, `types`, `formatter`, `sanitizer`, `rate_limiter`, `message_journal`, `sidecar`) is always compiled regardless of feature flags.
 
-Enable a single channel in your `Cargo.toml`:
-
-```toml
-librefang-channels = { version = "...", features = ["channel-telegram"] }
-```
-
-## Core Types (`types.rs`)
+## Core Types
 
 ### `ChannelMessage`
 
-The canonical message type all adapters produce. An inbound message from any platform is normalised into this shape:
+The unified inbound message type. All adapters produce these. Key fields:
 
-```rust
-pub struct ChannelMessage {
-    pub channel:        ChannelType,
-    pub sender:         ChannelUser,
-    pub content:        ChannelContent,
-    pub is_group:       bool,
-    pub thread_id:      Option<String>,
-    pub timestamp:      DateTime<Utc>,
-    pub metadata:       HashMap<String, serde_json::Value>,
-    pub platform_message_id: String,
-}
-```
+- `channel: ChannelType` — originating platform (enum: `Telegram`, `Discord`, `Slack`, `WhatsApp`, `Custom(String)`, etc.)
+- `sender: ChannelUser` — who sent it (`platform_id`, `display_name`, optional `librefang_user`)
+- `content: ChannelContent` — what they sent (see below)
+- `is_group: bool` — group vs. DM context
+- `metadata: HashMap<String, serde_json::Value>` — adapter-specific data (`was_mentioned`, `guild_id`, `account_id`, `thread_route_agent`, `group_participants`, `agent_name`, `sender_user_id`, `message_id`)
+- `thread_id: Option<String>` — for threaded channels (Telegram forum topics, Slack threads)
+- `platform_message_id: String` — used for lifecycle reactions and journal entries
 
 ### `ChannelContent`
 
-Discriminated enum covering every content type LibreFang handles:
+Enum covering all inbound content types:
 
-```rust
-pub enum ChannelContent {
-    Text(String),
-    Command { name: String, args: Vec<String> },   // slash commands
-    Image { url, caption, mime_type },
-    File { url, filename },
-    Voice { url, caption, duration_seconds },
-    Video { url, caption, duration_seconds },
-    Location { lat, f64, lon: f64 },
-    FileData { filename, data },
-    Interactive { text, payload },
-    ButtonCallback { action, message_text },
-}
-```
+| Variant | Description |
+|---|---|
+| `Text(String)` | Plain text |
+| `Command { name, args }` | Parsed slash command |
+| `Image { url, caption, mime_type }` | Photo with optional caption |
+| `File { url, filename }` | File attachment |
+| `Voice { url, duration_seconds, caption }` | Voice message |
+| `Video { url, caption, duration_seconds, .. }` | Video |
+| `Audio { url, caption, duration_seconds, .. }` | Audio file |
+| `Location { lat, lon }` | Geolocation |
+| `Interactive { text, buttons }` | Message with inline buttons |
+| `ButtonCallback { action, message_text }` | User clicked a button |
+| `EditInteractive { message_id, text, buttons }` | Edit an interactive message |
+| `DeleteMessage { message_id }` | Delete a previously sent message |
+| `Sticker`, `Animation`, `MediaGroup`, `Poll`, `PollAnswer`, `FileData` | Additional Telegram-rich types |
 
-### `ChannelType`
+### `ChannelAdapter` trait
 
-Platform discriminator used for routing and config lookups:
+Each adapter implements this trait. Key methods:
 
-```rust
-pub enum ChannelType {
-    Telegram, Discord, Slack, WhatsApp, Signal,
-    Matrix, Email, Teams, Mattermost, WeChat,
-    WebChat, CLI, Custom(String),
-}
-```
-
-### `ChannelUser`
-
-Identifies the sender on a channel:
-
-```rust
-pub struct ChannelUser {
-    pub platform_id:   String,   // native user/chat ID
-    pub display_name:  String,
-    pub avatar_url:    Option<String>,
-    pub librefang_user: Option<String>, // optional LibreFang user ID (for cross-channel identity)
-}
-```
+- **Inbound**: `start()` → returns `Pin<Box<dyn Stream<Item = ChannelMessage>>>` (or `create_webhook_routes()` returning `(Router, Stream)`)
+- **Outbound**: `send(user, content)`, `send_in_thread(user, content, thread_id)`, `send_typing(user)`, `send_reaction(user, msg_id, reaction)`, `send_streaming(user, rx, thread_id)`
+- **Lifecycle**: `name()`, `channel_type()`, `stop()`, `supports_streaming()`, `suppress_error_responses()`
+- **Optional**: `typing_events()` → receiver of `TypingEvent` for debounce integration
 
 ### `SenderContext`
 
-Propagates sender identity to the agent's system prompt so the agent knows who is talking and from which channel. Built by `build_sender_context()` in `bridge.rs` from the incoming `ChannelMessage` and any per-channel overrides.
+Propagated to the agent so it knows who is talking and from where. Includes channel, user ID, display name, group/mention status, thread ID, account ID, auto-route parameters, and group participant roster.
 
-```rust
-pub struct SenderContext {
-    pub channel:                       String,
-    pub user_id:                       String,
-    pub display_name:                  String,
-    pub is_group:                      bool,
-    pub was_mentioned:                 bool,
-    pub thread_id:                     Option<String>,
-    pub account_id:                    Option<String>,
-    pub auto_route:                    AutoRouteStrategy,
-    pub auto_route_ttl_minutes:        u32,
-    pub auto_route_confidence_threshold: f32,
-    pub auto_route_sticky_bonus:       i32,
-    pub auto_route_divergence_count:   i32,
-}
-```
+## `ChannelBridgeHandle` Trait
 
-## `ChannelAdapter` Trait
+Defined in this crate to avoid circular dependencies (channels cannot depend on kernel). Implemented in `librefang-api`. Provides the kernel operations adapters need:
 
-Every channel adapter implements `ChannelAdapter`, defined in `types.rs`. The trait is `async_trait`:
+| Method | Purpose |
+|---|---|
+| `send_message(agent_id, text)` | Basic agent query |
+| `send_message_with_sender(agent_id, text, sender)` | Query with sender identity |
+| `send_message_with_blocks(agent_id, blocks)` | Multimodal (text + images) |
+| `send_message_with_blocks_and_sender(...)` | Full multimodal + identity |
+| `send_message_streaming(agent_id, text)` | Streaming response (delta channel) |
+| `send_message_streaming_with_sender(...)` | Streaming with identity |
+| `find_agent_by_name(name)` | Name → AgentId lookup |
+| `list_agents()` | All running agents |
+| `spawn_agent_by_name(manifest)` | Create a new agent |
+| `reset_session`, `reboot_session`, `compact_session` | Session lifecycle |
+| `set_model`, `stop_run`, `set_thinking` | Runtime controls |
+| `session_usage`, `uptime_info` | Status queries |
+| `authorize_channel_user(channel, user_id, action)` | RBAC gate |
+| `channel_overrides(channel, account_id)` | Per-channel config |
+| `record_delivery(...)` | Delivery tracking for cron/workflow |
+| `check_auto_reply(agent_id, message)` | Auto-reply engine |
+| `subscribe_events()` | Kernel event broadcast receiver |
+| Workflow/trigger/schedule/approval management methods | Automation surface |
+| `budget_text`, `peers_text`, `a2a_agents_text` | Network/budget introspection |
+| `send_channel_push(channel, recipient, msg, thread_id)` | Proactive outbound via REST API |
 
-```rust
-#[async_trait]
-pub trait ChannelAdapter: Send + Sync {
-    fn name(&self) -> &str;
-    fn channel_type(&self) -> ChannelType;
-    fn supports_streaming(&self) -> bool { false }
-    fn suppress_error_responses(&self) -> bool { false }
+Most methods have sensible defaults (no-ops, "not available" strings, or fallback to simpler methods) so the kernel implementation can incrementally add support.
 
-    // Start the adapter's receive loop and return a message stream.
-    async fn start(&self) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, ...>;
+## `BridgeManager`
 
-    // Provide webhook routes and stream together. If not implemented,
-    // the adapter falls back to standalone mode via start().
-    async fn create_webhook_routes(&self) -> Option<(axum::Router, Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>)> { None }
+Owns all running adapters. Created with `BridgeManager::new(handle, router)` or `BridgeManager::with_sanitizer(handle, router, config)`.
 
-    async fn send(&self, user: &ChannelUser, content: ChannelContent) -> Result<(), String>;
-    async fn send_in_thread(&self, user: &ChannelUser, content: ChannelContent, thread_id: &str) -> Result<(), String> { ... }
-    async fn send_streaming(&self, user: &ChannelUser, text_rx: Receiver<String>, thread_id: Option<&str>) -> Result<(), String> { Err("Not supported".into()) }
-    async fn send_typing(&self, user: &ChannelUser) -> Result<(), String> { Ok(()) }
-    async fn send_reaction(&self, user: &ChannelUser, message_id: &str, reaction: &LifecycleReaction) -> Result<(), String> { Ok(()) }
-    async fn stop(&self) -> Result<(), String> { Ok(()) }
-    fn typing_events(&self) -> Option<Receiver<TypingEvent>> { None }
-}
-```
+### Startup Flow
 
-The two startup paths matter:
+1. **`start_adapter(adapter)`** — subscribes to the adapter's message stream, spawns a dispatch loop
+2. Adapters that provide `create_webhook_routes()` contribute axum routes mounted at `/channels/{name}/webhook`
+3. **`take_webhook_router()`** — returns merged router for the main API server
+4. **`start_approval_listener(adapters)`** — subscribes to kernel events and forwards approval notifications
 
-- **`start()`** — adapter manages its own connection (long-lived WebSocket, polling loop, etc.). Returns a `Stream<ChannelMessage>`. Used by adapters that cannot expose a webhook (e.g., IRC, XMPP, Matrix).
-- **`create_webhook_routes()`** — adapter returns an `axum::Router` to be mounted on the shared HTTP server at `/channels/{name}/webhook`. This avoids each adapter needing its own HTTP port. Routes are collected by `BridgeManager::take_webhook_router()` and merged into the main API server.
+Each adapter gets its own tokio task with a concurrency semaphore (32 permits) to prevent unbounded memory growth under burst traffic.
 
-## Bridge Manager (`bridge.rs`)
+### Shutdown Flow
 
-### `ChannelBridgeHandle` Trait
-
-Defines every kernel operation an adapter may call. It lives in `librefang-channels` to avoid circular dependencies (the kernel crate cannot be a dependency here). The actual implementation lives in `librefang-api/src/channel_bridge.rs`.
-
-Key methods:
-
-| Category | Methods |
-|----------|---------|
-| Messaging | `send_message`, `send_message_with_blocks`, `send_message_with_sender`, `send_message_streaming`, `send_message_streaming_with_sender` |
-| Agent lifecycle | `find_agent_by_name`, `list_agents`, `spawn_agent_by_name`, `reset_session`, `reboot_session`, `compact_session` |
-| Agent control | `set_model`, `stop_run`, `set_thinking` |
-| Info | `uptime_info`, `list_models_text`, `list_providers_text`, `list_skills_text`, `list_hands_text` |
-| Ephemeral | `send_message_ephemeral` — `/btw` side-question, no session history |
-| Security | `authorize_channel_user` — RBAC gate per channel/platform_id/action |
-| Overrides | `channel_overrides` — per-channel config (format, threading, command policy, rate limits) |
-| Streaming | `send_message_streaming` / `_with_sender` — text deltas piped back to adapter |
-| Delivery tracking | `record_delivery` — delivery receipts for cron/workflow pushes |
-| Auto-reply | `check_auto_reply` — engine decides whether to process a message |
-| Automation | `list_workflows_text`, `run_workflow_text`, `list_triggers_text`, `create_trigger_text`, `delete_trigger_text`, `list_schedules_text`, `manage_schedule_text`, `list_approvals_text`, `resolve_approval_text` |
-| System | `budget_text`, `peers_text`, `a2a_agents_text` |
-| Events | `subscribe_events` — broadcast receiver for `ApprovalRequested` and other kernel events |
-
-Default implementations for most methods return `"Not available."` strings. The kernel is expected to override only the methods it supports.
-
-### `BridgeManager`
-
-Owns all running adapters and manages the dispatch pipeline.
-
-```rust
-pub struct BridgeManager {
-    handle:       Arc<dyn ChannelBridgeHandle>,
-    router:       Arc<AgentRouter>,
-    rate_limiter: ChannelRateLimiter,
-    sanitizer:    Arc<InputSanitizer>,
-    adapters:     Vec<Arc<dyn ChannelAdapter>>,
-    webhook_routes: Vec<(String, axum::Router)>,
-    journal:      Option<MessageJournal>,
-    tasks:        Vec<tokio::task::JoinHandle<()>>,
-}
-```
-
-Construction options (all chainable):
-
-```rust
-BridgeManager::new(handle, router)
-    .with_sanitizer(sanitize_config)   // override default sanitizer config
-    .with_journal(journal)             // enable crash recovery
-```
-
-### `start_adapter`
-
-Attaches an adapter to the manager. This is where the message dispatch pipeline begins:
-
-1. Call `adapter.create_webhook_routes()` if the adapter provides webhook routes; otherwise call `adapter.start()`.
-2. If `message_debounce_ms > 0`, enable the **debounce path** (see below).
-3. Otherwise, the **fast path**: each incoming `ChannelMessage` spawns a concurrent tokio task (limited by a semaphore of 32) that calls `dispatch_message()`.
-
-```rust
-pub async fn start_adapter(
-    &mut self,
-    adapter: Arc<dyn ChannelAdapter>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-```
+1. `shutdown_tx` signals all dispatch loops to drain
+2. Each adapter's `stop()` is called (releases ports, connections)
+3. All tasks awaited to completion
+4. Journal compacted via `compact_journal()`
 
 ### Message Debouncing
 
-When `message_debounce_ms` is configured for a channel (via `ChannelOverrides`), the bridge buffers rapid messages from the same sender and flushes them as a single merged dispatch after the debounce interval. This prevents a burst of 10 messages in 1 second from spawning 10 separate agent calls.
+When `message_debounce_ms` > 0 in channel overrides, rapid messages from the same sender are buffered and merged. Parameters:
+
+- `message_debounce_ms` — delay after last message before flushing
+- `message_debounce_max_ms` — hard deadline (default 30s)
+- `message_debounce_max_buffer` — flush early if buffer fills (default 64)
+
+Typing events from the adapter reset the debounce timer. Merged messages concatenate text; same-name commands merge their arguments.
+
+### Proactive Push
+
+`push_message(channel_type, recipient, message, thread_id)` sends an outbound message through a configured adapter without going through the agent loop. Used by `POST /api/agents/:id/push`.
+
+### Crash Recovery
+
+When a message journal is configured (`with_journal(journal)`):
+
+1. Every message is recorded before dispatch (`JournalStatus::Processing`)
+2. On success → `Completed`; on failure → `Failed` with error
+3. On restart, `recover_pending()` returns interrupted entries for re-dispatch
+4. `compact_journal()` prunes completed entries
+
+## Message Dispatch Pipeline
+
+`dispatch_message()` processes each inbound message through these stages:
 
 ```
-sender_key = "{channel_type}:{platform_id}"
-
-on message → push to SenderBuffer → reset debounce timer
-on debounce timer fires → drain buffer → dispatch merged message
-on max_timer fires (hard limit) → drain immediately
-on typing stop → reset debounce timer (typing pauses the flush)
+Input Sanitization
+    ↓
+Channel Overrides Lookup
+    ↓
+DM/Group Policy Check
+    ↓
+Rate Limiting (global + per-user)
+    ↓
+Command Handling (early return for /cmd)
+    ↓
+Image Download → Multimodal Blocks (if applicable)
+    ↓
+Button Callback Routing (menu navigation)
+    ↓
+Text Normalization (all content types → text)
+    ↓
+Embedded Slash Command Detection
+    ↓
+Broadcast Routing (multi-agent)
+    ↓
+Agent Resolution (thread route → binding context → fallback)
+    ↓
+RBAC Authorization
+    ↓
+Auto-Reply Check
+    ↓
+Journal Recording
+    ↓
+Typing Indicator + Lifecycle Reactions (⏳→🤔→📝/✅/❌)
+    ↓
+Streaming or Non-Streaming Agent Call
+    ↓
+Response Formatting & Delivery
+    ↓
+Delivery Recording
 ```
 
-Messages of the same type (text + text) are merged by concatenating with `\n`. Multiple `/command` invocations with the same name are merged into a single command with combined args. Mixed content types always fall back to text concatenation.
+### Agent Resolution (`resolve_or_fallback`)
 
-### Message Dispatch Pipeline
+1. **Thread routing**: if `metadata["thread_route_agent"]` is set, resolve by name
+2. **Binding context routing**: uses `router.resolve_with_context()` with channel, account_id, peer_id, guild_id
+3. **Fallback**: find agent named "assistant", then first available agent, auto-set as user default
 
-Both `dispatch_message()` (text path) and `dispatch_with_blocks()` (multimodal path) apply this sequence:
+### Stale Agent Re-resolution
 
-```mermaid
-flowchart TD
-    A["1. Input sanitization\n(prompt injection detection)"] --> B["2. Channel overrides lookup\n(format, threading, policies)"]
-    B --> C{"3. DM/Group policy check"}
-    C -->|Group + policy mismatch| Z[return]
-    C -->|Pass| D["4. Rate limiting\n(global + per-user)"]
-    D -->|Rate limited| Y[send_response + return]
-    D -->|Pass| E{"5. Built-in command?"}
-    E -->|yes + allowed| F["handle_command → send_response"]
-    E -->|no| G["6. RBAC authorize_channel_user"]
-    G -->|denied| X[send_response 'Access denied' + return]
-    G -->|pass| H["7. Auto-reply check"]
-    H -->|auto-reply fires| W[send_response + record_delivery]
-    H -->|pass| I["8. Journal record\n(crash recovery)"]
-    I --> J["9. Send typing indicator\n(best-effort)"]
-    J --> K["10. Lifecycle reaction: ⏳ Queued → 🤔 Thinking"]
-    K --> L{"11. Adapter supports streaming?"}
-    L -->|yes| M["12a. send_message_streaming_with_sender\ntee to adapter.send_streaming"]
-    L -->|no| N["12b. send_message_with_sender\n(non-streaming)"]
-    M --> O{"13. Streaming ok?"}
-    O -->|yes| P["✅ Done reaction\nupdate journal → Completed"]
-    O -->|fallback| Q["Send buffered text (non-streaming)\n✅ Done reaction"]
-    N --> R{"14. Agent response received?"}
-    R -->|ok| S["send_response\n✅ Done reaction\nupdate journal → Completed"]
-    R -->|error| T["handle_send_error\n❌ Error reaction\nupdate journal → Failed"]
-```
-
-### Image Handling (`download_image_to_blocks`)
-
-When a `ChannelContent::Image` arrives, the bridge:
-
-1. **Detects MIME type** using a four-tier priority: adapter hint > Content-Type header (if `image/*`) > magic byte sniffing > URL extension.
-2. **Enforces size limits**: images > 5 MB are rejected with a text fallback.
-3. **Downscales** images > 200 KB to max 1024×1024 px using the `image` crate's `Triangle` filter, then re-encodes as JPEG. This protects the LLM context budget when users send multiple photos.
-4. **Saves to disk** (`/tmp/librefang_uploads/{uuid}.{ext}`) rather than base64-encoding into the session. The `ContentBlock::ImageFile` variant holds the path, keeping sessions lightweight.
-5. Falls back to base64 inline encoding if the file write fails.
-
-### Lifecycle Reactions
-
-The bridge sends emoji reactions to the user's message as the agent processes it:
-
-| Phase | Emoji |
-|-------|-------|
-| Queued | ⏳ |
-| Thinking | 🤔 |
-| Streaming | 🔄 |
-| Done | ✅ |
-| Error | ❌ |
-
-These are best-effort (non-blocking). The Telegram adapter sends them as actual Telegram message reactions; others log or skip silently.
+When an agent call fails with "Agent not found", the bridge checks if the agent was the channel default. If so, it re-resolves by name, updates the router cache, and retries once. This handles agent restarts transparently.
 
 ### Streaming Path
 
-When `adapter.supports_streaming()` returns `true`, the bridge:
+If the adapter returns `true` from `supports_streaming()`:
 
-1. Calls `send_message_streaming_with_sender()`, receiving a `Receiver<String>` of text deltas.
-2. **Tees** the stream: one copy feeds `adapter.send_streaming()` (progressive display), another accumulates into a buffer.
-3. If `send_streaming()` succeeds → done.
-4. If it fails → falls back to `send_response()` with the accumulated buffer text.
+1. Calls `send_message_streaming_with_sender()` to get a delta receiver
+2. Tees the stream: forwards to `adapter.send_streaming()` while buffering a copy
+3. If streaming fails, falls back to sending the buffered text via the non-streaming path
 
-This ensures the user always gets a response even if the streaming channel closes mid-stream.
+### Group Message Filtering (`should_process_group_message`)
 
-### Slash Commands
+Controlled by `ChannelOverrides.group_policy`:
 
-The bridge handles built-in slash commands directly without calling the LLM:
+| Policy | Behavior |
+|---|---|
+| `Ignore` | All group messages dropped |
+| `CommandsOnly` | Only slash commands processed |
+| `MentionOnly` | Requires explicit mention, command, or regex trigger match |
+| `All` | Everything processed |
 
-| Command | Description |
-|---------|-------------|
-| `/start`, `/help` | Welcome and help text |
-| `/agents`, `/agent <name>` | List or select an agent |
-| `/new`, `/reboot`, `/compact` | Session management |
-| `/model [name]`, `/stop`, `/usage`, `/think` | Agent control |
-| `/models`, `/providers`, `/skills`, `/hands`, `/status` | System info |
-| `/btw <question>` | Ephemeral side-question |
-| `/workflows`, `/workflow run <name>` | Workflow management |
-| `/triggers`, `/trigger add/del` | Trigger management |
-| `/schedules`, `/schedule add/del/run` | Cron management |
-| `/approvals`, `/approve`, `/reject` | Approval workflow |
-| `/budget`, `/peers`, `/a2a` | System monitoring |
+The **MentionOnly** policy supports regex trigger patterns (`group_trigger_patterns`) for substring matching. When the **addressee guard** is enabled (`LIBREFANG_GROUP_ADDRESSEE_GUARD=on`):
 
-Commands can be embedded in plain text (e.g., a user types `/agents` without a leading space). The bridge detects `text.starts_with('/')` and routes to `handle_command()`.
+- **OB-04**: If the message opens with a vocative addressing another participant (e.g., "Caterina, chiedi..."), it's skipped even if a trigger pattern matches mid-turn
+- **OB-05**: Substring matches must additionally pass positional vocative validation (`is_vocative_trigger`)
 
-### Command Policy
+### Command Handling
 
-Per-channel overrides control which commands are allowed:
+Built-in commands are intercepted before reaching the agent:
 
-```rust
-// Precedence (highest first):
-// 1. disable_commands = true  → all commands blocked
-// 2. allowed_commands non-empty  → whitelist (only these)
-// 3. blocked_commands non-empty  → blacklist (all except these)
-// 4. default  → everything allowed
-fn is_command_allowed(cmd: &str, overrides: Option<&ChannelOverrides>) -> bool
-```
+- `/start`, `/help`, `/status`, `/agents`, `/agent`, `/models`, `/providers`, `/new`, `/reboot`, `/compact`, `/model`, `/stop`, `/usage`, `/think`, `/skills`, `/hands`, `/btw`
+- Workflow/automation: `/workflows`, `/triggers`, `/schedules`, `/approvals`, `/approve`, `/reject`
+- System: `/budget`, `/peers`, `/a2a`
 
-Config entries accept either `"agent"` or `"/agent"` (leading slash is stripped for matching).
+Commands `/agents` and `/models` send interactive inline keyboards instead of plain text when agents/providers exist.
 
-### Group Policies
+Command access is controlled per-channel:
+- `disable_commands: true` blocks all commands
+- `allowed_commands` is a whitelist (if non-empty, only listed commands work)
+- `blocked_commands` is a blacklist
+- Blocked commands are forwarded to the agent as plain text instead
 
-When a message arrives in a group context, `should_process_group_message()` applies the configured `GroupPolicy`:
+## Supporting Modules
 
-| Policy | Behaviour |
-|--------|-----------|
-| `Ignore` | Silently drop |
-| `CommandsOnly` | Process only if `ChannelContent::Command` or text starting with `/` |
-| `MentionOnly` | Process only if `was_mentioned`, a command, or matches a regex trigger pattern |
-| `All` | Always process |
+### `router` (`AgentRouter`)
 
-Regex trigger patterns are compiled once into a `RegexSet` and cached in a `DashMap` keyed by the pattern set. Pattern compilation errors are logged but do not crash the bridge.
+Maps `(channel, user)` pairs to agents. Supports:
 
-### RBAC
+- **Direct routes**: explicit user → agent mapping
+- **Channel defaults**: default agent per channel
+- **User defaults**: auto-assigned on first fallback resolution
+- **Binding context**: routes based on `account_id`, `guild_id`, `peer_id`
+- **Broadcast**: one user → multiple agents (parallel or sequential)
+- **Auto-routing**: confidence-based with TTL, sticky bonus, divergence count
 
-Before forwarding any message to an agent, `dispatch_message()` calls `handle.authorize_channel_user(ct_str, sender_id, "chat")`. The default implementation allows everything. The kernel can override this to enforce per-channel, per-user permission checks.
+### `rate_limiter` (`ChannelRateLimiter`)
 
-### Crash Recovery (`message_journal`)
+Token-bucket per-channel and per-user rate limiting. Configured via `ChannelOverrides.rate_limit_per_minute` and `rate_limit_per_user`.
 
-When a `MessageJournal` is attached, every inbound message is written to the journal **before** dispatch with status `Processing`. On success the status is updated to `Completed`; on failure to `Failed`. On startup, `recover_pending()` returns all `Processing` entries so the caller can re-dispatch them. The journal is compacted on graceful shutdown.
+### `sanitizer` (`InputSanitizer`)
 
-### Approval Event Listener
+Prompt injection detection for inbound messages. Three modes:
 
-`start_approval_listener()` subscribes to kernel events and listens for `ApprovalRequested`. When one arrives, it logs a notification for each adapter. Concrete delivery (sending an inline-keyboard message to the specific user) is noted as a follow-up feature requiring per-adapter user tracking.
+- **Off**: no checking
+- **Warn**: log suspicious patterns but allow through
+- **Block**: reject with "Your message could not be processed"
 
-### Push API
+### `formatter`
 
-`push_message()` is the bridge-level entry point for the REST API's `POST /api/agents/:id/push`. It validates inputs, then delegates to `handle.send_channel_push()`, which looks up the adapter by type and calls `ChannelAdapter::send()`. This allows external callers to trigger outbound messages without going through the agent loop.
+Transforms agent responses for display on each platform. Handles markdown → platform-specific formatting (e.g., Slack mrkdwn, Telegram HTML). Channel-specific default output formats via `default_output_format_for_channel()`.
 
-## Agent Router (`router.rs`)
+### `message_journal`
 
-The router resolves incoming messages to a target `AgentId` using:
+SQLite-backed journal for crash recovery. Records message state transitions: `Processing` → `Completed` / `Failed`. On restart, `recover_pending()` returns interrupted entries. Periodic compaction prunes completed entries.
 
-1. **Thread routing** — the adapter can tag a message with `metadata["thread_route_agent"]` to route it to a specific agent based on the conversation thread.
-2. **Binding context** — `resolve_with_context()` uses `account_id`, `guild_id`, `peer_id`, and `channel` to find a per-binding agent mapping.
-3. **User default** — `resolve()` checks if the user has a cached default agent.
-4. **Channel default** — fallback to the channel-wide default agent.
-5. **Sticky re-resolution** — if the cached channel default returns "Agent not found", the bridge re-resolves by name and retries once.
+### `http_client`
 
-Broadcast routing sends a single message to multiple agents in parallel or sequentially based on the configured `BroadcastStrategy`.
-
-## Input Sanitizer (`sanitizer.rs`)
-
-Detects prompt injection attacks in inbound text. Returns:
-
-- `Clean` — pass through
-- `Warned(reason)` — pass through but log
-- `Blocked(reason)` — return an error message to the user and abort dispatch
-
-Configured via `SanitizeConfig` in `librefang-types`.
-
-## Rate Limiter (`rate_limiter.rs`)
-
-Sliding-window rate limiter keyed on `{channel}:{sender_id}` and `{channel}:__global__`. Checks are per-override config (`rate_limit_per_minute`, `rate_limit_per_user`). Returns an error message string on limit breach.
-
-## Formatter (`formatter.rs`)
-
-Transforms agent response text for channel-specific conventions (markdown stripping, code block formatting, character limits). `default_output_format_for_channel()` returns a sensible default per channel type.
-
-## Sidecar (`sidecar.rs`)
-
-Provides a pre-configured `reqwest::Client` with sensible timeouts and proxy support for all channel adapters. The HTTP client is shared across the bridge for image downloads and webhook calls.
+Internal shared HTTP client with sensible defaults for adapter API calls.
 
 ## Adding a New Channel Adapter
 
-1. Create `crates/librefang-channels/src/{name}.rs` implementing `ChannelAdapter`.
-2. Add the module declaration in `lib.rs` with `#[cfg(feature = "channel-{name}")]` and a public re-export if needed.
-3. Add `channel-{name}` to `Cargo.toml` under the appropriate feature group.
-4. Implement `ChannelAdapter::start()` or `create_webhook_routes()` to produce a `Stream<Item = ChannelMessage>`.
-5. Implement `send()` (required) and any optional methods (`send_streaming`, `send_reaction`, etc.) your platform supports.
-6. Call `dispatch_message()` from the adapter's test suite to verify integration.
+1. Create `src/my_channel.rs` implementing `ChannelAdapter`
+2. Add `#[cfg(feature = "channel-my-channel")] pub mod my_channel;` to `lib.rs`
+3. Add the feature flag to `Cargo.toml` with appropriate dependencies
+4. Implement `start()` or `create_webhook_routes()` to produce a `ChannelMessage` stream
+5. Implement `send()` for outbound delivery
+6. Register in `librefang-api`'s `start_channel_bridge_with_config()` based on config
 
-The adapter owns only platform-specific logic (API calls, WebSocket handling, signature verification). All routing, RBAC, rate limiting, sanitization, and agent dispatch are handled by `BridgeManager`.
+## Configuration Entry Points
+
+The kernel calls into this crate through:
+
+- **`BridgeManager::new(handle, router)`** or **`with_sanitizer(handle, router, config)`** — construction
+- **`start_adapter(adapter)`** — per-channel startup
+- **`start_approval_listener(adapters)`** — event forwarding
+- **`take_webhook_router()`** — collect webhook routes for the API server
+- **`recover_pending()`** — crash recovery on boot
+- **`stop()`** — graceful shutdown
+- **`compact_journal()`** — journal maintenance

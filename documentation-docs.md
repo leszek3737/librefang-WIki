@@ -1,239 +1,136 @@
 # Documentation — docs
 
-# LibreFang Documentation Site
+# Documentation Site (`docs/`)
 
-The `docs/` directory contains the official LibreFang documentation website, a Next.js application that renders MDX content with syntax highlighting, search, and multi-language support.
+The LibreFang documentation website — a statically exported Next.js application powered by MDX, Tailwind CSS, and a custom content pipeline. It serves as the official docs hub with full-text search, dark mode, and bilingual support (Chinese + English).
 
-## Overview
-
-This is a static documentation site that:
-
-- Renders MDX (Markdown + JSX) content from `src/app/`
-- Supports Chinese (default) and English locales
-- Provides full-text search via FlexSearch
-- Uses Shiki for syntax highlighting with custom themes
-- Exports as a fully static site for Cloudflare Pages deployment
-
-## Architecture
+## Architecture Overview
 
 ```mermaid
-flowchart LR
-    A[MDX File] --> B[Remark Plugins]
+graph LR
+    A[MDX Pages<br>src/app/**/page.mdx] --> B[Remark Plugins]
     B --> C[Rehype Plugins]
     C --> D[Recma Plugins]
-    D --> E[HTML Output]
-    
-    F[Search Index] --> G[FlexSearch]
-    G --> H[Search UI]
-    H --> E
-    
-    I[Theme Provider] --> J[Light/Dark Mode]
-    J --> E
+    D --> E[Static HTML Export]
+    F[Search Plugin] --> E
+    G[MDX Components<br>src/components/mdx] --> A
+    E --> H[Cloudflare Pages]
 ```
 
-## Directory Structure
+Content is authored as `.mdx` files under `src/app/`. Next.js processes them through a three-stage MDX pipeline (remark → rehype → recma), wraps them with shared UI components via `mdx-components.tsx`, and produces a static site deployed to Cloudflare Pages.
 
-```
-docs/
-├── src/
-│   ├── app/              # Next.js App Router pages (MDX files)
-│   ├── components/       # Reusable React components
-│   ├── lib/              # Utility functions
-│   └── mdx/              # MDX processing plugins
-│       ├── remark.mjs    # Remark plugins (GFM, etc.)
-│       ├── rehype.mjs    # Rehype plugins (Shiki, etc.)
-│       └── recma.mjs     # Recma plugins
-├── next.config.mjs       # Next.js + MDX configuration
-├── postcss.config.js     # Tailwind CSS processing
-├── typography.ts         # Prose styling configuration
-└── package.json
-```
+## Key Configuration Files
 
-## Key Components
+| File | Purpose |
+|------|---------|
+| `next.config.mjs` | Next.js config — MDX pipeline, static export, Shiki for syntax highlighting |
+| `tsconfig.json` | TypeScript paths — aliases `@/*`, `@web/ui`, `@web/shared`, `@web/config` |
+| `postcss.config.js` | PostCSS with `@tailwindcss/postcss` plugin |
+| `typography.ts` | Tailwind Typography theme — custom colors, spacing, dark mode variants |
+| `mdx-components.tsx` | MDX component provider — maps all `@/components/mdx` exports into every MDX page |
+| `package.json` | Dependencies, scripts, engine requirements |
 
-### MDX Processing Pipeline (`next.config.mjs`)
+## Static Export Configuration
 
-The MDX pipeline transforms Markdown files into React components through three stages:
+The site is configured for full static export in `next.config.mjs`:
 
-1. **Remark** — Markdown-aware transforms (GFM tables, footnotes)
-2. **Rehype** — HTML-aware transforms (Shiki syntax highlighting)
-3. **Recma** — AST transforms specific to MDX
-
-```javascript
-const withMDX = nextMDX({
-  extension: /\.mdx?$/,
-  options: {
-    remarkPlugins: remarkPlugins,
-    rehypePlugins: rehypePlugins,
-    recmaPlugins: recmaPlugins,
-  },
-});
+```js
+output: "export",
+images: { unoptimized: true },
 ```
 
-### Custom MDX Components (`mdx-components.tsx`)
+This means no server-side rendering or API routes — everything precompiles to flat HTML/CSS/JS at build time.
 
-Provides custom React components that override default MDX rendering. The `useMDXComponents` hook merges custom components with the defaults:
+## MDX Processing Pipeline
 
-```tsx
-import * as mdxComponents from '@/components/mdx';
+The content pipeline is assembled in `next.config.mjs` and applied in a specific order:
 
-export function useMDXComponents(components: MDXComponents) {
-  return {
-    ...components,
-    ...mdxComponents,
-  };
-}
+```js
+const finalConfig = withMDX(withSearch(nextConfig));
 ```
 
-Place custom components in `src/components/mdx/` to override elements like `pre`, `code`, `a`, etc.
+1. **`withSearch`** wraps the config to enhance search indexing (defined in `src/mdx/search.mjs`)
+2. **`withMDX`** applies `@next/mdx` with three plugin layers:
+   - **Remark plugins** (`src/mdx/remark.mjs`) — transform the Markdown AST
+   - **Rehype plugins** (`src/mdx/rehype.mjs`) — transform the HTML AST
+   - **Recma plugins** (`src/mdx/recma.mjs`) — transform the JavaScript AST output
 
-### Typography Configuration (`typography.ts`)
+Shiki is registered as a `serverExternalPackage` for server-side syntax highlighting during build.
 
-Defines prose styling using Tailwind Typography with custom color tokens:
+### Component Injection
 
-- **Body text**: `zinc-700` (light) / `zinc-400` (dark)
-- **Headings**: `zinc-900` (light) / `white` (dark)
-- **Links**: `emerald-500` accent with hover state
-- **Code blocks**: `zinc-100` background with inset ring border
+`mdx-components.tsx` exports `useMDXComponents`, which merges the shared component set from `@/components/mdx` into every MDX page. This provides consistent rendering for code blocks, callouts, tables, and other custom elements.
 
-The configuration supports both light and dark modes through CSS variable inheritance.
+## Typography Theme
 
-### Search Integration (`src/mdx/search.mjs`)
+`typography.ts` defines a comprehensive prose theme for `@tailwindcss/typography`:
 
-Adds FlexSearch-based full-text search to the site. The plugin indexes MDX content at build time and provides search UI components.
+- **Light mode**: zinc-based neutrals with emerald accent links
+- **Dark mode** (`invert` variant): inverted palette with adjusted opacity values
+- Covers body text, headings (h1–h3), lists, blockquotes, tables, inline code, horizontal rules, and media elements
+- Responsive horizontal rule margins at `sm` and `lg` breakpoints
 
-## Content Structure
+To apply the theme, import and spread it into your Tailwind typography config:
 
-### Adding New Documentation
+```js
+import typographyConfig from './typography';
+```
 
-1. Create a directory under `src/app/`, e.g., `src/app/new-feature/`
-2. Add `page.mdx` with your content
-3. Export a `sections` array for navigation:
+## Adding New Pages
+
+1. Create a directory under `src/app/`, e.g. `src/app/new-topic/`
+2. Add a `page.mdx` file inside it
+3. Export a `sections` array at the end of the file for sidebar navigation:
 
 ```mdx
-# New Feature
+# New Topic
 
-Documentation content here...
+Content here...
 
 export const sections = [
-  { title: "Overview", id: "overview" },
-  { title: "Usage", id: "usage" },
+  { title: "Section Title", id: "section-id" }
 ];
 ```
 
-### Multi-Language Support
+The `pageExtensions` config in `next.config.mjs` includes `mdx`, so Next.js automatically routes these files.
 
-| Route | Language |
-|-------|----------|
-| `/` | Chinese (default) |
-| `/en/` | English (synced from LibreFang repo) |
+## Multilingual Structure
 
-## Build Configuration
+- `/` — Chinese (default locale)
+- `/en/` — English content synced from the LibreFang repository
 
-### Static Export
+Both locales live under `src/app/` using Next.js file-system routing conventions.
 
-The site uses Next.js static export for Cloudflare Pages:
+## Development Commands
 
-```javascript
-output: "export",
-```
+| Command | Description |
+|---------|-------------|
+| `pnpm dev` | Start dev server on port 3001 |
+| `pnpm build` | Produce static export |
+| `pnpm start` | Serve the built site on port 3001 |
+| `pnpm lint` | Run Biome checks |
+| `pnpm lint:fix` | Run Biome with auto-fix |
+| `pnpm typecheck` | TypeScript type checking (no emit) |
+| `pnpm format` | Format `src/` with Biome |
 
-This generates pure HTML/CSS/JS with no server-side rendering.
+**Requirements**: Node ≥ 18, pnpm ≥ 9.
 
-### Shiki Integration
+## Monorepo Path Aliases
 
-Shiki provides syntax highlighting with server-side processing (disabled `mdxRs`):
+`tsconfig.json` maps several monorepo package paths for cross-package imports:
 
-```javascript
-serverExternalPackages: ['shiki'],
-experimental: { mdxRs: false },
-```
+| Alias | Target |
+|-------|--------|
+| `@/*` | `./src/*` |
+| `@/components/*` | `./src/components/*` |
+| `@/lib/*` | `./src/lib/*` |
+| `@/app/*` | `./src/app/*` |
+| `@web/ui` | `../../packages/react/src/index.ts` |
+| `@web/shared` | `../../packages/shared/src/index.ts` |
+| `@web/config` | `../../packages/config/src/index.ts` |
 
-Shiki runs at build time to transform code blocks into highlighted HTML.
-
-### Path Aliases
-
-TypeScript path aliases simplify imports across the monorepo:
-
-```json
-{
-  "paths": {
-    "@/*": ["./src/*"],
-    "@web/ui": ["../../packages/react/src/index.ts"],
-    "@web/config": ["../../packages/config/src/index.ts"]
-  }
-}
-```
-
-## Development Workflow
-
-```bash
-# Install dependencies
-pnpm install
-
-# Start development server (port 3001)
-pnpm dev
-
-# Build static site
-pnpm build
-
-# Type checking
-pnpm typecheck
-
-# Lint with Biome
-pnpm lint
-pnpm lint:fix
-
-# Format code
-pnpm format
-```
-
-## Dependencies
-
-### Production
-
-| Package | Purpose |
-|---------|---------|
-| `next` 15.5.14 | Framework with App Router |
-| `@next/mdx` | MDX integration |
-| `shiki` 2.x | Syntax highlighting |
-| `flexsearch` | Full-text search |
-| `tailwindcss` 4.x | Styling |
-| `next-themes` | Dark/light mode |
-| `prism-react-renderer` | Code block components |
-| `motion` | Animations |
-
-### Development
-
-| Package | Purpose |
-|---------|---------|
-| `@tailwindcss/postcss` | Tailwind v4 processing |
-| `@tailwindcss/typography` | Prose styling |
-| `biome` | Linting and formatting |
-| `typescript` | Type checking |
-
-## Theme System
-
-The site uses `next-themes` to manage light/dark mode. The typography configuration defines separate color sets for each mode:
-
-```javascript
-typography: ({ theme }) => ({
-  DEFAULT: { /* light mode colors */ },
-  invert: { /* dark mode colors */ },
-})
-```
+This allows the docs site to import shared UI components and utilities from sibling packages in the monorepo.
 
 ## Deployment
 
-The site auto-deploys to Cloudflare Pages via the static export. Cloudflare reads the `output: "export"` configuration and serves the generated `out/` directory.
-
-## CLI Profile Rotation Documentation
-
-The `cli-profile-rotation.md` file demonstrates the site's documentation format with:
-
-- Conceptual explanation with ASCII diagrams
-- Step-by-step setup instructions
-- Reference tables for error handling
-- FAQ section for common questions
-
-This pattern is used for all feature documentation within the site.
+The site auto-deploys to **Cloudflare Pages**. The static export output from `next build` is served directly — no Node.js runtime required.

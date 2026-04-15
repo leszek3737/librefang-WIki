@@ -1,162 +1,123 @@
 # Deployment — worker
 
-# Deployment — Worker Module
+# Deployment Worker
 
-The `deploy/worker` module is a Cloudflare Workers application that powers **deploy.librefang.ai** — a zero-infrastructure web interface for launching self-hosted LibreFang instances on Fly.io. It handles the complete provisioning workflow: token validation, app creation, network setup, persistent storage, and machine launch.
+A Cloudflare Worker that provides a web UI and API for one-click LibreFang deployment to Fly.io, along with links to alternative deployment platforms.
 
 ## Overview
 
-This module serves two purposes:
+The worker serves two purposes:
 
-1. **Web UI** — An interactive HTML page where users select a deployment platform and enter their Fly.io credentials
-2. **API Endpoint** — A `POST /api/deploy` handler that orchestrates Fly.io provisioning programmatically
+- **Static HTML page** at the root path — a deployment portal listing platform options (Fly.io, Render, Railway, GCP, Docker, and local installers)
+- **Deployment API** at `POST /api/deploy` — orchestrates a full Fly.io provisioning pipeline using the user's API token
 
-The worker is deployed via GitHub Actions and routes all traffic to `deploy.librefang.ai/*` through the `librefang.ai` zone.
+**Route:** `deploy.librefang.ai/*`
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    A["User Browser"] -->|HTTPS| B["deploy.librefang.ai"]
-    B -->|GET /| C["HTML UI"]
-    B -->|POST /api/deploy| D["handleDeploy"]
-    D -->|1. Verify| E["fly.io API"]
-    D -->|2. Create App| E
-    D -->|3. Allocate IPs| F["fly.io GraphQL"]
-    D -->|4. Create Volume| E
-    D -->|5. Launch Machine| E
-    E -->|appName, url| G["Success Response"]
-    F -->|IP allocation| G
+sequenceDiagram
+    participant U as Browser
+    participant W as Cloudflare Worker
+    participant FM as Fly Machines API
+    participant FG as Fly GraphQL API
+
+    U->>W: POST /api/deploy {token}
+    W->>FM: GET /v1/apps (validate token)
+    FM-->>W: 200 OK
+    W->>FM: POST /v1/apps (create app)
+    FM-->>W: app created
+    W->>FG: allocateIPAddress (shared v4)
+    W->>FG: allocateIPAddress (v6)
+    W->>FM: POST /v1/apps/{name}/volumes
+    FM-->>W: volume created
+    W->>FM: POST /v1/apps/{name}/machines
+    FM-->>W: machine launched
+    W-->>U: {success, url, appName, ...}
 ```
 
-## Request Flow
+## Key Constants
 
-### GET / (Default Route)
+| Constant | Value | Purpose |
+|---|---|---|
+| `FLY_API` | `https://api.machines.dev/v1` | Fly.io Machines REST API base |
+| `DOCKER_IMAGE` | `ghcr.io/librefang/librefang:latest` | Container image deployed to Fly |
+| `REGION` | `nrt` | Tokyo region for all provisioned resources |
 
-Returns the full HTML interface. The page is a single-page application with two views:
+## Core Functions
 
-1. **Platform Selection** — Grid of deployment options (Fly.io, Render, Railway, GCP, Docker, local installs)
-2. **Fly.io Deploy Form** — Token input and deployment progress UI
+### `fetch(request, env)`
 
-### POST /api/deploy
+Worker entry point. Routes based on path and method:
 
-Expects a JSON body with a `token` field containing the Fly.io personal access token.
+- `POST /api/deploy` → `handleDeploy`
+- All other requests → serves the static HTML page
 
-**Validation steps:**
+The `env` binding provides access to Cloudflare Worker secrets, specifically `OPENROUTER_API_KEY` which is injected into deployed instances as a free default LLM provider.
 
-| Step | Action | Failure Handling |
-|------|--------|------------------|
-| 1 | Verify token via `GET /apps` | Returns 401 if token invalid |
-| 2 | Create app with random name `librefang-{6-hex-chars}` | Returns 500 if creation fails |
-| 3 | Allocate shared IPv4 and IPv6 via GraphQL | Non-fatal — failures logged |
-| 4 | Create 1GB volume named `librefang_data` in `nrt` region | Returns 500 if creation fails |
-| 5 | Launch machine with Docker image | Returns 500 if machine creation fails |
+### `handleDeploy(request, env)`
 
-**Success response:**
+Orchestrates the six-step Fly.io provisioning pipeline:
+
+1. **Validate token** — `GET /v1/apps` against the Fly Machines API. Returns `401` if invalid.
+2. **Create app** — `POST /v1/apps` with name `librefang-{randomHex(6)}` under the `personal` org.
+3. **Allocate IP addresses** — Two GraphQL mutations via `https://api.fly.io/graphql`:
+   - Shared IPv4 (required for public HTTPS)
+   - IPv6
+4. **Create persistent volume** — `POST /v1/apps/{name}/volumes` — 1 GB volume named `librefang_data` in region `nrt`.
+5. **Build environment** — Sets `LIBREFANG_HOME=/data` and `OPENROUTER_API_KEY` from the worker's own secret.
+6. **Launch machine** — `POST /v1/apps/{name}/machines` with:
+   - 1 shared CPU, 256 MB RAM
+   - HTTP/TLS service on ports 80/443 → internal port 4545
+   - Volume mounted at `/data`
+   - `auto_destroy: false`
+
+On success, returns:
 
 ```json
 {
   "success": true,
-  "appName": "librefang-a1b2c3",
-  "url": "https://librefang-a1b2c3.fly.dev",
-  "dashboardUrl": "https://fly.io/apps/librefang-a1b2c3",
-  "machineId": "machine-id",
+  "appName": "librefang-a1b2c3d4e5f6",
+  "url": "https://librefang-a1b2c3d4e5f6.fly.dev",
+  "dashboardUrl": "https://fly.io/apps/librefang-a1b2c3d4e5f6",
+  "machineId": "...",
   "region": "nrt"
 }
 ```
 
-**Error response:**
-
-```json
-{
-  "error": "Human-readable error message"
-}
-```
-
-## Machine Configuration
-
-The deployed Fly.io machine uses:
-
-```javascript
-{
-  region: 'nrt',
-  image: 'ghcr.io/librefang/librefang:latest',
-  guest: { cpu_kind: 'shared', cpus: 1, memory_mb: 256 },
-  services: [
-    {
-      ports: [
-        { port: 443, handlers: ['tls', 'http'] },
-        { port: 80, handlers: ['http'] }
-      ],
-      protocol: 'tcp',
-      internal_port: 4545
-    }
-  ],
-  mounts: [{ volume: 'librefang_data', path: '/data' }],
-  env: {
-    LIBREFANG_HOME: '/data',
-    OPENROUTER_API_KEY: '<from env>'
-  }
-}
-```
-
-Key details:
-- **Port 4545** is the internal service port
-- **HTTPS termination** is handled by Fly.io's edge (handlers: `tls, http`)
-- **Volume** is mounted at `/data` for persistent configuration and storage
-- **OpenRouter key** is pre-populated from the worker's `OPENROUTER_API_KEY` secret for the free Step 3.5 Flash model
-
-## Environment Configuration
-
-The worker requires the following secret (set via `wrangler secret put` or Cloudflare dashboard):
-
-| Variable | Purpose |
-|----------|---------|
-| `OPENROUTER_API_KEY` | Pre-configured API key injected into new deployments for free LLM access |
-
-## Key Functions
-
-### `handleDeploy(request, env)`
-
-Main deployment orchestrator. Returns a `Response` object (not a thrown error) for all cases including failures.
+Error responses at any step include a descriptive message and appropriate HTTP status.
 
 ### `randomHex(len)`
 
-Generates cryptographically random hex strings for app naming:
-
-```javascript
-function randomHex(len) {
-  const arr = new Uint8Array(len);
-  crypto.getRandomValues(arr);
-  return Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('');
-}
-```
+Cryptographically secure hex string generator using `crypto.getRandomValues()`. Used for unique app name suffixes.
 
 ### `json(data, status)`
 
-Convenience helper for building JSON responses with consistent headers:
+Response helper. Returns a `Response` with JSON content type and the given status code (default `200`).
 
-```javascript
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
-```
+## Environment Bindings
 
-## Frontend Integration
+Set via `wrangler.toml` or the Cloudflare dashboard:
 
-The HTML page includes a JavaScript client (`deploy()` function) that:
+| Variable | Required | Purpose |
+|---|---|---|
+| `OPENROUTER_API_KEY` | Yes | Injected into deployed instances as the default free LLM provider (Step 3.5 Flash) |
 
-1. Shows a multi-step progress indicator as deployment proceeds
-2. Advances the progress UI every 1.5 seconds regardless of actual progress (a UI convenience, not tied to real state)
-3. Displays the result with direct links to the deployed app and Fly.io dashboard
-4. Handles errors by resetting the form and showing the error message
+## Frontend
 
-## Deployment
+The `HTML` constant contains the entire single-page application. Key sections:
 
-The worker is deployed via GitHub Actions using Wrangler. See `wrangler.toml`:
+- **Platform selection grid** — Cards for Fly.io, Render, Railway, GCP, Docker, and local installers (macOS/Linux/Windows) with copy-to-clipboard install commands
+- **Fly.io deploy form** — Revealed when the user selects Fly.io. Contains step-by-step instructions, a token input field, and a deploy button
+- **Progress indicator** — Animated step-by-step progress during deployment (auth → app → network → volume → machine)
+- **Result view** — Links to the deployed instance and Fly.io console on success
+- **Troubleshooting** — Expandable FAQ covering SSO token issues, missing images, and post-deploy configuration
+
+The frontend POSTs the token to `/api/deploy` and handles the response entirely client-side. A simulated progress indicator advances on a 1.5-second interval while the actual API call is in flight.
+
+## Configuration
+
+**`wrangler.toml`:**
 
 ```toml
 name = "librefang-deploy"
@@ -168,13 +129,9 @@ routes = [
 ]
 ```
 
+The worker is auto-deployed via GitHub Actions on changes to `deploy/worker/`.
+
 ## Security Considerations
 
-- **Token handling**: The Fly.io API token is passed directly to Fly.io's API and never stored or logged by this worker
-- **Token validation**: The token is validated before any resources are created to fail fast on authentication errors
-- **App naming**: Random hex suffixes prevent naming collisions and add unpredictability
-- **Read-only env vars**: Users cannot inject arbitrary environment variables through this interface; only the pre-configured OpenRouter key is passed
-
-## Relationship to Other Modules
-
-The call graph indicates this module's `json()` helper is referenced across the codebase as a standard response format. Other services (the Rust-based runtime, CLI, kernel) follow the same response structure convention established here for consistent API responses.
+- **Token handling:** The user's Fly.io API token is sent from the browser to the worker, then forwarded directly to Fly.io APIs. It is never stored or logged by the worker.
+- **No authentication on the worker itself:** The `/api/deploy` endpoint is public. Rate limiting and abuse prevention rely on Cloudflare's built-in protections and the fact that deployment requires a valid Fly.io token.

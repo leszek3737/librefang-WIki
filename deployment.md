@@ -1,63 +1,41 @@
 # Deployment
 
-# Deployment Module
+# Deployment
 
-The `deploy/` directory contains everything needed to package, ship, and operate LibreFang in production. It supports multiple deployment targets and includes the observability stack for monitoring running instances.
+Everything needed to run and monitor LibreFang in production. This module provides multiple deployment targets, a complete observability stack, a one-click deployment portal, and a WhatsApp integration bridge.
 
 ## Deployment Targets
 
-LibreFang can be deployed to several platforms, each optimized for different use cases:
+LibreFang supports several deployment paths, all building from the same multi-stage Dockerfile defined in [deploy/](deploy.md):
 
-| Platform | Best For | Configuration |
-|----------|----------|---------------|
-| [Fly.io](deploy-fly.md) | One-command self-hosted deployment | `fly/deploy.sh` |
-| [Google Cloud Platform](deploy-gcp.md) | Free-tier single VM | `gcp/` |
-| [Railway](deploy-railway.md) | Docker-based hosting | `railway.json` / `railway.toml` |
-| [Render](deploy-render-yaml.md) | Simple cloud deployment | `render.yaml` |
+| Target | Module | Best for |
+|--------|--------|----------|
+| Docker Compose | [deploy/](deploy.md) | Self-hosted, full control |
+| Fly.io | [fly/](fly.md) | Edge deployment, one-command setup |
+| GCP Free Tier | [gcp/](gcp.md) | Zero-cost `e2-micro` instance via Terraform |
+| Railway | [railway/](railway.md) | Managed platform with health checks |
+| Render | [render.yaml](render-yaml.md) | Managed free-tier container hosting |
+| Bare metal | [deploy/](deploy.md) | systemd unit (`librefang.service`) |
 
-All platform-specific deployments use the same [Dockerfile](deploy.md), which produces a multi-stage image combining the Rust-compiled daemon with the Node.js runtime for the React dashboard.
+The [Cloudflare Worker](worker.md) at `deploy.librefang.ai` provides a browser-based deployment portal that links to all platform options and automates Fly.io provisioning via its `POST /api/deploy` endpoint.
 
 ## Observability Stack
 
-Monitoring is implemented as a three-layer pipeline:
+Prometheus and Grafana work together to provide full-stack monitoring:
 
-```mermaid
-flowchart LR
-    subgraph Collect["Prometheus (deploy/prometheus.md)"]
-        P[Scrape Config]
-    end
-    
-    subgraph Store["Prometheus"]
-        T[(Time Series DB)]
-    end
-    
-    subgraph Visualize["Grafana (deploy/grafana.md)"]
-        D1[Tokens]
-        D2[HTTP Requests]
-        D3[Agents]
-        D4[Cost]
-    end
-    
-    L[LibreFang /api/metrics] --> P --> T --> D1 & D2 & D3 & D4
-```
+1. **[Prometheus](prometheus.md)** scrapes the LibreFang application and Ollama backend every 15 seconds.
+2. **[Grafana](grafana.md)** auto-provisions four linked dashboards — system overview, LLM/token usage, HTTP/API metrics, and cost/budget tracking — all querying the Prometheus datasource.
 
-Prometheus scrapes metrics from `/api/metrics` every 15 seconds. Grafana dashboards are auto-provisioned from YAML, visualizing token usage, HTTP request latency, agent activity, and cost.
+Both are included in the `docker-compose.yml` stack from [deploy/](deploy.md).
 
-## WhatsApp Integration
+## Integrations
 
-The [WhatsApp Gateway](deploy-whatsapp-gateway.md) bridges WhatsApp Web to the LibreFang agent runtime. It handles QR authentication, message routing, media processing, and streaming LLM responses. Messages are persisted to SQLite for history and retry recovery, then forwarded to the LibreFang daemon for agent processing.
+The [WhatsApp Gateway](whatsapp-gateway.md) is a standalone Node.js process that bridges WhatsApp conversations to LibreFang agents. It uses the Baileys library for WhatsApp connectivity, SQLite for message persistence, and communicates with the agent platform via HTTP POST and SSE streaming. Deploy it alongside any of the deployment targets above.
 
-## Web-Based Deployment
+## Quick Navigation
 
-[deploy.librefang.ai](deploy-worker.md) provides a zero-infrastructure web UI for launching self-hosted instances on Fly.io. Built as a Cloudflare Worker, it handles the full provisioning workflow—token validation, app creation, persistent volume setup, and machine launch—without requiring server infrastructure.
-
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `Dockerfile` | Multi-stage production image (Rust + Node.js) |
-| `fly/deploy.sh` | One-command Fly.io deployment |
-| `prometheus/prometheus.yml` | Metrics scrape configuration |
-| `grafana/provisioning/dashboards/` | Pre-built monitoring dashboards |
-| `whatsapp-gateway/index.js` | WhatsApp bridge service |
-| `worker/src/index.js` | Cloudflare Worker for deploy.librefang.ai |
+- **Deploy locally with Docker:** See [deploy/](deploy.md) for the compose stack.
+- **One-click cloud deploy:** Visit the [Worker](worker.md) portal or run [fly/deploy.sh](fly.md) directly.
+- **Free-tier cloud:** Use [gcp/](gcp.md) (Terraform) or [render.yaml](render-yaml.md).
+- **Set up monitoring:** Deploy [Prometheus](prometheus.md) and [Grafana](grafana.md) together.
+- **Connect WhatsApp:** Configure the [WhatsApp Gateway](whatsapp-gateway.md) with your LibreFang instance.

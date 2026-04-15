@@ -1,100 +1,116 @@
 # Website — scripts
 
-# Website — fetch-registry Script
+# Website — Scripts: `fetch-registry.ts`
 
-Fetches catalog data from the librefang-registry GitHub repository and generates a static JSON file for the website.
+Build-time script that pulls registry data from the `librefang/librefang-registry` GitHub repository and writes it to `public/registry.json` for static consumption by the website.
 
 ## Overview
 
-This build-time script populates `public/registry.json` with data about the plugin ecosystem. The website uses this file to display catalog statistics, plugin listings, and localized descriptions on the homepage and documentation pages.
+The Librefang project maintains a separate registry repository containing TOML metadata files for various extension types (hands, channels, providers, etc.). This script resolves that remote data at build time so the website can serve it as a static JSON file without runtime API calls.
 
-The script runs via:
+## Execution
 
 ```bash
+# Direct
 npx tsx scripts/fetch-registry.ts
+
+# With GitHub token (avoids rate limits on CI)
+GITHUB_TOKEN=ghp_... npx tsx scripts/fetch-registry.ts
 ```
 
-## Execution Flow
+The output is written to `web/public/registry.json`.
+
+## How It Works
 
 ```mermaid
 flowchart TD
-    A[main] --> B[Parallel fetchDir for 7 categories]
-    B --> C[filter README.md from listings]
-    C --> D[Parallel fetchToml for hands & channels]
-    D --> E[parseToml extracts metadata]
-    E --> F[Build data object with counts]
-    F --> G[Write registry.json]
+    A[main] --> B["fetchDir() ×7 categories"]
+    B --> C[GitHub Contents API]
+    C --> D["Filter directories & TOML files"]
+    D --> E["fetchToml() for hands & channels"]
+    E --> F["parseToml()"]
+    F --> G["Write registry.json"]
 ```
+
+1. **Directory listing** — Calls `fetchDir()` for each of the seven registry categories against GitHub's Contents API. This returns all directories (for categories like `hands` and `agents` that are folder-based) or `.toml` files (for flat-file categories).
+
+2. **Detail fetching** — For `hands` and `channels`, fetches the actual TOML content via `raw.githubusercontent.com` and parses it into structured `Detail` objects. Other categories currently only contribute a count.
+
+3. **Serialization** — Assembles all data into a single object and writes it to `public/registry.json`.
 
 ## Key Functions
 
 ### `fetchDir(path: string): Promise<GHItem[]>`
 
-Queries the GitHub API for directory contents at the given path. Filters results to include only directories and `.toml` files, excluding `README.md`.
-
-Returns an array of `{ name: string; type: string }` objects.
-
-### `fetchToml(path: string): Promise<Detail | null>`
-
-Fetches a raw TOML file from the registry and passes the content to `parseToml`. Returns `null` on HTTP failure.
+Queries `https://api.github.com/repos/librefang/librefang-registry/contents/{path}` and returns items that are either directories or `.toml` files, excluding `README.md`. Returns an empty array on failure (non-throwing).
 
 ### `parseToml(text: string): Detail`
 
-Extracts structured data from TOML content using regex patterns:
+Minimal TOML parser that extracts:
 
-- **`id`, `name`, `description`, `category`, `icon`** — extracted via simple key matching
-- **`tags`** — parsed from `tags = ["tag1", ...]` array syntax
-- **`i18n`** — parsed from `[i18n.<locale>]` sections, extracting the `description` field per language
+| Field | Source |
+|-------|--------|
+| `id`, `name`, `description`, `category`, `icon` | Top-level `key = "value"` pairs |
+| `tags` | `tags = ["...", "..."]` array |
+| `i18n` | `[i18n.{lang}]` sections with `description` |
 
-Returns a `Detail` object containing the plugin's metadata.
+This is intentionally lightweight — it uses regex matching rather than a full TOML AST, which is sufficient for the flat structure the registry uses.
 
-## Data Collected
+### `fetchToml(path: string): Promise<Detail | null>`
 
-The script gathers counts for all seven categories:
+Fetches raw file content from GitHub and passes it through `parseToml`. Returns `null` on any HTTP error.
 
-| Category | Detail Fetched | Data Source |
-|----------|----------------|-------------|
-| `hands` | Yes | `hands/<name>/HAND.toml` |
-| `channels` | Yes | `channels/<name>` |
-| `providers` | Count only | — |
-| `integrations` | Count only | — |
-| `workflows` | Count only | — |
-| `agents` | Count only | — |
-| `plugins` | Count only | — |
+## Output Schema
 
-Currently, only `hands` and `channels` have their full metadata (including i18n descriptions) fetched. Other categories are tracked by count only.
+The generated `registry.json` has this shape:
 
-## Output Format
+```ts
+interface RegistryData {
+  hands: Detail[]          // Full parsed TOML details
+  channels: Detail[]       // Full parsed TOML details
+  handsCount: number
+  channelsCount: number
+  providersCount: number
+  integrationsCount: number
+  workflowsCount: number
+  agentsCount: number
+  pluginsCount: number
+  fetchedAt: string        // ISO 8601 timestamp
+}
 
-Written to `public/registry.json`:
-
-```json
-{
-  "hands": [Detail, Detail, ...],
-  "channels": [Detail, Detail, ...],
-  "handsCount": 42,
-  "channelsCount": 8,
-  "providersCount": 15,
-  "integrationsCount": 23,
-  "workflowsCount": 12,
-  "agentsCount": 6,
-  "pluginsCount": 95,
-  "fetchedAt": "2025-01-15T10:30:00.000Z"
+interface Detail {
+  id: string
+  name: string
+  description: string
+  category: string
+  icon: string
+  tags?: string[]
+  i18n?: Record<string, { description: string }>
 }
 ```
 
-## Authentication
+Only `hands` and `channels` currently produce full `Detail[]` arrays. All other categories contribute a count only.
 
-If the `GITHUB_TOKEN` environment variable is set, the script includes it in API requests to avoid rate limiting. For public repositories this is optional but recommended for CI environments.
+## GitHub API Authentication
 
-```bash
-GITHUB_TOKEN=ghp_xxx npx tsx scripts/fetch-registry.ts
-```
+The script reads `process.env.GITHUB_TOKEN`. When present, it's sent as a `Bearer` token in the `Authorization` header. Unauthenticated requests are rate-limited to 60/hour by GitHub, so setting this token is recommended in CI environments.
 
-## Registry Source
+## Registry Categories
 
-The script fetches from:
-- **API**: `https://api.github.com/repos/librefang/librefang-registry/contents`
-- **Raw files**: `https://raw.githubusercontent.com/librefang/librefang-registry/main`
+| Category | Storage format | Fully parsed |
+|----------|---------------|-------------|
+| `hands` | `hands/{id}/HAND.toml` | ✅ |
+| `channels` | `channels/{name}.toml` | ✅ |
+| `providers` | `providers/{name}.toml` | Count only |
+| `integrations` | `integrations/{name}.toml` | Count only |
+| `workflows` | `workflows/{name}.toml` | Count only |
+| `agents` | `agents/{id}/` (directory) | Count only |
+| `plugins` | `plugins/{name}.toml` | Count only |
 
-Both URLs point to the `main` branch of the registry repository.
+Extending a category to produce full details requires adding a `fetchToml` call in `main()` with the correct path pattern, then pushing the results into the output object.
+
+## Error Handling
+
+- `fetchDir` logs the failing path and status, then returns `[]` — the build continues with empty data for that category.
+- `fetchToml` returns `null` on HTTP errors; these are filtered out with `.filter(Boolean)` before serialization.
+- Uncaught errors in `main` are caught by `.catch(console.error)`.

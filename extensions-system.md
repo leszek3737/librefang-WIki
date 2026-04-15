@@ -1,431 +1,242 @@
 # Extensions System
 
-
 # LibreFang Extensions System
 
-The Extensions System (`librefang-extensions`) provides one-click integration for MCP (Model Context Protocol) servers. It handles the complete lifecycle: discovering available integrations, authenticating with credentials, running OAuth flows, persisting install state, and monitoring server health with automatic reconnection.
+The extensions crate provides a one-click integration system for MCP (Model Context Protocol) servers. It handles the complete lifecycle: discovering integrations, resolving credentials, running OAuth flows, installing, health monitoring, and generating the MCP server configs that the kernel consumes.
 
-## Architecture Overview
+## Architecture
 
-```mermaid
-graph TB
-    subgraph "Extensions Crate"
-        IR[Integration Registry]
-        CR[Credential Resolver]
-        HM[Health Monitor]
-        INST[Installer]
-        OAUTH[OAuth PKCE]
-        VAULT[Credential Vault]
-    end
-
-    IR --> INST
-    CR --> INST
-    VAULT --> CR
-    OAUTH --> VAULT
-    HM -.-> IR
-
-    subgraph "Storage"
-        TEMPLATES["~/.librefang/integrations/*.toml"]
-        INT_TOML["~/.librefang/integrations.toml"]
-        VAULT_ENC["~/.librefang/vault.enc"]
-        DOTENV["~/.librefang/.env"]
-    end
-
-    IR --> TEMPLATES
-    IR --> INT_TOML
-    VAULT --> VAULT_ENC
-    CR --> DOTENV
-
-    INT_TOML --> KERNEL[MCP Kernel Config]
-    VAULT --> MCP["MCP Server Process"]
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Installer                            │
+│              (install_integration / remove / list)           │
+├──────────┬──────────┬──────────────┬────────────────────────┤
+│ Registry │Credential│    OAuth     │   Health Monitor       │
+│ (templates│Resolver │  (PKCE flow) │ (DashMap + backoff)    │
+│  + state) │(4-source│              │                        │
+│           │ chain)  │              │                        │
+├──────────┴────┬─────┴──────────────┴────────────────────────┤
+│     Vault     │          Dotenv / Env Vars                  │
+│ (AES-256-GCM) │                                             │
+└───────────────┴─────────────────────────────────────────────┘
 ```
 
-## Core Types
+Data flows downward: the installer orchestrates the registry, resolver, and OAuth modules. The resolver pulls secrets from the vault, dotenv files, environment variables, or interactive prompts. The registry outputs `McpServerConfigEntry` objects that the kernel merges into its MCP server list.
 
-### IntegrationTemplate
+## Key Types (lib.rs)
 
-Describes a bundled MCP server integration:
+All shared types live in the crate root. The most important ones:
+
+| Type | Purpose |
+|------|---------|
+| `IntegrationTemplate` | A bundled integration definition loaded from a TOML file. Contains transport config, required env vars, OAuth config, health check settings, and metadata. |
+| `InstalledIntegration` | Persisted record of an installed integration (written to `integrations.toml`). |
+| `IntegrationStatus` | State enum: `Ready`, `Setup`, `Available`, `Error(String)`, `Disabled`. |
+| `IntegrationInfo` | Combined view merging a template with its install state and tool count. |
+| `McpTransportTemplate` | How to launch the MCP server: `Stdio { command, args }`, `Sse { url }`, or `Http { url }`. |
+| `RequiredEnvVar` | Describes a credential an integration needs — name, label, help text, whether it's secret, and a URL to create the key. |
+| `ExtensionError` | Error enum covering all failure modes (`NotFound`, `VaultLocked`, `OAuth`, etc.). |
+
+### File Layout on Disk
+
+```
+~/.librefang/
+├── integrations/          # Template TOML files (one per integration)
+│   ├── github.toml
+│   ├── slack.toml
+│   └── ...
+├── integrations.toml      # Installed integrations state
+├── vault.enc              # AES-256-GCM encrypted secrets (OFV1 magic header)
+└── .env                   # Optional dotenv fallback
+```
+
+---
+
+## Module Reference
+
+### Registry (`registry.rs`)
+
+`IntegrationRegistry` is the central store. It loads integration templates from `~/.librefang/integrations/*.toml` at startup, tracks which are installed via `integrations.toml`, and converts installed integrations to `McpServerConfigEntry` values for the kernel.
 
 ```rust
-pub struct IntegrationTemplate {
-    pub id: String,                    // "github", "slack", etc.
-    pub name: String,                  // Human-readable name
-    pub description: String,
-    pub category: IntegrationCategory,
-    pub transport: McpTransportTemplate,
-    pub required_env: Vec<RequiredEnvVar>,
-    pub oauth: Option<OAuthTemplate>,
-    pub health_check: HealthCheckConfig,
-}
+let mut registry = IntegrationRegistry::new(home_dir);
+registry.load_templates(home_dir);   // loads *.toml from integrations/
+registry.load_installed()?;           // reads integrations.toml
+
+// Query
+registry.get_template("github");     // Option<&IntegrationTemplate>
+registry.is_installed("github");     // bool
+registry.search("git");              // Vec<&IntegrationTemplate>
+registry.list_by_category(&IntegrationCategory::DevTools);
+
+// Mutate (persists to integrations.toml)
+registry.install(entry)?;
+registry.uninstall("github")?;
+registry.set_enabled("github", false)?;
+
+// Output for kernel
+let configs: Vec<McpServerConfigEntry> = registry.to_mcp_configs();
 ```
 
-**Transport templates** define how the MCP server is launched:
-
-```rust
-pub enum McpTransportTemplate {
-    Stdio { command: String, args: Vec<String> },
-    Sse { url: String },
-    Http { url: String },
-}
-```
-
-### IntegrationStatus
-
-Represents the current state of an integration:
-
-| Status | Meaning |
-|--------|---------|
-| `Ready` | Configured and MCP server running |
-| `Setup` | Installed but credentials missing |
-| `Available` | Not installed |
-| `Error(msg)` | MCP server errored |
-| `Disabled` | User disabled the integration |
-
-## Component Details
-
-### Integration Registry (`registry.rs`)
-
-Manages integration templates and install state.
-
-**Key operations:**
-
-```rust
-impl IntegrationRegistry {
-    // Load templates from ~/.librefang/integrations/*.toml
-    pub fn load_templates(&mut self, home_dir: &Path) -> usize;
-
-    // Load/save installed state from integrations.toml
-    pub fn load_installed(&mut self) -> ExtensionResult<usize>;
-    pub fn save_installed(&self) -> ExtensionResult<()>;
-
-    // Template lookups
-    pub fn get_template(&self, id: &str) -> Option<&IntegrationTemplate>;
-    pub fn search(&self, query: &str) -> Vec<&IntegrationTemplate>;
-    pub fn list_by_category(&self, category: &IntegrationCategory) -> Vec<&IntegrationTemplate>;
-
-    // Install management
-    pub fn install(&mut self, entry: InstalledIntegration) -> ExtensionResult<()>;
-    pub fn uninstall(&mut self, id: &str) -> ExtensionResult<()>;
-    pub fn set_enabled(&mut self, id: &str, enabled: bool) -> ExtensionResult<()>;
-
-    // Convert to kernel config for MCP server spawning
-    pub fn to_mcp_configs(&self) -> Vec<McpServerConfigEntry>;
-}
-```
-
-**Template loading:** Templates are TOML files in `~/.librefang/integrations/` with the integration ID as the filename (e.g., `github.toml`). Each file contains a complete `IntegrationTemplate` struct.
-
-**Persistence:** Install state lives in `~/.librefang/integrations.toml`:
+Templates are TOML files matching the `IntegrationTemplate` struct. A minimal example:
 
 ```toml
-[[installed]]
 id = "github"
-installed_at = "2026-02-23T10:00:00Z"
-enabled = true
-oauth_provider = null
+name = "GitHub"
+description = "GitHub API via MCP"
+category = "devtools"
+icon = "🐙"
 
-[[installed]]
-id = "google-calendar"
-installed_at = "2026-02-23T10:05:00Z"
-enabled = true
-oauth_provider = "google"
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+
+[[required_env]]
+name = "GITHUB_PERSONAL_ACCESS_TOKEN"
+label = "Personal Access Token"
+help = "Create at https://github.com/settings/tokens"
+is_secret = true
+get_url = "https://github.com/settings/tokens"
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
 ```
 
 ### Credential Vault (`vault.rs`)
 
-AES-256-GCM encrypted secret storage. Secrets persist in `~/.librefang/vault.enc`.
-
-**File format:**
-- Magic bytes: `OFV1` (Older Fang Vault v1)
-- JSON body with `version`, `salt`, `nonce`, `ciphertext` (all base64)
-
-**Key derivation:** Argon2id derives a 256-bit encryption key from the master key + random salt.
+AES-256-GCM encrypted storage for secrets, persisted at `~/.librefang/vault.enc`. The file format uses an `OFV1` magic header followed by a JSON payload containing the Argon2id salt, nonce, and ciphertext (all base64-encoded).
 
 **Master key resolution order:**
+1. Cached key in memory (avoids repeated keyring/env lookups)
+2. OS keyring (file-based fallback at `~/.local/share/librefang/.keyring`, AES-256-GCM wrapped with a machine fingerprint)
+3. `LIBREFANG_VAULT_KEY` environment variable (base64-encoded 32-byte key)
 
-```mermaid
-sequenceDiagram
-    participant Vault
-    participant Keyring as OS Keyring<br/>(Keychain/Credential Manager/Secret Service)
-    participant Env as LIBREFANG_VAULT_KEY
-
-    Vault->>Vault: Check cached_key
-    alt Cached key available
-        Vault-->>Vault: Return cached key
-    else No cache
-        Vault->>Keyring: load_keyring_key()
-        alt Keyring has key
-            Keyring-->>Vault: Return key
-        else Keyring unavailable
-            Vault->>Env: Read env var
-            alt Env var set
-                Env-->>Vault: Return key
-            else No env var
-                Vault-->>Vault: ExtensionError::VaultLocked
-            end
-        end
-    end
-```
-
-**Keyring storage:** When OS keyring access fails, the system falls back to a file-based keyring (`~/.local/share/librefang/.keyring`) that wraps the master key with AES-256-GCM using a machine-specific wrapping key derived from username, hostname, and Argon2id.
-
-**Vault operations:**
+**Encryption pipeline:** master key + random salt → Argon2id → derived key → AES-256-GCM encrypt the JSON-serialized secret map.
 
 ```rust
-impl CredentialVault {
-    // Initialize new vault (generates and stores master key)
-    pub fn init(&mut self) -> ExtensionResult<()>;
-
-    // Unlock existing vault
-    pub fn unlock(&mut self) -> ExtensionResult<()>;
-
-    // Secret management
-    pub fn get(&self, key: &str) -> Option<Zeroizing<String>>;
-    pub fn set(&mut self, key: String, value: Zeroizing<String>) -> ExtensionResult<()>;
-    pub fn remove(&mut self, key: &str) -> ExtensionResult<bool>;
-    pub fn list_keys(&self) -> Vec<&str>;
-
-    // State queries
-    pub fn is_unlocked(&self) -> bool;
-    pub fn exists(&self) -> bool;
-}
+let mut vault = CredentialVault::new(vault_path);
+vault.init_with_key(master_key)?;           // create vault file
+vault.set("API_KEY".into(), Zeroizing::new("secret".into()))?;
+let val = vault.get("API_KEY");             // Option<Zeroizing<String>>
+vault.remove("API_KEY")?;
 ```
+
+For production use, call `vault.init()` which generates a random key and stores it in the OS keyring, or `vault.unlock()` which resolves the key from keyring/env.
+
+The `Drop` implementation clears all in-memory entries and the cached key. All secret values use `Zeroizing<String>` to ensure memory is zeroed on deallocation.
 
 ### Credential Resolver (`credentials.rs`)
 
-Resolves credentials from multiple sources in priority order:
+Resolves secrets from four sources in priority order:
 
-```mermaid
-flowchart LR
-    A[Resolve key] --> B{Vault unlocked?}
-    B -->|Yes| C[Check vault]
-    B -->|No| D[Skip vault]
-    C --> E{Found?}
-    D --> F[Check .env]
-    E -->|Yes| Z[Return value]
-    E -->|No| F
-    F --> G{Found in .env?}
-    G -->|Yes| Z
-    G -->|No| H{Check env var}
-    H -->|Yes| Z
-    H -->|No| I{Interactive?}
-    I -->|Yes| J[Prompt user]
-    I -->|No| K[Return None]
-    J --> Z
-```
+1. **Vault** — `~/.librefang/vault.enc` (if unlocked)
+2. **Dotenv** — `~/.librefang/.env` (loaded at construction time)
+3. **Environment variable** — `std::env::var`
+4. **Interactive prompt** — stderr prompt + stdin read (only when `interactive` is enabled)
 
 ```rust
-impl CredentialResolver {
-    pub fn resolve(&self, key: &str) -> Option<Zeroizing<String>>;
-    pub fn has_credential(&self, key: &str) -> bool;
-    pub fn resolve_all(&self, keys: &[&str]) -> HashMap<String, Zeroizing<String>>;
-    pub fn missing_credentials(&self, keys: &[&str]) -> Vec<String>;
-    pub fn store_in_vault(&mut self, key: &str, value: Zeroizing<String>) -> ExtensionResult<()>;
-}
+let resolver = CredentialResolver::new(Some(vault), Some(dotenv_path))
+    .with_interactive(true);
+
+// Single credential
+let token = resolver.resolve("GITHUB_TOKEN");  // Option<Zeroizing<String>>
+
+// Batch
+let creds = resolver.resolve_all(&["KEY_A", "KEY_B", "KEY_C"]);
+let missing = resolver.missing_credentials(&["KEY_A", "KEY_B"]);
 ```
+
+Dotenv parsing handles `KEY=VALUE`, `KEY="quoted"`, `KEY='single'`, comments (`#`), and blank lines. The dotenv cache is loaded once at construction; call `clear_dotenv_cache` if keys are deleted at runtime.
 
 ### OAuth2 PKCE (`oauth.rs`)
 
-Handles OAuth flows for Google, GitHub, Microsoft, and Slack.
+Implements the Authorization Code flow with PKCE (Proof Key for Code Exchange) for Google, GitHub, Microsoft, and Slack. No client secret is needed — safe for desktop/CLI apps.
 
 **Flow:**
-
-```mermaid
-sequenceDiagram
-    participant App
-    participant Browser
-    participant CallbackServer as localhost:port/callback
-    participant Provider as OAuth Provider
-
-    App->>App: Generate PKCE pair (verifier, challenge)
-    App->>App: Start callback server on random port
-    App->>Browser: Open auth URL with code_challenge
-    Browser->>Provider: Authorization request
-    Provider->>Browser: User consent page
-    Browser-->>Provider: User approves
-    Provider->>CallbackServer: Redirect with code + state
-    CallbackServer-->>App: Receive code
-    App->>Provider: Exchange code + verifier for tokens
-    Provider-->>App: access_token, refresh_token
-    App->>App: Store tokens in vault
-```
+1. Generate random PKCE verifier → SHA-256 → base64url challenge
+2. Bind a localhost TCP listener on a random port
+3. Open the user's browser to the authorization URL (with `code_challenge`)
+4. Serve a one-shot callback at `/callback` via axum
+5. Exchange the authorization code for tokens (POST to `token_url` with `code_verifier`)
+6. Return `OAuthTokens` (access_token, refresh_token, expires_in, scope)
 
 ```rust
-pub async fn run_pkce_flow(
-    oauth: &OAuthTemplate,
-    client_id: &str,
-) -> ExtensionResult<OAuthTokens>
+let tokens = run_pkce_flow(&template.oauth.unwrap(), client_id).await?;
+// tokens.access_token_zeroizing() -> Zeroizing<String>
 ```
 
-**Configuration:** Client IDs are resolved from `librefang_types::config::OAuthConfig` with fallback defaults. Users should configure their own client IDs in the config file for production use.
+Client IDs default to placeholder values. Override them via `OAuthConfig` in the app config:
+
+```rust
+let client_ids = resolve_client_ids(&config.oauth);
+// merges defaults with config.google_client_id, config.github_client_id, etc.
+```
+
+The callback server has a 5-minute timeout. State parameter is validated for CSRF protection.
 
 ### Health Monitor (`health.rs`)
 
-Tracks MCP server health and manages reconnection with exponential backoff.
+Thread-safe health tracking for MCP server connections using `DashMap`. Each integration has an `IntegrationHealth` record tracking status, tool count, consecutive failures, reconnect attempts, and timestamps.
 
 ```rust
-impl HealthMonitor {
-    pub fn register(&self, id: &str);
-    pub fn unregister(&self, id: &str);
+let monitor = HealthMonitor::new(HealthMonitorConfig::default());
+monitor.register("github");
 
-    pub fn report_ok(&self, id: &str, tool_count: usize);
-    pub fn report_error(&self, id: &str, error: String);
+// Background task reports
+monitor.report_ok("github", 12);              // 12 tools available
+monitor.report_error("github", "timeout".into());
 
-    pub fn get_health(&self, id: &str) -> Option<IntegrationHealth>;
-    pub fn all_health(&self) -> Vec<IntegrationHealth>;
+// Query
+let health = monitor.get_health("github");    // Option<IntegrationHealth>
+let all = monitor.all_health();               // Vec<IntegrationHealth>
 
-    pub fn should_reconnect(&self, id: &str) -> bool;
-    pub fn backoff_duration(&self, attempt: u32) -> Duration;
+// Reconnect logic
+if monitor.should_reconnect("github") {
+    monitor.mark_reconnecting("github");
+    let backoff = monitor.backoff_duration(attempt);  // exponential
 }
 ```
 
-**Backoff schedule:** `5s → 10s → 20s → 40s → ...` capped at 5 minutes, with a maximum of 10 reconnect attempts.
+**Backoff:** 5s → 10s → 20s → 40s → 80s → ... → capped at 300s (5 min). Maximum 10 reconnect attempts (configurable). After recovery via `mark_ok`, failure counters and reconnect state reset.
 
-**IntegrationHealth struct:**
-
-```rust
-pub struct IntegrationHealth {
-    pub id: String,
-    pub status: IntegrationStatus,
-    pub tool_count: usize,
-    pub last_ok: Option<DateTime<Utc>>,
-    pub last_error: Option<String>,
-    pub consecutive_failures: u32,
-    pub reconnecting: bool,
-    pub reconnect_attempts: u32,
-    pub connected_since: Option<DateTime<Utc>>,
-}
-```
+Default health check interval is 60 seconds; an integration is marked unhealthy after 3 consecutive failures.
 
 ### Installer (`installer.rs`)
 
-Provides the one-click installation experience:
+Orchestrates the complete install/remove flow:
+
+**`install_integration`** — looks up the template, stores any provided keys in the vault, checks for missing credentials, writes the install record to `integrations.toml`, and returns an `InstallResult` with status `Ready` (all credentials present) or `Setup` (credentials still needed).
+
+**`remove_integration`** — unregisters from the registry and persists the change.
+
+**`list_integrations`** — returns all templates with computed status based on install state and credential availability.
+
+**`search_integrations`** — fuzzy text search across template ID, name, description, and tags.
+
+**`scaffold_integration`** / **`scaffold_skill`** — generate starter TOML templates for custom integrations or skills.
 
 ```rust
-pub fn install_integration(
-    registry: &mut IntegrationRegistry,
-    resolver: &mut CredentialResolver,
-    id: &str,
-    provided_keys: &HashMap<String, String>,
-) -> ExtensionResult<InstallResult>
-
-pub fn remove_integration(
-    registry: &mut IntegrationRegistry,
-    id: &str,
-) -> ExtensionResult<String>
-
-pub fn list_integrations(
-    registry: &IntegrationRegistry,
-    resolver: &CredentialResolver,
-) -> Vec<IntegrationListEntry>
-
-pub fn search_integrations(
-    registry: &IntegrationRegistry,
-    query: &str,
-) -> Vec<IntegrationListEntry>
+// Install with a provided API key
+let mut keys = HashMap::new();
+keys.insert("NOTION_API_KEY".into(), "ntn_xxx".into());
+let result = install_integration(&mut registry, &mut resolver, "notion", &keys)?;
+// result.status is Ready if all required_env are satisfied
 ```
 
-**Install flow:**
+### HTTP Client (`http_client.rs`)
 
-```mermaid
-flowchart TD
-    A[librefang add github] --> B[Lookup template in registry]
-    B --> C{Template found?}
-    C -->|No| D[Error: NotFound]
-    C -->|Yes| E{Already installed?}
-    E -->|Yes| F[Error: AlreadyInstalled]
-    E -->|No| G[Store provided keys in vault]
-    G --> H{Check all required credentials}
-    H --> I{All credentials present?}
-    I -->|Yes| J[Status: Ready]
-    I -->|No| K[Status: Setup]
-    J --> L[Write to integrations.toml]
-    K --> L
-    L --> M[Return InstallResult]
-```
-
-## Usage Example
+Shared `reqwest::Client` builder with TLS root certificates sourced from the native certificate store, falling back to `webpki-roots` if no native certs are found. Uses `rustls` with the `aws_lc_rs` crypto provider.
 
 ```rust
-use librefang_extensions::{IntegrationRegistry, CredentialResolver, CredentialVault};
-use std::path::Path;
-
-// Initialize components
-let home = Path::new("~/.librefang");
-let mut registry = IntegrationRegistry::new(home);
-registry.load_templates(home)?;
-registry.load_installed()?;
-
-// Set up credential resolution
-let mut vault = CredentialVault::new(home.join("vault.enc"));
-vault.unlock().ok(); // May fail if vault not initialized
-let resolver = CredentialResolver::new(Some(vault), Some(&home.join(".env")));
-
-// List available integrations
-let integrations = installer::list_integrations(&registry, &resolver);
-for entry in &integrations {
-    println!("{} {} [{}]", entry.icon, entry.name, entry.status);
-}
-
-// Search and install
-let results = installer::search_integrations(&registry, "git");
-if !results.is_empty() {
-    let result = installer::install_integration(
-        &mut registry,
-        &mut resolver,
-        &results[0].id,
-        &HashMap::new(),
-    )?;
-    println!("{}", result.message);
-}
-
-// Convert to MCP kernel config
-let mcp_configs = registry.to_mcp_configs();
-// mcp_configs can be merged into the kernel's server list
+let client = new_client();  // reqwest::Client with bundled CA roots
 ```
 
-## Error Handling
+---
 
-```rust
-pub enum ExtensionError {
-    NotFound(String),              // Integration not in registry
-    AlreadyInstalled(String),     // Attempted duplicate install
-    NotInstalled(String),         // Uninstall target missing
-    CredentialNotFound(String),  // Secret resolution failed
-    Vault(String),                // Vault operation failed
-    VaultLocked,                  // Vault locked, needs unlock
-    OAuth(String),                // OAuth flow error
-    TomlParse(String),            // TOML parsing failed
-    Io(std::io::Error),
-    Http(String),
-    HealthCheck(String),
-}
-```
+## Integration with the Kernel
 
-## Key Design Decisions
+During boot, the kernel calls `vault.unlock()` to decrypt secrets, then the registry converts installed integrations into `McpServerConfigEntry` values via `to_mcp_configs()`. These are merged into the kernel's MCP server list, and the health monitor tracks their status in the background.
 
-### 1. Vault-First Credential Storage
-
-Credentials default to the encrypted vault, with fallbacks for convenience. This balances security (credentials at rest are encrypted) with usability (env vars and dotenv work for development).
-
-### 2. Template-Based Integration Discovery
-
-Templates live on disk as TOML files, making them:
-- Easy to browse without loading the crate
-- Simple to add custom integrations
-- Debuggable with standard tools
-
-### 3. PKCE-Only OAuth
-
-The OAuth implementation uses PKCE (Proof Key for Code Exchange), which:
-- Doesn't require a client secret
-- Protects against authorization code interception
-- Works with public/client-side applications
-
-### 4. Non-Blocking Vault Unlock
-
-The vault caches the master key after first unlock to avoid repeated OS keyring or env var lookups during credential resolution. The key is zeroized on drop.
-
-### 5. OFV1 Magic Bytes
-
-The vault file format starts with `OFV1` magic bytes to distinguish it from plain JSON and provide forward compatibility for future format changes.
+The vault is used across the codebase — routes like `list_providers`, `auth_start`, and `wechat_qr_status` all flow through `boot_with_config` → `vault.unlock()` → `resolve_master_key()`, which checks the OS keyring and env var.

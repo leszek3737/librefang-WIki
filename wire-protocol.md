@@ -1,324 +1,193 @@
 # Wire Protocol
 
-# LibreFang Wire Protocol (OFP)
+# Wire Protocol (`librefang-wire`)
 
-The `librefang-wire` crate implements **OFP** (OpenFang Protocol), LibreFang's agent-to-agent networking layer. It provides cross-machine peer discovery, HMAC-authenticated handshake, and reliable message exchange over TCP connections.
+Agent-to-agent networking over TCP using the LibreFang Wire Protocol (OFP). Enables cross-machine discovery, authentication, and message routing between LibreFang kernels.
 
-## Overview
+## Wire Format
 
-OFP enables LibreFang kernels to:
+Every message on the wire uses a length-prefixed JSON frame:
 
-- **Discover agents** running on remote peers via text queries
-- **Route messages** to specific agents on remote machines
-- **Track peer state** and their advertised agents in real-time
-- **Broadcast notifications** when agents spawn, terminate, or the peer shuts down
+```
+┌────────────────────┬──────────────────────────┐
+│  4 bytes (BE u32)  │     JSON payload          │
+│  length of payload │     (WireMessage)         │
+└────────────────────┴──────────────────────────┘
+```
 
-All communication uses JSON-framed messages over TCP with HMAC-SHA256 authentication and replay-attack protection.
+After the HMAC handshake completes, post-handshake frames append a 64-character hex HMAC:
 
-## Architecture
+```
+┌──────────┬──────────────┬─────────────────────┐
+│ 4B len   │  JSON body   │  64-byte hex HMAC   │
+│ (total)  │              │  HMAC(key, body)     │
+└──────────┴──────────────┴─────────────────────┘
+```
+
+The length field covers both the JSON body and the trailing HMAC. Maximum message size is 16 MB (`MAX_MESSAGE_SIZE`).
+
+Encoding/decoding is handled by `encode_message`, `decode_length`, and `decode_message` in the `message` module. The `peer` module provides async I/O wrappers: `write_message`, `read_message`, `write_message_authenticated`, and `read_message_authenticated`.
+
+## Authentication & Security Model
+
+OFP mandates authentication — it refuses to start without a configured `shared_secret`. The protocol has three layers of protection:
+
+### 1. HMAC Handshake
+
+Every connection begins with a mutual HMAC-authenticated handshake. Both sides generate a random nonce and compute:
+
+```
+HMAC-SHA256(shared_secret, nonce || node_id)
+```
+
+The initiator sends a `Handshake` request containing its nonce and HMAC. The responder verifies the HMAC, checks the nonce for replay, then replies with a `HandshakeAck` containing its own nonce and HMAC. The initiator then verifies that response.
+
+Any connection that sends a non-`Handshake` message as its first frame is rejected with a `401` error and the connection is dropped.
+
+### 2. Nonce Replay Protection
+
+`NonceTracker` records every nonce seen within a 5-minute sliding window. It uses `DashMap::entry` for atomic check-and-insert, preventing TOCTOU races where concurrent connections could both pass a `contains_key` check before either inserts. The tracker has a hard cap of 100,000 entries — under flood conditions it fails closed rather than growing unbounded.
+
+### 3. Per-Session and Per-Message HMAC
+
+After the handshake, both sides derive a session key:
+
+```rust
+session_key = HMAC-SHA256(shared_secret, client_nonce || server_nonce)
+```
+
+Nonce order matters — the client's nonce comes first regardless of which side is computing the key. All subsequent messages on that connection are framed with a trailing HMAC over the JSON body, verified on read. Tampered or forged messages are rejected.
+
+## Connection Lifecycle
 
 ```mermaid
 sequenceDiagram
-    participant Kernel as LibreFang Kernel
-    participant PeerNode as PeerNode
-    participant Registry as PeerRegistry
-    participant Remote as Remote Peer
-
-    Note over Kernel, PeerNode: Start
-    PeerNode->>PeerNode: Start TCP listener
-    PeerNode->>Registry: Clone registry reference
-
-    Note over Kernel, Remote: Outbound connection
-    Kernel->>PeerNode: connect_to_peer(addr)
-    PeerNode->>Remote: TCP handshake + HMAC auth
-    Remote-->>PeerNode: HandshakeAck + HMAC
-    PeerNode->>Registry: add_peer()
-    PeerNode->>Kernel: Ok
-
-    Note over Kernel, Remote: Agent message
-    Kernel->>PeerNode: send_to_peer(node_id, agent, msg)
-    PeerNode->>Remote: HMAC-authenticated AgentMessage
-    Remote-->>PeerNode: AgentResponse
-    PeerNode-->>Kernel: Ok(text)
+    participant C as Client (PeerNode)
+    participant S as Server (PeerNode)
+    C->>S: TCP connect
+    C->>S: Handshake {nonce_c, HMAC(secret, nonce_c||node_c)}
+    S->>S: verify HMAC, check nonce_c replay
+    S->>C: HandshakeAck {nonce_s, HMAC(secret, nonce_s||node_s)}
+    C->>C: verify HMAC, check nonce_s replay
+    C->>C: derive session_key
+    S->>S: derive session_key
+    loop Authenticated message exchange
+        C->>S: Request + HMAC(session_key, body)
+        S->>C: Response + HMAC(session_key, body)
+    end
 ```
 
-### Component Responsibilities
+### Inbound connections (accept loop)
 
-| Component | Responsibility |
-|-----------|----------------|
-| `PeerNode` | TCP listener, inbound/outbound connections, message dispatch |
-| `PeerRegistry` | Thread-safe storage for known peers and their agents |
-| `PeerHandle` | Trait bridging wire protocol to the kernel's agent runtime |
-| `WireMessage` | JSON-enveloped protocol messages with typed variants |
+`PeerNode::start` binds a `TcpListener` and spawns an accept loop. For each incoming connection, `handle_inbound` reads the handshake, verifies the HMAC and nonce, sends a `HandshakeAck`, derives the session key, then enters the `connection_loop`.
 
-## Message Protocol
+### Outbound connections
 
-### Framing
+`connect_to_peer` opens a TCP connection, sends a handshake, verifies the `HandshakeAck`, and spawns a background task running `connection_loop`. The remote peer is registered in the local `PeerRegistry`.
 
-Every message on the wire follows this format:
+`send_to_peer` is a one-shot variant: it opens a connection, performs the full handshake, sends a single `AgentMessage`, reads the response, and closes. It does not keep the connection alive.
 
-```
-[4-byte big-endian length][JSON body][64-byte HMAC (post-handshake only)]
-```
+## Message Types
 
-The 4-byte length prefix indicates the total frame size. During authenticated sessions (post-handshake), a 64-character hex HMAC follows the JSON body.
+The `WireMessage` envelope carries a unique `id` and a `WireMessageKind`:
 
-### Message Types
+| Kind | Tag | Description |
+|------|-----|-------------|
+| `WireRequest::Handshake` | `"handshake"` | Initial authentication exchange |
+| `WireRequest::Discover` | `"discover"` | Query remote agents by name/tag/description |
+| `WireRequest::AgentMessage` | `"agent_message"` | Send text to a remote agent, receive response |
+| `WireRequest::Ping` | `"ping"` | Liveness check |
+| `WireResponse::HandshakeAck` | `"handshake_ack"` | Accept handshake, exchange identity |
+| `WireResponse::DiscoverResult` | `"discover_result"` | List of matching agents |
+| `WireResponse::AgentResponse` | `"agent_response"` | Agent's text reply |
+| `WireResponse::Pong` | `"pong"` | Liveness reply with uptime |
+| `WireResponse::Error` | `"error"` | Error with code and message |
+| `WireNotification::AgentSpawned` | `"agent_spawned"` | New agent available on peer |
+| `WireNotification::AgentTerminated` | `"agent_terminated"` | Agent no longer available |
+| `WireNotification::ShuttingDown` | `"shutting_down"` | Peer is going offline |
 
-#### Requests
+All types use `#[serde(tag = "...")]` for discriminant serialization — requests use `"method"`, responses use `"method"`, and notifications use `"event"`. The outer `WireMessageKind` uses `#[serde(tag = "type")]`.
 
-| Method | Purpose |
-|--------|---------|
-| `handshake` | Exchange identity, protocol version, and agent list with HMAC auth |
-| `discover` | Search remote peers for agents matching a query |
-| `agent_message` | Send a message to a specific agent and await a response |
-| `ping` | Liveness check |
-
-#### Responses
-
-| Method | Purpose |
-|--------|---------|
-| `handshake_ack` | Acknowledge successful handshake, return identity and agents |
-| `discover_result` | Return agents matching a discovery query |
-| `agent_response` | Agent's reply to an `agent_message` |
-| `pong` | Liveness response with uptime |
-| `error` | Generic error with code and message |
-
-#### Notifications (one-way)
-
-| Event | Trigger |
-|-------|---------|
-| `agent_spawned` | New agent started on the peer |
-| `agent_terminated` | Agent terminated on the peer |
-| `shutting_down` | Peer is going offline |
-
-### Example: Discovery Flow
-
-```json
-// Request
-{"id": "req-1", "type": "request", "method": "discover", "query": "coder"}
-
-// Response
-{"id": "req-1", "type": "response", "method": "discover_result", "agents": [
-  {"id": "a1", "name": "coder", "description": "Coding assistant", "tags": ["code"], "tools": ["file_write"], "state": "running"}
-]}
-```
+Agent metadata is carried in `RemoteAgentInfo`: `id`, `name`, `description`, `tags`, `tools`, and `state`.
 
 ## PeerNode
 
-`PeerNode` is the central actor — it binds a TCP socket, accepts inbound connections, and initiates outbound connections to known peers.
+`PeerNode` is the main networking entry point. It owns the listener, configuration, registry reference, nonce tracker, and session key state.
 
-### Starting a PeerNode
-
-```rust
-use librefang_wire::{PeerConfig, PeerNode, PeerRegistry};
-
-let config = PeerConfig {
-    listen_addr: "0.0.0.0:0".parse()?,
-    node_id: "my-kernel-1".to_string(),
-    node_name: "production-kernel".to_string(),
-    shared_secret: "...".to_string(), // Required
-};
-
-let registry = PeerRegistry::new();
-let handle: Arc<dyn PeerHandle> = /* your implementation */;
-
-let (node, accept_task) = PeerNode::start(config, registry, handle).await?;
-println!("Listening on {}", node.local_addr());
-```
-
-### Connecting to a Peer
+### Creation
 
 ```rust
-node.connect_to_peer(remote_addr, handle.clone()).await?;
+let (node, task_handle) = PeerNode::start(config, registry, handle).await?;
 ```
 
-### Sending Messages to Remote Agents
+`start` validates that `shared_secret` is non-empty, binds the listener, and spawns the accept loop. It returns an `Arc<PeerNode>` and the `JoinHandle` for the accept task.
 
-```rust
-let response = node
-    .send_to_peer("node-id-of-remote", "coder", "Write a function", None, handle.clone())
-    .await?;
-```
+### Key methods
+
+| Method | Purpose |
+|--------|---------|
+| `local_addr()` | Returns the actual bound address (useful when binding to port 0) |
+| `node_id()` | This node's unique identifier |
+| `registry()` | Access the `PeerRegistry` |
+| `connect_to_peer(addr, handle)` | Establish outbound connection with full handshake |
+| `send_to_peer(node_id, agent, message, sender, handle)` | One-shot agent message to a known peer |
 
 ## PeerHandle Trait
 
-The `PeerHandle` trait abstracts the kernel's agent runtime, allowing the wire protocol to route messages to local agents:
+The kernel implements `PeerHandle` to bridge the wire protocol with local agent infrastructure:
 
 ```rust
-use async_trait::async_trait;
-use librefang_wire::{PeerHandle, RemoteAgentInfo};
-
-struct MyHandle;
-
 #[async_trait]
-impl PeerHandle for MyHandle {
-    fn local_agents(&self) -> Vec<RemoteAgentInfo> {
-        // Return agents available on this kernel
-    }
-
-    async fn handle_agent_message(
-        &self,
-        agent: &str,
-        message: &str,
-        sender: Option<&str>,
-    ) -> Result<String, String> {
-        // Route message to local agent, return response
-    }
-
-    fn discover_agents(&self, query: &str) -> Vec<RemoteAgentInfo> {
-        // Search local agents matching query
-    }
-
-    fn uptime_secs(&self) -> u64 {
-        // Return node uptime for Pong
-    }
+pub trait PeerHandle: Send + Sync + 'static {
+    fn local_agents(&self) -> Vec<RemoteAgentInfo>;
+    async fn handle_agent_message(&self, agent: &str, message: &str, sender: Option<&str>) -> Result<String, String>;
+    fn discover_agents(&self, query: &str) -> Vec<RemoteAgentInfo>;
+    fn uptime_secs(&self) -> u64;
 }
 ```
+
+- `local_agents` — called during handshake and discovery to advertise this node's agents
+- `handle_agent_message` — routes incoming remote messages to local agents
+- `discover_agents` — searches local agents matching a query string (name, tags, description)
+- `uptime_secs` — included in `Pong` responses
 
 ## PeerRegistry
 
-`PeerRegistry` is a thread-safe, concurrent registry tracking all known peers and their advertised agents:
+Thread-safe (`RwLock<HashMap<...>>`) store for known peers. Thread safety is managed internally — consumers receive `Clone` copies of `PeerEntry` values.
 
-```rust
-use librefang_wire::{PeerRegistry, PeerEntry, PeerState};
+### Peer states
 
-// Add a peer after successful handshake
-registry.add_peer(PeerEntry { ... });
+- **Connected** — handshake completed, eligible for message routing
+- **Disconnected** — connection lost, entry retained for reconnection
 
-// Mark peer disconnected (retains entry for reconnect)
-registry.mark_disconnected("node-id");
+Disconnected peers are excluded from `find_agents` and `connected_peers` but remain in `all_peers`.
 
-// Find agents across all connected peers
-let agents = registry.find_agents("coder");
+### Agent management
 
-// Iterate all remote agents
-for remote in registry.all_remote_agents() {
-    println!("{} on {}: {}", remote.info.name, remote.peer_node_id, remote.info.description);
-}
-```
+The registry tracks agents per-peer. `find_agents` searches across all connected peers, matching against name, tags, and description (case-insensitive). Results are returned as `RemoteAgent` structs pairing the agent info with the owning `peer_node_id`.
 
-### Agent Discovery
+`add_agent` and `remove_agent` support incremental updates driven by `AgentSpawned` / `AgentTerminated` notifications received in the connection loop.
 
-The registry searches across connected peers' agent name, description, and tags:
+### Key methods
 
-```rust
-// Returns RemoteAgent { peer_node_id, info }
-let coders = registry.find_agents("code"); // Matches "coder", "code-reviewer", etc.
-```
+| Method | Returns |
+|--------|---------|
+| `add_peer(entry)` | Register/update a peer |
+| `remove_peer(node_id)` | Remove entirely |
+| `mark_disconnected(node_id)` | Set state without removing |
+| `mark_connected(node_id)` | Restore to connected |
+| `get_peer(node_id)` | Single peer snapshot |
+| `connected_peers()` | All peers in Connected state |
+| `find_agents(query)` | Cross-peer agent search |
+| `all_remote_agents()` | Every agent on every connected peer |
+| `connected_count()` / `total_count()` | Counts |
 
-## Security
+## Broadcasting
 
-OFP implements defense-in-depth with multiple authentication layers:
-
-### Handshake Authentication
-
-On connection establishment, both parties perform mutual HMAC-SHA256 authentication:
-
-```
-1. Each party generates a random nonce (UUID)
-2. Compute HMAC = HMAC-SHA256(shared_secret, nonce + node_id)
-3. Exchange handshakes containing: node_id, node_name, protocol_version, agents, nonce, auth_hmac
-4. Verify the peer's HMAC using their nonce + our node_id
-```
-
-### Replay Attack Prevention
-
-`NonceTracker` maintains a 5-minute sliding window of seen nonces. Any nonce reused within the window is rejected as a replay attempt:
-
-```rust
-let tracker = NonceTracker::new();
-tracker.check_and_record("unique-nonce-123")?; // Ok
-tracker.check_and_record("unique-nonce-123")?; // Err: "Nonce replay detected"
-```
-
-### Per-Session Key Derivation
-
-After successful handshake, both parties derive a unique session key:
-
-```rust
-let session_key = derive_session_key(shared_secret, our_nonce, their_nonce);
-// Result: HMAC-SHA256(shared_secret, our_nonce + their_nonce)
-```
-
-### Per-Message Authentication
-
-Post-handshake messages include a 64-byte HMAC appended to the frame:
-
-```
-[4-byte length][JSON body][64-byte HMAC]
-```
-
-The HMAC covers only the JSON body, preventing tampering or forgery of individual messages.
-
-### Constant-Time Comparison
-
-HMAC verification uses `subtle::ConstantTimeEq` to prevent timing attacks:
-
-```rust
-fn hmac_verify(secret: &str, data: &[u8], signature: &str) -> bool {
-    let expected = hmac_sign(secret, data);
-    subtle::ConstantTimeEq::ct_eq(expected.as_bytes(), signature.as_bytes()).into()
-}
-```
-
-### Rejecting Unauthenticated Requests
-
-Any message received before a successful handshake is rejected with HTTP 401-equivalent error:
-
-```rust
-WireResponse::Error { code: 401, message: "Authentication required: complete HMAC handshake first" }
-```
+`broadcast_notification` sends a one-shot notification to all connected peers. For each peer it opens a fresh TCP connection, derives a per-message key from the shared secret and a fresh nonce, writes the authenticated message, and closes. Failures are collected and returned — the caller decides how to handle them.
 
 ## Integration Points
 
-### Used By
+The kernel (`src/kernel/mod.rs`) calls `start_ofp_node` to create a `PeerNode` with a `PeerConfig` populated from the application configuration. The kernel implements `PeerHandle` to route wire messages into the local agent system.
 
-| Module | Usage |
-|--------|-------|
-| `librefang-api` | Network status endpoints, WebSocket command routing |
-| `librefang-desktop` | Desktop server initialization |
-| `librefang-runtime` | OAuth flows, MCP server, telemetry |
-| `librefang-cli` | Tracing initialization |
-
-### Key Methods Consumed
-
-From `PeerNode`:
-- `local_addr()` — Get bound TCP address
-- `node_id()` — Get this node's unique ID
-- `registry()` — Access the peer registry
-
-From `PeerRegistry`:
-- `connected_count()` / `total_count()` — Peer counts
-- `all_peers()` / `connected_peers()` — Peer listings
-- `find_agents()` / `all_remote_agents()` — Agent discovery
-
-## Configuration
-
-OFP requires a shared secret for HMAC authentication. Configure via `config.toml`:
-
-```toml
-[network]
-shared_secret = "your-256-bit-pre-shared-key"
-```
-
-The protocol refuses to start without a configured secret.
-
-## Error Handling
-
-| Error | Meaning |
-|-------|---------|
-| `Io` | TCP socket error |
-| `Json` | Malformed message body |
-| `HandshakeFailed` | Authentication or protocol error during handshake |
-| `ConnectionClosed` | Peer closed the connection |
-| `MessageTooLarge` | Frame exceeds 16 MB limit |
-| `VersionMismatch` | Protocol version incompatibility |
-
-## Limits
-
-| Limit | Value |
-|-------|-------|
-| Maximum message size | 16 MB |
-| Nonce replay window | 5 minutes |
-| Protocol version | 1 |
+The HTTP API exposes network status through `src/routes/network.rs`, reading `registry().connected_count()`, `total_count()`, `local_addr()`, and `all_peers()`. The WebSocket layer (`librefang-api/src/ws`) also reads `all_peers()` for channel bridge output.

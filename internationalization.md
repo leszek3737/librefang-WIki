@@ -1,269 +1,176 @@
 # Internationalization
 
-# Internationalization (i18n) Module
+# Internationalization (i18n)
 
-The `i18n/` directory contains translated documentation and error message catalogs for LibreFang's multi-language support.
+The `i18n/` directory manages all multi-language content for LibreFang. It contains two distinct systems that serve different purposes:
 
-## Overview
+1. **Document translations** — Full markdown translations of project documentation (README, getting-started guide, skill development guide) for human readers.
+2. **Runtime error catalogs** — TOML key-value files that catalog translatable error messages, used by the application at runtime via Fluent (`.ftl`) locale files.
 
-LibreFang serves a global community of developers and users. The i18n module ensures that documentation, error messages, and user-facing strings are available in multiple languages. This module follows a **full-document translation** approach for documentation, where each language has a complete translated version of the source document, rather than fragment-by-fragment translation.
+There is no executable code in this module. It is static content consumed by GitHub rendering, the build system, and the runtime locale loader.
 
-## Directory Structure
+## Directory Layout
 
 ```
 i18n/
-├── README.md              # This module's guide for translators
-├── README.de.md           # German translation
-├── README.es.md           # Spanish translation
-├── README.ja.md           # Japanese translation
-├── README.ko.md           # Korean translation
-├── README.pl.md           # Polish translation
-├── README.zh.md           # Chinese translation
-├── en.toml                # English error message catalog
-├── zh.toml                # Chinese error message catalog
-├── getting-started.fr.md  # French getting started guide
-└── skill-development.zh.md # Chinese skill development guide
+├── README.md                 # Contributor guide for translations
+├── README.de.md              # German README translation
+├── README.es.md              # Spanish README translation
+├── README.ja.md              # Japanese README translation
+├── README.ko.md              # Korean README translation
+├── README.pl.md              # Polish README translation
+├── README.zh.md              # Chinese (Simplified) README translation
+├── en.toml                   # English error message catalog
+├── zh.toml                   # Chinese error message catalog
+├── getting-started.fr.md     # French getting-started guide
+└── skill-development.zh.md   # Chinese skill development guide
+
+packages/cli-npm/             # npm binary distribution wrapper
+├── README.md
+├── package.json
+└── bin/librefang.js
 ```
 
-## Translation Types
+## Document Translations
 
-### Full-Document Translations
+### README Translations
 
-The README translations (`README.*.md`) are complete translations of the project's root `README.md`. Each file maintains:
+Each `README.<lang>.md` is a complete translation of the root `README.md`. They follow identical section structure and preserve all HTML markup, badge URLs, image paths, and relative links.
 
-- The same heading structure and hierarchy
-- Identical HTML/markdown formatting
-- Matching image paths and badge URLs
-- Consistent multi-language navigation bars
+**Current languages:**
 
-### Error Message Catalogs
+| File | Language | Code |
+|------|----------|------|
+| `README.de.md` | Deutsch (German) | `de` |
+| `README.es.md` | Español (Spanish) | `es` |
+| `README.ja.md` | 日本語 (Japanese) | `ja` |
+| `README.ko.md` | 한국어 (Korean) | `ko` |
+| `README.pl.md` | Polski (Polish) | `pl` |
+| `README.zh.md` | 中文 (Chinese Simplified) | `zh` |
 
-The `.toml` files (`en.toml`, `zh.toml`) provide human-readable reference catalogs for translatable error messages. These map string keys to translated messages:
-
-```toml
-[agent]
-not-found = "Agent not found"
-spawn-failed = "Agent spawn failed"
-```
-
-> **Note:** The runtime uses Fluent (`.ftl`) files under `crates/librefang-types/locales/` for actual translation lookup. The TOML files serve as a human-readable catalog and reference for external tooling.
-
-### Topic-Specific Guides
-
-Additional translated guides cover specialized topics:
-- `getting-started.fr.md` — French quickstart guide
-- `skill-development.zh.md` — Chinese skill development documentation
-
-## Adding a New Language
-
-### Step 1: Create the Translation File
-
-Copy the English `README.md` into `i18n/` with the appropriate ISO 639-1 language code:
-
-```bash
-cp README.md i18n/README.fr.md  # For French
-```
-
-### Step 2: Translate Content
-
-Translate all content while preserving:
-
-- **Heading levels** — `##` remains `##`
-- **Code blocks** — Commands and code examples stay in English
-- **Placeholders** — `{reason}`, `{error}`, `{name}` remain unchanged
-- **Technical terms** — Keep "LibreFang", "Rust", "crate", "API" in English
-- **Brand names** — "LibreFang", "Hands", "FangHub" are never translated
-
-### Step 3: Update Navigation Bars
-
-Add your language to the multi-language navigation bar in **all translation files**:
+All translated READMEs contain a multi-language navigation bar near the top:
 
 ```html
-<p align="center">
-    <a href="../README.md">English</a> | 
-    <a href="README.zh.md">中文</a> | 
-    <a href="README.ja.md">日本語</a> | 
-    <!-- Add your language here -->
-    <a href="README.fr.md">Français</a>
-</p>
+<a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | ...
 ```
 
-Update the navigation bar in:
-- The new translation file itself
-- All existing translation files
-- The root `README.md`
+This bar must be updated in **every** translation file (including the root `README.md`) whenever a new language is added.
 
-### Step 4: Submit Changes
+### Additional Document Translations
 
-```bash
-git checkout -b i18n/add-french
-git add i18n/README.fr.md
-# Update navigation bars in existing files
-git add README.md i18n/README.de.md i18n/README.es.md ...
-git commit -m "docs(i18n): add French translation"
-git push origin i18n/add-french
+Beyond the README, some longer-form docs have been translated:
+
+- `getting-started.fr.md` — Full French translation of the getting-started guide
+- `skill-development.zh.md` — Full Chinese translation of the skill development guide
+
+These follow the same conventions: preserve all relative links pointing to English originals, keep formatting identical, and leave brand names and technical terms untranslated.
+
+### Link Conventions
+
+All document translations use `../` relative paths to reference files outside `i18n/`:
+
+- `../docs/CONTRIBUTING.md` — Contribution guide (English original)
+- `../docs/GOVERNANCE.md` — Governance docs (English original)
+- `../public/assets/logo.png` — Shared assets
+
+Docs files are **never duplicated** into `i18n/`. Translation files point to the single English original. This avoids drift and maintenance burden.
+
+## Runtime Error Message Catalogs
+
+### Purpose
+
+The TOML files (`en.toml`, `zh.toml`) catalog all translatable error messages used by the LibreFang API and runtime. They are organized by subsystem into TOML tables:
+
+- `[agent]` — Agent lifecycle errors (spawn, not-found, invalid-id)
+- `[message]` — Message handling errors (too-large, delivery-failed)
+- `[template]` — Template parsing and lookup errors
+- `[manifest]` — Manifest validation and signature errors
+- `[auth]` — Authentication errors
+- `[session]` — Session management errors
+- `[workflow]` — Workflow execution errors
+- `[trigger]` — Event trigger errors
+- `[budget]` — Budget management errors
+- `[config]` — Configuration read/write errors
+- `[profile]` — Profile lookup errors
+- `[cron]` — Scheduled job errors
+- `[general]` — Catch-all errors (not-found, internal, bad-request, rate-limited)
+
+### Relationship to Fluent Files
+
+The TOML files are **reference catalogs**, not the files loaded at runtime. The actual translation lookup uses Fluent (`.ftl`) files located at:
+
+```
+crates/librefang-types/locales/
 ```
 
-## Adding Translation Keys
+The TOML catalogs exist for:
+- Human-readable reference of all error keys and their English source text
+- External tooling that may need to parse the message catalog
+- Future TOML-based i18n backends
 
-When the English `README.md` receives new sections:
+### Message Format
 
-1. **Review the diff** to identify what changed
-2. **Add translated sections** to each language file at the same position
-3. **If you cannot translate all languages:**
-   - Update the languages you know
-   - Open GitHub issues for remaining languages
-   - Tag them with `i18n` and the language code (e.g., `i18n:fr`, `i18n:de`)
-
-## Style Guidelines
-
-### Keep Translations Concise
-
-Match the tone and length of the English original. Avoid adding explanatory footnotes or commentary that isn't in the source.
-
-### Preserve All Markup
-
-```markdown
-<!-- Keep these exactly as-is -->
-<img src="../public/assets/logo.png" />
-<a href="https://discord.gg/...">Discord</a>
-[![Deploy Hub](https://img.shields.io/...)]
-```
-
-### Use Natural Phrasing
-
-Prefer idiomatic expressions over literal word-for-word translation:
-
-```diff
-- "Agentes que trabajan para ti"     # Literal
-+ "Agentes trabajando para ti"         # Idiomatic
-```
-
-### Maintain Terminology Consistency
-
-If you translate "agent" as a specific word in your language, use that word everywhere:
+Messages use ICU-style interpolation with curly braces:
 
 ```toml
-# German example - consistent terminology
-agent = "Agent"           # First occurrence
-"Research Agent" = "Recherche-Agent"   # Consistent
-"Lead Agent" = "Lead-Agent"             # Consistent
+delivery-failed  = "Message delivery failed: {reason}"
+not-found        = "Template '{name}' not found"
+parse-failed     = "Failed to parse template: {error}"
+bad-request      = "Bad request: {reason}"
 ```
 
-### Handle Technical Terms
+Placeholders like `{reason}`, `{name}`, `{error}` are filled at runtime by the calling code.
 
-| Category | Example | Recommendation |
-|----------|---------|----------------|
-| Product names | LibreFang, FangHub, Hands | Never translate |
-| Languages | Rust, Python, Go | Never translate |
-| Protocols | API, REST, WebSocket, MCP | Never translate |
-| Technical concepts | WebAssembly, sandbox, CLI | Translate surrounding text only |
-| Feature names | SKILL.md, HAND.toml | Keep format, translate description |
+### Adding a New Error Language
 
-## Error Message Translation
+1. Copy `en.toml` to `<lang-code>.toml` (e.g., `ja.toml`).
+2. Translate all message values. Keep all interpolation placeholders (`{reason}`, `{name}`, etc.) unchanged.
+3. Create corresponding Fluent files under `crates/librefang-types/locales/<lang-code>/`.
+4. Register the locale in the runtime's locale loader.
 
-The TOML catalogs cover runtime error messages. To add a new language's error catalog:
+## NPM CLI Package
 
-### 1. Copy the English Catalog
+The `packages/cli-npm/` directory wraps the pre-built LibreFang CLI binary for npm distribution. It is not related to translations but lives in the i18n/packages tree.
 
-```bash
-cp i18n/en.toml i18n/ja.toml
-```
+### Platform Binaries
 
-### 2. Translate Each Value
+The package uses `optionalDependencies` to install the correct platform-specific binary:
 
-```toml
-# en.toml
-[agent]
-not-found = "Agent not found"
+| Package | Platform |
+|---------|----------|
+| `@librefang/cli-darwin-arm64` | macOS Apple Silicon |
+| `@librefang/cli-darwin-x64` | macOS Intel |
+| `@librefang/cli-linux-x64` | Linux x64 (glibc) |
+| `@librefang/cli-linux-arm64` | Linux arm64 (glibc) |
+| `@librefang/cli-linux-x64-musl` | Linux x64 (musl/Alpine) |
+| `@librefang/cli-linux-arm64-musl` | Linux arm64 (musl/Alpine) |
+| `@librefang/cli-win32-x64` | Windows x64 |
+| `@librefang/cli-win32-arm64` | Windows arm64 |
 
-# ja.toml
-[agent]
-not-found = "エージェントが見つかりません"
-```
+npm automatically selects the correct optional dependency at install time based on the user's platform.
 
-### 3. Preserve Placeholders
+## Contributing Translations
 
-```toml
-# en.toml
-[message]
-delivery-failed = "Message delivery failed: {reason}"
+### Adding a New README Language
 
-# ja.toml
-[message]
-delivery-failed = "メッセージの配信に失敗しました: {reason}"
-```
+1. Copy the root `README.md` into `i18n/` as `README.<lang>.md`, where `<lang>` is an [ISO 639-1](https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes) code.
+2. Translate all prose. Leave unchanged: HTML tags, badge URLs, image paths, code blocks, brand names (LibreFang, Hands, Hand, FangHub), and well-known technical terms (Rust, crate, CLI, API, WebAssembly).
+3. Add your language link to the navigation bar in **every** existing translation file and the root `README.md`.
+4. Verify all relative links resolve correctly from the `i18n/` directory.
+5. Open a PR.
 
-## Testing Translations
+### Updating Translations After English Changes
 
-### Visual Review
+When the root `README.md` changes:
 
-Open the markdown file in a GitHub preview or local markdown viewer to verify:
+1. Review the diff to identify new or modified sections.
+2. Add corresponding translated sections to each language file in the same position.
+3. If you cannot translate to all languages, update what you can and open issues for the rest.
 
-- Headings render at correct levels
-- Tables align properly
-- Code blocks display correctly
-- Images load
+### Style Guidelines
 
-### Link Verification
-
-Check all relative links resolve correctly from the `i18n/` directory:
-
-```bash
-# From repo root
-cd i18n
-
-# Verify relative paths work
-# These should resolve to existing files:
-../README.md              # Root README
-../docs/CONTRIBUTING.md   # Contributing guide
-../public/assets/logo.png # Logo image
-```
-
-### Navigation Bar Testing
-
-Click through each language link in the navigation bar to confirm:
-
-- All links point to existing files
-- The current language is correctly highlighted
-- Return links work bidirectionally
-
-### Diff Comparison
-
-Compare your translation against the English original section by section:
-
-```bash
-# Show side-by-side diff
-diff -y --suppress-common-lines README.md i18n/README.fr.md | head -100
-```
-
-## Integration with Build System
-
-The i18n module integrates with the broader LibreFang build system:
-
-```mermaid
-flowchart LR
-    A[English README.md] --> B[Translation Files]
-    B --> C[i18n/README.*.md]
-    B --> D[Topic Guides]
-    
-    E[en.toml] --> F[crates/librefang-types/locales/]
-    F --> G[Runtime .ftl files]
-    
-    H[Contributors] --> I[PR Reviews]
-    I --> B
-    I --> G
-```
-
-Translations are **not compiled** into binaries directly. They serve as:
-
-1. **User-facing documentation** — Rendered on GitHub or the documentation site
-2. **Reference for runtime i18n** — The TOML catalogs define message keys
-3. **Onboarding resources** — Help non-English speakers contribute to the project
-
-## Related Documentation
-
-- [`docs/CONTRIBUTING.md`](../docs/CONTRIBUTING.md) — General contribution guidelines
-- [`docs/GOVERNANCE.md`](../docs/GOVERNANCE.md) — Project governance structure
-- [`crates/librefang-types/locales/`](../crates/librefang-types/locales/) — Runtime Fluent files
-- [ISO 639-1 Language Codes](https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes) — Reference for language codes
+- Match the tone and length of the English original — avoid adding commentary.
+- Use idiomatic phrasing over literal word-for-word translation.
+- Use consistent terminology throughout (e.g., always translate "agent" the same way).
+- Keep well-known technical terms in English.
+- Brand names stay untranslated.

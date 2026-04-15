@@ -1,67 +1,51 @@
 # Testing Utilities
 
-# librefang-testing — Test Infrastructure
-
-Provides mock infrastructure for testing LibreFang API routes and components without starting a full daemon. This module is used throughout the codebase to create isolated, reproducible test environments.
+# Testing Utilities (`librefang-testing`)
 
 ## Purpose
 
-Testing LibreFang's API routes and kernel functionality requires:
+`librefang-testing` provides mock infrastructure for writing unit and integration tests against API routes without starting a full daemon. It replaces heavyweight dependencies—real LLM providers, persistent databases, network services—with in-memory and tempfile-backed alternatives while preserving the production code paths.
 
-- A running `LibreFangKernel` instance with database, file system, and configuration
-- An `AppState` to serve HTTP routes via axum
-- A mock LLM driver to avoid external API calls during unit tests
+The crate is used across the entire workspace. Components like the HTTP client, MCP connectors, plugin manager, skill registries, provider health probes, and OAuth flows all call `MockKernelBuilder::build` to stand up a test kernel.
 
-The `librefang-testing` crate packages all of this into reusable, composable components that integrate with the broader test infrastructure across the codebase.
+---
 
-## Architecture Overview
+## Architecture
 
 ```mermaid
-flowchart LR
-    subgraph "Testing Utilities"
-        MKB[MockKernelBuilder]
-        MLD[MockLlmDriver]
-        TAS[TestAppState]
-        Helpers[test_request, assert_json_ok, assert_json_error]
-    end
-    
-    subgraph "Produced Instances"
-        Kernel[LibreFangKernel]
-        State[AppState]
-        Router[axum Router]
-    end
-    
-    subgraph "External Crates"
-        KernelCrate[librefang-kernel]
-        ApiCrate[librefang-api]
-        RuntimeCrate[librefang-runtime]
-    end
-    
-    MKB -->|boot_with_config| Kernel
-    TAS -->|wraps| MKB
-    TAS -->|builds| State
-    TAS -->|creates| Router
-    MLD -->|implements| RuntimeCrate
-    Helpers -->|used with| Router
+graph TD
+    TB[MockKernelBuilder] -->|build| K[LibreFangKernel]
+    K -->|feeds into| TA[TestAppState]
+    TA -->|router| R[axum::Router]
+    TA -->|app_state| AS[Arc&lt;AppState&gt;]
+    R -->|oneshot| REQ[test_request]
+    REQ -->|response| AJO[assert_json_ok]
+    REQ -->|response| AJE[assert_json_error]
+
+    MLD[MockLlmDriver] -->|implements| LD[LlmDriver trait]
+    FLD[FailingLlmDriver] -->|implements| LD
+    MLD -->|records| RC[RecordedCall]
 ```
 
-## Core Components
+**Two independent testing tracks:**
 
-### MockKernelBuilder
+1. **API route testing** — `MockKernelBuilder` → `TestAppState` → `Router` → send requests via `tower::ServiceExt::oneshot`, assert responses with helpers.
+2. **LLM behavior testing** — `MockLlmDriver` / `FailingLlmDriver` implement the `LlmDriver` trait directly, usable wherever a driver is injected.
 
-Builds a minimal `LibreFangKernel` instance suitable for testing. It creates:
+---
 
-- A temporary directory for kernel data (home dir, skills, workspaces)
-- An in-memory SQLite database (stored in the temp directory as a file)
-- A kernel with networking disabled
+## Key Components
 
-```rust
-use librefang_testing::MockKernelBuilder;
+### `MockKernelBuilder`
 
-// Basic usage
-let (kernel, _tmp) = MockKernelBuilder::new().build();
+Builds a real `LibreFangKernel` instance with a minimal environment:
 
-// With custom config
+- **In-memory-capable SQLite** — database file lives under a temp directory.
+- **Temp directory tree** — creates `data/`, `skills/`, `workspaces/agents/`, `workspaces/hands/` automatically.
+- **Networking disabled** — `network_enabled` is set to `false`.
+- **Custom config** — `with_config` accepts a closure to override any `KernelConfig` field before boot.
+
+```rust,ignore
 let (kernel, _tmp) = MockKernelBuilder::new()
     .with_config(|cfg| {
         cfg.language = "zh".into();
@@ -70,234 +54,107 @@ let (kernel, _tmp) = MockKernelBuilder::new()
     .build();
 ```
 
-**Important**: The returned `TempDir` must be held by the caller. Dropping it will delete the kernel's data directory, invalidating any file paths the kernel has opened.
+**Important:** The returned `TempDir` must be held for the lifetime of the kernel. Dropping it deletes the underlying files and invalidates any path-based operations.
 
-#### Convenience function
+Convenience function: `test_kernel()` is equivalent to `MockKernelBuilder::new().build()`.
 
-```rust
-use librefang_testing::mock_kernel::test_kernel;
+### `MockLlmDriver`
 
-let (kernel, _tmp) = test_kernel();
-```
+A configurable fake that implements `LlmDriver`. Features:
 
-### MockLlmDriver
+- **Canned responses** — provide a `Vec<String>` at construction; responses are returned in order. When the list is exhausted, the last response repeats.
+- **Call recording** — every call to `complete` or `stream` pushes a `RecordedCall` with `model`, `message_count`, `tool_count`, and `system`.
+- **Builder customization** — `with_tokens(input, output)` and `with_stop_reason(reason)` override defaults.
+- **Streaming simulation** — `stream` sends a `TextDelta` event followed by `ContentComplete`.
 
-A configurable mock LLM driver implementing the `LlmDriver` trait. It returns canned responses and records all calls for assertion.
-
-```rust
-use librefang_testing::MockLlmDriver;
-use librefang_runtime::llm_driver::{CompletionRequest, LlmDriver};
-
-// Basic canned responses
-let driver = MockLlmDriver::new(vec!["Response 1".into(), "Response 2".into()]);
-
-// Single repeated response
-let driver = MockLlmDriver::with_response("Always the same");
-
-// Custom token usage and stop reason
-let driver = MockLlmDriver::with_response("hello")
+```rust,ignore
+let driver = MockLlmDriver::new(vec!["Hello".into(), "World".into()])
     .with_tokens(100, 50)
-    .with_stop_reason(StopReason::MaxTokens);
+    .with_stop_reason(StopReason::EndTurn);
 
-// Check recorded calls
-let calls = driver.recorded_calls();
-assert_eq!(driver.call_count(), 2);
+let resp = driver.complete(request).await.unwrap();
+assert_eq!(driver.call_count(), 1);
+assert_eq!(driver.recorded_calls()[0].model, "test-model");
 ```
 
-The driver cycles through responses in order, wrapping to the last response when exhausted.
+### `FailingLlmDriver`
 
-#### Streaming support
+Always returns `LlmError::Api` with the given message. Useful for testing error-handling paths.
 
-The `stream` method simulates streaming by sending a `TextDelta` event followed by `ContentComplete`:
-
-```rust
-async fn stream(
-    &self,
-    request: CompletionRequest,
-    tx: tokio::sync::mpsc::Sender<StreamEvent>,
-) -> Result<CompletionResponse, LlmError>
+```rust,ignore
+let driver = FailingLlmDriver::new("simulated failure");
+assert!(driver.complete(request).await.is_err());
+assert!(!driver.is_configured());
 ```
 
-### FailingLlmDriver
+### `TestAppState`
 
-A mock that always returns errors, useful for testing error handling paths:
+Wraps `MockKernelBuilder` output into a full `AppState` and exposes an axum `Router` with all API routes mounted under `/api`. This is the primary entry point for HTTP-level route tests.
 
-```rust
-use librefang_testing::FailingLlmDriver;
+Construction paths:
+- `TestAppState::new()` — default mock kernel.
+- `TestAppState::with_builder(builder)` — custom `MockKernelBuilder`.
+- `TestAppState::from_kernel(kernel, tmp)` — pre-built kernel, caller holds `TempDir`.
 
-let driver = FailingLlmDriver::new("Simulated API failure");
-let result = driver.complete(request).await;
-assert!(result.is_err());
-```
+The `router()` method returns a `Router` covering agents CRUD, skills, config, memory, budget, system endpoints, models, providers, and sessions — matching the production route layout.
 
-### TestAppState
-
-Builds a complete `AppState` and axum `Router` for HTTP route testing:
-
-```rust
-use librefang_testing::TestAppState;
-
-let test = TestAppState::new();
-let router = test.router();
-```
-
-#### Router routes
-
-The router includes all major API endpoints under `/api`:
-
-| Category | Endpoints |
-|----------|-----------|
-| **System** | `/health`, `/health/detail`, `/status`, `/version`, `/metrics` |
-| **Agents CRUD** | `GET/POST /agents`, `GET/DELETE/PATCH /agents/{id}` |
-| **Agent operations** | `/agents/{id}/message`, `/agents/{id}/stop`, `/agents/{id}/model`, `/agents/{id}/mode` |
-| **Sessions** | `/agents/{id}/session`, `/agents/{id}/sessions`, `/agents/{id}/session/reset` |
-| **Agent config** | `/agents/{id}/tools`, `/agents/{id}/skills`, `/agents/{id}/logs` |
-| **Profiles** | `GET /profiles`, `GET /profiles/{name}` |
-| **Skills** | `GET /skills`, `POST /skills/create` |
-| **Config** | `GET /config`, `GET /config/schema`, `POST /config/set`, `POST /config/reload` |
-| **Memory** | `GET /memory/search`, `GET /memory/stats` |
-| **Usage** | `GET /usage`, `GET /usage/summary` |
-| **Tools & Commands** | `GET /tools`, `GET /tools/{name}`, `GET /commands` |
-| **Models & Providers** | `GET /models`, `GET /providers` |
-| **Sessions** | `GET /sessions` |
-
-#### Construction methods
-
-```rust
-// Default kernel
-let test = TestAppState::new();
-
-// Custom kernel builder
-let test = TestAppState::with_builder(
-    MockKernelBuilder::new().with_config(|cfg| { /* ... */ })
-);
-
-// From existing kernel (caller holds TempDir)
-let test = TestAppState::from_kernel(kernel, tmp);
-```
-
-### Helper Functions
-
-#### `test_request`
-
-Builds a test HTTP request with optional JSON body:
-
-```rust
-use librefang_testing::test_request;
-use axum::http::Method;
+```rust,ignore
+let app = TestAppState::new();
+let router = app.router();
 
 let req = test_request(Method::GET, "/api/health", None);
-let req = test_request(Method::POST, "/api/agents", Some(r#"{"name":"test"}"#));
-```
-
-Automatically sets `Content-Type: application/json` when a body is provided.
-
-#### `assert_json_ok`
-
-Asserts the response is 200 OK and returns the parsed JSON:
-
-```rust
-use librefang_testing::{test_request, assert_json_ok};
-
-let resp = router.oneshot(req).await?;
+let resp = router.oneshot(req).await.unwrap();
 let json = assert_json_ok(resp).await;
-// json is a serde_json::Value
-assert_eq!(json["status"], "ok");
 ```
 
-Panics with a descriptive message if the status is not 200 or the body is not valid JSON.
+The `state` field is `Arc<AppState>`, accessible for direct kernel inspection (e.g., checking config values or registry state after an operation).
 
-#### `assert_json_error`
+### Helpers
 
-Asserts the response has a specific error status code:
+| Function | Purpose |
+|---|---|
+| `test_request(method, path, body)` | Builds an `axum::http::Request<Body>`. Automatically sets `content-type: application/json` when a body is provided. |
+| `assert_json_ok(response)` | Asserts status 200, parses body as JSON. Returns `serde_json::Value`. |
+| `assert_json_error(response, expected_status)` | Asserts status matches, parses body as JSON. Returns `serde_json::Value`. |
 
-```rust
-use librefang_testing::{test_request, assert_json_error};
-use axum::http::StatusCode;
+All assertion helpers panic with a descriptive message including the raw response body on failure.
 
-let resp = router.oneshot(req).await?;
-let json = assert_json_error(resp, StatusCode::NOT_FOUND).await;
-assert!(json.get("error").is_some());
-```
+---
 
-## Usage Patterns
+## Typical Test Pattern
 
-### Testing an API endpoint
-
-```rust
-use librefang_testing::{TestAppState, test_request, assert_json_ok, assert_json_error};
-use axum::http::{Method, StatusCode};
-use tower::ServiceExt;
-
-#[tokio::test]
-async fn test_agents_list() {
+```rust,ignore
+#[tokio::test(flavor = "multi_thread")]
+async fn test_something() {
+    // 1. Set up the test app
     let app = TestAppState::new();
     let router = app.router();
 
-    // Valid request
-    let req = test_request(Method::GET, "/api/agents", None);
+    // 2. Build a request
+    let req = test_request(Method::POST, "/api/agents", Some(r#"{"manifest_toml": "..."}"#));
+
+    // 3. Send it through the router
     let resp = router.oneshot(req).await.expect("request failed");
+
+    // 4. Assert on the response
     let json = assert_json_ok(resp).await;
-    assert!(json["items"].is_array());
-
-    // Invalid UUID
-    let req = test_request(Method::GET, "/api/agents/not-a-uuid", None);
-    let resp = router.oneshot(req).await.expect("request failed");
-    assert_json_error(resp, StatusCode::BAD_REQUEST).await;
-
-    // Nonexistent agent
-    let fake_id = uuid::Uuid::new_v4();
-    let req = test_request(Method::GET, &format!("/api/agents/{fake_id}"), None);
-    let resp = router.oneshot(req).await.expect("request failed");
-    assert_json_error(resp, StatusCode::NOT_FOUND).await;
+    assert!(json.get("id").is_some());
 }
 ```
 
-### Testing with a mock LLM driver
+Tests requiring multi-threaded tokio runtime (anything touching the kernel or SQLite) must use `#[tokio::test(flavor = "multi_thread")]`.
 
-```rust
-use librefang_testing::MockLlmDriver;
-use librefang_runtime::llm_driver::{CompletionRequest, LlmDriver};
+---
 
-let driver = MockLlmDriver::new(vec!["Expected response".into()]);
+## Connections to the Rest of the Codebase
 
-let request = CompletionRequest {
-    model: "test-model".into(),
-    messages: vec![],
-    tools: vec![],
-    max_tokens: 100,
-    temperature: 0.0,
-    system: Some("You are helpful.".into()),
-    // ... other fields
-};
+`MockKernelBuilder::build` internally calls `LibreFangKernel::boot_with_config`, which exercises the real kernel initialization path including vault unlock, config validation, and database setup. This means:
 
-let response = driver.complete(request).await.unwrap();
-assert_eq!(response.text(), "Expected response");
+- **Provider health probes** (`librefang-runtime/src/provider_health.rs`) use the test kernel to build HTTP clients and probe providers.
+- **Plugin manager** (`librefang-runtime/src/plugin_manager.rs`) uses the test kernel for install/list operations.
+- **Skill registries** (`librefang-skills/src/clawhub.rs`, `skillhub.rs`, `marketplace.rs`) use it to test HTTP fetching and catalog sync.
+- **OAuth flows** (`librefang-runtime-oauth`) use it to test device flow start/poll with vault-backed secrets.
+- **MCP connectors** (`librefang-runtime-mcp`) use it for SSE and HTTP transport setup.
+- **Desktop server** (`librefang-desktop/src/server.rs`) uses it in integration tests for the full server startup path.
 
-// Verify the driver recorded the call
-assert_eq!(driver.call_count(), 1);
-let calls = driver.recorded_calls();
-assert_eq!(calls[0].model, "test-model");
-assert_eq!(calls[0].system, Some("You are helpful.".into()));
-```
-
-## Integration with the Broader Codebase
-
-`MockKernelBuilder::build()` is called by numerous modules for testing:
-
-| Module | Usage |
-|--------|-------|
-| `librefang-runtime` | HTTP client tests, MCP client tests, provider health probing |
-| `librefang-skills` | SkillHub and marketplace tests |
-| `librefang-desktop` | Server startup, connection tests, shortcuts |
-| `librefang-cli` | Daemon discovery and command tests |
-| `librefang-extensions` | Extension HTTP client tests |
-
-The `TestAppState` router is the primary integration point for API route tests, providing a complete HTTP stack without network dependencies.
-
-## Key Design Notes
-
-- **TempDir ownership**: Both `MockKernelBuilder::build()` and `TestAppState` return a `TempDir` that must be retained. Dropping it destroys the kernel's data directory.
-- **In-memory SQLite**: The database is a file under the temp directory (not `:memory:`) because `boot_with_config` requires a file path.
-- **Networking disabled**: The mock kernel sets `network_enabled = false`, avoiding HTTP client initialization.
-- **Same AppState type**: `TestAppState::state` is the same type as production, just with mock/empty fields for testing.
+The `TestAppState` is specific to `librefang-api` route testing and constructs a production-faithful `AppState` including `WebhookStore`, session tracking, provider probe caches, and media driver caches — all backed by temp files.

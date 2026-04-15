@@ -1,480 +1,282 @@
 # Build System — xtask
 
-# xtask — LibreFang Build Automation
+# xtask — Build Automation
 
-Cross-platform build automation for the LibreFang workspace. This crate replaces scattered shell scripts and manual workflows with a single, consistent Rust CLI built with [clap](https://clap.rs/).
+## Overview
 
-## Purpose
+`xtask` is the build automation layer for the LibreFang workspace. It follows the [cargo xtask pattern](https://github.com/matklad/cargo-xtask) — a convention where a `Cargo.toml` at the workspace root aliases `cargo xtask` to run a custom Rust binary instead of scattering shell scripts across the repository.
 
-LibreFang is a multi-component project spanning:
+Every workflow that a contributor or CI pipeline needs — building, testing, releasing, publishing, cross-compiling — is exposed as a subcommand through a single CLI entry point powered by `clap`.
 
-- **Core Rust crates** (workspace with multiple packages)
-- **JavaScript/TypeScript frontends** (dashboard, web app, docs)
-- **SDKs** (JavaScript, Python, Rust)
-- **Desktop integration** (Tauri configuration)
-- **Deployment artifacts** (Docker, distribution binaries)
+### Why xtask Instead of Scripts
 
-Managing builds, releases, and development workflows across these components manually is error-prone. The `xtask` crate centralizes all build automation in one place:
+Shell scripts work until they don't. `xtask` solves real problems that emerged in this workspace:
 
-- **Consistent interface** — one tool for all operations
-- **Fail-fast CI** — runs the same checks locally that CI runs remotely
-- **Version synchronization** — keeps CalVer in sync across all manifests
-- **Safe defaults** — interactive prompts with `--no-confirm` for CI
-- **Comprehensive coverage** — from development to deployment
+- **Portability.** Commands like `release`, `sync-versions`, and `changelog` need to run on Linux, macOS, and Windows without maintaining three script variants.
+- **Type safety.** Argument parsing, version validation, and file manipulation are handled by Rust and `serde` rather than fragile string manipulation in bash.
+- **Workspace awareness.** Commands operate on workspace metadata directly through `toml_edit` and `serde_json`, keeping version sync and cross-compilation accurate.
+- **Composability.** Commands can invoke each other (e.g., `release` orchestrates `changelog`, `sync-versions`, and `build-web`) without subprocess soup.
 
 ## Architecture
 
-The crate follows the standard Rust `xtask` pattern: a separate Cargo package that provides build-time utilities invoked via `cargo xtask <command>`.
-
-```
-xtask/
-├── Cargo.toml          # Dependencies and package metadata
-├── README.md           # Command reference and usage examples
-└── src/
-    └── main.rs         # All commands and logic (embedded in crate)
-```
-
-### Command Organization
-
-Commands fall into several categories:
-
-| Category | Commands |
-|----------|----------|
-| **Release** | `release`, `changelog`, `sync-versions`, `publish-sdks` |
-| **Build** | `build-web`, `dist`, `docker`, `codegen` |
-| **Quality** | `ci`, `fmt`, `clippy`, `license-check`, `check-links` |
-| **Testing** | `integration-test`, `coverage`, `bench` |
-| **Maintenance** | `deps`, `update-deps`, `clean-all`, `setup` |
-| **Development** | `dev`, `doctor`, `db`, `validate-config`, `api-docs` |
-| **Migration** | `migrate` |
-
-### Key Dependencies
-
-```toml
-clap = { version = "4", features = ["derive", "env"] }  # CLI argument parsing
-serde = { version = "1", features = ["derive"] }        # Serialization
-toml_edit = "0.25"                                       # TOML manipulation
-regex = "1"                                              # Pattern matching
-chrono = "0.4"                                           # Date/time handling
-base64 = { workspace = true }                           # Encoding
-librefang-migrate = { path = "../crates/librefang-migrate" }  # Migration logic
-```
-
-## Core Commands
-
-### Release Flow (`release`)
-
-The `release` command orchestrates the complete release process:
-
-```bash
-cargo xtask release --version 2026.3.2214
-```
-
-**Process flow:**
-
-1. Generate CHANGELOG from merged PRs since last tag
-2. Sync version strings across all manifests
-3. Build the dashboard
-4. Commit changes
-5. Create git tag
-6. Push to remote
-7. Create GitHub PR with release notes
+`xtask` is structured as a flat command dispatch. `clap` with the `derive` feature parses the subcommand name and flags, then each command runs as an independent function. There is no persistent state between commands — each invocation starts fresh.
 
 ```mermaid
-flowchart LR
-    A[Generate CHANGELOG] --> B[Sync Versions]
-    B --> C[Build Dashboard]
-    C --> D[Commit + Tag]
-    D --> E[Push]
-    E --> F[Create PR]
+graph TD
+    CLI["cargo xtask &lt;command&gt;"] --> Clap["clap arg parsing"]
+    Clap --> Build["Build & Package"]
+    Clap --> Quality["Quality & CI"]
+    Clap --> Release["Release & Publish"]
+    Clap --> Dev["Dev Workflow"]
+    Clap --> Infra["Infra & Diagnostics"]
+
+    Build --> BW["build-web"]
+    Build --> Dist["dist"]
+    Build --> Docker["docker"]
+
+    Quality --> CI["ci"]
+    Quality --> Fmt["fmt"]
+    Quality --> PreCommit["pre-commit"]
+    Quality --> Deps["deps"]
+    Quality --> License["license-check"]
+    Quality --> Coverage["coverage"]
+    Quality --> Bench["bench"]
+
+    Release --> Rel["release"]
+    Rel --> CL["changelog"]
+    Rel --> SV["sync-versions"]
+    Rel --> BW
+    Release --> Pub["publish-sdks"]
+
+    Dev --> DevCmd["dev"]
+    Dev --> Setup["setup"]
+    Dev --> DB["db"]
+    Dev --> IT["integration-test"]
+
+    Infra --> Doc["api-docs / codegen / check-links"]
+    Infra --> Migrate["migrate"]
+    Infra --> Doctor["doctor"]
 ```
 
-**Prerequisites:**
+### Dependency Map
 
-- Clean working tree (no uncommitted changes)
-- On `main` branch
-- `gh` CLI authenticated for PR creation
+| Crate Dependency | Purpose |
+|---|---|
+| `clap` (derive + env) | Subcommand parsing and flag definitions |
+| `serde` + `serde_json` | Parsing and writing JSON configs, OpenAPI specs, API responses |
+| `toml_edit` | Modifying `Cargo.toml` and `tauri.conf.json` while preserving formatting and comments |
+| `regex` | Changelog parsing, version string manipulation, link checking |
+| `chrono` | CalVer date components, changelog timestamps |
+| `base64` | Encoding for Docker auth, MSI-compatible version fields |
+| `librefang-migrate` | Framework migration logic for importing agents from OpenClaw/OpenFang |
 
-**Options:**
+`librefang-migrate` is the only workspace crate that `xtask` depends on directly. The rest of the interaction with the workspace happens through subprocess calls (`cargo`, `pnpm`, `gh`, `npm`, `twine`) and file I/O against workspace paths.
 
-| Flag | Description |
-|------|-------------|
-| `--version` | Explicit version (CalVer format: `YYYY.M.D.N`) |
-| `--no-confirm` | Skip interactive prompts (for CI) |
-| `--no-push` | Skip push and PR creation |
-| `--no-article` | Skip Dev.to article generation |
+## Command Reference
 
-### Version Synchronization (`sync-versions`)
+Commands are organized by workflow. Each command is invoked as `cargo xtask <name>` with the flags documented below.
 
-Ensures consistent version strings across all package manifests:
+### Release & Publishing
+
+#### `release` — Full Release Flow
+
+Orchestrates the complete release pipeline: changelog generation, version synchronization, frontend builds, git commit/tag, and PR creation.
 
 ```bash
-cargo xtask sync-versions 2026.3.2214
+cargo xtask release --version 2026.3.2214        # explicit version
+cargo xtask release --version 2026.3.2214-beta1  # pre-release
+cargo xtask release --no-confirm                  # non-interactive (CI)
+cargo xtask release --no-push                     # local only, skip push + PR
+cargo xtask release --no-article                  # skip Dev.to article
 ```
 
-**Files updated:**
+**Preconditions:** Must be on `main` branch with a clean worktree. Requires `gh` CLI for PR creation.
 
-| File | Format Notes |
-|------|--------------|
-| `Cargo.toml` (workspace) | Standard Cargo version |
-| `sdk/javascript/package.json` | npm semver |
-| `sdk/python/setup.py` | PEP 440 (hyphens to dots: `1.0.0-beta1` → `1.0.0b1`) |
-| `sdk/rust/Cargo.toml` | Standard Cargo version |
-| `sdk/rust/README.md` | Badge/version display |
-| `packages/whatsapp-gateway/package.json` | npm semver |
-| `crates/librefang-desktop/tauri.conf.json` | MSI-compatible encoding |
+This is the single entry point that composes `changelog`, `sync-versions`, and `build-web` into one atomic workflow.
 
-### Changelog Generation (`changelog`)
+#### `changelog <version> [since-tag]`
 
-Creates a CHANGELOG.md entry from GitHub PRs:
+Generates a `CHANGELOG.md` entry from merged PRs since the last tag. PRs are classified by conventional commit prefix (`feat:`, `fix:`, `refactor:`, `perf:`, `docs:`, `chore:`/`ci:`/`build:`/`test:`). Requires `gh` CLI.
 
-```bash
-cargo xtask changelog 2026.3.22 v2026.3.2114
-```
+#### `sync-versions [version]`
 
-**PR Classification by Commit Prefix:**
+Writes the CalVer version string across every package in the workspace:
 
-| Prefix | Section |
-|--------|---------|
-| `feat:` | Added |
-| `fix:` | Fixed |
-| `refactor:` | Changed |
-| `perf:` | Performance |
-| `docs:` | Documentation |
-| `chore:`, `ci:`, `build:`, `test:` | Maintenance |
+| File | Notes |
+|---|---|
+| `Cargo.toml` (workspace root) | `[workspace.package] version` |
+| `sdk/javascript/package.json` | Direct write |
+| `sdk/python/setup.py` | PEP 440 conversion (`-beta1` → `b1`) |
+| `sdk/rust/Cargo.toml` + `sdk/rust/README.md` | Both updated |
+| `packages/whatsapp-gateway/package.json` | Direct write |
+| `crates/librefang-desktop/tauri.conf.json` | MSI-compatible base64 encoding for version field |
 
-Requires the `gh` CLI for GitHub API access.
+When called with no argument, reads the current version from the workspace `Cargo.toml` and ensures all other files match. When called with an argument, bumps everything to the new version.
 
-## Development Workflows
+#### `publish-sdks`
 
-### Local CI (`ci`)
+Publishes SDKs to their registries. Flags: `--js` (npm), `--python` (PyPI via `twine`), `--rust` (crates.io). Use `--dry-run` to validate without publishing.
 
-Run the same quality checks locally that CI runs:
+### Build & Distribution
 
-```bash
-cargo xtask ci --release
-```
+#### `build-web`
 
-**Execution order (fail-fast):**
+Builds frontend targets via `pnpm`. Skips any directory missing a `package.json`.
+
+| Flag | Target Directory |
+|---|---|
+| `--dashboard` | `crates/librefang-api/dashboard/` (React) |
+| `--web` | `web/` (Vite + React) |
+| `--docs` | `docs/` (Next.js) |
+| *(no flag)* | All of the above |
+
+#### `dist`
+
+Cross-compiles release binaries for multiple targets. Default targets: Linux (x86\_64, aarch64), macOS (x86\_64, aarch64), Windows (x86\_64). Produces `.tar.gz` for Linux/macOS, `.zip` for Windows.
+
+Use `--cross` to invoke `cross` instead of `cargo` for cross-compilation. Use `--output` to specify the artifact directory.
+
+#### `docker`
+
+Builds the Docker image from `deploy/Dockerfile` and tags it as `ghcr.io/librefang/librefang:<version>`. Supports `--push`, `--latest`, `--tag`, and `--platform` flags.
+
+### CI & Quality
+
+#### `ci`
+
+Runs the full local CI suite in order, fail-fast:
 
 1. `cargo build --workspace --lib`
-2. `cargo test --workspace`
+2. `cargo test --workspace` (unless `--no-test`)
 3. `cargo clippy --workspace --all-targets -- -D warnings`
-4. `pnpm run lint` in `web/` (if exists)
+4. `pnpm run lint` in `web/` (unless `--no-web`)
 
-```mermaid
-flowchart TD
-    A[Build] --> B[Test]
-    B --> C[Clippy]
-    C --> D[Web Lint]
-    A -.->|fail| X[Stop]
-    B -.->|fail| X
-    C -.->|fail| X
-```
+Use `--release` to build with the release profile. Use `--no-test --no-web` for the fastest check (build + clippy only).
 
-**Options:**
+#### `fmt`
 
-| Flag | Description |
-|------|-------------|
-| `--no-test` | Skip unit tests |
-| `--no-web` | Skip web lint |
-| `--release` | Use release profile |
+Unified formatting check across Rust (`cargo fmt --check`) and frontend (`pnpm prettier --check`). Flags: `--fix` to auto-fix, `--no-web` for Rust only, `--no-rust` for web only.
 
-### Development Server (`dev`)
+#### `pre-commit`
 
-Start the daemon and dashboard together:
+Runs `fmt` + `clippy` + `test` as a pre-commit hook. Flags: `--no-test` (faster), `--no-clippy`, `--fix`.
 
-```bash
-cargo xtask dev --port 5000 --release
-```
+#### `coverage`
 
-This builds the project, starts the LibreFang daemon, and launches the React dashboard. All processes are terminated together on Ctrl+C.
+Generates test coverage via `cargo-llvm-cov`. Auto-installs the tool if missing. Flags: `--open` (open HTML report), `--lcov` (CI-friendly format), `--output <dir>`.
 
-### Environment Diagnostics (`doctor`)
+#### `bench`
 
-Verify your development environment is correctly configured:
+Runs criterion benchmarks. Flags: `--name <bench>` (specific benchmark), `--save-baseline <name>`, `--baseline <name>` (compare), `--open` (HTML report).
 
-```bash
-cargo xtask doctor --port 5000
-```
+#### `deps`
 
-**Checks performed:**
+Dependency audit using `cargo-audit`, `cargo-outdated`, and `pnpm audit`. Auto-installs missing tools. Flags: `--audit`, `--outdated`, `--web` to run subsets.
 
-- Rust toolchain availability
-- Required binaries (`cargo`, `rustup`, `pnpm`, `gh`, `docker`, `just`)
-- Port availability
-- Daemon health and responsiveness
-- Configuration file validity
-- API key presence (if configured)
-- Workspace state (clean worktree, correct branch)
+#### `license-check`
 
-### Pre-Commit Checks (`pre-commit`)
+License compliance check using `cargo-deny` (falls back to `cargo metadata`). Flags: `--rust`, `--web`, `--deny "GPL-3.0,AGPL-3.0"` for custom denied licenses.
 
-Run before committing to catch issues early:
+### Development Workflow
 
-```bash
-cargo xtask pre-commit --fix
-```
+#### `dev`
 
-**Steps:**
+Starts the daemon and dashboard dev server together. Builds the daemon binary first, then runs both processes. Press Ctrl+C to stop. Flags: `--no-dashboard`, `--release`, `--port`.
 
-1. Format check (Rust fmt + Prettier)
-2. Clippy linting
-3. Unit tests (can skip with `--no-test`)
+#### `setup`
 
-## Build Commands
+First-time environment setup for new contributors. Checks for required tools (cargo, rustup, pnpm, gh, docker, just), installs git hooks, fetches dependencies, runs `pnpm install`, and creates a default config. Flags: `--no-web`, `--no-fetch`.
 
-### Web Frontend Builds (`build-web`)
+#### `integration-test`
 
-Build one or more frontend targets:
+Starts the daemon, hits API endpoints (`/api/health`, `/api/agents`, `/api/budget`, `/api/network/status`), optionally tests LLM via `POST /api/agents/{id}/message`, verifies budget updated, then cleans up.
 
-```bash
-cargo xtask build-web --dashboard --web --docs
-```
+Requires a pre-built binary at `target/release/librefang` (override with `--binary`). Flags: `--skip-llm`, `--api-key`, `--port`.
 
-**Targets:**
+#### `db`
 
-| Target | Directory | Framework |
-|--------|-----------|-----------|
-| `dashboard` | `crates/librefang-api/dashboard/` | React + Vite |
-| `web` | `web/` | React + Vite |
-| `docs` | `docs/` | Next.js |
+Database management: `--info` (show database info), `--backup <dir>` (copy db files), `--reset` (delete databases; daemon must be stopped). Use `--data-dir` for a custom data directory.
 
-Each target is skipped if it doesn't contain a `package.json`.
+#### `doctor`
 
-### Distribution Binaries (`dist`)
+Deep environment diagnostics. Checks toolchain, port availability, daemon health, config validity, API keys, and workspace state. Use `--port` for a custom port.
 
-Cross-compile release binaries:
+### Code Generation & Documentation
 
-```bash
-cargo xtask dist --cross --output release-artifacts
-```
+#### `codegen`
 
-**Default targets:**
+Runs code generators. Currently supports `--openapi` to regenerate `openapi.json` from utoipa annotations by running the spec test.
 
-| Platform | Architectures |
-|----------|---------------|
-| Linux | x86_64, aarch64 |
-| macOS | x86_64, aarch64 |
-| Windows | x86_64 |
+#### `api-docs`
 
-**Output format:**
+Generates a standalone Swagger UI HTML page from `openapi.json`. Flags: `--open` (open in browser), `--refresh` (regenerate spec first), `--output <dir>`.
 
-- Linux/macOS: `.tar.gz`
-- Windows: `.zip`
+#### `check-links`
 
-Uses [`cross`](https://github.com/cross-rs/cross) for cross-compilation when `--cross` is specified.
+Checks for broken links in documentation. Uses [lychee](https://github.com/lycheeverse/lychee) if installed, falls back to a built-in relative-link checker. Flags: `--basic`, `--path <dir>`, `--exclude <pattern>`.
 
-### Docker Image (`docker`)
+#### `validate-config`
 
-Build and push the container image:
+Validates `~/.librefang/config.toml` syntax and known fields. Flags: `--config <path>` (custom path), `--show` (print parsed config).
 
-```bash
-cargo xtask docker --push --latest --tag 2026.3.2214
-```
+### Utility
 
-**Image details:**
+#### `loc`
 
-- Registry: `ghcr.io/librefang/librefang`
-- Dockerfile: `deploy/Dockerfile`
-- Multi-platform support with `--platform`
+Lines of code statistics. Flags: `--crates` (per-crate breakdown), `--web` (include frontend), `--deps` (show crate dependency graph).
 
-## SDK Publishing (`publish-sdks`)
+#### `update-deps`
 
-Publish SDKs to their respective registries:
+Batch updates Rust (`cargo update`) and web (`pnpm update`) dependencies. Flags: `--rust`, `--web`, `--dry-run`, `--test` (run tests after updating).
 
-```bash
-cargo xtask publish-sdks --dry-run
-cargo xtask publish-sdks --js --python --rust
-```
+#### `clean-all`
 
-**SDKs:**
+Deep clean of all build artifacts. Flags: `--rust` (`target/` + `dist/`), `--web` (`node_modules/` + `.next/` + `dist/`), `--dry-run` (preview).
 
-| SDK | Registry | Tool |
-|-----|----------|------|
-| JavaScript | npm | `npm` |
-| Python | PyPI | `twine` |
-| Rust | crates.io | `cargo` |
+#### `migrate`
 
-## Database Management (`db`)
+Imports agents from other frameworks (OpenClaw, OpenFang) into LibreFang using the `librefang-migrate` crate. Flags: `--source <name>`, `--source-dir <path>`, `--target-dir <path>`, `--dry-run`.
 
-Inspect and manage LibreFang databases:
+## External Tool Dependencies
 
-```bash
-cargo xtask db --info
-cargo xtask db --backup ./backup
-cargo xtask db --reset --data-dir ~/.librefang
-```
+Several commands shell out to external tools. Here is the full inventory:
 
-**Operations:**
+| Tool | Used By | Required For |
+|---|---|---|
+| `cargo` | `ci`, `dist`, `coverage`, `bench`, `pre-commit`, `dev` | All Rust workflows |
+| `pnpm` | `build-web`, `ci`, `setup`, `dev` | Frontend workflows |
+| `gh` | `release`, `changelog` | Release automation |
+| `npm` | `publish-sdks --js` | JS SDK publishing |
+| `twine` | `publish-sdks --python` | Python SDK publishing |
+| `docker` | `docker` | Container builds |
+| `cross` | `dist --cross` | Cross-compilation |
+| `cargo-llvm-cov` | `coverage` | Test coverage (auto-installed) |
+| `cargo-audit` | `deps --audit` | Security audit (auto-installed) |
+| `cargo-outdated` | `deps --outdated` | Dependency freshness (auto-installed) |
+| `cargo-deny` | `license-check` | License compliance (optional, graceful fallback) |
+| `lychee` | `check-links` | Link checking (optional, graceful fallback) |
 
-- `info` — Display database paths and sizes
-- `backup` — Copy database files to backup directory
-- `reset` — Delete all databases (requires daemon to be stopped)
+Commands that require an external tool check for its presence before running and produce a clear error message if it is missing. Tools marked "auto-installed" are installed automatically via `cargo install` when absent.
 
-## Integration Testing (`integration-test`)
+## Adding a New Command
 
-Run live API integration tests:
+To add a new subcommand:
 
-```bash
-cargo xtask integration-test --api-key $GROQ_API_KEY
-```
+1. **Define the CLI struct.** Add a `clap` `Args` struct and a variant to the top-level `Cli` enum in the main entry point.
 
-**Test sequence:**
+2. **Implement the command function.** Create a new module (or add to an existing one) with a `pub fn run(opts: &YourArgs) -> Result<()>`. Keep the function self-contained — read workspace state from files and environment, invoke tools via `std::process::Command`, and write results.
 
-1. Start the daemon on specified port
-2. `GET /api/health` — Health check
-3. `GET /api/agents` — List agents
-4. `GET /api/budget` — Check budget
-5. `GET /api/network/status` — Network status
-6. `POST /api/agents/{id}/message` — Send message (requires LLM)
-7. Verify budget decreased after LLM call
+3. **Dispatch from main.** Match on the new CLI variant and call the command function.
 
-**Defaults:**
+4. **Follow the conventions:**
+   - Use `--dry-run` for any command with side effects.
+   - Use `--no-<step>` flags to allow skipping phases.
+   - Return a non-zero exit code on failure via `anyhow` error propagation.
+   - Print what the command is doing (tool name, target, file path) so output is self-documenting.
 
-- Binary: `target/release/librefang`
-- Port: derived from config
+## Conventions
 
-## Code Quality
-
-### Dependency Auditing (`deps`)
-
-Check for security vulnerabilities and outdated packages:
-
-```bash
-cargo xtask deps --audit --outdated --web
-```
-
-**Tools used:**
-
-| Check | Tool | Auto-install |
-|-------|------|--------------|
-| Rust audit | `cargo-audit` | Yes |
-| Rust outdated | `cargo-outdated` | Yes |
-| Web audit | `pnpm audit` | No |
-
-### Test Coverage (`coverage`)
-
-Generate coverage reports:
-
-```bash
-cargo xtask coverage --open --output ./cov-report
-```
-
-Requires `cargo-llvm-cov`, which is auto-installed if missing.
-
-### License Compliance (`license-check`)
-
-Verify dependencies use acceptable licenses:
-
-```bash
-cargo xtask license-check --deny "GPL-3.0,AGPL-3.0"
-```
-
-Uses `cargo-deny` if installed, falls back to `cargo metadata`.
-
-### Link Checking (`check-links`)
-
-Validate documentation links:
-
-```bash
-cargo xtask check-links --path docs --exclude "example.com"
-```
-
-Uses `lychee` if installed, otherwise falls back to a basic relative-link checker.
-
-## Configuration Validation (`validate-config`)
-
-Verify `~/.librefang/config.toml`:
-
-```bash
-cargo xtask validate-config --config ./my-config.toml --show
-```
-
-Validates:
-
-- TOML syntax
-- Known fields present
-- Values within expected ranges
-
-## Migration (`migrate`)
-
-Import agents from other frameworks:
-
-```bash
-cargo xtask migrate --source openfang --source-dir ./import --dry-run
-```
-
-**Supported sources:**
-
-- `openclaw`
-- `openfang`
-
-Uses the `librefang-migrate` crate internally for conversion logic.
-
-## Common Workflows
-
-### Full Release (Manual)
-
-```bash
-# 1. Ensure clean state
-cargo xtask doctor
-git status  # should be clean
-
-# 2. Run CI locally
-cargo xtask ci --release
-
-# 3. Run integration tests
-cargo xtask integration-test --skip-llm
-
-# 4. Perform release
-cargo xtask release --version 2026.3.2214 --no-confirm
-```
-
-### New Contributor Setup
-
-```bash
-# Install all dependencies
-cargo xtask setup
-
-# Verify environment
-cargo xtask doctor
-
-# Start development
-cargo xtask dev
-```
-
-### Debugging a Release Issue
-
-```bash
-# Check changelog generation
-cargo xtask changelog 2026.3.22 v2026.3.2114
-
-# Check version sync
-cargo xtask sync-versions --dry-run 2026.3.2214
-
-# Verify config
-cargo xtask validate-config
-
-# Check license compliance
-cargo xtask license-check
-```
-
-## Extension Points
-
-### Adding a New Command
-
-To add a command to xtask:
-
-1. Define a new `#[derive(Subcommand)]` variant in the enum
-2. Implement a handler function with `#[tokio::main]` if async
-3. Add documentation in this README following the existing format
-4. Update the command reference table
-
-### Custom Targets for `dist`
-
-Edit the target list in the `dist` command implementation to add new platforms or architectures.
-
-### Migration Source Plugins
-
-Add new source support in `librefang-migrate` crate and reference it from the `migrate` command.
+- **CalVer versioning.** All version strings follow `YYYY.M.DDMM` (e.g., `2026.3.2214`). Pre-release suffixes use the format `-beta1`, `-rc1`, etc. The `sync-versions` command handles format conversion for Python (PEP 440) and MSI.
+- **Fail-fast.** Commands that run multiple steps (e.g., `ci`, `release`) stop at the first failure.
+- **Idempotency.** Commands like `sync-versions` with no version argument are safe to run repeatedly — they converge all files to the workspace version without making changes if already correct.
+- **Workspace-relative paths.** All file operations are relative to the workspace root, located by walking up from `CARGO_MANIFEST_DIR` to find the root `Cargo.toml`.

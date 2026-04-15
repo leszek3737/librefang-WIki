@@ -2,93 +2,48 @@
 
 # API Server
 
-The API Server module group provides the HTTP and WebSocket interface for the LibreFang Agent OS daemon, including interactive documentation and a formal API specification.
+The API Server module group provides the HTTP/WebWebSocket interface for LibreFang Agent OS. It exposes agent management, chat, status monitoring, configuration, and external integrations through JSON REST endpoints and WebSocket connections. The CLI, dashboard SPA, and third-party consumers all communicate through this layer.
 
-## Components
+## Sub-modules
 
-| Module | Purpose |
-|--------|---------|
-| [librefang-api](librefang-api.md) | HTTP and WebSocket API server built on Axum |
-| [api-docs](api-docs.md) | Interactive Swagger UI documentation portal |
-| [openapi.json](openapi.json.md) | OpenAPI 3.1.0 specification with 130+ endpoints |
+| Module | Role |
+|---|---|
+| [librefang-api](librefang-api.md) | The live server — Axum-based HTTP/WS handlers, middleware pipeline, and supporting infrastructure (OAuth, webhooks, WebSocket management, versioning) |
+| [api-docs](api-docs.md) | Static Swagger UI host (`index.html`) that renders the interactive documentation page in browsers |
+| [openapi.json](openapi.json.md) | OpenAPI 3.1.0 specification — the single source of truth for every route, request/response schema, and operation ID |
 
-## Architecture
+## How they fit together
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                     API Server                          │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  ┌─────────────┐    serves    ┌─────────────────────┐  │
-│  │  api-docs   │──────────────│   Swagger UI        │  │
-│  └─────────────┘              └─────────────────────┘  │
-│         │                              ▲               │
-│         │ loads                        │ fetches        │
-│         ▼                              │               │
-│  ┌─────────────┐                       │               │
-│  │ openapi.json│───────────────────────────────────────┘
-│  └─────────────┘
-│         ▲
-│         │ defines
-│         │
-│  ┌─────────────┐    implements     ┌─────────────────┐
-│  │ librefang-api│─────────────────│  REST + WebSocket │
-│  └─────────────┘                   │   Endpoints      │
-│                                    └─────────────────┘
-└─────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    Consumer["CLI / Dashboard / SDK"]
+    Spec["openapi.json"]
+
+    subgraph Server ["librefang-api"]
+        MW["Middleware<br/>(auth, rate-limit, logging)"]
+        Routes["Route Handlers"]
+        WS["WebSocket Layer"]
+    end
+
+    subgraph Docs ["api-docs"]
+        UI["Swagger UI"]
+    end
+
+    Spec -->|"operation IDs map to"| Routes
+    Spec -->|"rendered by"| UI
+    Consumer -->|"HTTP/WS"| MW --> Routes
+    Consumer -->|"GET /docs"| UI
+    Routes -->|"kernel, vault, providers"| Runtime["librefang-runtime / extensions"]
 ```
 
-The three modules form a layered stack:
+The **spec** (`openapi.json`) is the contract. Operation IDs such as `spawn_agent` and `list_agents` map directly to handler function names inside `librefang-api`. The **docs** module is a zero-dependency artifact that simply serves that spec through Swagger UI — it has no runtime coupling to the server. The **server** implements the contract and wires every request through a shared middleware pipeline (authentication, rate limiting, structured logging, i18n error messages, security headers) before dispatching to route handlers.
 
-1. **[openapi.json](openapi.json.md)** — The canonical contract defining all endpoints, request/response schemas, and authentication requirements
-2. **[librefang-api](librefang-api.md)** — The runtime implementation that fulfills the contract, handling HTTP/WebSocket traffic and business logic
-3. **[api-docs](api-docs.md)** — The developer-facing interface that renders the specification as interactive documentation
+## Key cross-cutting workflows
 
-## Key Cross-Module Workflows
+- **Provider health checks** — `list_providers` in the routes layer calls through provider health probing → kernel boot → vault unlock → master key resolution, ensuring every provider listing reflects live connectivity status.
+- **WebSocket lifecycle** — Connection acquisition (`try_acquire_ws_slot` / `WsConnectionGuard`) enforces concurrency limits. Inbound text messages are classified for streaming errors and deduplicated via `stream_dedup`. Origin validation rejects cross-host connections while permitting loopback and configured extras.
+- **Webhook delivery** — Creation flows through SSRF protection (`is_private_ip`), URL/length validation, and HMAC signature computation. Updates support secret rotation and selective field clearing.
+- **API versioning** — The `Accept` header is parsed by `versioning` helpers to route requests to the correct handler revision, enabling backward-compatible API evolution.
+- **Channel integrations** (e.g. WeChat QR) — Route handlers bootstrap the kernel and vault on first use, following the same boot → unlock → key resolution path as provider flows.
 
-### Authentication Flow (Terminal WebSocket)
-
-Terminal sessions demonstrate how the server coordinates authentication across multiple systems:
-
-```
-terminal_ws → validate_api_tokens → dashboard_session_token 
-→ resolve_dashboard_credential → vault.unlock 
-→ vault.resolve_master_key → vault.load_keyring_key
-```
-
-This chain verifies API tokens, resolves session credentials, and unlocks secure storage for the terminal session.
-
-### Webhook Delivery
-
-Webhook registration and delivery flows through the server:
-
-```
-create_webhook → validate_url → persist_webhook 
-→ trigger_event → deliver_to_webhook_endpoint
-```
-
-Webhooks are validated for security (rejecting private IPs), stored with configurable event filters, and dispatched asynchronously.
-
-## API Surface
-
-The combined API provides:
-
-- **Agent lifecycle management** — create, configure, start, stop agents
-- **Chat interaction** — message exchange with streaming responses
-- **Session management** — persistent conversation contexts
-- **Memory operations** — knowledge storage and retrieval
-- **Tool/skill registration** — extend agent capabilities
-- **OAuth integration** — third-party authentication
-- **OpenAI-compatible endpoints** — drop-in replacement support
-- **Webhook system** — event-driven integrations
-- **Dashboard SPA** — browser-based control interface
-
-## Relationship to Other Modules
-
-The API server acts as the gateway for all external clients. Internally, it coordinates with:
-
-- **[librefang-extensions/vault](librefang-extensions.md#vault)** — secure credential and key storage
-- **Kernel modules** — agent execution, memory, and tool registry
-- **Authentication providers** — OAuth flows and API key management
-
-See individual sub-module documentation for implementation details.
+For implementation details, see the individual sub-module pages linked above.

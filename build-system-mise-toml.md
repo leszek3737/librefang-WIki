@@ -2,118 +2,79 @@
 
 # Build System — `mise.toml`
 
-## Overview
+## Purpose
 
-This file is the **mise configuration** for the project. [Mise](https://mise.jdx.dev/) (formerly rtx) is a development environment manager that handles tool version management, replacing tools like `nvm`, `rustup`, and `pyenv`.
-
-When you run commands in this project, mise automatically activates the correct versions of these tools based on this configuration.
-
-## Configured Tools
-
-| Tool | Version | Purpose |
-|------|---------|---------|
-| `just` | 1.48 | Command runner / task automation |
-| `pnpm` | 10.33 | Node.js package manager |
-| `rust` | 1.92 | Rust compiler and toolchain |
+`mise.toml` is the project-level tool version manifest. It declaratively pins the exact versions of all runtime and build tools required to develop, build, and test this project. By committing this file to version control, every contributor gets a consistent, reproducible toolchain with no manual setup beyond installing mise itself.
 
 ## How It Works
 
-### Automatic Tool Activation
+When a developer enters the project directory, mise reads `mise.toml` and automatically activates the specified tool versions. If a tool isn't installed locally, mise downloads and installs it on first use.
 
-When you enter this project directory, mise reads `mise.toml` and ensures the specified tool versions are available. This happens through mise's shell integration or the `.mise.toml` detection system.
+Activation happens via shell hooks (`eval "$(mise activate bash/zsh/fish)"`) or the `mise exec` / `mise run` commands.
 
-### Tool Usage
+## Declared Tools
 
-**Just** (`just`) serves as the project's task runner. Common commands:
+| Tool | Version | Role |
+|------|---------|------|
+| `just` | 1.48 | Command runner. Repeats common project tasks (build, test, lint, etc.) without relying on OS-specific Make quirks. |
+| `pnpm` | 10.33 | JavaScript package manager. Handles dependency installation, workspace management, and script running for the project's Node/TypeScript code. |
+| `rust` | 1.92 | Rust toolchain (rustc + cargo). Required to compile any Rust source in the project. |
+
+## Developer Workflow
+
+### Initial Setup
 
 ```bash
-just              # List available recipes
-just <recipe>     # Run a specific recipe
+# Install mise (if not already installed)
+curl https://mise.run | sh
+
+# Activate mise in your shell (one-time)
+echo 'eval "$(mise activate zsh)"' >> ~/.zshrc
+
+# Enter the project — mise auto-installs pinned tools
+cd /path/to/project
 ```
 
-**pnpm** manages JavaScript/TypeScript dependencies if the project includes Node.js components:
+### Day-to-Day Usage
 
 ```bash
+# Verify active tool versions
+mise current
+
+# Run a task defined in a justfile
+just build
+
+# Run pnpm commands
 pnpm install
-pnpm build
 pnpm test
 ```
 
-**Rust** provides the compiler and toolchain for any Rust components in the project:
+### Updating a Tool Version
 
-```bash
-cargo build
-cargo test
-cargo fmt
-```
-
-## Project Integration
-
-```
-┌─────────────────────────────────┐
-│         mise.toml               │
-│  (version declarations)         │
-└────────────┬────────────────────┘
-             │ mise reads on directory entry
-             ▼
-┌─────────────────────────────────┐
-│    Active Tool Versions         │
-│  • just 1.48                    │
-│  • pnpm 10.33                   │
-│  • rust 1.92                    │
-└────────────┬────────────────────┘
-             │ available to
-             ▼
-┌─────────────────────────────────┐
-│   Project Commands              │
-│  • just (task runner)           │
-│  • pnpm (package manager)       │
-│  • cargo/rustc (compiler)       │
-└─────────────────────────────────┘
-```
-
-## Updating Tool Versions
-
-To upgrade a tool version, edit `mise.toml`:
+1. Edit the version string in `mise.toml`.
+2. Commit the change so the rest of the team picks it up.
 
 ```toml
-[tools]
-just = "1.50"       # Update from 1.48
-pnpm = "10.40"      # Update from 10.33
-rust = "1.95"       # Update from 1.92
+# Example: upgrade pnpm
+pnpm = "10.34"
 ```
 
-Then run:
+## Conventions
 
-```bash
-mise install
+- **Always pin exact versions** (e.g., `"1.48"`, not `"^1"` or `"latest"`). This guarantees reproducibility across machines and CI.
+- **One tool, one line.** Keep the `[tools]` section flat and alphabetically sorted for readability.
+- **Avoid `~/.config/mise/config.toml` overrides** for tools declared here. Local overrides can mask version mismatches that will break CI.
+
+## CI Integration
+
+CI pipelines should call `mise install` early in the pipeline to ensure all tools are available:
+
+```yaml
+# GitHub Actions example
+- name: Install tools
+  run: mise install
+- name: Build
+  run: just build
 ```
 
-## Relationship to Other Configuration
-
-This file defines **runtime versions** of tools. It complements:
-
-- **`package.json`** — Node.js dependency declarations (uses pnpm)
-- **`Justfile`** — Task definitions (uses just to execute)
-- **`Cargo.toml`** — Rust package definitions (uses rust toolchain)
-
-## Prerequisites
-
-Mise must be installed on your system:
-
-```bash
-# macOS
-brew install mise
-
-# Linux
-curl https://mise.run | sh
-
-# Verify installation
-mise --version
-```
-
-After installation, enable mise in your shell (add to `.bashrc`, `.zshrc`, etc.):
-
-```bash
-eval "$(mise activate bash)"  # or zsh, fish, etc.
-```
+This guarantees CI uses the same pinned versions defined in `mise.toml`.

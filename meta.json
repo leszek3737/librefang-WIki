@@ -1,7 +1,7 @@
 {
-  "fromCommit": "2dfcffbd696db4e62756252c5f29441b637636d6",
-  "generatedAt": "2026-04-10T19:19:54.149Z",
-  "model": "minimax-m2.7",
+  "fromCommit": "82f6ca18e205a7f25a57bdb398d2d8a11edc6558",
+  "generatedAt": "2026-04-15T01:31:13.725Z",
+  "model": "glm-5.1",
   "moduleFiles": {
     "Documentation": [
       "docs/src/app/agent/hands/page.mdx",

@@ -1,252 +1,243 @@
 # Website — src
 
-# Website — src Module
+# Website — `web/src`
 
-The `web/src` module is the frontend application for LibreFang's marketing site and documentation hub. It's a React application built with TypeScript that serves as both a landing page and a dashboard for downloading, deploying, and learning about the LibreFang Agent Operating System.
+The marketing and documentation site for LibreFang. A single-page React application rendered at `librefang.ai` with client-side routing for locale prefixes, `/deploy`, and `/changelog`.
 
-## Overview
-
-The module renders a single-page application with multiple sections: a hero with animated terminal, architecture overview, capability showcase, performance benchmarks, installation instructions, downloads, documentation links, FAQ, and community section. It supports 7 languages, dark/light themes, and dynamically fetches live data from external APIs.
-
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `App.tsx` | Main component with all page sections and routing |
-| `i18n.ts` | Translation strings for all 7 supported languages |
-| `useRegistry.ts` | React Query hook for fetching registry data |
-| `store.ts` | Zustand store for theme and language state |
-| `lib/utils.ts` | Utility functions including `cn` className merger |
-| `pages/DeployPage.tsx` | Deployment platform selection page |
-| `pages/ChangelogPage.tsx` | Release changelog viewer |
-
-## Application Architecture
+## Architecture
 
 ```mermaid
 graph TD
-    App[App.tsx] --> Nav
-    App --> Hero
-    App --> Architecture
-    App --> Hands
-    App --> Workflows
-    App --> Performance
-    App --> Install
-    App --> Downloads
-    App --> Docs
-    App --> FAQ
-    App --> GitHubStats
-    App --> Community
-    App --> Footer
-    
-    Nav --> store[Zustand Store]
-    Hero --> useRegistry[useRegistry]
-    Hands --> useRegistry
-    Architecture --> useRegistry
-    Downloads --> GitHubAPI[stats.librefang.ai]
-    
-    App --> DeployPage[/deploy route]
-    App --> ChangelogPage[/changelog route]
+    App[App.tsx] -->|path-based routing| DeployPage[DeployPage]
+    App -->|path-based routing| ChangelogPage[ChangelogPage]
+    App -->|renders| Nav
+    App -->|renders| Hero
+    App -->|renders| Architecture
+    App -->|renders| Hands
+    App -->|renders| Workflows
+    App -->|renders| Performance
+    App -->|renders| Install
+    App -->|renders| Downloads
+    App -->|renders| Docs
+    App -->|renders| FAQ
+    App -->|renders| GitHubStats
+    App -->|renders| Community
+    App -->|renders| Footer
+    App -->|reads| Store[Zustand store]
+    App -->|calls| useRegistry[useRegistry hook]
+    App -->|reads| i18n[translations map]
+    Hands -->|calls| useRegistry
+    Hands -->|calls| getLocalizedDesc
+    Hands -->|calls| sortByPopularity
+    Downloads -->|React Query| StatsAPI[stats.librefang.ai]
+    GitHubStats -->|fetch| StatsAPI
+    GitHubStats -->|fetch| CounterAPI[counter.librefang.ai]
 ```
-
-## State Management
-
-The application uses **Zustand** for global state:
-
-```typescript
-interface AppState {
-  theme: 'dark' | 'light'
-  lang: string
-  toggleTheme: () => void
-  switchLang: (code: string) => void
-}
-```
-
-The `store.ts` also handles:
-- **CJK font loading** for languages with non-Latin scripts (Chinese, Japanese, Korean)
-- **Language persistence** via localStorage
-
-## Internationalization
-
-The `i18n.ts` file exports translations for 7 languages with full type safety via the `Translation` interface:
-
-| Code | Language | URL Pattern |
-|------|----------|-------------|
-| `en` | English | `/` |
-| `zh` | Simplified Chinese | `/zh` |
-| `zh-TW` | Traditional Chinese | `/zh-TW` |
-| `ja` | Japanese | `/ja` |
-| `ko` | Korean | `/ko` |
-| `de` | German | `/de` |
-| `es` | Spanish | `/es` |
-
-**Language detection flow:**
-1. `getCurrentLang()` checks `window.location.pathname` prefix
-2. Falls back to `'en'` if no match
-3. Zustand persists the selection in localStorage
-4. `popstate` listener re-detects on browser back/forward
-
-## Data Fetching
-
-### Registry Data (`useRegistry`)
-
-Fetches capability data from the registry API:
-
-```typescript
-// Returns:
-interface RegistryData {
-  hands: Hand[]      // 15 built-in capability units
-  channels: Channel[] // 44 channel adapters
-  handsCount: number
-  providersCount: number
-}
-```
-
-The `useRegistry` hook:
-- Uses React Query with 5-minute stale time
-- Merges detailed descriptions from the API
-- Returns localized descriptions based on current language
-
-### GitHub Statistics
-
-```typescript
-// Fetches from stats.librefang.ai/api/github
-interface GitHubStatsData {
-  stars: number
-  forks: number
-  issues: number
-  prs: number
-  downloads: number
-  lastUpdate: string
-  starHistory: { stars: number }[]
-}
-```
-
-### Downloads
-
-Fetches from `stats.librefang.ai/api/releases` and categorizes assets:
-
-```typescript
-// Desktop app patterns:
-x64.dmg              // macOS Intel
-aarch64.dmg          // macOS Apple Silicon
-x64-setup.exe        // Windows x64
-arm64-setup.exe      // Windows ARM
-amd64.AppImage       // Linux AppImage
-amd64.deb            // Linux DEB
-x86_64.rpm           // Linux RPM
-
-// CLI patterns:
-x86_64-apple-darwin.tar.gz     // macOS Intel
-aarch64-apple-darwin.tar.gz    // macOS ARM
-x86_64-unknown-linux-gnu.tar.gz  // Linux glibc
-aarch64-unknown-linux-gnu.tar.gz // Linux ARM
-```
-
-## Component Structure
-
-### Hero Section
-
-Features a typing animation that cycles through use cases:
-
-```typescript
-typing: [
-  'run autonomous agents 24/7',
-  'replace entire workflows',
-  'deploy on any hardware',
-  'monitor with 16 security layers',
-]
-```
-
-The `useTyping` hook implements a typewriter effect with:
-- Configurable speed (default 60ms per character)
-- 2-second pause at end of each phrase
-- Backspace deletion at half speed
-
-### Architecture Section
-
-Expandable 5-layer architecture with icons:
-
-| Layer | Icon | Description |
-|-------|------|-------------|
-| 0 | Globe | 44 channel adapters |
-| 1 | Box | 15 hands (capability units) |
-| 2 | Cpu | Kernel: lifecycle, workflows, budget, scheduler |
-| 3 | Layers | Runtime: Tokio, WASM, Merkle audit |
-| 4 | Radio | Hardware: single binary support |
-
-Each layer expands to show technical details and populates channels/hands from the registry API.
-
-### Hands Carousel
-
-Horizontal scrollable grid showing all 15 capability units:
-- **Clip** — Video processing (YouTube to shorts)
-- **Lead** — Sales prospecting
-- **Collector** — OSINT monitoring
-- **Predictor** — Forecasting
-- **Researcher** — Deep research
-- **Trader** — Market intelligence
-- + 9 more: Twitter, Browser, Analytics, DevOps, Creator, LinkedIn, Reddit, Strategist, API Tester
-
-Items marked with the `popular` tag in their `tags` array appear first and get a 🔥 indicator.
-
-### Install Section
-
-Detects the user's OS via `navigator.userAgent` and displays the appropriate install command:
-
-| OS | Command |
-|----|---------|
-| macOS | `curl -fsSL https://librefang.ai/install \| sh` |
-| Windows | `irm https://librefang.ai/install.ps1 \| iex` |
-| Linux | `curl -fsSL https://librefang.ai/install \| sh` |
-
-## Animation Utilities
-
-### `FadeIn` Component
-
-Wraps Framer Motion's `motion.div` for scroll-triggered entrance animations:
-
-```typescript
-<FadeIn delay={200}>
-  {children}
-</FadeIn>
-```
-
-Uses `whileInView` with `viewport={{ once: true, amount: 0.1 }}` to trigger when 10% of the element is visible.
-
-### Accordion Transitions
-
-FAQ and architecture layers use `AnimatePresence` with height/opacity animations for smooth expand/collapse.
-
-## Theme System
-
-Dark/light mode is stored in Zustand and persisted to localStorage. The toggle updates `document.documentElement.classList` and swaps Lucide icons between Sun and Moon variants.
-
-## External Integrations
-
-| Service | Endpoint | Purpose |
-|---------|----------|---------|
-| Registry API | `stats.librefang.ai/api/registry` | Hands, channels, providers |
-| Releases | `stats.librefang.ai/api/releases` | Download binaries |
-| GitHub Stats | `stats.librefang.ai/api/github` | Stars, forks, issues |
-| Counter | `counter.librefang.ai/api` | Documentation visits |
-| contrib.rocks | `contrib.rocks/image` | Contributor avatars |
 
 ## Routing
 
-The `App` component checks `window.location.pathname` on mount:
+Routing is purely path-based — no router library. `App` inspects `window.location.pathname` on mount:
 
-```typescript
-'/deploy'      → renders <DeployPage />
-'/changelog/'  → renders <ChangelogPage />
-otherwise      → renders full landing page
+| Path | Renders |
+|------|---------|
+| `/` | Main landing page (all sections) |
+| `/zh`, `/zh-TW`, `/ja`, `/ko`, `/de`, `/es` | Same landing page, locale detected |
+| `/deploy` | `DeployPage` component |
+| `/changelog` | `ChangelogPage` component |
+
+Language is detected by `getCurrentLang()`, which reads the URL prefix. The detected language is written into the Zustand store via `useAppStore.setState({ lang })` on mount and `popstate`.
+
+## State Management
+
+**File:** `store.ts` (imported as `useAppStore`)
+
+The Zustand store holds:
+
+- **`lang`** — current language code (`'en'`, `'zh'`, `'zh-TW'`, `'ja'`, `'ko'`, `'de'`, `'es'`)
+- **`theme`** — `'dark'` or `'light'`
+- **`switchLang(code)`** — changes `lang`, updates `document.documentElement.lang`, pushes a new history entry
+- **`toggleTheme()`** — toggles between dark and light
+
+Every section component reads `lang` and `theme` from this store as needed.
+
+## Internationalization
+
+**File:** `i18n.ts`
+
+### Types
+
+- **`Language`** — `{ code, name, url }` — one entry per supported locale
+- **`Translation`** — a flat interface covering every translatable string across all sections (`nav`, `hero`, `stats`, `architecture`, `hands`, `performance`, `install`, `faq`, `community`, `meta`, `workflows`, `docs`, `githubStats`, `contributing`, `footer`)
+
+### Supported Languages
+
+| Code | Name | URL prefix |
+|------|------|------------|
+| `en` | English | `/` |
+| `zh` | 简体中文 | `/zh` |
+| `zh-TW` | 繁體中文 | `/zh-TW` |
+| `ja` | 日本語 | `/ja` |
+| `ko` | 한국어 | `/ko` |
+| `de` | Deutsch | `/de` |
+| `es` | Español | `/es` |
+
+### How It Works
+
+`App` resolves the translation object for the current language:
+
+```ts
+const t = translations[lang] || translations['en']!
 ```
 
-Both sub-pages are self-contained React components with their own layouts and styling.
+Every section component receives `t: Translation` as a prop. Some sections (like `Downloads`) supplement the shared `Translation` type with inline locale maps for strings not in the shared schema.
 
-## Performance Considerations
+## Data Fetching
 
-- React Query caches API responses (5-minute stale time for registry, 1-hour for releases)
-- Horizontal scroll uses `touch-pan-x` for mobile swipe gestures
-- `IntersectionObserver` for scroll-spy navigation only updates active section
-- Images use `loading="lazy"` for below-fold content
-- Registry fallback values prevent layout shift while loading
+### Registry — `useRegistry`
+
+The `useRegistry` hook (from `useRegistry.ts`) fetches the hands and channels registry. It returns `{ data: RegistryData }` where `RegistryData` includes arrays of `hands` and `channels` with `id`, `name`, `category`, `tags`, and localized `description` fields.
+
+Used by:
+- **`App`** — passes `registry` to `Hero` for live stat counts
+- **`Architecture`** — renders channels (layer 0) and hands (layer 1) from registry data
+- **`Hands`** — renders the full hands carousel
+
+### Releases — `Downloads`
+
+The `Downloads` component uses `@tanstack/react-query` (`useQuery`) to fetch `https://stats.librefang.ai/api/releases`. The response is an array of GitHub release objects with `tag_name`, `assets`, and `html_url`. It takes the first release and passes its assets through `categorizeAssets()`.
+
+### GitHub Stats — `GitHubStats`
+
+Fetches two endpoints in parallel via `useEffect`:
+
+1. `https://stats.librefang.ai/api/github` → stars, forks, issues, prs, downloads, lastUpdate, starHistory
+2. `https://counter.librefang.ai/api` → docs visit count
+
+## Section Components
+
+All section components follow the pattern: accept `{ t: Translation }`, render a `<section>` with an `id` for anchor navigation, and use `FadeIn` for scroll-triggered entrance animations.
+
+### `Nav`
+
+Fixed top navigation bar. Key behaviors:
+- Tracks scroll state to add a backdrop blur background (`scrolled`)
+- Uses `IntersectionObserver` to highlight the currently visible section in the nav (`activeSection`)
+- Language dropdown with click-outside and Escape-key dismissal
+- Theme toggle button (sun/moon icon)
+- Responsive: full nav on `md:` screens, hamburger menu on mobile
+- Smooth-scrolls to `#anchor` links
+
+### `Hero`
+
+Full-viewport landing section with:
+- **Typing animation** via `useTyping(t.hero.typing)` — cycles through translated strings, typing and deleting at configurable speed/pause
+- Badge with version info
+- CTA buttons: "Get Started" (anchors to `#install`) and "View on GitHub"
+- Desktop-only terminal preview showing `librefang status` output
+- Stats bar showing cold start, memory, hands count, providers count (hands/providers counts come from registry data when available)
+
+### `useTyping(texts, speed, pause)`
+
+Custom hook that animates typing and deleting through an array of strings. Returns the current display string. Parameters:
+- `texts` — array of strings to cycle through
+- `speed` — typing speed in ms (default 60)
+- `pause` — pause at end of each string in ms (default 2000)
+
+### `FadeIn`
+
+A Framer Motion wrapper component. Props:
+- `delay` — delay in milliseconds (converted to seconds internally)
+- `className` — passed through to the `motion.div`
+
+Animates from `{ opacity: 0, y: 24 }` to `{ opacity: 1, y: 0 }` with `whileInView`, firing once.
+
+### `Architecture`
+
+Five expandable layers (Channels → Hands → Kernel → Runtime → Hardware). Each layer row is a button that toggles an expanded detail panel. Layers 0 and 1 render live registry data (channels and hands respectively), sorted by popularity. Layers 2–4 render static `DetailGrid` components with technical feature names and translated descriptions.
+
+### Popularity Sorting
+
+Two helper functions:
+- **`isPopular(item)`** — checks if `item.tags` includes `'popular'`
+- **`sortByPopularity(items)`** — stable sort, popular items first. Used by `Architecture` and `Hands`.
+
+### `Hands`
+
+Horizontal-scroll carousel of hand cards. Each card links to `https://docs.librefang.ai/agent/hands#{hand.id}`. Category colors are mapped via `categoryColors`:
+
+| Category | Color |
+|----------|-------|
+| content | amber |
+| data | cyan |
+| productivity | emerald |
+| communication | purple |
+| development | rose |
+| research | blue |
+
+Descriptions are localized via `getLocalizedDesc(hand, lang)` from `useRegistry.ts`.
+
+### `Workflows`
+
+Six workflow cards in a responsive grid. Icon assignment is positional (`workflowIcons` array mapped by index).
+
+### `Performance`
+
+Comparison table (LibreFang vs "Others"). Desktop renders an HTML `<table>`, mobile renders stacked cards.
+
+### `Install`
+
+Terminal-style code block with OS-specific install commands. Auto-detects OS from `navigator.userAgent`. Includes a copy-to-clipboard button and OS switcher tabs (macOS / Windows / Linux).
+
+### `Downloads`
+
+Categorizes release assets into Desktop App and CLI via `categorizeAssets()`, which matches filenames against regex patterns:
+
+- **Desktop:** `.dmg` (Intel/ARM), `-setup.exe` (x64/ARM), `.AppImage`, `.deb`, `.rpm`
+- **CLI:** `apple-darwin.tar.gz`, `unknown-linux-gnu.tar.gz`, `unknown-linux-musl.tar.gz`, `pc-windows-msvc.zip`, `linux-android.tar.gz`
+
+A third column provides one-click deploy links (Fly.io, Railway, Render, GCP, Docker).
+
+The SDK section shows copy-to-clipboard commands for pip, npm, cargo, and go.
+
+### `categorizeAssets(assets)`
+
+Takes `ReleaseAsset[]` and returns `DownloadItem[]` (Desktop + CLI). Each asset is matched against known filename patterns. SHA256 files are skipped.
+
+### `FAQ`
+
+Accordion. Only one item open at a time (`openIndex`). Uses `AnimatePresence` for smooth expand/collapse.
+
+### `GitHubStats`
+
+Fetches live GitHub metrics and renders:
+- 7-stat grid (stars, forks, issues, PRs, downloads, docs visits, last update) with loading skeletons
+- Star history bar chart (up to 30 bars)
+- Contributors image from `contrib.rocks`
+
+### `Community`
+
+Four-card grid linking to GitHub PRs, Issues, Discussions, and Discord.
+
+### `BackToTop`
+
+Fixed button that appears after scrolling one viewport height. Smooth-scrolls to top.
+
+### `trackEvent(action, label)`
+
+Thin wrapper around `window.gtag()` for Google Analytics event tracking. Guards against SSR (`typeof window !== 'undefined'`). Used by `Hero` CTAs and `Install` copy button.
+
+## Adding a New Language
+
+1. Add an entry to the `languages` array in `i18n.ts` with `{ code, name, url }`
+2. Add a corresponding entry in the `translations` record keyed by the same code
+3. Add a path check in `getCurrentLang()` in `App.tsx`
+4. Add URL prefix entries in any inline locale maps (e.g., `Downloads` labels)
+
+## Adding a New Section
+
+1. Define the section's strings in the `Translation` interface in `i18n.ts`
+2. Add translations for every language in the `translations` record
+3. Create a component accepting `{ t: Translation }` (and optionally `registry`)
+4. Add the component to the `App` return tree
+5. Add a nav link in the `links` array inside `Nav`
+6. Ensure the section has an `id` attribute matching the nav `href`

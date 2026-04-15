@@ -2,285 +2,150 @@
 
 # Build System — justfile
 
-The `justfile` is the central command hub for LibreFang development. It wraps Cargo and custom xtask commands behind a consistent, human-readable interface using [`just`](https://github.com/casey/just), a modern alternative to Make.
-
 ## Overview
 
-Rather than requiring developers to remember complex `cargo` invocations or locate custom scripts, the justfile provides named recipes for every common development task. It serves as both documentation ("what can I do?") and automation ("run it").
+The `justfile` is the project's task runner, powered by [just](https://github.com/casey/just). It serves as the single entry point for all build, test, lint, release, and maintenance commands across the LibreFang workspace. Most non-trivial operations delegate to `cargo xtask` commands implemented in the `xtask` crate, keeping this file as a thin routing layer.
 
-The justfile coordinates across multiple build targets:
-
-- **Rust workspace**: Core libraries and CLI
-- **Web assets**: React dashboard served by the API
-- **Desktop app**: Tauri-based application
-- **SDKs**: npm, PyPI, and crates.io publishing
-
-## Quick Reference
-
-```bash
-just                    # List all available recipes
-just build              # Build all workspace libraries
-just test               # Run all tests
-just lint               # Run clippy with strict warnings
-just fmt                # Format code
-just ci                 # Run local CI (build + test + lint)
-```
+Running `just` with no arguments prints the full recipe list via `just --list`.
 
 ## Prerequisites
 
-Before using the justfile, install the required tools:
+| Tool | Purpose | Install |
+|------|---------|---------|
+| `just` | Recipe runner | `cargo install just` |
+| `cargo` | Rust builds, xtask runner | rustup |
+| `pnpm` | Dashboard frontend builds | `npm install -g pnpm` |
+| `tauri-cli` | Desktop app builds (optional) | `cargo install tauri-cli` |
+
+## Core Development Recipes
+
+These cover the standard edit–build–test cycle.
+
+| Recipe | Command | Description |
+|--------|---------|-------------|
+| `build` | `cargo build --workspace --lib` | Compile all workspace libraries |
+| `test` | `cargo test --workspace` | Run all workspace tests |
+| `check` | `cargo check --workspace` | Type-check without producing artifacts |
+| `lint` | `cargo clippy --workspace --all-targets -- -D warnings` | Clippy with warnings as errors |
+| `fmt` | `cargo fmt --all` | Format all Rust code in place |
+| `fmt-check` | `cargo fmt --all -- --check` | Verify formatting without modifying files |
+| `doc` | `cargo doc --workspace --no-deps --open` | Build and open rustdoc |
+
+The `ci` recipe runs `cargo xtask ci`, which combines build, test, clippy, and web linting into a single pass for local CI simulation before pushing.
+
+## Web & Desktop Builds
+
+The project ships a React dashboard compiled to static assets, consumed by both the API server and the Tauri desktop app.
+
+```
+dashboard-build
+       │
+       ▼
+desktop-build ─────► cargo tauri build
+desktop-dev   ─────► cargo tauri dev
+install       ─────► ~/.librefang/bin
+install-full  ─────► ~/.librefang/bin + ~/.librefang/dashboard
+```
+
+- **`build-web *ARGS`** — General-purpose frontend build, delegates to `cargo xtask build-web`.
+- **`dashboard-build`** — Builds only the React dashboard assets (shorthand for `build-web --dashboard`).
+- **`dash`** — Starts the React dev server with hot reload. Requires the API running on `:4545`. Changes directory to `crates/librefang-api/dashboard` and runs `pnpm install && pnpm dev`.
+- **`desktop-build`** and **`desktop-dev`** — Build or run the Tauri desktop app. Both depend on `dashboard-build` to ensure frontend assets are current before the Tauri bundle is created.
+
+## Installation Recipes
+
+### Unix (`~/.librefang/bin`)
+
+- **`install`** — Builds `librefang-cli` with the `release-local` profile and copies the binary to `~/.librefang/bin/librefang`.
+- **`install-full`** — Extends `install` by also deploying a fresh dashboard to `~/.librefang/dashboard` and writing a `.version` file extracted from `cargo metadata`.
+
+### Windows (`%USERPROFILE%\.librefang\bin`)
+
+- **`install`** — Same as the Unix variant, using `cmd` syntax (`if not exist`, `copy /Y`).
+
+Both platform variants are gated with `[unix]` and `[windows]` attributes. The `set windows-shell := ["cmd", "/c"]` directive at the top ensures correct shell invocation on Windows.
+
+## Xtask-Delegated Recipes
+
+Most operational complexity lives behind `cargo xtask <name>` calls. The justfile passes through any extra arguments via the `*ARGS` variadic parameter, so each recipe supports xtask-specific flags.
+
+### Build & Release
+
+| Recipe | Xtask | Purpose |
+|--------|-------|---------|
+| `dist *ARGS` | `xtask dist` | Cross-platform release binaries |
+| `docker *ARGS` | `xtask docker` | Build and optionally push Docker images |
+| `release *ARGS` | `xtask release` | Cut a new release |
+| `publish-sdks *ARGS` | `xtask publish-sdks` | Publish SDKs to npm, PyPI, crates.io |
+| `publish-npm-binaries *ARGS` | `xtask publish-npm-binaries` | Publish CLI binaries to npm |
+| `publish-pypi-binaries *ARGS` | `xtask publish-pypi-binaries` | Publish CLI wheels to PyPI |
+
+### Code Quality & Analysis
+
+| Recipe | Xtask | Purpose |
+|--------|-------|---------|
+| `coverage *ARGS` | `xtask coverage` | Test coverage reports |
+| `bench *ARGS` | `xtask bench` | Criterion benchmarks |
+| `deps *ARGS` | `xtask deps` | Dependency vulnerability/updates audit |
+| `license-check *ARGS` | `xtask license-check` | Dependency license validation |
+| `check-links *ARGS` | `xtask check-links` | Broken link detection in docs |
+| `loc *ARGS` | `xtask loc` | Lines of code and dependency graph stats |
+
+### Code Generation & Documentation
+
+| Recipe | Xtask | Purpose |
+|--------|-------|---------|
+| `codegen *ARGS` | `xtask codegen` | OpenAPI spec and other generated code |
+| `api-docs *ARGS` | `xtask api-docs` | API docs from OpenAPI spec |
+| `changelog *ARGS` | `xtask changelog` | Generate CHANGELOG from merged PRs |
+| `contributors *ARGS` | `xtask contributors` | Contributor/star history SVGs |
+
+### Environment & Maintenance
+
+| Recipe | Xtask | Purpose |
+|--------|-------|---------|
+| `setup *ARGS` | `xtask setup` | First-time dev environment setup |
+| `dev *ARGS` | `xtask dev` | Start daemon + dashboard hot reload |
+| `doctor *ARGS` | `xtask doctor` | Diagnose environment issues |
+| `db *ARGS` | `xtask db` | Database info, backup, reset |
+| `clean-all *ARGS` | `xtask clean-all` | Remove all build artifacts (Rust + web) |
+| `update-deps *ARGS` | `xtask update-deps` | Update Rust and web dependencies |
+| `sync-versions *ARGS` | `xtask sync-versions` | Synchronize crate versions across workspace |
+| `fmt-all *ARGS` | `xtask fmt` | Format both Rust and web code |
+| `validate-config *ARGS` | `xtask validate-config` | Validate config.toml |
+| `pre-commit *ARGS` | `xtask pre-commit` | fmt + clippy + test in one pass |
+| `migrate *ARGS` | `xtask migrate` | Migrate agents from other frameworks |
+
+### Testing
+
+| Recipe | Xtask | Purpose |
+|--------|-------|---------|
+| `integration-test *ARGS` | `xtask integration-test` | Live integration test suite |
+
+## Passing Arguments
+
+All variadic recipes use `*ARGS` which forwards extra arguments to the underlying xtask. For example:
 
 ```bash
-# Required
-cargo install just
+# Run integration tests against a specific host
+just integration-test --host http://staging.example.com
 
-# For desktop development
-cargo install tauri-cli
+# Build Docker image with a specific tag
+just docker --tag v2.1.0 --push
 
-# For dashboard development
-pnpm install
+# Run benchmarks for a specific crate
+just bench --bench crate_name
 ```
 
-The justfile sets Windows shell to `cmd /c` for cross-platform compatibility.
+## Recipe Dependency Graph
 
-## Core Development Commands
-
-### Build and Test
-
-| Recipe | Description |
-|--------|-------------|
-| `just build` | Compile all workspace libraries in debug mode |
-| `just test` | Run all workspace tests |
-| `just check` | Type-check without compiling (faster iteration) |
-| `just clean` | Remove build artifacts |
-
-### Code Quality
-
-| Recipe | Description |
-|--------|-------------|
-| `just fmt` | Format all Rust code with `cargo fmt` |
-| `just fmt-check` | Verify formatting without modifying files |
-| `just lint` | Run clippy with `-D warnings` (fails on any warning) |
-| `just check` | Type-check the workspace |
-
-### Documentation
-
-| Recipe | Description |
-|--------|-------------|
-| `just doc` | Build and open workspace documentation in browser |
-| `just api-docs` | Generate API documentation from OpenAPI spec |
-| `just check-links` | Validate links in documentation |
-
-## Web Development
-
-The web stack consists of a React dashboard served statically by the API. The dashboard must be built before any command that needs it.
-
-### Dashboard Commands
-
-| Recipe | Description |
-|--------|-------------|
-| `just dashboard-build` | Build React dashboard assets to `crates/librefang-api/static/react` |
-| `just dash` | Start dashboard in development mode with hot reload |
-| `just build-web` | Build all frontend targets (dashboard, web, docs) |
-
-```mermaid
-flowchart LR
-    A[just dashboard-build] --> B[pnpm build]
-    B --> C[static/react]
-    C --> D[API serves at /dashboard]
-    C --> E[Desktop app bundles it]
-```
-
-### Development Workflow
-
-```bash
-# Terminal 1: Start API
-cargo run -p librefang-api
-
-# Terminal 2: Start dashboard with hot reload
-just dash
-```
-
-The dashboard dev server proxies API requests to `localhost:4545`.
-
-## Desktop Application (Tauri)
-
-Builds a native desktop application that bundles the dashboard.
-
-| Recipe | Description |
-|--------|-------------|
-| `just desktop-build` | Build production desktop executable |
-| `just desktop-dev` | Run desktop app in development mode |
-
-### Dependency Chain
+Recipes with a `:` suffix (e.g., `desktop-build: dashboard-build`) declare dependencies. The following recipes chain automatically:
 
 ```
-desktop-build / desktop-dev
-    └── dashboard-build
-            └── pnpm build
+desktop-build ──► dashboard-build
+desktop-dev   ──► dashboard-build
+install       ──► dashboard-build    (both unix and windows)
+install-full  ──► dashboard-build
 ```
 
-The desktop recipes automatically build dashboard assets first because the Tauri app embeds them.
-
-## Installation
-
-### CLI Installation
-
-Install the release build of the CLI to `~/.librefang/bin`:
-
-```bash
-# Unix/macOS
-just install
-
-# Windows
-just install
-```
-
-The `install` recipe on Unix uses the `release-local` Cargo profile and copies the binary to the user-local bin directory.
-
-### Full Installation
-
-Includes CLI binary plus a static copy of the dashboard:
-
-```bash
-just install-full
-```
-
-This installs:
-- Binary to `~/.librefang/bin/librefang`
-- Dashboard to `~/.librefang/dashboard`
-- Version file to `~/.librefang/dashboard/.version`
-
-## Extended Tasks (xtask)
-
-Most recipes delegate to `cargo xtask`, which runs custom tasks defined in a dedicated xtask crate. This pattern allows complex build logic in Rust while remaining accessible via simple commands.
-
-### Release Management
-
-| Recipe | Description |
-|--------|-------------|
-| `just release` | Create and publish a release |
-| `just changelog` | Generate CHANGELOG from merged PRs |
-| `just sync-versions` | Synchronize crate versions across workspace |
-| `just dist` | Build release binaries for multiple platforms |
-| `just docker` | Build and push Docker image |
-
-### SDK Publishing
-
-| Recipe | Description |
-|--------|-------------|
-| `just publish-sdks` | Publish all SDKs to npm, PyPI, and crates.io |
-| `just publish-npm-binaries` | Publish CLI binaries to npm |
-| `just publish-pypi-binaries` | Publish CLI wheels to PyPI |
-
-### Development Helpers
-
-| Recipe | Description |
-|--------|-------------|
-| `just setup` | Set up local development environment |
-| `just doctor` | Diagnose development environment issues |
-| `just db` | Database management (info, backup, reset) |
-| `just integration-test` | Run live integration tests |
-| `just coverage` | Generate test coverage report |
-| `just bench` | Run criterion benchmarks |
-| `just codegen` | Run code generation (OpenAPI spec, etc.) |
-
-### Maintenance
-
-| Recipe | Description |
-|--------|-------------|
-| `just deps` | Audit dependencies for vulnerabilities |
-| `just license-check` | Check dependency licenses |
-| `just update-deps` | Update Rust and web dependencies |
-| `just clean-all` | Clean all build artifacts and caches |
-| `just validate-config` | Validate config.toml |
-| `just loc` | Code statistics (lines, dependency graph) |
-
-## Development Workflows
-
-### Local CI Simulation
-
-```bash
-just ci
-```
-
-This runs the same checks as the CI pipeline:
-- Build all targets
-- Run all tests
-- Run clippy with strict warnings
-- Web linting
-
-### Pre-commit Checklist
-
-```bash
-just pre-commit
-```
-
-Runs formatting, linting, and tests before committing:
-
-```
-cargo fmt → cargo clippy → cargo test
-```
-
-### Migration Workflow
-
-```bash
-just migrate <framework>
-```
-
-Import agents from other agent frameworks into LibreFang.
-
-## Architecture
-
-The justfile follows a layered architecture:
-
-```
-┌─────────────────────────────────────┐
-│           justfile                  │  ← User interface
-├─────────────────────────────────────┤
-│         cargo xtask                 │  ← Custom build tasks
-├───────────┬───────────┬────────────┤
-│  cargo    │  pnpm     │  tauri     │  ← Build tools
-├───────────┴───────────┴────────────┤
-│   Rust workspace   │  Web assets  │  ← Build targets
-└─────────────────────┴──────────────┘
-```
-
-### Key Design Decisions
-
-1. **Dashboard-first dependencies**: Commands that need web assets always build them first, ensuring consistency across targets.
-
-2. **Platform-specific recipes**: The `[unix]` and `[windows]` attributes handle path and shell differences without complex conditionals in recipes.
-
-3. **Pass-through arguments**: Recipes like `build-web *ARGS` accept arbitrary arguments, forwarding them to the underlying command for flexibility.
-
-4. **Composite tasks via xtask**: Complex operations live in the xtask crate rather than cluttering the justfile, keeping it readable.
-
-## Common Tasks
-
-### Full Development Setup
-
-```bash
-just setup              # Install all dependencies
-just build              # Verify build works
-just pre-commit         # Run pre-commit checks
-```
-
-### Release Process
-
-```bash
-just sync-versions      # Ensure versions are consistent
-just changelog          # Generate changelog
-just release            # Create release
-just publish-sdks       # Publish SDKs
-just docker             # Build and push image
-```
-
-### Investigating Issues
-
-```bash
-just doctor             # Check environment setup
-just lint               # Run linter to catch issues
-just coverage           # Check test coverage
-just check-links        # Validate documentation links
-```
+When you run `just desktop-build`, `just` first runs `dashboard-build` to compile the React assets, then proceeds with the Tauri build. No manual ordering is required.

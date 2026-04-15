@@ -1,291 +1,299 @@
 # Memory Management
 
-# Memory Management Module (`librefang-memory`)
+# Memory Management (`librefang-memory`)
 
-The `librefang-memory` crate provides the memory substrate for the LibreFang Agent Operating System. It exposes a unified API over three storage backends—structured, semantic, and knowledge graph—all backed by SQLite with optional external vector database support.
+## Purpose
 
-## Architecture Overview
+The memory substrate for the LibreFang Agent Operating System. It provides a unified memory API over three storage backends so agents can persist, search, and reason over structured state, semantic memories, and knowledge graph relationships through a single interface.
 
-The module is organized in three conceptual layers:
-
-| Layer | Purpose | Backing Store |
-|-------|---------|---------------|
-| **Proactive Memory** | mem0-style API for agents: search, add, get, list | `ProactiveMemoryStore` |
-| **Memory Substrate** | Unified facade over all storage backends | `MemorySubstrate` |
-| **Backend Stores** | Individual stores for structured, semantic, and graph data | SQLite + optional vector DB |
+## Architecture
 
 ```mermaid
-graph TB
-    subgraph "Proactive Layer"
-        PM[ProactiveMemoryStore]
-        PMH[ProactiveMemoryHooks]
-    end
-
-    subgraph "Facade"
-        MS[MemorySubstrate]
-    end
-
-    subgraph "Backend Stores"
-        SS[SemanticStore]
-        Str[StructuredStore]
-        KG[KnowledgeStore]
-        US[UsageStore]
-    end
-
-    subgraph "Storage"
-        SQLite[(SQLite)]
-        Vec[VectorStore<br/>HttpVectorStore or<br/>SqliteVectorStore]
-    end
-
-    PM --> PMH
-    PM --> MS
-    PMH --> MS
-    MS --> SS
-    MS --> Str
-    MS --> KG
-    MS --> US
-    SS --> SQLite
-    SS --> Vec
-    Str --> SQLite
-    KG --> SQLite
-    US --> SQLite
+graph TD
+    A[ProactiveMemoryStore] --> B[MemorySubstrate]
+    B --> C[StructuredStore]
+    B --> D[SemanticStore]
+    B --> E[KnowledgeStore]
+    D --> F[SqliteVectorStore]
+    D --> G[HttpVectorStore]
+    A --> C
+    A --> D
+    A --> E
+    H[ConsolidationEngine] --> D
+    I[decay::run_decay] --> D
 ```
 
-## Multi-Level Memory
+Agents interact primarily with `ProactiveMemoryStore` (the mem0-style API) or directly with `MemorySubstrate` for lower-level operations. Both delegate to three SQLite-backed stores:
 
-The system manages memories at three TTL tiers:
+| Store | Purpose | Tables |
+|---|---|---|
+| **StructuredStore** | Key-value pairs, agent state, config | `kv_store` |
+| **SemanticStore** | Text memories with optional vector embeddings | `memories` |
+| **KnowledgeStore** | Named entities and typed relations | `entities`, `relations` |
 
-- **USER** (`user_memory`): Permanent user knowledge. Never decays or is auto-deleted. Stores preferences, important facts, and relationship information.
-- **SESSION** (`session_memory`): Session-scoped context. Decays after `session_ttl_days` of no access. Stores ephemeral interaction context.
-- **AGENT** (`agent_memory`): Agent-level knowledge. Decays after `agent_ttl_days` of no access. Stores learned agent behaviors and working context.
+## Memory Levels
 
-Every memory carries a `confidence` score (0.0–1.0) that decays over time and is boosted by repeated access.
+Every memory has a scope that controls its lifecycle:
 
-## Key Components
+| Level | Scope String | Decay Behavior |
+|---|---|---|
+| `User` | `user_memory` | Never decays — permanent user knowledge |
+| `Session` | `session_memory` | Hard-deleted after `session_ttl_hours` of inactivity |
+| `Agent` | `agent_memory` | Hard-deleted after `agent_ttl_days` of inactivity |
 
-### MemorySubstrate (`substrate.rs`)
+Accessing a memory (via search/recall) updates `accessed_at`, resetting the decay timer.
 
-The central facade that orchestrates all stores. Provides:
+## Proactive Memory System (`proactive.rs`)
 
-- **KV operations**: `set`, `get`, `delete` for structured key-value data
-- **Session management**: `create_session`, `get_session`, `save_session`, `search_sessions`
-- **Semantic memory**: `remember`, `remember_with_embedding_async`, `recall`, `recall_with_embedding`
-- **Agent registry**: `save_agent`, `load_agent`, `load_all_agents`
-- **Task queue**: `task_post`, `task_claim`, `task_complete`, `task_list`
-- **Canonical sessions**: Cross-channel persistent memory via `append_canonical`, `canonical_context`
+The `ProactiveMemoryStore` implements a mem0-style API on top of `MemorySubstrate`. This is the recommended interface for agent memory operations.
 
-### SemanticStore (`semantic.rs`)
+### Core Operations
 
-Handles embedding-backed memory storage and retrieval. Supports two search modes:
+| Method | Description |
+|---|---|
+| `search(query, user_id, limit)` | Semantic search across all memory levels |
+| `add(messages, user_id)` | Store memories with automatic extraction from conversation messages |
+| `get(user_id)` | Retrieve all user-level memories |
+| `list(user_id, level, category)` | List memories filtered by level and category |
+| `export_all(agent_id)` | Export all memories as a flat JSON-serializable list |
+| `import_memories(agent_id, items)` | Import memories with deduplication |
 
-1. **Vector search**: When an embedding driver is provided, uses cosine similarity against stored vectors
-2. **LIKE fallback**: When no embedding driver is available, searches using SQL `LIKE` on text content
+### Auto Hooks
 
-Key operations:
-- `remember_with_embedding`: Store a memory with its embedding
-- `recall_with_embedding`: Search using a query embedding
-- `update_content`: In-place content update preserving ID, scope, and access statistics
-- `forget_session_older_than_global`: Batch soft-delete of session memories
+`ProactiveMemoryHooks` provides two hooks that wrap agent execution:
 
-### StructuredStore (`structured.rs`)
+- **`auto_memorize`** — Called after an agent response. Extracts memories from the conversation, decides whether to ADD, UPDATE, or skip (NOOP), and persists the result.
+- **`auto_retrieve`** — Called before an agent execution. Searches relevant memories and returns them as context.
 
-Key-value store for per-agent structured data. Backed by the `kv_store` SQLite table. Supports typed JSON values and version tracking.
+### Memory Decision Flow
 
-### KnowledgeStore (`knowledge.rs`)
+When `add()` is called, the store runs a dedup/merge decision:
 
-Graph store for entities and relations. Backed by `entities` and `relations` SQLite tables. Supports pattern queries via `GraphPattern` with optional source, relation type, and target filters.
+1. Compute an embedding for the candidate memory (if embedding driver is configured).
+2. Search for the top 5 most similar existing memories (vector cosine similarity or LIKE fallback).
+3. The `MemoryExtractor` (default: `DefaultMemoryExtractor`) decides the action:
+   - **ADD** — No similar memory exists; create a new one.
+   - **UPDATE** — A similar memory exists but content differs; update in-place with version history.
+   - **NOOP** — The memory already exists verbatim; skip.
 
-The store resolves entity references by both ID and name, handling the common case where MCP tools create relations referencing entities by name rather than UUID.
+When an UPDATE targets a memory that appears contradictory (detected by `detect_memory_conflict`), a `MemoryConflict` is attached to the result and `conflict_detected` is set in metadata.
 
-### Knowledge Graph Entities and Relations
+### Confidence Decay
 
-The knowledge graph stores structured facts extracted from conversations:
+Each call to `search()`, `auto_retrieve()`, or consolidation triggers `maybe_run_maintenance()`, which rate-limits two tasks to once per hour:
+
+- **Confidence decay**: For memories not accessed in >1 day, applies exponential decay: `confidence × e^(-rate × days)`, then a frequency boost: `× min(1.0 + log₂(access_count), 2.0)`.
+- **Session TTL cleanup**: Soft-deletes session-level memories older than the configured `session_ttl_hours`.
+
+### Per-Agent Memory Cap
+
+`ProactiveMemoryConfig.max_memories_per_agent` sets a hard cap. When adding memories would exceed the cap, `evict_if_over_cap()` removes the lowest-confidence memories (eviction is capped at the number of existing memories; if a single batch alone exceeds the cap, a warning is logged and the cap is temporarily exceeded).
+
+### Embedding Driver
+
+By default, `ProactiveMemoryStore` falls back to `LIKE` text matching for search. Call `.with_embedding(driver)` to enable vector similarity search. The driver must implement:
 
 ```rust
-// Entities: people, organizations, concepts
-Entity {
-    id: String,
-    entity_type: EntityType,  // Person, Organization, Concept, Custom
-    name: String,
-    properties: HashMap<String, JsonValue>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-// Relations: directed edges between entities
-Relation {
-    source: String,  // entity ID or name
-    relation: RelationType,  // WorksAt, Knows, RelatedTo, etc.
-    target: String,
-    properties: HashMap<String, JsonValue>,
-    confidence: f32,
-    created_at: DateTime<Utc>,
+#[async_trait]
+pub trait EmbeddingFn: Send + Sync {
+    async fn embed_one(&self, text: &str) -> LibreFangResult<Vec<f32>>;
 }
 ```
 
-### ProactiveMemoryStore (`proactive.rs`)
+When enabled, embeddings are stored alongside memories and cosine similarity is used for recall.
 
-A mem0-style wrapper over `MemorySubstrate` that provides a simpler API:
+### Knowledge Graph Integration
+
+When `auto_memorize` extracts `RelationTriple`s from conversation, `store_relations()` upserts entities and relations into `KnowledgeStore`. Deduplication skips triples where an identical (source, relation, target) edge already exists.
+
+## MemorySubstrate (`substrate.rs`)
+
+The lower-level entry point that owns the SQLite connection and exposes the three stores.
 
 ```rust
-// Search memories semantically
-let results = store.search("preferences", user_id, 10).await?;
-
-// Add a memory with automatic deduplication
-store.add(&[json!({"role": "user", "content": "I prefer dark mode"})], user_id).await?;
-
-// Auto-retrieve relevant memories before agent execution
-let context = store.auto_retrieve(user_id, query).await?;
-
-// Auto-memorize after agent decisions
-store.auto_memorize(user_id, agent_id, decision).await?;
+let substrate = MemorySubstrate::open_in_memory(0.1)?;
+let substrate = Arc::new(substrate);
 ```
 
-**Auto-deduplication flow**: Before adding a memory, the store searches for similar existing memories. The `MemoryExtractor` trait decides whether to `Add`, `Update`, or `Noop`:
+Key methods:
 
-- **Noop**: Skip if a very similar memory (>90% text similarity) already exists
-- **Add**: Store as a new memory
-- **Update**: Merge into an existing memory, preserving a version history chain
+| Method | Delegates To |
+|---|---|
+| `structured_get/set/delete` | `StructuredStore` |
+| `remember/recall/forget` | `SemanticStore` |
+| `store_with_chunking` | `SemanticStore` (via `chunker`) |
+| `consolidate` | `ConsolidationEngine` |
+| `get_session/create_session` | `SessionStore` |
+| `usage_conn()` | Shared connection for `UsageStore` |
 
-**Conflict detection**: When updating, the store checks whether the update is a refinement or a contradiction. Contradictory updates are flagged with `conflict_detected: true` in metadata.
+### Chunked Storage
 
-### Text Chunker (`chunker.rs`)
+`store_with_chunking` splits long text using the chunker before storing. Each chunk gets its own row in `memories` with independent confidence and access tracking, but shares the same `agent_id` and `scope`.
 
-Splits long documents into overlapping chunks suitable for embedding:
+## Text Chunking (`chunker.rs`)
 
-1. Split on paragraph boundaries (`\n\n`) first
-2. If a paragraph exceeds `max_size`, split on sentence boundaries (`. `, `。`, `？`, `！`)
-3. If a sentence still exceeds `max_size`, hard-split at character boundaries (respecting UTF-8)
+`chunk_text(text, max_size, overlap)` splits documents into character-bounded chunks:
 
-Overlap is applied by prepending the last `overlap` characters of the previous chunk. The chunker properly handles Unicode (Chinese, emoji) via char-based iteration.
+1. Split on paragraph boundaries (`\n\n`).
+2. Within oversized paragraphs, split on sentence boundaries (`. `, `。`, `？`, `！`).
+3. Within oversized sentences, hard-split at the character limit.
+4. Greedily pack segments into chunks, prepending `overlap` characters from the previous chunk.
 
-### Consolidation Engine (`consolidation.rs`)
+All splitting operates on Unicode character boundaries — multi-byte text (CJK, emoji) is handled correctly.
 
-Reduces storage and improves retrieval quality by merging similar memories:
+## Memory Consolidation (`consolidation.rs`)
 
-1. **Decay phase**: Reduce confidence of memories not accessed in 7 days
-2. **Merge phase**: Soft-delete memories with >90% text similarity to a higher-confidence memory
+`ConsolidationEngine::consolidate()` runs two phases:
 
-The merge is capped at 100 merges per consolidation run to avoid O(n²) blowup on large stores.
+1. **Confidence decay**: Multiplies confidence by `(1 - decay_rate)` for memories not accessed in the last 7 days, floored at 0.1.
+2. **Duplicate merging**: Loads all active memories sorted by confidence DESC. For each pair with >90% Jaccard word similarity, soft-deletes the lower-confidence duplicate. If the absorbed memory had higher confidence, the keeper is lifted to that value. Capped at 100 merges per run to avoid O(n²) blowup.
 
-### Time-Based Decay (`decay.rs`)
+Returns a `ConsolidationReport` with `memories_decayed`, `memories_merged`, and `duration_ms`.
 
-Hard-deletes memories past their TTL:
+## Time-Based Decay (`decay.rs`)
 
-- **SESSION** scope: Deleted if not accessed for `session_ttl_days`
-- **AGENT** scope: Deleted if not accessed for `agent_ttl_days`
-- **USER** scope: Never automatically deleted
+`run_decay(conn, config)` performs hard deletion based on scope TTLs:
 
-Accessing a memory (via `recall_with_embedding`) resets the `accessed_at` timestamp, preventing decay.
+- **USER scope**: Never touched.
+- **SESSION scope**: Deleted when `accessed_at` is older than `session_ttl_days`.
+- **AGENT scope**: Deleted when `accessed_at` is older than `agent_ttl_days`.
 
-### Vector Store Implementations
+Controlled by `MemoryDecayConfig` (gated by `enabled` flag). This is distinct from consolidation's confidence decay — this removes stale data entirely.
 
-Two `VectorStore` implementations exist:
+## Knowledge Graph (`knowledge.rs`)
 
-**SqliteVectorStore** (`semantic.rs`): Stores embeddings as BLOBs in the SQLite `memories` table. Suitable for single-node deployments.
+`KnowledgeStore` stores `Entity` and `Relation` records in SQLite with support for graph pattern queries.
 
-**HttpVectorStore** (`http_vector_store.rs`): Delegates to a remote HTTP service (Qdrant, Weaviate, custom microservice). Expected API:
+### Entities
+
+```rust
+store.add_entity(
+    Entity {
+        id: String::new(),       // auto-generated UUID if empty
+        entity_type: EntityType::Person,
+        name: "Alice".to_string(),
+        properties: HashMap::new(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    },
+    "agent-id",
+)?;
+```
+
+Upserts on conflict (updates name and properties).
+
+### Relations
+
+```rust
+store.add_relation(
+    Relation {
+        source: "alice-id".to_string(),
+        relation: RelationType::WorksAt,
+        target: "acme-id".to_string(),
+        properties: HashMap::new(),
+        confidence: 0.95,
+        created_at: Utc::now(),
+    },
+    "agent-id",
+)?;
+```
+
+Relations can reference entities by either ID or name (the MCP tool uses names). The `query_graph` JOIN resolves both:
+
+```sql
+JOIN entities s ON (r.source_entity = s.id OR (r.source_entity = s.name AND s.agent_id = r.agent_id))
+```
+
+### Pattern Queries
+
+`query_graph(GraphPattern)` returns `Vec<GraphMatch>` with source entity, relation, and target entity. Filters are optional — you can query by source, relation type, target, or any combination. Results are limited to 100 rows.
+
+`delete_by_agent(agent_id)` removes all entities and relations owned by an agent.
+
+## Session Management (`session.rs`)
+
+`SessionStore` manages conversation history in the `sessions` table with:
+
+- **Per-agent session isolation** via `agent_id` and optional `peer_id` (for multi-user agents).
+- **FTS5 full-text search** across session content via the `sessions_fts` virtual table.
+- **Canonical sessions** (`canonical_sessions` table) for cross-channel persistent memory — a single conversation thread shared across WhatsApp, web, etc.
+- **Session labels** for human-readable identification.
+- **JSONL mirror** support for streaming session content to a log file.
+- **Cleanup**: `cleanup_excess_sessions(agent_id, max_count)` evicts the oldest sessions when an agent exceeds a limit.
+
+## Schema Migrations (`migration.rs`)
+
+SQLite schema is versioned via the `user_version` pragma. Current version: **19**.
+
+Key tables created across migrations:
+
+| Version | Addition |
+|---|---|
+| 1 | Core tables: `agents`, `sessions`, `events`, `kv_store`, `task_queue`, `memories`, `entities`, `relations` |
+| 3 | `embedding` column on `memories` |
+| 4 | `usage_events` for cost tracking |
+| 5 | `canonical_sessions` for cross-channel memory |
+| 8 | `audit_entries` for Merkle audit trail |
+| 9 | Performance indexes for proactive memory queries |
+| 10 | `agent_id` on entities/relations for per-agent cleanup |
+| 12 | FTS5 virtual table for session search |
+| 13 | Prompt versioning and A/B testing tables |
+| 15 | Multimodal memory columns (`image_url`, `image_embedding`, `modality`) |
+| 16 | `peer_id` on memories and sessions for per-user isolation |
+| 17 | `approval_audit` for persistent approval audit log |
+| 19 | `provider` column on `usage_events` for per-provider budgets |
+
+Migrations are idempotent — `run_migrations` can be called safely on every boot.
+
+## Usage Tracking (`usage.rs`)
+
+`UsageStore` records per-request cost metrics in `usage_events`:
+
+- `record(UsageRecord)` — Log a single LLM call (model, tokens, cost, latency, provider).
+- `query_summary(agent_id)` — Aggregate stats for an agent.
+- `query_hourly/daily/monthly` — Time-bucketed queries.
+- `query_by_model(agent_id)` — Per-model breakdown.
+- `check_quota(agent_id, limits)` — Enforce hourly/daily/monthly token and cost caps.
+- `query_provider_*` — Per-provider budget enforcement (issue #2316).
+- `cleanup_old(before)` — Purge old usage data.
+
+The metering engine (`librefang-kernel-metering`) calls these methods to enforce budgets before allowing LLM calls.
+
+## Prompt Versioning (`prompt.rs`)
+
+`PromptStore` manages system prompt versioning and A/B testing:
+
+- **Version history**: `create_version_if_changed` hashes prompt content and creates a new version only on changes.
+- **Active version**: `set_active_version` promotes a version for production use.
+- **Experiments**: Define A/B tests with traffic splits and success criteria.
+- **Metrics**: Track request counts, success rates, latency, and cost per variant.
+
+## Vector Store Backends
+
+The `VectorStore` trait defines four operations: `insert`, `search`, `delete`, `get_embeddings`.
+
+Two implementations:
+
+| Backend | Use Case |
+|---|---|
+| `SqliteVectorStore` | Local development, single-node deployments. Stores embeddings as BLOBs. |
+| `HttpVectorStore` | Production deployments with external vector DBs (Qdrant, Weaviate, custom). Delegates over HTTP/JSON. |
+
+`HttpVectorStore` expects four REST endpoints at the configured `base_url`:
 
 | Method | Path | Purpose |
-|--------|------|---------|
-| POST | `/insert` | Store embedding |
-| POST | `/search` | Query by embedding |
-| DELETE | `/delete` | Remove embedding |
-| POST | `/get_embeddings` | Batch retrieval |
+|---|---|---|
+| POST | `/insert` | Store an embedding with payload |
+| POST | `/search` | Nearest-neighbor search |
+| DELETE | `/delete` | Remove by ID |
+| POST | `/get_embeddings` | Batch fetch embeddings |
 
-### Session Management (`session.rs`)
+## Integration Points
 
-Manages conversation history with support for:
+The memory module connects to the rest of the system through these call flows:
 
-- **Per-session storage**: Messages stored as JSON blobs in SQLite
-- **Full-text search**: FTS5 virtual table (`sessions_fts`) for semantic session lookup
-- **Canonical sessions**: Cross-channel persistent memory that survives session boundaries
-- **Compaction**: Summarizes old messages to stay within context window limits
-- **TTL enforcement**: `cleanup_expired_sessions` removes sessions past `session_ttl_days`
-
-### Usage Tracking (`usage.rs`)
-
-Records token usage and cost per agent per model. Used for metering and billing. Tables: `usage_events` with columns for `input_tokens`, `output_tokens`, `cost_usd`, `latency_ms`.
-
-### Schema Migrations (`migration.rs`)
-
-18 migrations bring the database from initial schema to current version:
-
-- **v1**: Core tables (agents, sessions, events, kv_store, task_queue, memories, entities, relations)
-- **v3**: Add `embedding` column to memories for vector search
-- **v5**: Canonical sessions for cross-channel memory
-- **v9**: Performance indexes for proactive memory queries
-- **v10**: Add `agent_id` to entities and relations for per-agent cleanup
-- **v12**: FTS5 virtual table for full-text session search
-- **v13**: Prompt versioning and A/B testing tables
-- **v15**: Multimodal memory (image URL, image embedding, modality)
-- **v16**: `peer_id` for per-user isolation
-- **v17**: Persistent approval audit log
-- **v18**: TOTP lockout tracking
-
-## Proactive Memory Lifecycle
-
-The proactive memory hooks integrate with the agent loop:
-
-```mermaid
-sequenceDiagram
-    participant AL as Agent Loop
-    participant PMH as ProactiveMemoryHooks
-    participant PMS as ProactiveMemoryStore
-    participant SS as SemanticStore
-    participant KG as KnowledgeStore
-
-    AL->>PMH: before_agent_run(context)
-    PMH->>PMS: auto_retrieve(user_id, query)
-    PMS->>SS: recall_with_embedding()
-    SS-->>PMS: relevant memories
-    PMS-->>PMH: injected context
-
-    AL->>PMH: after_agent_decision(decision)
-    PMH->>PMS: auto_memorize()
-    PMS->>PMS: add_with_decision()
-    alt Add/Update
-        PMS->>SS: remember_with_embedding()
-        PMS->>SS: update_content()
-        PMS->>KG: store_relations()
-    else Noop
-        Note over PMS: Skip (duplicate)
-    end
-
-    alt Every 10 calls
-        PMS->>SS: consolidate()
-    end
-```
-
-**Rate-limited maintenance**: Decay and session cleanup run at most once per hour, even when called on every request.
-
-## Configuration
-
-Key configuration options in `ProactiveMemoryConfig`:
-
-| Field | Default | Purpose |
-|-------|---------|---------|
-| `max_memories_per_agent` | 0 (unlimited) | Cap on memories per agent |
-| `session_ttl_hours` | 0 (disabled) | Session memory TTL |
-| `confidence_decay_rate` | 0.0 (disabled) | Exponential decay rate for unaccessed memories |
-
-## Connecting to the Rest of the Codebase
-
-**Agent Loop Integration** (`librefang-runtime/src/agent_loop.rs`):
-- `remember_interaction_best_effort`: Stores user/assistant message pairs
-- `save_session_async`: Persists session after each turn
-- `setup_recalled_memories`: Injects `auto_retrieve` results into context
-
-**Context Engine** (`librefang-runtime/src/context_engine.rs`):
-- `ingest`: Calls `recall_with_embedding_async` to pull relevant memories
-- `remember`: Direct `remember` call for specific facts
-
-**Proactive Memory Initialization** (`librefang-runtime/src/proactive_memory.rs`):
-- `init_proactive_memory_full`: Creates store with custom extractor and embedding driver
-
-**HTTP Routes** (`src/routes/memory.rs`):
-- `memory_delete`, `memory_update`: Use `find_agent_id_for_memory` → `get_by_id` to locate and modify memories
-
-**Knowledge Graph via MCP** (`src/routes/memory.rs`):
-- `knowledge_add_relation`: Adds entities and relations via `KnowledgeStore`
-- `knowledge_query`: Pattern-based graph queries
+- **Agent message handling** (`src/routes/agents.rs`) → `MemorySubstrate::get_session` → `SessionStore` for loading conversation history.
+- **Memory CRUD** (`src/routes/memory.rs`) → `ProactiveMemoryStore` → `SemanticStore::get_by_id` for updates and deletes.
+- **KV access** (`src/routes/system.rs`, `src/kernel/mod.rs`) → `MemorySubstrate::structured_get` → `StructuredStore::get` for reading agent configuration.
+- **Metering** (`librefang-kernel-metering`) → `UsageStore` methods for quota checking and cost recording before each LLM call.
+- **Skills** (`src/routes/skills.rs`) → `MemorySubstrate::get_session` for session context during tool execution.

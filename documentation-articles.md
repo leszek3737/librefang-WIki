@@ -1,183 +1,107 @@
 # Documentation — articles
 
-# Documentation — Articles Module
+# Documentation — Articles
 
-## Overview
+Markdown articles published to external platforms (Dev.to, canonical blog) announcing releases, features, and project milestones.
 
-The `articles/` directory contains the written content for the LibreFang documentation website. These Markdown files serve as the primary source for blog posts, release announcements, announcements, and informational articles that appear on [docs.librefang.ai](https://docs.librefang.ai).
+## Purpose
 
-Articles are static content files that complement the generated API documentation and guides. They cover release notes, project announcements, and feature introductions.
+This module is the content source for all externally published articles about LibreFang. Articles are **not executed at runtime** — they are static Markdown files consumed by publishing pipelines and syndicated to platforms like Dev.to.
 
-## Article Types
+The module serves three distinct functions:
 
-The module contains three categories of articles:
+1. **Release announcements** — Version-specific changelogs formatted as developer-facing articles
+2. **Project introductions** — Evergreen content explaining what LibreFang is and how to get started
+3. **Milestone posts** — Announcements for major events (website launches, architecture overhauls)
 
-### 1. Introduction Articles
+## File Inventory
 
-General-purpose articles that introduce the project to new users. These provide high-level overviews, quick start guides, and contribution information.
+| File | Type | Version / Scope |
+|------|------|-----------------|
+| `hello-librefang.md` | Introduction | Evergreen — project overview, quick start, contributing guide |
+| `new-website-launch.md` | Milestone | Website redesign announcement with architecture details |
+| `release-0.5.6.md` | Release | v0.5.6 — CLI i18n, Telegram reply-to, SDK publishing |
+| `release-0.5.7.md` | Release | v0.5.7 — Multi-token fallback, event webhooks, multi-agent foundations |
+| `release-0.6.0.md` | Release | v0.6.0 — Memory/context engine, NVIDIA NIM, Vertex AI, cron workflows |
+| `release-0.6.1.md` | Release | v0.6.1 — CLI name resolution, API response consistency, dashboard i18n |
+| `release-0.6.2.md` | Release | v0.6.2 — Provider config deduplication, CI build fix (17 compilation errors) |
+| `release-0.6.3.md` | Release | v0.6.3 — Vault auto-init, webhook decryption, POSIX installer |
+| `release-0.6.4.md` | Release | v0.6.4 — Qwen Code CLI provider, image pipeline, web deployment overhaul |
+| `release-0.6.5.md` | Release | v0.6.5 — Security hardening, multi-provider cost tracking, rustls TLS |
+| `release-0.6.6.md` | Release | v0.6.6 — Docker `build-push-action@v7` compatibility fix |
+| `release-0.6.7.md` | Release | v0.6.7 — HAND manifest routing, raw JSON context hooks, GitHub Discussions |
+| `release-0.6.8.md` | Release | v0.6.8 — CLI on npm/PyPI, external DM routing |
+| `release-0.7.0.md` | Release | v0.7.0 — LLM intent routing, OpenFang migration, CORS/rate-limit/audit config |
+| `release-2026.3.21.md` | Release | CalVer debut — Azure OpenAI, DeepInfra, dashboard redesign, 30+ fixes |
+| `release-2026.3.22.md` | Release | CalVer consolidation — 50+ improvements, pipeline runner agents, plugin scoping |
 
-**Example:** `hello-librefang.md`
+## Front Matter Schema
 
-```
-articles/
-└── hello-librefang.md   # Main project introduction
-```
-
-### 2. Announcement Articles
-
-Articles covering significant project milestones such as website launches, new features, or community updates.
-
-**Example:** `new-website-launch.md`
-
-### 3. Release Notes
-
-Serialized articles documenting each version of LibreFang. These follow a consistent format across versions 0.5.6 through the current CalVer releases.
-
-**Pattern:** `release-{version}.md`
-
-```
-articles/
-├── release-0.5.6.md
-├── release-0.5.7.md
-├── release-0.6.0.md
-├── release-0.6.1.md
-├── release-0.6.2.md
-├── release-0.6.3.md
-├── release-0.6.4.md
-├── release-0.6.5.md
-├── release-0.6.6.md
-├── release-0.6.7.md
-├── release-0.6.8.md
-├── release-0.7.0.md
-├── release-2026.3.21.md
-└── release-2026.3.22.md
-```
-
-## Frontmatter Schema
-
-Every article must include valid YAML frontmatter at the top of the file. This metadata powers the documentation site's routing, SEO, and listing features.
+Every article uses a consistent YAML front matter block:
 
 ```yaml
 ---
-title: "Article Title"
-published: true
-description: "Short description for SEO and previews"
-tags: [tag1, tag2, tag3]
-canonical_url: https://github.com/librefang/librefang/releases/tag/vX.X.X
+title: "LibreFang X.Y.Z Released"          # Required — article headline
+published: true                             # Required — controls visibility
+description: "One-line summary for SEO"     # Required — appears in link previews
+tags: rust, ai, opensource, release         # Required — comma-separated platform tags
+canonical_url: https://github.com/...       # Required — original source URL
 cover_image: https://raw.githubusercontent.com/librefang/librefang/main/public/assets/logo.png
 ---
 ```
 
-### Required Fields
+### Tag Conventions
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `title` | string | The article heading and page title |
-| `published` | boolean | Whether the article is publicly visible |
-| `description` | string | Meta description for SEO (150-160 characters recommended) |
-| `tags` | string[] | Categorization tags for filtering and discovery |
+| Article Type | Tags |
+|-------------|------|
+| Release notes | `rust, ai, opensource, release` |
+| Introduction | `rust, ai, opensource, agents` |
+| Web/milestone | `opensource, rust, ai, webdev` |
 
-### Optional Fields
+## Article Structure Patterns
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `canonical_url` | string | Preferred URL for SEO (typically links to GitHub releases) |
-| `cover_image` | string | Hero image URL displayed in listings and social previews |
+### Release Notes
 
-### Publishing Status
-
-Set `published: false` to draft an article without removing it from the repository. The documentation site filters unpublished articles from public listings.
-
-## Article Structure
-
-### Release Notes Format
-
-Release notes follow a standardized template for consistency across versions:
+All release notes follow a predictable structure:
 
 ```markdown
----
-# ... frontmatter ...
----
+# LibreFang X.Y.Z Released
 
-# LibreFang {Version} Released
+[2-3 sentence summary of the release theme]
 
-Opening paragraph describing the release theme and significance.
+## [Category emojis + headings organized by impact]
 
-## What's New
-
-### Category Heading
-Description of new features or changes.
-
-### Another Category
-Additional changes.
-
-## Bug Fixes
-
-- Individual fix items
-- Listed as bullet points
+[Grouped changes with issue references in parentheses]
 
 ## Install / Upgrade
 
-```bash
-# Binary
-curl -fsSL https://get.librefang.ai | sh
-
-# Rust SDK
-cargo add librefang
-
-# JavaScript SDK
-npm install @librefang/sdk
-
-# Python SDK
-pip install librefang-sdk
-```
+[Standard install block — binary, Rust SDK, JS SDK, Python SDK]
 
 ## Links
 
-- [Full Changelog](link)
-- [GitHub Release](link)
-- [GitHub](link)
-- [Discord](link)
-- [Contributing Guide](link)
+[Full Changelog, GitHub Release, GitHub, Discord, Contributing Guide]
 ```
 
-### Introduction Articles Format
+Release notes reference GitHub issues and PRs by number (e.g., `#441`, `#1088`) and credit contributors by username (e.g., `@SenZhangAI`).
 
-Introduction articles use a more narrative structure with feature highlights:
+### Version Naming Transition
 
-```markdown
----
-# ... frontmatter ...
----
+The project switched from SemVer to CalVer starting with `v2026.3.21`:
 
-# Article Title
+- **Pre-CalVer**: `release-0.5.6.md`, `release-0.6.0.md`, … `release-0.7.0.md`
+- **CalVer**: `release-2026.3.21.md`, `release-2026.3.22.md`
 
-Opening paragraph introducing the topic.
+CalVer format is `YYYY.M.DDHH` (e.g., `2026.3.2201`).
 
-## Section Heading
+The `canonical_url` field maps to the corresponding GitHub release tag:
+- SemVer: `.../releases/tag/v0.6.4-20260320`
+- CalVer: `.../releases/tag/v2026.3.2201`
 
-Content with code examples, tables, or lists.
+## Content Conventions
 
-## Quick Start
+### Install Block
 
-```bash
-# Terminal commands
-```
-
-## Contributing
-
-Contribution guidelines with tables or lists.
-
-## Links
-
-External resources and related documentation.
-```
-
-## Common Patterns
-
-### Code Blocks
-
-Install commands are consistently formatted across all release articles:
+Every release article includes the same install block:
 
 ```bash
 # Binary
@@ -193,96 +117,56 @@ npm install @librefang/sdk
 pip install librefang-sdk
 ```
 
-### Reference Links
+This block must be kept in sync with the actual distribution channels. The install URL `https://get.librefang.ai` and package names (`librefang`, `@librefang/sdk`, `librefang-sdk`) are referenced in the CI/CD release pipeline.
 
-Release notes reference GitHub issues and PRs using `#number` notation (e.g., `#441`, `#1170`). The documentation site transforms these into clickable links to the LibreFang repository.
+### Links Block
 
-### Version Numbering
-
-The project switched from semantic versioning (`0.x.x`) to calendar versioning (`YYYY.M.DDHH`) as of version `2026.3.21`:
-
-| Old Format | New Format | Example |
-|------------|------------|---------|
-| `0.5.6` | `YYYY.M.DDHH` | `2026.3.21` |
-
-### Feature Tables
-
-Feature comparison tables use pipe syntax:
+Every release article ends with the same link set:
 
 ```markdown
-| Metric | Others | LibreFang |
-|--------|--------|-----------|
-| Cold Start | 2.5 ~ 4s | **180ms** |
-| Idle Memory | 180 ~ 250MB | **40MB** |
+- [Full Changelog](https://github.com/librefang/librefang/blob/main/CHANGELOG.md)
+- [GitHub Release](https://github.com/librefang/librefang/releases/tag/v...)
+- [GitHub](https://github.com/librefang/librefang)
+- [Discord](https://discord.gg/DzTYqAZZmc)
+- [Contributing Guide](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md)
 ```
 
-## Contributing New Articles
+The only variable is the GitHub Release URL, which changes per version.
 
-### Writing Release Notes
+## Publishing Pipeline
 
-1. Create a new file named `articles/release-{version}.md`
-2. Copy the template from an existing release article
-3. Fill in the frontmatter with accurate version information
-4. Document changes under appropriate category headings
-5. Include the standard install/upgrade section
-6. Add links to the full changelog and GitHub release
+Based on release notes referencing "automated release announcements" (#0.5.6), articles are generated or published through a CI workflow:
 
-### Writing Introduction Articles
+1. **Trigger** — A GitHub release is published
+2. **Generate** — Release notes are converted to article Markdown
+3. **Publish** — Articles are posted to Dev.to via API
 
-1. Create a new file named `articles/{slug}.md`
-2. Include all required frontmatter fields
-3. Structure content with clear headings and examples
-4. Add a links section with relevant resources
+The workflow was fixed in v0.5.6 (YAML syntax error in Bluesky notification) and v0.6.1 (Dev.to markdown fence wrapper removal in #1167).
 
-### Style Guidelines
+## Contributing a New Article
 
-- **Headings**: Use sentence case for headings (e.g., "What's New" not "What's NEW")
-- **Code blocks**: Always specify the language for syntax highlighting
-- **Links**: Use descriptive link text, not "click here"
-- **Version references**: Use bold formatting for version numbers in prose
-- **Breaking changes**: Clearly mark breaking changes in release notes
-- **Description length**: Keep descriptions under 160 characters for SEO
+### For a Release
 
-## Metadata Conventions
+1. Create `articles/release-X.Y.Z.md` (or `release-YYYY.M.DD.md` for CalVer)
+2. Copy the front matter from an existing release article
+3. Update `title`, `description`, `canonical_url`, and `cover_image`
+4. Write the body following the release note structure
+5. Reference GitHub issues/PRs by number
+6. Include the standard Install and Links blocks
+7. Ensure the `canonical_url` matches the actual GitHub release tag
 
-### Tag Taxonomy
+### For a Non-Release Article
 
-Common tags used across articles:
+1. Choose an appropriate filename (e.g., `new-website-launch.md`, `hello-librefang.md`)
+2. Use tags relevant to the content topic
+3. Write for an external developer audience — not internal documentation
+4. Include practical commands, code blocks, or comparison tables where applicable
 
-| Tag | Usage |
-|-----|-------|
-| `rust` | Rust-related content |
-| `ai` | AI/ML features |
-| `opensource` | Open source announcements |
-| `release` | Version release notes |
-| `webdev` | Website-related content |
+### Validation Checklist
 
-### Cover Images
-
-All articles reference the official LibreFang logo from the repository:
-
-```
-https://raw.githubusercontent.com/librefang/librefang/main/public/assets/logo.png
-```
-
-## Relationship to Documentation Site
-
-The `articles/` directory integrates with the documentation site's content pipeline:
-
-1. **Frontmatter parsing**: The site reads YAML frontmatter to build article listings
-2. **Routing**: File names determine URL slugs (e.g., `release-0.6.0.md` → `/articles/release-0.6.0`)
-3. **Tag filtering**: Articles are filterable by tags on listing pages
-4. **SEO**: Canonical URLs and descriptions populate meta tags
-5. **Social preview**: Cover images appear in Open Graph and Twitter Card metadata
-
-## File Naming
-
-Articles use lowercase kebab-case for filenames:
-
-| Article Type | Naming Convention | Example |
-|--------------|-------------------|---------|
-| Release notes | `release-{version}.md` | `release-0.6.0.md` |
-| Announcements | `{topic}-{topic}.md` | `new-website-launch.md` |
-| Introductions | `{topic}.md` | `hello-librefang.md` |
-
-Release note filenames match the GitHub release tag exactly (e.g., `release-2026.3.21.md` for tag `v2026.3.21`).
+- [ ] Front matter is complete (`title`, `published`, `description`, `tags`, `canonical_url`, `cover_image`)
+- [ ] No raw HTML in Markdown
+- [ ] Code blocks specify their language for syntax highlighting
+- [ ] Issue references use `#NNN` format
+- [ ] Install block matches current distribution channels
+- [ ] Links block points to correct release tag

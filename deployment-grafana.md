@@ -1,273 +1,268 @@
 # Deployment — grafana
 
-# LibreFang Grafana Monitoring Dashboards
+# Deployment — Grafana
 
-This module provides pre-configured Grafana dashboards for monitoring a LibreFang deployment. Dashboards are automatically provisioned at startup via YAML configuration, pulling metrics from a Prometheus data source.
+## Overview
 
-## Architecture Overview
+This module provides a complete Grafana observability stack for LibreFang, consisting of four pre-built dashboards and the provisioning configuration to load them automatically. All dashboards query a single Prometheus datasource and are cross-linked for quick navigation between views.
 
-```mermaid
-graph LR
-    subgraph Grafana["Grafana Instance"]
-        D1[dashboards]
-        D2[datasources]
-    end
-    
-    subgraph Prometheus["Prometheus"]
-        M1[Metrics]
-    end
-    
-    subgraph LibreFang["LibreFang Application"]
-        A1[librefang tokens]
-        A2[librefang http requests]
-        A3[librefang agents]
-        A4[librefang cost]
-    end
-    
-    D2 -->|queries| M1
-    M1 -->|scrapes| A1
-    M1 -->|scrapes| A2
-    M1 -->|scrapes| A3
-    M1 -->|scrapes| A4
-    D1 -->|renders| M1
+## Directory Layout
+
+```
+deploy/grafana/
+├── dashboards/
+│   ├── librefang.json           # System Overview (uid: librefang-overview)
+│   ├── librefang-llm.json       # LLM & Token Usage (uid: librefang-llm)
+│   ├── librefang-http.json      # HTTP & API Metrics (uid: librefang-http)
+│   └── librefang-cost.json      # Cost & Budget (uid: librefang-cost)
+└── provisioning/
+    ├── dashboards/
+    │   └── dashboard.yml         # Auto-loads JSON from /var/lib/grafana/dashboards
+    └── datasources/
+        └── prometheus.yml         # Registers Prometheus at http://prometheus:9090
 ```
 
-## Dashboard Inventory
+## Provisioning
 
-| Dashboard | UID | Purpose |
-|-----------|-----|---------|
-| Overview | `librefang-overview` | System health, version, uptime, agent/session counts, panics/restarts |
-| LLM & Token Usage | `librefang-llm` | Token consumption, LLM calls, input/output breakdown by agent/provider/model |
-| HTTP & API | `librefang-http` | Request rates, latency percentiles, error rates, slow endpoints |
-| Cost & Budget | `librefang-cost` | USD cost tracking, token-based cost attribution, model cost distribution |
+### Datasource
 
-## Provisioning Configuration
+`provisioning/datasources/prometheus.yml` registers a single Prometheus instance:
 
-### Dashboard Provider (`deploy/grafana/provisioning/dashboards/dashboard.yml`)
+| Field | Value |
+|-------|-------|
+| `name` | Prometheus |
+| `uid` | `librefang-prometheus` |
+| `type` | prometheus |
+| `access` | proxy |
+| `url` | `http://prometheus:9090` |
+| `isDefault` | true |
+| `editable` | false |
+
+Every dashboard targets this datasource by uid (`"uid": "librefang-prometheus"`). The hostname `prometheus` assumes a Docker Compose or Kubernetes network where Prometheus is reachable at that name on port 9090.
+
+### Dashboard Provider
+
+`provisioning/dashboards/dashboard.yml` tells Grafana to recursively load all JSON files from `/var/lib/grafana/dashboards`. In a container deployment, mount the `dashboards/` directory to that path:
 
 ```yaml
-apiVersion: 1
-providers:
-  - name: "LibreFang"
-    orgId: 1
-    folder: ""
-    type: file
-    disableDeletion: false
-    editable: true
-    options:
-      path: /var/lib/grafana/dashboards
+volumes:
+  - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
 ```
 
-Dashboards are loaded from `/var/lib/grafana/dashboards/` as JSON files. The `editable: true` setting allows in-browser modifications.
-
-### Prometheus Data Source (`deploy/grafana/provisioning/datasources/prometheus.yml`)
-
-```yaml
-apiVersion: 1
-datasources:
-  - name: Prometheus
-    type: prometheus
-    uid: librefang-prometheus
-    access: proxy
-    url: http://prometheus:9090
-    isDefault: true
-```
-
-The data source uses proxy access mode to `http://prometheus:9090`. All dashboard panels reference this datasource via UID `librefang-prometheus`.
+The provider allows edits and deletions from the UI (`editable: true`, `disableDeletion: false`), but those changes are ephemeral — they reset when the container restarts unless you persist Grafana's data directory.
 
 ## Dashboard Navigation
 
-Each dashboard includes links in the top navigation bar for cross-dashboard navigation:
+All four dashboards include a top-level link bar for cross-navigation:
 
-```json
-"links": [
-  { "title": "Overview", "url": "/d/librefang-overview" },
-  { "title": "LLM & Tokens", "url": "/d/librefang-llm" },
-  { "title": "HTTP & API", "url": "/d/librefang-http" },
-  { "title": "Cost & Budget", "url": "/d/librefang-cost" }
-]
+```mermaid
+graph LR
+    A[Overview<br/>librefang-overview] -->|link| B[LLM & Tokens<br/>librefang-llm]
+    A -->|link| C[HTTP & API<br/>librefang-http]
+    A -->|link| D[Cost & Budget<br/>librefang-cost]
+    B -->|link| A
+    B -->|link| C
+    B -->|link| D
+    C -->|link| A
+    C -->|link| B
+    C -->|link| D
+    D -->|link| A
+    D -->|link| B
 ```
 
-## Overview Dashboard (`librefang.json`)
+Each link uses the dashboard uid in the URL path (e.g. `/d/librefang-llm`) so they work regardless of the Grafana root URL.
 
-Displays system-wide health and operational metrics with a 1-hour default time range.
+## Dashboard Details
 
-### Key Panels
+### 1. LibreFang Overview (`librefang-overview`)
 
-| Panel | Metric | Description |
-|-------|--------|-------------|
-| Version | `librefang_info` | Current LibreFang version |
-| Uptime | `librefang_uptime_seconds` | System uptime in `dtdurations` format |
-| Active Agents | `librefang_agents_active` | Currently active agent count (thresholds: >10 yellow, >50 red) |
-| Total Agents | `librefang_agents_total` | Total registered agents |
-| Active Sessions | `librefang_active_sessions` | Concurrent user sessions (thresholds: >5 yellow, >20 red) |
-| Cost Today | `librefang_cost_usd_today` | Daily cost in USD (thresholds: >$1 yellow, >$10 red) |
-| Panics | `librefang_panics_total` | Total panic count (thresholds: >1 orange, >100 red) |
-| Restarts | `librefang_restarts_total` | Total restart count (threshold: >1 red) |
+**File**: `librefang.json`  
+**Default time range**: Last 1 hour  
+**Template variables**: None
 
-### Time Series Panels
+The landing dashboard showing system health at a glance.
 
-- **Panics & Restarts Over Time** — Tracks the cumulative panic and restart counts to identify instability patterns
-- **Active vs Total Agents** — Compares active agent load against total registered agents
+**Row 1 — Status bar** (6 stat panels):
 
-## LLM & Token Usage Dashboard (`librefang-llm.json`)
+| Panel | Metric | Notes |
+|-------|--------|-------|
+| Version | `librefang_info` | Displays `{{version}}` label, no graph |
+| Uptime | `librefang_uptime_seconds` | Formatted as duration |
+| Active Agents | `librefang_agents_active` | Yellow at 10, red at 50 |
+| Total Agents | `librefang_agents_total` | Instant query |
+| Active Sessions | `librefang_active_sessions` | Yellow at 5, red at 20 |
+| Cost Today | `librefang_cost_usd_today` | USD, yellow at $1, red at $10 |
 
-Focused on token consumption and LLM interaction metrics with filterable variables for `agent`, `provider`, and `model`.
+**Row 2 — Health indicators** (2 stat panels):
 
-### Template Variables
+| Panel | Metric | Notes |
+|-------|--------|-------|
+| Panics | `librefang_panics_total` | Orange at 1, red at 100 |
+| Restarts | `librefang_restarts_total` | Red at ≥1 |
+
+**Charts**:
+
+| Panel | Type | Metrics |
+|-------|------|---------|
+| Panics & Restarts Over Time | timeseries | `librefang_panics_total`, `librefang_restarts_total` |
+| Active vs Total Agents | timeseries | `librefang_agents_active`, `librefang_agents_total` |
+
+---
+
+### 2. LLM & Token Usage (`librefang-llm`)
+
+**File**: `librefang-llm.json`  
+**Default time range**: Last 1 hour  
+**Template variables**: `agent`, `provider`, `model` (all multi-select with "All" default)
+
+Deep-dive into LLM usage patterns.
+
+**Template Variables**
+
+| Name | Query | Dependency |
+|------|-------|------------|
+| `$agent` | `label_values(librefang_tokens, agent)` | None |
+| `$provider` | `label_values(librefang_tokens, provider)` | None |
+| `$model` | `label_values(librefang_tokens{provider=~"$provider"}, model)` | Filtered by `$provider` |
+
+All three use `allValue: ".*"` with regex matching in queries (e.g. `agent=~"$agent"`).
+
+**Row 1 — Summary stats** (4 panels):
+
+| Panel | Metric |
+|-------|--------|
+| Total Tokens | `sum(librefang_tokens{...})` |
+| Input Tokens | `sum(librefang_tokens_input{...})` |
+| Output Tokens | `sum(librefang_tokens_output{...})` |
+| LLM Calls | `sum(librefang_llm_calls{...})` |
+
+**Charts**:
+
+| Panel | Type | Details |
+|-------|------|---------|
+| Tokens Consumed by Agent | stacked timeseries | Per-agent token lines, legend shows last value and max |
+| LLM Calls by Agent | stacked bars | Per-agent call counts |
+| Input vs Output Tokens | stacked bars | Blue=input, orange=output |
+| Tokens by Provider/Model | stacked timeseries | Grouped by `(provider, model)` |
+| Agent Token Breakdown | donut chart | Current distribution per agent |
+| Token Input/Output Ratio | donut chart | Global ratio, blue vs orange |
+| Tool Calls by Agent | stacked bars | `librefang_tool_calls` metric |
+
+---
+
+### 3. HTTP & API Metrics (`librefang-http`)
+
+**File**: `librefang-http.json`  
+**Default time range**: Last 1 hour  
+**Template variables**: None
+
+Standard RED (Rate, Errors, Duration) metrics for the HTTP layer.
+
+**Metrics used**:
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `librefang_http_requests_total` | counter | `method`, `status`, `path` |
+| `librefang_http_request_duration_seconds_bucket` | histogram | `path`, `le` |
+
+**Panels**:
+
+| Panel | Type | PromQL |
+|-------|------|--------|
+| HTTP Request Rate | timeseries | `sum(rate(librefang_http_requests_total[5m]))` + by method |
+| Request Latency (p50/p90/p99) | timeseries | `histogram_quantile(0.50/0.90/0.99, ...)` over 5m windows |
+| Request Rate by Status Code | stacked timeseries | Grouped by `status` label |
+| HTTP Error Rate (4xx/5xx) | timeseries | Regex matchers `status=~"4.."` and `status=~"5.."` |
+| Top Endpoints by Request Count | horizontal bargauge | `topk(10, sum by (path) (increase(...[1h])))` |
+| Slowest Endpoints (p99) | horizontal bargauge | `topk(10, histogram_quantile(0.99, ...))` by path |
+
+The latency panel uses fixed colors: green for p50, orange for p90, red for p99. Error rates use orange for 4xx and red for 5xx.
+
+---
+
+### 4. Cost & Budget (`librefang-cost`)
+
+**File**: `librefang-cost.json`  
+**Default time range**: Last 6 hours  
+**Template variables**: Same as LLM dashboard (`agent`, `provider`, `model`)
+
+Focuses on spending patterns and token cost proxies.
+
+**Panels**:
+
+| Panel | Type | Purpose |
+|-------|------|---------|
+| Cost Today (USD) | stat | Direct cost metric with 4-step threshold ($0→green, $1→yellow, $5→orange, $10→red) |
+| Total Tokens | stat | 1h window sum, used as cost proxy |
+| LLM Calls | stat | 1h window sum |
+| Cost Trend | timeseries | `librefang_cost_usd_today` over time |
+| Tokens by Agent (cost proxy) | stacked timeseries | Per-agent token consumption |
+| Cost by Model (token share) | donut chart | `sum by (provider, model)` |
+| Output Tokens by Agent | horizontal bargauge | `topk(10, librefang_tokens_output{...})` — highlights most expensive agents |
+| Input / Output Token Ratio | donut chart | Blue=input (cheaper), orange=output (expensive) |
+
+The 6-hour default window is wider than other dashboards to better show daily cost accumulation.
+
+## Required Prometheus Metrics
+
+The application must expose the following metrics at its `/metrics` endpoint for these dashboards to function:
+
+```
+# Info
+librefang_info{version="..."}
+
+# System health
+librefang_uptime_seconds
+librefang_agents_active
+librefang_agents_total
+librefang_active_sessions
+librefang_panics_total
+librefang_restarts_total
+
+# Cost
+librefang_cost_usd_today
+
+# LLM usage (labels: agent, provider, model)
+librefang_tokens
+librefang_tokens_input
+librefang_tokens_output
+librefang_llm_calls
+librefang_tool_calls
+
+# HTTP (labels: method, status, path)
+librefang_http_requests_total
+librefang_http_request_duration_seconds_bucket
+```
+
+All label names in the dashboards are hardcoded — the application must use exactly `agent`, `provider`, `model`, `method`, `status`, and `path` as label keys.
+
+## Deployment
+
+Mount both directories into the Grafana container:
 
 ```yaml
-- name: agent
-  query: label_values(librefang_tokens, agent)
-- name: provider
-  query: label_values(librefang_tokens, provider)
-- name: model
-  query: label_values(librefang_tokens{provider=~"$provider"}, model)
+services:
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=secret
+    ports:
+      - "3000:3000"
 ```
 
-The `model` variable's query depends on the selected `provider`, enabling hierarchical filtering.
+Grafana reads provisioning on startup. To reload dashboards without restarting, send a `POST` to the admin API or set `GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH` to one of the JSON files to set a custom landing page.
 
-### Key Panels
+## Modifying Dashboards
 
-| Panel | Metrics | Visualization |
-|-------|---------|---------------|
-| Total / Input / Output Tokens | `librefang_tokens`, `librefang_tokens_input`, `librefang_tokens_output` | Stat cards |
-| LLM Calls | `librefang_llm_calls` | Stat card |
-| Tokens Consumed by Agent | `librefang_tokens` grouped by agent | Stacked timeseries |
-| LLM Calls by Agent | `librefang_llm_calls` grouped by agent | Stacked bar chart |
-| Input vs Output Tokens | `librefang_tokens_input`, `librefang_tokens_output` | Stacked bar chart |
-| Tokens by Provider/Model | `librefang_tokens` grouped by `(provider, model)` | Stacked timeseries |
-| Agent Token Breakdown | `librefang_tokens` | Donut pie chart |
-| Token Input/Output Ratio | `librefang_tokens_input`, `librefang_tokens_output` | Donut pie chart |
-| Tool Calls by Agent | `librefang_tool_calls` | Stacked bar chart |
+1. **Edit in Grafana UI** — make changes, then use "Inspect → JSON Model" to export back to the JSON files.
+2. **Edit JSON directly** — all files use schema version 39. Key fields to preserve:
+   - `uid` — used by cross-dashboard links and the provisioning system.
+   - `datasource.uid` — must remain `"librefang-prometheus"`.
+   - `templating.list` — variable names (`$agent`, `$provider`, `$model`) are referenced in PromQL expressions via regex matchers like `agent=~"$agent"`.
+3. **Add new panels** — respect the `gridPos` layout. Panels are positioned on a 24-column grid. The `y` coordinate determines row placement.
 
-### Key Metric Labels
-
-- `agent` — Name of the agent making the request
-- `provider` — LLM provider (e.g., openai, anthropic)
-- `model` — Model identifier (e.g., gpt-4, claude-3)
-
-## HTTP & API Dashboard (`librefang-http.json`)
-
-Monitors HTTP traffic patterns and API performance with a 1-hour default time range.
-
-### Key Panels
-
-| Panel | Metrics | Description |
-|-------|---------|-------------|
-| HTTP Request Rate | `rate(librefang_http_requests_total[5m])` | Requests per second, total and by method |
-| Request Latency (p50/p90/p99) | `histogram_quantile()` on duration histogram | Latency percentiles in seconds |
-| Request Rate by Status Code | `rate(librefang_http_requests_total[5m])` grouped by status | Stacked view of 2xx/4xx/5xx responses |
-| HTTP Error Rate | `rate(librefang_http_requests_total{status=~"4.."}[5m])` | 4xx and 5xx error rates |
-| Top Endpoints by Request Count | `topk(10, sum by (path) (increase(...)))` | Top 10 busiest endpoints |
-| Slowest Endpoints | `histogram_quantile(0.99, ...)` grouped by path | Top 10 highest p99 latency endpoints |
-
-### Latency Thresholds
-
-The latency panel uses color-coded percentiles:
-- **p50** — green (typical response time)
-- **p90** — orange (slow requests)
-- **p99** — red (tail latency)
-
-## Cost & Budget Dashboard (`librefang-cost.json`)
-
-Tracks LLM usage costs and token-driven cost attribution with filterable variables for `agent`, `provider`, and `model`.
-
-### Key Panels
-
-| Panel | Metrics | Visualization |
-|-------|---------|---------------|
-| Cost Today | `librefang_cost_usd_today` | Stat card with USD currency formatting (thresholds: >$1 yellow, >$5 orange, >$10 red) |
-| Total Tokens (1h) | `sum(librefang_tokens{...})` | Stat card |
-| LLM Calls (1h) | `sum(librefang_llm_calls{...})` | Stat card |
-| Cost Trend | `librefang_cost_usd_today` | Timeseries showing cost accumulation |
-| Tokens by Agent | `librefang_tokens{...}` grouped by agent | Stacked timeseries (token volume as cost proxy) |
-| Cost by Model | `librefang_tokens` grouped by `(provider, model)` | Donut pie chart |
-| Output Tokens by Agent | `topk(10, librefang_tokens_output{...})` | Bar gauge showing top 10 agents by output token count |
-| Input/Output Token Ratio | `sum(librefang_tokens_input)`, `sum(librefang_tokens_output)` | Donut pie chart |
-
-### Cost Insight
-
-Output tokens are annotated as 3-5x more expensive than input tokens. The output token bar gauge helps identify which agents are generating the highest-cost completions.
-
-## Prometheus Metrics Reference
-
-The dashboards query the following metrics exported by the LibreFang application:
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `librefang_info` | Gauge | `version` | Build information |
-| `librefang_uptime_seconds` | Gauge | — | Seconds since process start |
-| `librefang_agents_active` | Gauge | — | Currently active agents |
-| `librefang_agents_total` | Gauge | — | Total registered agents |
-| `librefang_active_sessions` | Gauge | — | Active user sessions |
-| `librefang_cost_usd_today` | Gauge | — | Today's cumulative cost in USD |
-| `librefang_panics_total` | Counter | — | Total panic events |
-| `librefang_restarts_total` | Counter | — | Total restart events |
-| `librefang_tokens` | Counter | `agent`, `provider`, `model` | Total tokens consumed |
-| `librefang_tokens_input` | Counter | `agent`, `provider`, `model` | Input (prompt) tokens |
-| `librefang_tokens_output` | Counter | `agent`, `provider`, `model` | Output (completion) tokens |
-| `librefang_llm_calls` | Counter | `agent`, `provider`, `model` | LLM API call count |
-| `librefang_tool_calls` | Counter | `agent`, `provider`, `model` | Tool invocation count |
-| `librefang_http_requests_total` | Counter | `method`, `path`, `status` | Total HTTP requests |
-| `librefang_http_request_duration_seconds_bucket` | Histogram | `method`, `path`, `status` | Request duration buckets |
-
-## Deployment Requirements
-
-The dashboards assume:
-
-1. **Prometheus** is running and accessible at `http://prometheus:9090`
-2. **LibreFang** is configured to expose Prometheus metrics at its `/metrics` endpoint
-3. Prometheus has a scrape target configured for the LibreFang application
-
-### Container Volume Mounts
-
-For the provisioning to work in Docker/Kubernetes:
-
-| Host Path | Container Path | Purpose |
-|-----------|---------------|---------|
-| `deploy/grafana/dashboards/` | `/var/lib/grafana/dashboards/` | Dashboard JSON files |
-| `deploy/grafana/provisioning/dashboards/` | `/etc/grafana/provisioning/dashboards/` | Dashboard provider config |
-| `deploy/grafana/provisioning/datasources/` | `/etc/grafana/provisioning/datasources/` | Datasource config |
-
-## Customization
-
-### Adding New Metrics
-
-To extend dashboards with new metrics:
-
-1. Ensure the metric is exported by LibreFang (check `/metrics` endpoint)
-2. Edit the dashboard JSON directly or via Grafana UI (`editable: true` is set)
-3. Add a new panel targeting the metric with appropriate visualization
-
-### Threshold Tuning
-
-Each panel's `thresholds` can be adjusted based on your deployment scale:
-
-```json
-"thresholds": {
-  "mode": "absolute",
-  "steps": [
-    { "color": "green", "value": null },
-    { "color": "yellow", "value": 100 },  // Adjust to match your baseline
-    { "color": "red", "value": 1000 }
-  ]
-}
-```
-
-### New Template Variables
-
-To add filtering by additional dimensions (e.g., `region`, `environment`), add to the `templating.list` array:
-
-```json
-{
-  "name": "environment",
-  "label": "Environment",
-  "type": "query",
-  "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
-  "query": "label_values(librefang_tokens, environment)",
-  "refresh": 2,
-  "includeAll": true,
-  "allValue": ".*"
-}
-```
+When adding a new dashboard, create the JSON file in `dashboards/`, choose a uid matching the `librefang-*` convention, and add navigation links in the `links` array of the other dashboards to integrate it into the cross-navigation flow.

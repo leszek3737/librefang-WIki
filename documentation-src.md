@@ -1,291 +1,146 @@
 # Documentation — src
 
-# LibreFang Documentation Site
+# Documentation Site (`docs/src`)
 
-The `docs/src/` directory contains the LibreFang documentation website built with Next.js and MDX. This is a comprehensive developer documentation portal that covers the entire LibreFang Agent Operating System, from core concepts to advanced configuration.
+The documentation site is a Next.js application with MDX support that renders LibreFang's product documentation. It provides full-text search, scroll-tracked navigation, syntax-highlighted code blocks, and a responsive layout with mobile support.
 
-## Overview
-
-The documentation site serves as the primary reference for developers and users working with LibreFang. It covers:
-
-- **Agent System**: Templates, lifecycle, capabilities, and security
-- **Hands**: Pre-built autonomous agent packages
-- **Memory**: Persistent storage, vector search, and knowledge graphs
-- **Skills**: Pluggable tool bundles extending agent capabilities
-- **Plugins**: Context engine hooks for memory recall and context assembly
-- **Workflows**: Multi-step agent pipelines with branching and loops
-- **Architecture**: Internal system design and crate structure
-
-## Project Structure
-
-```
-docs/
-├── src/
-│   ├── app/                    # Next.js App Router pages
-│   │   ├── agent/             # Agent documentation pages
-│   │   │   ├── hands/         # Autonomous hands guide
-│   │   │   ├── memory/        # Memory system docs
-│   │   │   ├── plugins/        # Context engine plugins
-│   │   │   ├── prompt-intelligence/  # A/B testing for prompts
-│   │   │   ├── skills/         # Skill development guide
-│   │   │   ├── templates/      # Agent template catalog
-│   │   │   └── workflows/     # Workflow engine guide
-│   │   ├── architecture/      # System architecture docs
-│   │   ├── layout.tsx         # Root layout with providers
-│   │   ├── page.tsx           # Home page
-│   │   └── providers.tsx      # Theme and section providers
-│   ├── components/             # React components
-│   │   ├── Layout.tsx         # Main layout wrapper
-│   │   ├── Navigation.tsx     # Sidebar navigation
-│   │   ├── MobileNavigation.tsx
-│   │   ├── Search.tsx         # Search interface
-│   │   ├── Header.tsx         # Page header
-│   │   ├── Code.tsx           # Code blocks with tabs
-│   │   ├── Heading.tsx        # Section headings
-│   │   ├── SectionProvider.tsx # Scroll tracking
-│   │   ├── NotificationCenter.tsx
-│   │   ├── ErrorBoundary.tsx
-│   │   └── ui/                # Reusable UI primitives
-│   ├── lib/                   # Utilities
-│   │   ├── utils.ts           # Helper functions
-│   │   ├── remToPx.ts         # CSS unit conversion
-│   │   └── useKeyboardShortcuts.ts
-│   ├── mdx/                   # MDX processing
-│   │   ├── search.mjs         # Search index generation
-│   │   └── rehype.mjs         # MDX transformation
-│   └── styles/                # Global styles
-├── public/                    # Static assets
-├── package.json
-└── next.config.js
-```
-
-## Core Components
-
-### Layout System
-
-The layout system manages the overall page structure with persistent navigation:
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Header                               │
-│  [Logo]  [Search]                    [GitHub] [Theme]  │
-├─────────────┬───────────────────────────────────────────┤
-│             │                                           │
-│ Navigation  │           Content Area                     │
-│             │                                           │
-│ - Getting   │   # Page Title                            │
-│   Started   │                                           │
-│ - Agents    │   Documentation content rendered from      │
-│ - Hands     │   MDX files with custom components.        │
-│ - Memory    │                                           │
-│ - Skills    │                                           │
-│ - ...       │                                           │
-│             │                                           │
-└─────────────┴───────────────────────────────────────────┘
-```
-
-**Layout.tsx** wraps the application with theme providers and navigation. It integrates with the section tracking system to highlight the current page in the sidebar.
-
-### Navigation System
-
-The navigation consists of three coordinated components:
-
-**Navigation.tsx** renders the sidebar with collapsible sections. It uses `useSectionStore` to track which sections are expanded and highlights the active page based on scroll position.
-
-**MobileNavigation.tsx** provides a drawer-style navigation for smaller screens. It shares state with the desktop navigation through `useIsInsideMobileNavigation`.
-
-**VisibleSectionHighlight** tracks which documentation section is currently visible in the viewport using scroll detection, updating the active navigation item accordingly.
-
-### Search System
-
-Search provides full-text search across all documentation:
+## Architecture Overview
 
 ```mermaid
-graph LR
-    A[User Types] --> B[Search Component]
-    B --> C[Search Props Hook]
-    C --> D[Search Index]
-    D --> E[Results Display]
-    E --> F[onNavigate]
-    F --> G[Router Navigation]
+graph TD
+    MDX[MDX Page Files] --> Build[Next.js Build Pipeline]
+    Build --> rehype[rehype.mjs - Section Extraction]
+    Build --> search[search.mjs - Search Index]
+    rehype --> Sections[Section Data]
+    search --> SearchIndex[Search Index JSON]
+    
+    Sections --> Nav[Navigation.tsx]
+    SearchIndex --> SearchComp[Search.tsx]
+    
+    Layout[Layout.tsx] --> Nav
+    Layout --> Content[Page Content]
+    Layout --> Footer[Footer]
+    
+    SectionProvider[SectionProvider.tsx] --> Nav
+    Heading[Heading.tsx] --> SectionProvider
 ```
 
-**Search.tsx** implements the search interface with keyboard navigation. It uses `useSearchProps` to interface with the search index generated at build time.
+## Component Hierarchy
 
-**Search index generation** (`mdx/search.mjs`):
-- Scans all MDX files
-- Extracts headings and content
-- Builds a searchable index
-- Excludes object expressions to reduce noise
+The rendering pipeline flows through these layers:
 
-### Code Display
+1. **`Layout`** (`src/components/Layout.tsx`) — wraps every documentation page. Uses `withPrefix` (`src/lib/utils.ts`) to resolve URL paths, accounting for configured base paths.
 
-**Code.tsx** handles syntax-highlighted code blocks with several features:
+2. **`Navigation`** (`src/components/Navigation.tsx`) — sidebar with collapsible section groups. Each `NavigationGroup` reads section metadata from `SectionProvider` and renders expandable link lists.
 
-- **Tab groups**: Multiple code samples in tabs (e.g., Bash, Python, JSON)
-- **Copy button**: One-click copy with visual feedback
-- **Panel titles**: Optional headers for code blocks
-- **Layout shift prevention**: Reserves space before content loads
+3. **`SectionProvider`** (`src/components/SectionProvider.tsx`) — shared state for tracking which headings are visible in the viewport. Uses `createSectionStore` to produce a Zustand-like store, consumed via `useSectionStore`.
 
-The `useTabGroupProps` hook manages tab state, while `usePreventLayoutShift` ensures the UI doesn't jump when code loads.
+4. **`Heading`** (`src/components/Heading.tsx`) — registers each `<h2>`/`<h3>` with the section store and provides the scroll anchor that `VisibleSectionHighlight` and `ActivePageMarker` use to track reading position.
 
-## Theming
+5. **`CodeGroup`** (`src/components/Code.tsx`) — tabbed code block renderer. `getPanelTitle` infers tab labels from filenames or language identifiers. `useTabGroupProps` calls `usePreventLayoutShift` to avoid visual jumps when switching tabs.
 
-The site supports light and dark themes through **providers.tsx**:
+6. **`Search`** (`src/components/Search.tsx`) — full-text search modal. `useSearchProps` manages query state, keyboard navigation through results, and calls `onNavigate` on selection. A separate `MobileSearch` variant shares the same hook.
 
-```typescript
-ThemeWatcher → onMediaChange → theme state → CSS variables
+7. **`MobileNavigation`** (`src/components/MobileNavigation.tsx`) — slide-out drawer for small screens. Exposes `useIsInsideMobileNavigation` so nested components can suppress desktop-only behaviors (e.g., scroll tracking, hover states).
+
+8. **`ThemeWatcher`** (`src/app/providers.tsx`) — listens for `prefers-color-scheme` changes via `onMediaChange` and applies the user's theme preference.
+
+## Scroll Tracking System
+
+The documentation site highlights the currently visible section in the sidebar. This involves three cooperating pieces:
+
+- **`useVisibleSections`** — a `useEffect` hook in `SectionProvider.tsx` that sets up an `IntersectionObserver` on all registered headings. On each intersection event it calls `checkVisibleSections` to update the store.
+
+- **`VisibleSectionHighlight`** — reads the visible section IDs from `useSectionStore` and renders a positioned highlight bar behind the active navigation item. Uses `remToPx` (`src/lib/remToPx.ts`) for unit conversion.
+
+- **`ActivePageMarker`** — marks the current page's link in the sidebar, using `remToPx` for positioning.
+
+The `NavigationGroup` component uses `useInitialValue` to determine whether its section list should start expanded (if the current page is inside that group).
+
+## MDX Processing Pipeline
+
+### Section Extraction (`src/mdx/rehype.mjs`)
+
+A custom rehype plugin (`getSections`) walks the MDX AST at build time and extracts heading text, IDs, and nesting depth. This produces the structured data that populates the sidebar's collapsible section lists.
+
+### Search Index Generation (`src/mdx/search.mjs`)
+
+The `extractSections` function walks MDX content and produces a searchable index. It calls `excludeObjectExpressions` to strip out JSX object expressions (like `<Note>` component props) that shouldn't appear in search results. The output is a JSON file consumed at runtime by the `Search` component.
+
+## Navigation Integration
+
+The `navigate` function from `Search.tsx` is the central routing primitive. It calls `onNavigate` internally and is consumed throughout the dashboard and documentation pages:
+
+| Caller | Trigger |
+|--------|---------|
+| `ChatPage` | Cross-community navigation events |
+| `HandsPage`, `AgentsPage` | Card clicks and list interactions |
+| `WorkflowsPage` | `openWorkflow`, `handleNewWorkflow`, `handleUseTemplate` |
+| `CanvasPage` | Internal page transitions |
+| `NotificationCenter` | `goToAgent`, `handleAction` |
+| `CommandPalette` | Keyboard-driven navigation |
+| `useKeyboardShortcuts` | `handleKeyDown` for global shortcuts |
+
+## Utility Modules
+
+### `src/lib/remToPx.ts`
+
+Converts `rem` values to pixel values by reading the document root font size. Used by `ActivePageMarker`, `VisibleSectionHighlight`, and `Heading` for precise pixel-based positioning.
+
+### `src/lib/utils.ts`
+
+Exports `withPrefix`, which prepends the configured base path to URLs. Called by `Layout`, `Navigation`, and other components that render links.
+
+### `src/lib/useKeyboardShortcuts.ts`
+
+Registers global keyboard event listeners. `handleKeyDown` invokes `navigate` from Search to support keyboard-driven page transitions.
+
+## Key Design Decisions
+
+**Subprocess-per-hook for plugins** — the documentation for context engine plugins (`docs/src/app/agent/plugins/page.mdx`) explains that each hook invocation spawns a fresh subprocess. This is reflected in the docs site's own architecture: the MDX build pipeline isolates content processing from runtime rendering.
+
+**Scroll-based navigation state** — rather than tracking URL hash fragments, the section highlight system uses `IntersectionObserver`. This means the highlight updates continuously as the user scrolls, without requiring hash changes or history entries.
+
+**Search index at build time** — the search index is generated during the Next.js build by `search.mjs`, keeping the runtime bundle small. The `Search` component loads the index on demand when the search modal opens.
+
+## File Map
+
+```
+docs/src/
+├── app/
+│   ├── providers.tsx              # ThemeWatcher, global providers
+│   ├── agent/
+│   │   ├── hands/page.mdx         # Autonomous Hands docs
+│   │   ├── memory/page.mdx        # Memory System docs
+│   │   ├── plugins/page.mdx       # Context Engine Plugins docs
+│   │   ├── prompt-intelligence/page.mdx  # Prompt A/B testing docs
+│   │   ├── skills/page.mdx        # Skill Development docs
+│   │   ├── templates/page.mdx     # Agent Templates Catalog
+│   │   └── workflows/page.mdx     # Workflow Engine Guide
+│   └── architecture/page.mdx      # Architecture overview
+├── components/
+│   ├── Code.tsx                   # CodeGroup, useTabGroupProps, getPanelTitle
+│   ├── Heading.tsx                # Section-aware heading with anchor
+│   ├── Layout.tsx                 # Page layout wrapper
+│   ├── MobileNavigation.tsx       # Mobile drawer + useIsInsideMobileNavigation
+│   ├── Navigation.tsx             # Sidebar: NavigationGroup, VisibleSectionHighlight, ActivePageMarker
+│   ├── NotificationCenter.tsx     # Toast/notification rendering
+│   ├── Search.tsx                 # Search modal + useSearchProps + navigate
+│   └── SectionProvider.tsx        # useVisibleSections, createSectionStore, useSectionStore
+├── lib/
+│   ├── remToPx.ts                 # rem → px conversion
+│   ├── useKeyboardShortcuts.ts    # Global keyboard handler
+│   └── utils.ts                   # withPrefix URL helper
+└── mdx/
+    ├── rehype.mjs                 # Section extraction plugin (getSections)
+    └── search.mjs                 # Search index builder (extractSections, excludeObjectExpressions)
 ```
 
-**ThemeWatcher** listens for system theme changes via `matchMedia` and updates the theme state accordingly. Theme classes are applied to the root element, and CSS variables define the color palette.
+## Adding New Documentation Pages
 
-## Section Tracking
+1. Create a new `page.mdx` file under the appropriate route directory in `docs/src/app/`.
+2. Write MDX content using standard Markdown plus the available components (`Note`, `CodeGroup`, etc.).
+3. The build pipeline automatically runs `rehype.mjs` to extract sections and `search.mjs` to index the page content.
+4. Add a navigation entry in the documentation config (typically a navigation JSON or TOML file referenced by `Navigation.tsx`) so the page appears in the sidebar.
 
-**SectionProvider.tsx** tracks which documentation sections are visible as users scroll:
-
-```typescript
-SectionProvider → useVisibleSections → Navigation highlight
-                         ↓
-              checkVisibleSections → scroll events
-```
-
-This enables the sidebar to automatically expand the relevant section and highlight the current heading.
-
-## MDX Processing
-
-The documentation uses MDX for rich content:
-
-**rehype.mjs** transforms MDX with:
-- Heading extraction for navigation
-- Code block processing
-- Custom component mapping
-
-Custom components available in MDX:
-- `<Note>` - Callout boxes for tips
-- `<Warning>` - Important warnings
-- Tables - Styled markdown tables
-- API endpoint tables - Specialized endpoint documentation
-
-## Key Execution Flows
-
-### Navigation Flow
-
-```
-User clicks link → onNavigate → navigate function → router.push()
-                                       ↓
-                            Sidebar highlights section
-                            Content area updates
-```
-
-### Search Flow
-
-```
-User opens search → type query → useSearchProps → search index
-                                                     ↓
-                              results displayed → select result
-                                                     ↓
-                                          onNavigate → navigate
-```
-
-### Page Load Flow
-
-```
-Request → Layout → SectionProvider → Navigation
-                            ↓
-                    Page component → MDX render
-                            ↓
-                    Headings registered → Navigation updates
-```
-
-## Styling Approach
-
-The documentation uses Tailwind CSS with CSS variables for theming. Custom styles in `src/styles/` handle:
-- Syntax highlighting theme
-- Custom scrollbar styling
-- Print styles
-- Responsive adjustments
-
-## Development Commands
-
-```bash
-cd docs
-npm install
-npm run dev      # Start development server
-npm run build    # Production build
-npm run lint     # ESLint checks
-```
-
-## Adding Documentation
-
-### New Page
-
-1. Create MDX file in appropriate `app/` subdirectory:
-
-```mdx
-# Page Title
-
-Content with **markdown** and custom components.
-```
-
-2. The page automatically appears in navigation based on file location.
-
-### Custom Components
-
-Add reusable components to `src/components/`:
-
-```typescript
-// src/components/CustomComponent.tsx
-export function CustomComponent({ children }) {
-  return <div className="custom-styling">{children}</div>;
-}
-```
-
-Import in MDX files:
-
-```mdx
-import { CustomComponent } from '@/components/CustomComponent';
-
-<CustomComponent>
-  Content here
-</CustomComponent>
-```
-
-### Code Examples
-
-Use fenced code blocks with language identifiers:
-
-````mdx
-```typescript
-const example = "with syntax highlighting";
-```
-````
-
-For multi-language examples, use the tab syntax:
-
-````mdx
-```bash Tab="Bash"
-echo "Hello"
-```
-
-```typescript Tab="TypeScript"
-console.log("Hello");
-```
-````
-
-## Configuration
-
-Key configuration files:
-
-- **next.config.js**: Next.js configuration, MDX support
-- **tailwind.config.js**: Theme colors, custom utilities
-- **tsconfig.json**: TypeScript path aliases (`@/` maps to `src/`)
-
-## Deployment
-
-The documentation deploys to Vercel (or similar static hosting):
-
-```bash
-npm run build  # Generates static output in .next/
-```
-
-The site is fully static after build, suitable for CDN distribution.
+No changes to the component layer are required for new content pages — the section extraction, search indexing, and scroll tracking all work automatically based on the MDX heading structure.

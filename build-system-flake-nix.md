@@ -1,275 +1,167 @@
 # Build System — flake.nix
 
-# LibreFang Build System — `flake.nix`
+# Build System — `flake.nix`
 
 ## Overview
 
-This module defines the Nix flake for LibreFang, providing reproducible builds, automated checks, and a standardized development environment across all supported platforms. The flake uses [crane](https://github.com/ipetkov/crane) to integrate Rust tooling with Nix, ensuring efficient incremental builds and cache-friendly workflows.
+The LibreFang project uses a Nix flake to define a reproducible, cross-platform build pipeline for its Rust workspace. The flake leverages [crane](https://github.com/ipetkov/crane) for incremental Cargo builds with aggressive caching, and [rust-overlay](https://github.com/oxalica/rust-overlay) to pin a consistent Rust toolchain across all developer machines and CI environments.
 
-## Input Dependencies
+## Dependency Graph
 
-The flake declares four primary inputs that form the foundation of the build system:
-
-| Input | Source | Purpose |
-|-------|--------|---------|
-| `nixpkgs` | `github:NixOS/nixpkgs/nixpkgs-unstable` | Base package set and Nix utilities |
-| `crane` | `github:ipetkov/crane` | Rust-specific build helpers and caching |
-| `flake-utils` | `github:numtide/flake-utils` | Cross-platform compatibility helpers |
-| `rust-overlay` | `github:oxalica/rust-overlay` | Rust toolchain management with latest stable |
-
-The `rust-overlay` input follows `nixpkgs` to maintain version consistency between the two.
-
-## Build Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        flake.nix                                │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌──────────────┐     ┌──────────────────────────────────────┐ │
-│  │   nixpkgs    │────▶│         pkgs (with rust overlay)     │ │
-│  │  (unstable)  │     └──────────────────────────────────────┘ │
-│  └──────────────┘                      │                      │
-│         │                              ▼                      │
-│         │              ┌───────────────────────────────┐      │
-│         │              │      rustToolchain           │      │
-│         │              │   (stable.latest.default)    │      │
-│         │              │   + rust-src, rust-analyzer, │      │
-│         │              │     clippy extensions        │      │
-│         │              └───────────────────────────────┘      │
-│         │                              │                      │
-│         ▼                              ▼                      │
-│  ┌──────────────────────────────────────────────────────────┐ │
-│  │                     craneLib                             │ │
-│  │  (mkLib pkgs with custom toolchain)                      │ │
-│  └──────────────────────────────────────────────────────────┘ │
-│                              │                                 │
-│         ┌────────────────────┼────────────────────┐           │
-│         ▼                    ▼                    ▼           │
-│  ┌─────────────┐    ┌────────────────┐    ┌──────────────┐   │
-│  │ cleanCargo  │    │ buildDepsOnly  │    │ buildPackage │   │
-│  │ Source src  │    │ (cargoArtifacts)    │ (librefang)  │   │
-│  └─────────────┘    └────────────────┘    └──────────────┘   │
-│         │                   │                    │           │
-│         └───────────────────┴────────────────────┘           │
-│                             ▼                                 │
-│              ┌───────────────────────────────┐              │
-│              │         checks                │              │
-│              │  (clippy, fmt, librefang)     │              │
-│              └───────────────────────────────┘              │
-│                             │                                 │
-│         ┌────────────────────┼────────────────────┐           │
-│         ▼                    ▼                    ▼           │
-│  ┌─────────────┐    ┌────────────────┐    ┌──────────────┐   │
-│  │  packages   │    │    apps        │    │  devShells   │   │
-│  │ default     │    │  default       │    │   default    │   │
-│  └─────────────┘    └────────────────┘    └──────────────┘   │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    A[nixpkgs-unstable] --> B[flake outputs]
+    C[crane] --> B
+    D[rust-overlay] -->|follows nixpkgs| B
+    E[flake-utils] -->|eachDefaultSystem| B
+    B --> F[packages.librefang-cli]
+    B --> G[checks: clippy + fmt]
+    B --> H[devShells.default]
 ```
 
-## Key Components
+## Inputs
 
-### Rust Toolchain Configuration
+| Input | Purpose |
+|---|---|
+| `nixpkgs` | Package set (tracks `nixpkgs-unstable`) |
+| `crane` | Cargo-aware Nix build library — handles dependency caching, clippy, formatting checks |
+| `flake-utils` | Provides `eachDefaultSystem` to iterate outputs over all supported platforms |
+| `rust-overlay` | Supplies `rust-bin` for selecting a specific Rust toolchain; follows `nixpkgs` to avoid mismatched libc versions |
 
-```nix
+## Build Pipeline
+
+The flake produces outputs per-system via `flake-utils.lib.eachDefaultSystem`. Within each system, the build proceeds through these stages:
+
+### 1. Toolchain Selection
+
+```
 rustToolchain = pkgs.rust-bin.stable.latest.default.override {
   extensions = [ "rust-src" "rust-analyzer" "clippy" ];
 };
 ```
 
-The toolchain is built from `rust-bin` (instead of nixpkgs' `rustc`) to ensure:
-- **Latest stable Rust** via `stable.latest`
-- **`rust-src`** — Required for procedural macros and build scripts
-- **`rust-analyzer`** — Language server for IDE support in the dev shell
-- **`clippy`** — Linter used by the CI checks
+Pins the latest stable Rust compiler and adds `rust-src` (for IDE completion), `rust-analyzer`, and `clippy`. This toolchain is passed to crane via `overrideToolchain`.
 
-### Source Filtering
+### 2. Source Filtering
 
-```nix
+```
 src = craneLib.cleanCargoSource ./.;
 ```
 
-`cleanCargoSource` filters the repository to only include files relevant to Rust compilation, excluding:
-- `.git` directory
-- `target/` build artifacts
-- Documentation files not needed for compilation
-- Other non-Rust source files
+`cleanCargoSource` strips non-Rust files (documentation assets, non-Cargo config, etc.) from the source tree. This ensures that edits to files like `README.md` or this documentation don't invalidate the build cache.
 
-This optimization improves build caching and reduces the evaluation surface.
+### 3. Dependency Caching Layer
 
-### Dependency Caching Strategy
-
-```nix
+```
 cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+```
 
+This is the critical performance optimization. `buildDepsOnly` compiles **only** the workspace's third-party dependencies and stores the resulting build artifacts. Because `src` filtering removes irrelevant files, these artifacts are cached and reused as long as `Cargo.lock` and dependency declarations don't change — even when application code changes frequently.
+
+### 4. Application Build
+
+```
 librefang = craneLib.buildPackage (commonArgs // {
   inherit cargoArtifacts;
-  # ...
+  cargoExtraArgs = "--package librefang-cli";
+  doCheck = false;
 });
 ```
 
-The build system uses a two-phase approach:
-1. **`buildDepsOnly`** — Compiles `Cargo.lock` dependencies first, producing `cargoArtifacts`
-2. **`buildPackage`** — Builds the actual project using cached dependencies
+Builds the `librefang-cli` crate using the pre-cached dependencies. Tests are disabled (`doCheck = false`) because the test suite requires network access and runtime infrastructure that isn't available in the Nix sandbox.
 
-This pattern enables granular caching: dependency compilation can be reused across rebuilds when only application code changes.
+## Native Dependencies
 
-### Native Dependencies
+**Build-time** (`nativeBuildInputs`):
+- `pkg-config` — for locating system libraries
+- `rustToolchain` — the pinned Rust compiler
 
-```nix
-nativeBuildInputs = with pkgs; [
-  pkg-config
-  rustToolchain
-];
+**Run-time / link-time** (`buildInputs`):
+- `openssl` — TLS/SSL support (likely for HTTP client functionality)
 
-buildInputs = with pkgs; [
-  openssl
-] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-  pkgs.apple-sdk
-  pkgs.libiconv
-];
-```
+**Darwin-specific** (conditionally included):
+- `apple-sdk` — macOS system headers
+- `libiconv` — character encoding conversion (common requirement on macOS for Rust builds)
 
-- **`pkg-config`** — Locates library headers during build
-- **`openssl`** — Required by the Rust `openssl` crate
-- **Darwin-specific** — `apple-sdk` provides system headers, `libiconv` handles text encoding
+## Outputs
 
-### Strict Dependency Mode
+### `packages.default` / `packages.librefang-cli`
 
-```nix
-commonArgs = {
-  # ...
-  strictDeps = true;
-};
-```
+The compiled `librefang-cli` binary. These are the same derivation exposed under two attribute names for convenience.
 
-`strictDeps = true` ensures all dependencies must be explicitly declared in `nativeBuildInputs` or `buildInputs`. This catches missing dependencies early and improves reproducibility.
+### `apps.default`
 
-## Output Types
+Wraps the CLI binary as a Nix app, allowing `nix run .` to execute `librefang-cli` directly.
 
-### Checks
+### `checks`
 
-The `checks` output provides reproducible validation of code quality:
+| Check | What it does |
+|---|---|
+| `librefang` | Builds the CLI package (verifies compilation succeeds) |
+| `librefang-clippy` | Runs `cargo clippy --workspace --all-targets` with `-D warnings` — all warnings are treated as errors |
+| `librefang-fmt` | Runs `cargo fmt --check` — fails if any file is not formatted |
 
-| Check | Command | Purpose |
-|-------|---------|---------|
-| `librefang` | `cargo build` | Verifies the project compiles |
-| `librefang-clippy` | `cargo clippy --workspace` | Runs linter with `-D warnings` |
-| `librefang-fmt` | `cargo fmt --check` | Validates code formatting |
-
-These checks run automatically in CI via `nix flake check`.
-
-### Packages
-
-```nix
-packages = {
-  default = librefang;
-  librefang-cli = librefang;
-};
-```
-
-The CLI binary is the default package. Users can build it with:
+Run all checks with:
 
 ```bash
-nix build                      # default package
-nix build .#librefang-cli      # explicit reference
-```
-
-### Apps
-
-```nix
-apps.default = flake-utils.lib.mkApp {
-  drv = librefang;
-};
-```
-
-Enables running the application directly:
-
-```bash
-nix run .                      # run the CLI
-```
-
-### Development Shell
-
-```nix
-devShells.default = craneLib.devShell {
-  checks = self.checks.${system};
-  packages = with pkgs; [ ... ];
-  inputsFrom = [ librefang ];
-  shellHook = '' ... '';
-};
-```
-
-The dev shell provides:
-
-| Component | Description |
-|-----------|-------------|
-| `checks` | Runs clippy/fmt checks when entering the shell |
-| `inputsFrom` | Inherits build dependencies from `librefang` |
-| `cargo-watch` | Auto-rebuild on file changes |
-| `cargo-edit` | CLI for adding/removing dependencies |
-| `cargo-expand` | Macro debugging |
-| `just` | Command runner (alternative to Makefile) |
-| `gh`, `git`, `nodejs`, `python3` | Standard development tools |
-
-Enter the development environment with:
-
-```bash
-nix develop
-```
-
-## How to Use
-
-### Building
-
-```bash
-# Build the CLI binary
-nix build
-
-# Find the result
-./result/bin/librefang --version
-```
-
-### Development Workflow
-
-```bash
-# Enter the dev environment
-nix develop
-
-# Run clippy with auto-rebuild
-cargo watch -x clippy
-
-# Format code
-cargo fmt
-
-# Check formatting
-cargo fmt -- --check
-
-# Add a dependency
-cargo add tokio
-```
-
-### CI/Testing
-
-```bash
-# Run all checks locally (same as CI)
 nix flake check
-
-# Check a specific system
-nix flake check --system x86_64-linux
 ```
 
-### Reproducing CI Locally
+### `devShells.default`
 
-The dev shell's `checks = self.checks.${system}` ensures that entering the shell runs clippy and format checks, matching the CI pipeline exactly.
+A development environment that includes everything needed to work on LibreFang:
 
-## Build Targets
+**Rust tooling** (via crane devShell and the checks attribute):
+- The pinned Rust toolchain with `rust-src`, `rust-analyzer`, and `clippy`
 
-The flake targets the workspace package `librefang-cli`:
+**Additional CLI tools**:
+- `cargo-watch` — auto-recompile on file changes
+- `cargo-edit` — `cargo add`/`rm` with version management
+- `cargo-expand` — macro expansion for debugging
+- `just` — task runner (likely used for project workflows)
+- `gh` — GitHub CLI
+- `git`, `nodejs`, `python3` — general development utilities
 
-```nix
-cargoExtraArgs = "--package librefang-cli";
+The shell inherits build inputs from the `librefang` derivation via `inputsFrom`, ensuring the same `openssl`, `pkg-config`, and platform libraries are available during development.
+
+Enter the shell with:
+
+```bash
+nix develop
 ```
 
-This corresponds to a Cargo workspace member defined in `Cargo.toml`. To build different workspace crates, modify `cargoExtraArgs` or reference other packages by their workspace names.
+## Common Workflows
+
+### Building the CLI
+
+```bash
+nix build .            # result appears in ./result/bin/librefang-cli
+nix build .#librefang-cli   # explicit attribute
+```
+
+### Running Without Installing
+
+```bash
+nix run . -- <args>
+```
+
+### Entering the Development Environment
+
+```bash
+nix develop
+# Or with automatic environment loading via direnv:
+echo "use flake" > .envrc && direnv allow
+```
+
+### Running CI Checks Locally
+
+```bash
+nix flake check        # runs build + clippy + fmt check
+```
+
+## Design Decisions
+
+- **`strictDeps = true`**: Ensures the build environment is hermetic — only explicitly listed dependencies are available. This prevents builds from silently depending on system packages.
+- **`doCheck = false`**: The Nix sandbox blocks network access, making integration tests impossible. Tests should be run outside Nix (e.g., via `cargo test` in the dev shell or a CI runner with network access).
+- **`buildDepsOnly` before `buildPackage`**: This two-stage build is the single most impactful caching strategy. Application code changes (the common case during development) never recompile dependencies.
+- **`cleanCargoSource` filtering**: Prevents cache invalidation from non-code changes. Only changes to `Cargo.toml`, `Cargo.lock`, and `.rs` files trigger rebuilds.

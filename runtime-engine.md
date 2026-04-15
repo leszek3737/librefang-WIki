@@ -1,273 +1,265 @@
 # Runtime Engine
 
+# Runtime Engine (`librefang-runtime`)
 
-# Runtime Engine
+The agent runtime and execution environment. Manages the agent execution loop, LLM driver abstraction, tool execution, and WASM sandboxing for untrusted skill/plugin code.
 
-The runtime engine (`librefang-runtime`) is the execution core of LibreFang. It manages the agent lifecycle — from receiving a message through LLM inference, tool execution, and session persistence — while providing isolation, safety, and extensibility through sandboxing, plugins, and the MCP protocol.
-
-## Module Overview
-
-The crate exposes a single library target with a flat module structure. Key domains:
-
-| Domain | Modules |
-|--------|---------|
-| Agent execution | `agent_loop`, `loop_guard` |
-| LLM abstraction | `llm_driver`, `llm_errors`, `drivers/*` |
-| Tool system | `tool_runner`, `tool_policy`, `sandbox`, `subprocess_sandbox`, `docker_sandbox`, `workspace_sandbox` |
-| Protocol | `a2a`, `mcp`, `mcp_server` |
-| Context management | `context_engine`, `context_budget`, `context_overflow`, `compactor` |
-| Memory & embeddings | `embedding`, `proactive_memory` |
-| Web & media | `web_search`, `web_fetch`, `web_cache`, `web_content`, `browser`, `media`, `media_understanding`, `image_gen`, `tts` |
-| Utilities | `http_client`, `retry`, `auth_cooldown`, `graceful_shutdown`, `hooks`, `pii_filter`, `audit`, `trace_store`, `session_repair` |
-
-## The Agent Loop
-
-The core execution engine is `agent_loop::run_agent_loop`. It implements a tool-use loop: the agent calls the LLM, the LLM returns text and/or tool calls, tools execute, and the results feed back into the next LLM call.
-
-### Loop Lifecycle
+## Architecture Overview
 
 ```mermaid
-flowchart TD
-    A[User Message] --> B[Memory Recall]
-    B --> C[Prompt Build]
-    C --> D[LLM Call]
-    D --> E{Stop Reason?}
-    E -->|EndTurn| F[Save Session]
-    E -->|ToolUse| G[Execute Tools]
-    G --> H{More iterations?}
-    H -->|Yes| D
-    H -->|No| F
-    F --> I[Return AgentLoopResult]
-```
-
-### Key Parameters
-
-- **Max iterations**: 50 default, configurable per agent via `autonomous.max_iterations`
-- **Max history**: 40 messages; older messages are trimmed at conversation-turn boundaries
-- **Tool timeout**: 600 seconds for agent_send/agent_spawn and browser tools; configurable per agent
-- **Max continuations**: 5 consecutive MaxTokens responses before returning partial output
-- **Consecutive all-failed abort**: 3 iterations where every tool call hard-fails triggers loop exit
-
-### Context Assembly
-
-Before each LLM call, the loop assembles the context window:
-
-1. **Overflow recovery** (`context_overflow`): If the message list exceeds the context window, messages are compressed using structured extraction. If compression fails, the loop exits with an error.
-2. **Context guard** (`context_budget`): A head+tail strategy ensures the prompt always fits within available tokens, leaving room for the response.
-
-After each iteration, tool result content is truncated to prevent token bloat. When a `ContextEngine` is registered, truncation is delegated to it so plugins can customize the strategy.
-
-### Memory Integration
-
-The loop integrates two memory systems:
-
-- **Recall**: Before each turn, the loop retrieves up to 5 relevant memories using vector similarity (if an `EmbeddingDriver` is available) or text search. Retrieved memories are injected into the prompt.
-- **Remember**: After each turn, the interaction is saved as an episodic memory with optional embedding.
-
-Proactive memory (`proactive_memory`) provides additional retrieval and memorization hooks via `auto_retrieve` and `auto_memorize`.
-
-### Loop Phases
-
-Callbacks (`PhaseCallback`) notify callers of lifecycle transitions:
-
-| Phase | Meaning |
-|-------|---------|
-| `Thinking` | LLM call in progress |
-| `ToolUse { tool_name }` | Tool execution in progress |
-| `Streaming` | Tokens being streamed to client |
-| `Done` | Loop completed successfully |
-| `Error` | Loop terminated with error |
-
-## Tool Execution
-
-### `tool_runner::execute_tool`
-
-This is the single entry point for all tool calls. It:
-
-1. Resolves the tool name (handles normalization and aliases)
-2. Checks the loop guard (circuit breaker)
-3. Routes to the appropriate handler:
-   - **Skill tools**: loaded from `librefang_skills` registry
-   - **Built-in tools**: file I/O, shell, web fetch/search, knowledge graph, task posting, agent spawning
-   - **MCP tools**: forwarded over MCP connections
-   - **Browser tools**: executed via `BrowserManager`
-4. Enforces workspace boundaries and path traversal guards
-5. Runs taint analysis on shell execution inputs
-6. Records execution traces for debugging
-
-### Sandboxing
-
-Multiple sandbox layers provide defense in depth:
-
-| Sandbox | Module | Isolation mechanism |
-|---------|--------|---------------------|
-| Subprocess | `subprocess_sandbox` | `tokio::process::Command` with environment filtering |
-| Docker | `docker_sandbox` | OCI container with configurable image and resource limits |
-| Workspace | `workspace_sandbox` | Path canonicalization and traversal detection |
-
-The workspace sandbox is particularly important: it validates that all file paths resolve within the agent's configured workspace root, blocking path traversal attacks.
-
-## A2A Protocol
-
-The `a2a` module implements Google's Agent-to-Agent protocol for cross-framework interoperability.
-
-### Core Types
-
-- **`AgentCard`**: A JSON capability manifest served at `/.well-known/agent.json`. Describes agent name, description, skills, and supported input/output modes.
-- **`A2aTask`**: The unit of work exchanged between agents, with status tracking and message/artifact accumulation.
-- **`A2aTaskStore`**: In-memory task store with TTL-based eviction (24h default) and capacity management. Terminal-state tasks (Completed/Failed/Cancelled) are evicted before non-terminal tasks when at capacity.
-
-### Client Operations
-
-- **`discover`**: Fetches an external agent's `AgentCard` from `/.well-known/agent.json`
-- **`send_task`**: Sends a task via JSON-RPC `tasks/send`
-- **`get_task`**: Polls task status via JSON-RPC `tasks/get`
-
-### Server
-
-- **`build_agent_card`**: Generates an `AgentCard` from an `AgentManifest`, converting LibreFang tools into A2A skill descriptors
-
-## LLM Driver Architecture
-
-The `llm_driver` module defines the `LlmDriver` trait and `CompletionRequest`/`CompletionResponse` types. Driver implementations live in `drivers/`:
-
-- `openai.rs` — OpenAI-compatible APIs (OpenAI, Azure, generic OpenAI-compatible)
-- `anthropic.rs` — Anthropic Claude API
-- `google.rs` — Google Vertex AI and Gemini API
-- `openrouter.rs` — OpenRouter aggregation
-- `ollama.rs` — Local Ollama
-- `cloudflare.rs` — Cloudflare Workers AI
-- `deepseek.rs` — DeepSeek API
-
-Each driver implements:
-- **`complete`**: Single-shot completion
-- **`stream`**: Streaming completion yielding `StreamEvent`s
-- **`is_configured`**: Returns true when the driver has valid credentials
-
-## Context Management
-
-### `context_engine`
-
-A pluggable trait (`ContextEngine`) allows custom context assembly strategies. Implementations can override:
-- `ingest`: Called before the LLM call to recall relevant memories
-- `assemble`: Called to build the full message list for the LLM
-- `truncate_tool_result`: Called to truncate tool result content
-- `after_turn`: Called after each turn for post-processing
-
-### `context_budget`
-
-Implements head+tail truncation: the system prompt goes at the front, recent messages at the tail, with older middle messages dropped while preserving conversation boundaries.
-
-### `context_overflow`
-
-Handles severe overflow by attempting progressive recovery:
-1. Strip all images from prior turns
-2. Merge adjacent messages
-3. Strip thinking blocks
-4. Truncate all tool results to a fixed limit
-5. Final error if still overflowed
-
-## HTTP Client
-
-`http_client::proxied_client_builder` constructs a `reqwest::Client` that respects system proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`). All outgoing HTTP requests from the runtime (A2A discovery, web search, web fetch) route through this client.
-
-## Web Tools
-
-| Module | Function |
-|--------|----------|
-| `web_search` | Tavily, Perplexity, DuckDuckGo, Jina, Brave Search, DuckDuckGo Instant Answers |
-| `web_fetch` | HTTP GET with host allowlist, redirects, timeout, ETag/Last-Modified caching |
-| `web_cache` | In-memory cache for web content with TTL |
-| `web_content` | HTML-to-Markdown conversion |
-| `browser` | Browser automation (via CDP) for JavaScript-heavy pages |
-
-## Hooks System
-
-`hooks` provides lifecycle hooks that plugins can register:
-
-| Event | Timing |
-|-------|--------|
-| `BeforePromptBuild` | Before the system prompt and messages are assembled |
-| `BeforeToolCall` | Before each tool call; can block the tool |
-| `AfterToolCall` | After each tool completes |
-| `AgentLoopEnd` | After the loop finishes (success or failure) |
-
-Hooks run best-effort: failures are logged but do not abort the loop.
-
-## Loop Guard (Circuit Breaker)
-
-`loop_guard` implements a circuit breaker that prevents tool call loops:
-
-- **Per-tool circuit breaker**: After a tool is called `N` times in a single turn (default 3), subsequent calls to that tool return a soft error
-- **Global circuit breaker**: After `N` total tool calls (default 150), the loop exits
-- **Loop detection**: Tracks repeated patterns in tool call sequences
-
-The guard classifies outcomes:
-- **`Allow`**: Tool call proceeds
-- **`Warn`**: Tool call proceeds but a warning is appended to the result
-- **`Block`**: Tool call is rejected with an error
-- **`CircuitBreak`**: Loop terminates immediately
-
-## Retry and Backoff
-
-`retry` handles transient failures with exponential backoff:
-- Rate limit (429) and overload (529) responses trigger retry with exponential backoff
-- Configurable base delay and max retries
-- Auth cooldown (`auth_cooldown`) tracks per-provider cooldown windows to avoid hammering rate-limited providers
-
-## Shell Bleed Prevention
-
-`shell_bleed` strips ANSI escape sequences and terminal control codes from tool results. This prevents malicious tools from injecting color codes or control sequences that could obscure output or exploit terminal vulnerabilities.
-
-## PII Filtering
-
-`pii_filter` redacts personally identifiable information (emails, phone numbers, credit cards, etc.) from user messages before they reach the LLM, and from tool results before they are persisted. The redaction patterns are configurable.
-
-## Audit and Tracing
-
-- `audit` logs structured events for compliance and debugging
-- `trace_store` persists decision traces (tool call inputs, outputs, timing) that are captured during the agent loop
-- `reply_directives` extracts structured directives from agent responses (e.g., `reply_to`, `silent`, `current_thread`)
-
-## Graceful Shutdown
-
-`graceful_shutdown` coordinates orderly shutdown across all runtime components, ensuring in-flight tool executions and LLM calls complete or are cancelled cleanly.
-
-## Key Dependencies
-
-```mermaid
-graph LR
-    subgraph "Runtime Engine"
-        AL[agent_loop] --> TR[tool_runner]
-        AL --> LD[llm_driver]
-        AL --> CE[context_engine]
-        AL --> LG[loop_guard]
-        TR --> SB[sandbox]
-        TR --> MCP[mcp]
-        TR --> Skills[librefang_skills]
+graph TD
+    subgraph "Agent Loop"
+        AL[run_agent_loop] --> MEM[Memory Recall]
+        AL --> PM[Prompt Assembly]
+        PM --> LLM[LLM Driver]
+        LLM -->|EndTurn| DONE[Finalize Response]
+        LLM -->|ToolUse| TE[Tool Runner]
+        TE --> AL
+        TE -->|MCP| MCP[MCP Protocol]
+        TE -->|Sandbox| SAN[Docker/WASM/Subprocess]
     end
 
-    AL --> Memory[librefang_memory]
-    AL --> Types[librefang_types]
-    LD --> Drivers[drivers/*]
-    SB --> Docker[docker_sandbox]
-    SB --> Subprocess[subprocess_sandbox]
-    SB --> Workspace[workspace_sandbox]
+    subgraph "Supporting Systems"
+        CE[Context Engine] --> PM
+        CB[Context Budget] --> PM
+        LG[Loop Guard] --> TE
+        LG2[Loop Guard] --> AL
+        HF[Hooks] --> AL
+        PF[PII Filter] --> PM
+        TP[Tool Policy] --> TE
+        RR[Retry + Cooldown] --> LLM
+    end
+
+    subgraph "External Interfaces"
+        A2A[A2A Protocol] --> EXT[External Agents]
+        CAT[Catalog Sync] --> PROV[LLM Providers]
+        WS[Web Search/Fetch] --> WEB[Internet]
+        PL[Plugin Manager] --> SKILLS[Skills/Plugins]
+    end
 ```
 
-## Configuration Points
+## Core: Agent Execution Loop
 
-The runtime is configured via `AgentManifest` metadata fields:
+The `agent_loop` module is the heart of the runtime. `run_agent_loop` processes a single user message through the full lifecycle:
+
+1. **Provider check** — returns early with `provider_not_configured` if the LLM driver isn't ready
+2. **Experiment selection** — when an A/B prompt experiment is running, selects a variant deterministically from the session ID
+3. **Memory recall** — retrieves relevant memories via the context engine (preferred), embedding-based vector search, or text search fallback
+4. **Prompt assembly** — builds system prompt (with experiment variant if active), injects memory context, applies PII filtering
+5. **LLM call** — sends the completion request with retry logic and rate-limit handling
+6. **Response handling** — dispatches on `StopReason`:
+   - `EndTurn` / `StopSequence` — final text response, parse directives, check for NO_REPLY/silent
+   - `ToolUse` — stage the turn, execute tools, feed results back into the loop
+   - `MaxTokens` — continue generation with accumulated partial output
+7. **Post-turn finalization** — save session, persist episodic memory, run proactive memory `auto_memorize`, fire hooks
+
+### Key Constants
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `MAX_ITERATIONS` | 50 | Hard cap on loop iterations (overridable via autonomous config) |
+| `MAX_RETRIES` | 3 | Retries for rate-limited/overloaded API calls |
+| `TOOL_TIMEOUT_SECS` | 600 | Per-tool execution timeout (kernel can override) |
+| `MAX_CONTINUATIONS` | 5 | Consecutive `MaxTokens` turns before returning partial response |
+| `MAX_HISTORY_MESSAGES` | 40 | Message history size before auto-trimming |
+| `MAX_CONSECUTIVE_ALL_FAILED` | 3 | Consecutive iterations where every tool failed before abort |
+
+### Staged Tool Use (`StagedToolUseTurn`)
+
+Tool-use turns are staged in memory before committing to the session. This prevents half-committed states where an assistant `ToolUse` message is persisted without its paired user `ToolResult` message — a condition that causes API rejections ("tool_call_ids did not have response messages", issue #2381).
+
+Flow:
+1. `stage_tool_use_turn` — buffers the assistant message and tool call IDs
+2. `execute_single_tool_call` — executes each tool, appends result to the staged turn
+3. `pad_missing_results` — fills in synthetic error results for any tool that wasn't executed (mid-turn signal, hard error break)
+4. `commit` — atomically pushes the assistant message + user tool-result message to both `session.messages` and the LLM working copy
+
+### Mid-Turn Signals
+
+The loop accepts out-of-band signals via an `mpsc::Receiver<AgentLoopSignal>`:
+- **`Message`** — injects arbitrary text into the conversation mid-turn
+- **`ApprovalResolved`** — patches an in-flight tool result that was waiting for human approval, updating its content/status in-place
+
+When a signal arrives, the staged turn is padded and committed, the signal is injected as a user message, and the loop continues.
+
+### Context Management
+
+Context overflow is handled in two layers:
+
+- **`context_overflow::recover_from_overflow`** — progressive recovery: strip tool results → strip old turns → strip all but current turn → give up
+- **`context_engine`** — pluggable context assembly via the `ContextEngine` trait; when present, delegates assembly entirely
+
+`ContextBudget` tracks token allocation. `safe_trim_messages` trims both the LLM working copy and the persistent session store at conversation-turn boundaries so `ToolUse`/`ToolResult` pairs are never split.
+
+### Error Classification
+
+Tool errors are classified as **soft** or **hard**:
+
+- **Soft errors** — approval denials, sandbox rejections, parameter errors, argument truncation. The LLM can self-correct on the next iteration. Do not count toward the consecutive-failure abort threshold.
+- **Hard errors** — network failures, unrecognized tools, permanent API errors. Accumulate toward `MAX_CONSECUTIVE_ALL_FAILED`.
+
+### Provider Prefix Stripping
+
+Model IDs stored as `provider/org/model` (e.g., `openrouter/google/gemini-2.5-flash`) are stripped to `org/model` before API calls. For providers requiring qualified format (OpenRouter, Together, Fireworks, Replicate, Chutes, HuggingFace), bare model names like `gemini-2.5-flash` are normalized to `google/gemini-2.5-flash` automatically.
+
+### Group Chat Support
+
+When `is_group` is set in manifest metadata, user messages are prefixed with `[SanitizedSenderName]: ` so the LLM can distinguish speakers. The prefix is applied after PII filtering to prevent redaction of display names.
+
+### `AgentLoopResult`
+
+The return type carries everything the kernel needs to route the response:
 
 | Field | Purpose |
 |-------|---------|
-| `sender_user_id` | Per-sender trust and authorization context |
-| `sender_channel` | Channel-specific tool authorization |
-| `hand_allowed_env` | Environment variables exposed to skill tools |
-| `privacy` | PII redaction configuration |
-| `is_group` | Enable group chat `[sender]:` prefix |
-| `sender_display_name` | Display name for group chat prefix |
-| `stable_prefix_mode` | Disable vector memory recall |
-| `prompt_caching` | Enable prompt caching for applicable providers |
-| `timeout_secs` | Override tool execution timeout |
-| `exec_policy` | Execution policy for sandboxed tools |
+| `response` | Final text output |
+| `total_usage` | Accumulated `TokenUsage` across all LLM calls |
+| `iterations` | How many loop iterations ran |
+| `silent` | Agent chose NO_REPLY |
+| `provider_not_configured` | No LLM provider available |
+| `decision_traces` | Per-tool-call traces (rationale, timing, outcome) |
+| `memories_saved` / `memories_used` | Proactive memory summaries |
+| `directives` | Reply routing (thread, channel) |
+| `new_messages_start` | Index into `session.messages` where this turn's messages begin |
+
+## A2A Protocol (`a2a`)
+
+Implements Google's Agent-to-Agent protocol for cross-framework agent interoperability.
+
+### Agent Cards
+
+`AgentCard` is a JSON capability manifest served at `/.well-known/agent.json`. `build_agent_card` converts an `AgentManifest` into an A2A card, mapping LibreFang tool names to A2A skill descriptors.
+
+### Task Lifecycle
+
+Tasks (`A2aTask`) are the unit of inter-agent work:
+
+```
+Submitted → Working → Completed
+                   → Failed
+                   → InputRequired → Working (loop)
+                   → Cancelled
+```
+
+`A2aTaskStatusWrapper` handles both the bare string form (`"completed"`) and object form (`{"state": "completed", "message": ...}`) used by different A2A implementations.
+
+### Task Store (`A2aTaskStore`)
+
+In-memory bounded store for task tracking with two-tier eviction:
+
+1. **TTL sweep** — on every insert, tasks older than 24 hours (configurable) are removed regardless of state
+2. **Capacity eviction** — if at capacity after TTL sweep, evict the oldest terminal-state task; fall back to the oldest task overall
+
+### Discovery and Communication
+
+- `discover_external_agents` — called at boot, fetches agent cards from all configured external agents
+- `A2aClient` — HTTP client using JSON-RPC for `tasks/send`, `tasks/get` operations
+
+## Tool Execution (`tool_runner`)
+
+Dispatches tool calls to the appropriate handler:
+
+- **Built-in tools** — shell exec, file operations, browser automation, speech-to-text, Docker exec, process management
+- **MCP tools** — delegated to MCP connections via `call_tool`
+- **Skills** — dispatched through the `SkillRegistry`
+- **Approval flow** — tools requiring human approval are submitted via `submit_tool_approval` and their results patched in by `ApprovalResolved` signals
+
+Security checks before execution:
+- **Taint analysis** — `check_taint_shell_exec`, `check_taint_net_fetch`, `check_taint_outbound_header`, `check_taint_outbound_text` validate that tool inputs don't leak sensitive data
+- **Tool policy** — `resolve_tool_access` enforces per-agent tool allowlists and group-based permissions
+- **Loop guard** — circuit breaker and per-tool rate limiting to prevent infinite tool loops
+
+## Supporting Systems
+
+### Memory
+
+- **Recall** — embedding-based vector search with text fallback; filtered by agent ID and optional peer ID
+- **Proactive memory** — `auto_retrieve` fetches contextually relevant memories; `auto_memorize` extracts new memories from turn messages after completion
+- **Episodic persistence** — `remember_interaction_best_effort` stores "User asked: X / I responded: Y" pairs after each turn
+
+### Context Engine
+
+The `ContextEngine` trait provides a plugin interface for context assembly. When present, it handles:
+- `ingest` — recall memories and prepare context for the current turn
+- `assemble` — build the final message list within the context window
+- `after_turn` — post-turn processing (e.g., updating indices)
+
+When no context engine is registered, the built-in `recover_from_overflow` + `apply_context_guard` pipeline runs instead.
+
+### Hooks (`hooks`)
+
+`HookRegistry` fires callbacks at defined lifecycle points:
+- `BeforePromptBuild` — before system prompt assembly
+- `BeforeToolCall` — can block tool execution with a reason
+- `AfterToolCall` — after tool completes
+- `AgentLoopEnd` — after the loop finishes
+
+Hooks are best-effort: failures are logged but don't abort the loop.
+
+### Session Repair (`session_repair`)
+
+Maintains message history integrity:
+- `validate_and_repair` — ensures `ToolUse`/`ToolResult` pairing, removes orphaned blocks
+- `find_safe_trim_point` — locates trim boundaries that don't split tool-use pairs
+- `prune_heartbeat_turns` — removes autonomous heartbeat noise, keeping the most recent N turns
+- `strip_tool_result_details` — removes injection markers from tool output
+
+### Retry and Cooldown (`retry`, `auth_cooldown`)
+
+`call_with_retry` wraps LLM calls with exponential backoff. `ProviderCooldown` tracks per-provider cooldown periods when errors indicate temporary failures (rate limits, overload).
+
+### Provider Health (`provider_health`)
+
+`probe_provider_cached` checks LLM provider reachability, used by the kernel's provider listing endpoint. Probes are cached to avoid hammering provider APIs.
+
+### Web Tools
+
+- **`web_search`** — DuckDuckGo (default), Brave, Jina; auto-selects based on configured API keys
+- **`web_fetch`** — HTTP content fetching with proxy support, content type detection
+- **`web_content`** — HTML→Markdown conversion, tag stripping, link extraction
+- **`web_cache`** — time-bounded response cache for fetched content
+
+### Media (`media`, `media_understanding`)
+
+- Vision/understanding through `MediaEngine` — image analysis, transcription
+- TTS synthesis (`tts`) — OpenAI, Google, ElevenLabs providers
+- Speech-to-text via `tool_speech_to_text` → `transcribe_audio`
+
+### Sandboxing
+
+- **`docker_sandbox`** — containerized tool execution
+- **`subprocess_sandbox`** — restricted subprocess execution
+- **`workspace_sandbox`** — path validation preventing traversal and sandbox escapes
+- **`sandbox`** (WASM) — WebAssembly sandboxing for untrusted plugin code via `librefang-runtime-wasm`
+
+### Plugin System
+
+- **`plugin_manager`** — plugin discovery, parsing, lifecycle
+- **`plugin_runtime`** — plugin execution environment
+- **`python_runtime`** — Python code execution support
+
+### Model Catalog (`model_catalog`)
+
+Maintains model metadata and pricing. `merge_catalog_file` loads catalog data from disk. `find_model` and `list_models` support model selection and cost estimation.
+
+### Catalog Sync (`catalog_sync`)
+
+`sync_catalog_to` / `sync_catalog_http` synchronize model catalogs from remote providers, using the HTTP client with TLS configuration.
+
+### Registry Sync (`registry_sync`)
+
+`sync_registry` downloads the extension registry index. `resolve_home_dir_for_tests` provides a test-safe home directory resolution used across the codebase.
+
+## Re-exports
+
+The crate re-exports several sub-crates for convenience:
+
+| Re-export | Source Crate |
+|-----------|-------------|
+| `drivers` | `librefang-llm-drivers` |
+| `llm_driver`, `llm_errors` | `librefang-llm-driver` |
+| `http_client` | `librefang-http` |
+| `kernel_handle` | `librefang-kernel-handle` |
+| `mcp`, `mcp_oauth` | `librefang-runtime-mcp` |
+| `sandbox`, `host_functions` | `librefang-runtime-wasm` |
+| `chatgpt_oauth`, `copilot_oauth` | `librefang-runtime-oauth` |

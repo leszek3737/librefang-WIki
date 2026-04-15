@@ -2,262 +2,169 @@
 
 # Build System — `xtask`
 
-The `xtask` crate provides build automation and developer tooling for the LibreFang workspace using the `cargo xtask` pattern. Rather than relying on external build tools or Makefiles, LibreFang defines all workspace automation tasks as Rust modules that run via `cargo xtask <command>`.
-
-This approach offers several advantages: tasks are written in the same language as the project, they have full access to the workspace's type system, and they work identically across all platforms that Rust supports.
-
-## Module Structure
-
-```
-xtask/
-├── src/
-│   ├── main.rs          # CLI entry point, command dispatch
-│   ├── common.rs       # Shared utilities (repo_root)
-│   ├── api_docs.rs     # OpenAPI → Swagger UI
-│   ├── bench.rs        # Criterion benchmark runner
-│   ├── build_web.rs    # pnpm frontend builds
-│   ├── changelog.rs    # PR → changelog generator
-│   ├── check_links.rs  # Link validation (lychee)
-│   ├── ci.rs           # Local CI simulation
-│   ├── clean_all.rs    # Build artifact cleanup
-│   ├── codegen.rs      # OpenAPI spec generation
-│   ├── contributors.rs # GitHub → SVG generators
-│   ├── coverage.rs     # llvm-cov integration
-│   ├── db.rs           # SQLite management
-│   ├── deps.rs         # Security audits
-│   ├── dev.rs          # Hot-reload dev environment
-│   ├── dist.rs         # Cross-platform release builds
-│   ├── docker.rs       # Container image builds
-│   ├── doctor.rs       # Environment diagnostics
-│   ├── fmt.rs          # Formatting checks (rustfmt, prettier)
-│   ├── integration_test.rs  # Live API tests
-│   ├── license_check.rs    # License compliance
-│   ├── loc.rs          # Lines-of-code statistics
-│   ├── migrate.rs      # Agent migration
-│   ├── pre_commit.rs   # Pre-commit hook
-│   ├── publish_npm_binaries.rs
-│   ├── publish_pypi_binaries.rs
-│   ├── publish_sdks.rs
-│   ├── release.rs      # Full release pipeline
-│   ├── setup.rs        # Initial environment setup
-│   ├── sync_versions.rs # Multi-package version sync
-│   └── update_deps.rs  # Dependency updates
-└── Cargo.toml
-```
-
-## CLI Interface
-
-All tasks are exposed as subcommands of `cargo xtask`. The top-level `Cli` struct uses `clap` to parse the command line, dispatching each `Command` variant to its corresponding module's `run` function:
-
-```rust
-enum Command {
-    Release(release::ReleaseArgs),
-    BuildWeb(build_web::BuildWebArgs),
-    Ci(ci::CiArgs),
-    // ... 30+ additional commands
-}
-```
-
-Each submodule defines its own `Args` struct (deriving `Parser` and `Debug`) and exports a `run(Args) -> Result<(), Box<dyn Error>>` function. The main loop handles errors uniformly:
-
-```rust
-if let Err(e) = result {
-    eprintln!("Error: {e}");
-    std::process::exit(1);
-}
-```
-
-## Key Components
-
-### `common::repo_root`
-
-Every task needs to resolve the workspace root. Rather than assuming `std::env::current_dir()`, `repo_root()` walks upward until it finds a `Cargo.toml` containing `[workspace]`. This makes the tasks work correctly regardless of the current working directory:
-
-```rust
-pub fn repo_root() -> PathBuf {
-    let mut dir = std::env::current_dir().expect("cannot get cwd");
-    loop {
-        let cargo_toml = dir.join("Cargo.toml");
-        if cargo_toml.exists() {
-            let content = std::fs::read_to_string(&cargo_toml).unwrap_or_default();
-            if content.contains("[workspace]") {
-                return dir;
-            }
-        }
-        if !dir.pop() {
-            panic!("could not find workspace root");
-        }
-    }
-}
-```
-
-All modules import and use this via `use crate::common::repo_root;`.
-
-### Development Environment (`dev.rs`)
-
-The `dev` command orchestrates a full local development setup:
-
-1. **Kill stale processes** on ports 4545 (daemon) and 5173-5178 (dashboard)
-2. **Build** `librefang-cli` in debug mode
-3. **Auto-init** if no `config.toml` exists
-4. **Start dashboard** dev server in background with hot reload
-5. **Start daemon** on port 4545
-6. **Enter watch loop** via `cargo-watch` on `crates/`
-
-Two background threads provide developer convenience:
-
-- **Auto-pull**: Every 30 seconds, fetches `origin/main` and rebases if new commits exist
-- **Hotkey listener**: Raw terminal input provides shortcuts (`r`=rebase, `o`=open dashboard, `l`=logs, `s`=status, `c`=clear, `?`=help)
-
-The watch loop rebuilds `librefang-cli` on every change to `crates/`, then kills and restarts the daemon with a carefully constructed shell script that handles the stop-start sequence atomically.
-
-### Release Pipeline (`release.rs`)
-
-The `release` command executes the full release workflow: generate changelog → sync versions → commit → tag → create GitHub PR. It computes the next version using Calendar Versioning (`YYYY.M.D.N` format) and validates the working tree is clean before proceeding.
-
-### Web Builds (`build_web.rs`)
-
-Builds React frontend assets by running `pnpm install --frozen-lockfile && pnpm run build` for each of three directories:
-
-- `crates/librefang-api/dashboard` — React dashboard
-- `web/` — main web frontend
-- `docs/` — documentation site
-
-Selective builds are possible via `--dashboard`, `--web`, and `--docs` flags.
-
-### Integration Testing (`integration_test.rs`)
-
-Starts a fresh daemon, waits for the health endpoint, and runs HTTP requests against it:
-
-```
-GET /api/health
-GET /api/agents
-GET /api/budget
-GET /api/network/status
-POST /api/agents/{id}/message  (if --skip-llm not set)
-```
-
-Verifies budget updates after LLM calls when an API key is provided.
-
-### Changelog Generation (`changelog.rs`)
-
-Parses git log between the latest stable tag and `HEAD`, extracts PR numbers from commit messages (via `#\d+` regex), fetches PR titles and authors via `gh pr view --json`, classifies by conventional commit prefix, and writes a formatted section to `CHANGELOG.md`.
-
-### Contributors & Star History (`contributors.rs`)
-
-Two SVG generators that fetch GitHub data via the `gh` CLI:
-
-- **Contributors SVG**: Fetches the contributor list, downloads avatars via `curl`, embeds them as base64 data URIs (required because GitHub's CSP blocks external image loads in SVGs), and arranges them in a grid with links to profiles
-- **Star History SVG**: Fetches stargazer timestamps, builds a cumulative daily series, and renders a dark-themed line chart with area fill
-
-### Version Synchronization (`sync_versions.rs`)
-
-Keeps version strings consistent across:
-
-- `Cargo.toml` (workspace version)
-- `sdks/rust/Cargo.toml`
-- `sdks/js/package.json`
-- `sdks/python/setup.py`
-- Tauri configuration
-
-Uses `toml_edit` for in-place modification of TOML files.
-
-### Cross-Platform Distribution (`dist.rs`)
-
-Builds release binaries for all supported targets using `cargo build --release --target <triple>`. Default targets:
-
-```
-x86_64-unknown-linux-gnu
-aarch64-unknown-linux-gnu
-x86_64-apple-darwin
-aarch64-apple-darwin
-x86_64-pc-windows-msvc
-```
-
-Uses `cross` for cross-compilation when `--cross` is set. Archives each build as `.tar.gz` (Unix) or `.zip` (Windows).
+Workspace automation for LibreFang. Every development workflow—building, testing, releasing, publishing—is driven through `cargo xtask <command>`.
 
 ## Architecture
 
+The xtask follows a flat module-per-task convention. Each module exports two things: a clap `Parser` struct for arguments, and a `pub fn run(args) -> Result<(), Box<dyn std::error::Error>>` entry point. `main.rs` wires them together as subcommands.
+
 ```mermaid
-graph TB
-    subgraph "CLI Layer"
-        CLI["main.rs: Cli"]
-    end
-
-    subgraph "Commands"
-        Dev["dev.rs"]
-        CI["ci.rs"]
-        Release["release.rs"]
-        BuildWeb["build_web.rs"]
-        Dist["dist.rs"]
-        Docker["docker.rs"]
-        Test["integration_test.rs"]
-        Setup["setup.rs"]
-        Coverage["coverage.rs"]
-        Deps["deps.rs"]
-        Changelog["changelog.rs"]
-        Codegen["codegen.rs"]
-        SyncVersions["sync_versions.rs"]
-        Publish["publish_sdks.rs"]
-        Others["30+ other modules"]
-    end
-
-    subgraph "Shared"
-        Common["common.rs\nrepo_root()"]
-    end
-
-    CLI --> Dev
-    CLI --> CI
-    CLI --> Release
-    CLI --> BuildWeb
-    CLI --> Dist
-    CLI --> Docker
-    CLI --> Test
-    CLI --> Setup
-    CLI --> Coverage
-    CLI --> Deps
-    CLI --> Changelog
-    CLI --> Codegen
-    CLI --> SyncVersions
-    CLI --> Publish
-    CLI --> Others
-
-    Dev --> Common
-    CI --> Common
-    Test --> Common
-    BuildWeb --> Common
+graph TD
+    CLI["cargo xtask &lt;command&gt;"] --> Parser["clap::Parser"]
+    Parser --> Command["Command enum"]
+    Command --> Module["module::run(args)"]
+    Module --> Common["common::repo_root()"]
+    Module --> Ext["External tools<br/>(cargo, pnpm, gh, docker, ...)"]
 ```
 
-## External Tool Dependencies
+The `common` module provides a single function—`repo_root()`—that walks upward from the current directory until it finds a `Cargo.toml` containing `[workspace]`. Every task uses this to resolve paths.
 
-The xtask system manages several external tools, installing them on demand when not found:
+## Command Reference
 
-| Tool | Purpose | Auto-install |
-|------|---------|--------------|
-| `cargo-watch` | File watching in `dev` | Yes |
-| `cargo-llvm-cov` | Coverage reports | Yes |
-| `cargo-audit` | Security advisories | Yes |
-| `cargo-outdated` | Update checking | Yes |
-| `lychee` | Link checking | No (basic fallback available) |
-| `cross` | Cross-compilation | No |
-| `cargo-deny` | License checking | No (metadata fallback) |
-| `gh` | GitHub API access | No |
-| `pnpm` | Web builds | No |
+### Build & Release
 
-## Common Patterns
+| Command | Purpose |
+|---|---|
+| `build-web` | Build frontend assets (dashboard, web, docs) via pnpm |
+| `dist` | Cross-compile release binaries for multiple platforms |
+| `docker` | Build and optionally push a Docker image |
+| `release` | Full release flow: changelog → sync versions → commit → tag → PR |
+| `sync-versions` | Propagate the workspace version across Cargo.toml, SDKs, Tauri config, etc. |
+
+### Testing & Quality
+
+| Command | Purpose |
+|---|---|
+| `ci` | Run the full CI suite locally: build, test, clippy, web lint |
+| `integration-test` | Spin up the daemon and exercise HTTP endpoints against it |
+| `coverage` | Generate test coverage via `cargo llvm-cov` (HTML or lcov) |
+| `bench` | Run criterion benchmarks with optional baseline comparison |
+| `fmt` | Check or fix formatting for Rust (rustfmt) and web (prettier) |
+| `pre-commit` | One-shot check: fmt + clippy + test |
+| `check-links` | Validate links in Markdown docs (lychee or built-in fallback) |
+
+### Development
+
+| Command | Purpose |
+|---|---|
+| `dev` | Start the daemon with hot-reload, dashboard dev server, and interactive hotkeys |
+| `setup` | Bootstrap a local development environment |
+| `doctor` | Diagnose missing tools, stale ports, config issues, API key status |
+| `db` | Inspect, back up, or reset the local SQLite database |
+| `clean-all` | Remove all build artifacts (Rust + frontend) with size reporting |
+
+### Documentation & Metadata
+
+| Command | Purpose |
+|---|---|
+| `api-docs` | Generate a standalone Swagger UI page from the OpenAPI spec |
+| `changelog` | Produce a classified `CHANGELOG.md` entry from merged GitHub PRs |
+| `contributors` | Generate contributors SVG and star-history SVG via the GitHub API |
+| `loc` | Lines-of-code statistics and workspace dependency graph |
+| `codegen` | Regenerate derived files (OpenAPI spec) |
+
+### Publishing
+
+| Command | Purpose |
+|---|---|
+| `publish-sdks` | Publish JS, Python, and Rust SDKs to their respective registries |
+| `publish-npm-binaries` | Build and publish platform-specific CLI binaries to npm |
+| `publish-pypi-binaries` | Build and publish platform-specific wheels to PyPI |
+
+### Dependency Management
+
+| Command | Purpose |
+|---|---|
+| `deps` | Audit for vulnerabilities (`cargo audit`, `pnpm audit`) and check for updates |
+| `update-deps` | Update Rust and web dependencies |
+| `license-check` | Verify dependency licenses against a deny list |
+
+### Other
+
+| Command | Purpose |
+|---|---|
+| `migrate` | Migrate agent configurations from OpenClaw or OpenFang |
+| `validate-config` | Validate a `config.toml` file |
+
+## Adding a New Task
+
+1. Create `src/my_task.rs` with an `Args` struct and a `run` function:
+
+```rust
+use crate::common::repo_root;
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+pub struct MyTaskArgs {
+    #[arg(long)]
+    pub flag: bool,
+}
+
+pub fn run(args: MyTaskArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let root = repo_root();
+    // ...
+    Ok(())
+}
+```
+
+2. Add `mod my_task;` to `main.rs`.
+
+3. Add a variant to the `Command` enum with the `run` dispatch in the `match` block.
+
+## Key Patterns
 
 ### Error Handling
 
-All `run()` functions return `Result<(), Box<dyn std::error::Error>>`. The main function exits with code 1 on any error, printing the error message to stderr.
+All tasks return `Result<(), Box<dyn std::error::Error>>`. On failure, `main` prints the error to stderr and exits with code 1. Tasks that run multiple sub-steps (like `ci`, `deps`) count failures and report a summary at the end.
 
-### Path Resolution
+### External Tool Detection
 
-Every task begins by calling `repo_root()` to get an absolute path to the workspace root. All file operations are relative to this root, ensuring consistent behavior regardless of where `cargo xtask` is invoked from.
+Several tasks check for external tools before use. Some auto-install missing tools (`coverage` installs `cargo-llvm-cov`, `dev` installs `cargo-watch`, `deps` installs `cargo-audit` and `cargo-outdated`). The helper `has_command` or inline `Command::new(...).arg("--version")` checks are used throughout.
 
-### Command Execution
+### Conditional Execution
 
-Shell commands are executed via `std::process::Command`. Tasks check `status.success()` and return errors on failure rather than panicking.
+Tasks like `build-web`, `ci`, and `fmt` detect the presence of `package.json` or tool availability to skip irrelevant steps rather than failing. This keeps the commands portable across different developer environments.
 
-### File Discovery
+### Workspace Version
 
-Tasks search for files in multiple candidate locations (e.g., `find_openapi_spec` checks `openapi.json`, `crates/librefang-api/openapi.json`, and `docs/openapi.json`) and use the first one that exists.
+Several tasks (`dist`, `docker`, `release`, `sync_versions`) read the version from the workspace `Cargo.toml` using `toml_edit`:
+
+```rust
+fn read_workspace_version(root: &Path) -> String {
+    let content = fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
+    let doc = content.parse::<toml_edit::DocumentMut>().ok();
+    doc.and_then(|d| {
+        d["workspace"]["package"]["version"].as_str().map(String::from)
+    }).unwrap_or_else(|| "unknown".into())
+}
+```
+
+### Cross-Platform Builds
+
+`dist` supports five default targets (Linux x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64) and can use `cross` for cross-compilation. Archives are `.tar.gz` on Unix and `.zip` on Windows.
+
+## Notable Task Details
+
+### `dev` — Interactive Development Environment
+
+The most complex task. It:
+
+1. Kills stale processes on relevant ports (4545, 5173–5178) and removes stale `daemon.json`
+2. Builds `librefang-cli` and runs `librefang init --quick` if no config exists
+3. Starts the dashboard dev server (`pnpm dev`) in the background
+4. Launches `cargo watch` scoped to `crates/` (excluding the dashboard's own directory) for rebuild-and-restart cycles
+5. Spawns background threads for:
+   - **Auto-pull**: fetches and rebases `origin/main` every 30 seconds
+   - **Hotkey listener**: reads single keypresses (`r` rebase, `o` open dashboard, `l` logs, `s` status, `c` clear, `?` help)
+
+### `integration-test` — Live Endpoint Testing
+
+Starts the daemon as a subprocess, polls `/api/health` until responsive, then exercises endpoints (`/api/agents`, `/api/budget`, `/api/network/status`) and optionally an LLM round-trip. Uses `curl` subprocess calls for HTTP requests and cleans up the daemon on exit.
+
+### `changelog` — PR Classification
+
+Fetches PR data via `gh api`, classifies titles by conventional-commit prefix (`feat` → Added, `fix` → Fixed, etc.), and inserts the result into `CHANGELOG.md` at the correct position. Replaces an existing section for the same version if present.
+
+### `contributors` — SVG Generation
+
+Downloads contributor avatars from GitHub, encodes them as base64 data URIs (to avoid CSP issues in rendered SVGs), and produces a grid layout. The star-history chart queries `stargazers` with the `star+json` accept header for timestamps and renders a polyline chart.

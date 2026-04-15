@@ -1,149 +1,108 @@
 # Build System — tests
 
-# install_sh_test.sh — Installer Script Tests
-
-Tests the `install.sh` installer script by sourcing it in isolated environments and verifying behavior of its core functions.
+# Build System — `install.sh` Tests
 
 ## Overview
 
-This test suite validates the installer script's ability to:
-- Map shell names to their appropriate RC file paths
-- Select the correct RC file when multiple shells are present
-- Parse boolean configuration flags
-- Detect parent shells even when invoked via `curl | sh`
+`scripts/tests/install_sh_test.sh` is a POSIX-compliant shell test harness that validates logic in `web/public/install.sh` — the curl-pipeable installer script. It exercises four exported functions from the installer in complete isolation by sourcing the installer with `LIBREFANG_INSTALLER_SOURCE_ONLY=1` (which loads functions but skips execution) and pointing `$HOME` at a temporary directory.
 
-## Test Environment Setup
+## When to Run
 
-Each test runs against a temporary home directory to avoid polluting the developer's actual shell configuration:
+Execute from the repository root:
+
+```sh
+sh scripts/tests/install_sh_test.sh
+```
+
+No external test framework is required. The script uses only POSIX `sh` builtins and standard utilities (`mktemp`, `ps`).
+
+## Test Isolation Strategy
+
+The script creates a throwaway home directory and rebinds `$HOME` before sourcing the installer:
 
 ```sh
 TMP_HOME=$(mktemp -d)
 HOME="$TMP_HOME" LIBREFANG_INSTALLER_SOURCE_ONLY=1 . "$INSTALLER_PATH"
 ```
 
-- `LIBREFANG_INSTALLER_SOURCE_ONLY=1` loads the script's functions without triggering interactive prompts
-- The script is sourced (`.`) rather than executed, making functions directly callable
+This ensures:
+- No real user config files are read or mutated.
+- The installer's top-level code is suppressed (`LIBREFANG_INSTALLER_SOURCE_ONLY`), leaving only function definitions available for testing.
+- Temporary files are rooted under `$TMP_HOME`.
 
-## Test Cases
+## Test Suites
 
-### `shell_rc_from_shell` Mappings
+### 1. `shell_rc_from_shell` — Shell-to-RC-Path Mapping
 
-Verifies that each supported shell maps to its correct RC file location:
+Verifies that the function returns the correct config file path for each supported shell:
 
-| Shell | Expected RC File |
-|-------|------------------|
+| Input | Expected path |
+|---|---|
 | `zsh` | `$HOME/.zshrc` |
 | `/bin/bash` | `$HOME/.bashrc` |
 | `fish` | `$HOME/.config/fish/config.fish` |
 
-```sh
-[ "$(shell_rc_from_shell zsh)" = "$TMP_HOME/.zshrc" ] || fail "zsh rc mapping"
-```
+### 2. `choose_shell_rc` — Fallback Priority
 
-### `choose_shell_rc` Fallback Order
+Tests the fallback order when no explicit shell is specified. The function should prefer `.bashrc`, fall back to `.zshrc`, and finally to the fish config:
 
-Tests the priority order when multiple RC files exist. The function should prefer shells in this order: **bash → zsh → fish**.
+1. All three files exist → selects `.bashrc`
+2. `.bashrc` removed → selects `.zshrc`
+3. `.zshrc` also removed → selects `config.fish`
 
-```sh
-# All three present → bashrc wins
-[ "$(choose_shell_rc "")" = "$TMP_HOME/.bashrc" ]
+The test creates all three files upfront, then removes them one at a time to validate each step.
 
-# bashrc missing → zshrc wins
-[ "$(choose_shell_rc "")" = "$TMP_HOME/.zshrc" ]
+### 3. `is_enabled` — Auto-Start Flag Parsing
 
-# bashrc and zshrc missing → fish wins
-[ "$(choose_shell_rc "")" = "$TMP_HOME/.config/fish/config.fish" ]
-```
+Validates that the function correctly classifies truthy and falsy string values used for the `LIBREFANG_AUTO_START` environment variable.
 
-### `is_enabled` Flag Parser
+**Accepted (truthy):** `1`, `true`, `TRUE`, `yes`, `YES`, `on`, `ON`
 
-Validates the function that parses `LIBREFANG_AUTO_START` and similar boolean flags.
+**Rejected (falsy):** `0`, `false`, `FALSE`, `no`, `NO`, `off`, `OFF`, `""` (empty string)
 
-**Accept as true:**
-```
-1, true, TRUE, yes, YES, on, ON
-```
+### 4. `detect_user_shell` — Parent Shell Detection Under `curl|sh`
 
-**Reject (must return false):**
-```
-0, false, FALSE, no, NO, off, OFF, "" (empty string)
-```
+This is the most complex test. It validates a regression scenario where the installer runs as `curl … | sh`, meaning the immediate parent process is `sh`, not the user's actual shell. The function must walk up the process tree to find the real shell.
 
-```sh
-for truthy in 1 true TRUE yes YES on ON; do
-    is_enabled "$truthy" || fail "is_enabled should accept $truthy"
-done
-for falsy in 0 false FALSE no NO off OFF ""; do
-    if is_enabled "$falsy"; then
-        fail "is_enabled should reject $falsy"
-    fi
-done
-```
+**Mock setup:** A fake `ps` binary is written to a temporary directory and prepended to `$PATH`. The mock uses a state file to simulate two `ps -o comm=` calls:
 
-### `detect_user_shell` Parent Shell Detection
+| Call | Returns | Simulates |
+|---|---|---|
+| 1st `comm` query | `sh` | The curl\|sh parent process |
+| `ppid` query | `222` | The parent PID of `sh` |
+| 2nd `comm` query | `zsh` | The user's actual shell |
 
-Tests an edge case where `detect_user_shell` must look past an intermediate `sh` shell to find the actual parent (typically zsh when using `curl | sh`).
-
-The test uses a fake `ps` binary that simulates this sequence:
-
-1. First call to `ps -o comm=` returns `"sh"` (the pipe shell)
-2. Query for parent PID returns `"222"`
-3. Second call to `ps -o comm= -p 222` returns `"zsh"` (the actual shell)
+The test runs the detection in a subprocess with the mocked `$PATH`:
 
 ```sh
-# Fake ps outputs based on call count:
-# Call 1: "sh"
-# Call 2 (ppid query): "222"  
-# Call 3: "zsh"
+DETECTED=$(HOME="$TMP_HOME" PATH="$FAKE_BIN:$PATH" SHELL=/bin/bash \
+  FAKE_PS_STATE="$FAKE_PS_STATE" INSTALLER_PATH="$INSTALLER_PATH" \
+  LIBREFANG_INSTALLER_SOURCE_ONLY=1 \
+  sh -c '. "$INSTALLER_PATH"; detect_user_shell')
 ```
 
-The detector must traverse this chain and return `"zsh"`:
+Asserts that the result is `zsh` — proving the function walked past the intermediate `sh` process.
 
-```sh
-DETECTED=$(HOME="$TMP_HOME" ... sh -c '. "$INSTALLER_PATH"; detect_user_shell')
-[ "$DETECTED" = "zsh" ] || fail "detect_user_shell expected zsh, got: $DETECTED"
+## Relationship to the Codebase
+
+```mermaid
+graph LR
+    A[install_sh_test.sh] -->|sources with SOURCE_ONLY=1| B[web/public/install.sh]
+    A -->|mocks PATH| C[fake ps binary]
+    A -->|validates| D[shell_rc_from_shell]
+    A -->|validates| E[choose_shell_rc]
+    A -->|validates| F[is_enabled]
+    A -->|validates| G[detect_user_shell]
+    D & E & F & G -->|defined in| B
 ```
 
-## Running the Tests
+The test file depends on exactly one production file: `web/public/install.sh`. It does not call any external services, network endpoints, or other test utilities. This makes it suitable for running in CI without side effects.
 
-```sh
-./scripts/tests/install_sh_test.sh
-```
+## Adding New Tests
 
-All tests must pass for the output to be:
+Follow the existing pattern:
 
-```
-PASS: shell_rc_from_shell mappings
-PASS: choose_shell_rc fallback order
-PASS: LIBREFANG_AUTO_START flag parser
-PASS: detect_user_shell handles curl|sh parent shell
-All install.sh tests passed.
-```
-
-## Failure Handling
-
-The test script uses two helper functions:
-
-```sh
-fail() {
-    echo "FAIL: $*" >&2
-    exit 1
-}
-
-pass() {
-    echo "PASS: $*"
-}
-```
-
-Any assertion failure exits immediately with status 1, making the script suitable for CI integration.
-
-## Relationship to Installer
-
-This test file validates the non-interactive portions of `web/public/install.sh`. The tested functions handle:
-
-- **Shell detection** — determining which shell the user runs
-- **RC file selection** — choosing where to write initialization commands
-- **Configuration parsing** — interpreting boolean settings
-- **Parent shell traversal** — safely detecting the real shell across process boundaries
-
-These are the building blocks that allow `install.sh` to add itself to the user's shell configuration regardless of which shell they use.
+1. Use the `fail` / `pass` helpers for assertions and reporting.
+2. Keep all file operations inside `$TMP_HOME` — do not touch the real `$HOME`.
+3. For functions that shell out to external commands, mock them via a temp directory prepended to `$PATH`, as demonstrated in the `detect_user_shell` test.
+4. Exit immediately on failure (`set -e` is active, and `fail` calls `exit 1`).

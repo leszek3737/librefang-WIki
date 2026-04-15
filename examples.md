@@ -1,341 +1,241 @@
 # Examples
 
-# LibreFang Examples Module
+# Examples Module
 
-This module provides reference implementations and templates for extending LibreFang. It covers three extension points: agents, channel adapters, and skills. Each subdirectory is self-contained and designed to be copied and modified.
+This module provides ready-to-use templates and reference implementations for extending LibreFang. Each example is self-contained and can be copied as a starting point for custom agents, skills, and channel adapters.
 
-## Module Structure
+## What's Included
 
-```
-examples/
-├── custom-agent/              # Minimal agent template
-├── custom-channel/            # Guide for Rust channel adapters
-├── custom-skill-prompt/       # Prompt-only skill (TOML)
-├── custom-skill-python/       # Python skill with external runtime
-└── sidecar-channel-*/         # Language-agnostic adapters (Bash, Go, Node, Python)
-```
+| Example | Language | Purpose |
+|---------|----------|---------|
+| `custom-agent/` | TOML | Minimal agent configuration template |
+| `custom-skill-prompt/` | TOML | Pure prompt-engineering skill (no code) |
+| `custom-skill-python/` | Python + TOML | Code-based skill with Python runtime |
+| `custom-channel/` | Rust | Native channel adapter implementation guide |
+| `sidecar-channel-bash/` | Bash | Sidecar adapter using the JSON-RPC stdin/stdout protocol |
+| `sidecar-channel-go/` | Go | Sidecar adapter in Go |
+| `sidecar-channel-node/` | JavaScript | Sidecar adapter in Node.js |
+| `sidecar-channel-python/` | Python | Three sidecar adapters: echo, Telegram, and webhook |
 
-## Agent Templates
+---
 
-### `custom-agent/`
+## Custom Agent
 
-A minimal agent configuration template in TOML format. Agents in LibreFang are configured declaratively—the TOML defines the model, system prompt, capabilities, and resource limits.
+**Directory:** `custom-agent/`
 
-**Key configuration sections:**
+A minimal agent template defined in a single `agent.toml` file. Agents are the core conversational entities in LibreFang — each one configures a model, system prompt, resource limits, and capabilities.
 
-```toml
-[model]
-provider = "groq"
-model = "llama-3.3-70b-versatile"
-system_prompt = """..."""
-
-[capabilities]
-tools = ["web_fetch", "file_read", "file_list"]
-memory_read = ["self.*"]
-memory_write = ["self.*"]
-```
-
-To spawn this agent:
 ```bash
 librefang agent spawn examples/custom-agent/agent.toml
 ```
 
-The `module` field (`builtin:chat`) references a built-in skill that handles the actual message processing. Custom agent modules would point to a skill registered in the skill registry.
+### Key Configuration Sections
 
-## Channel Adapters (Rust)
+- **`[model]`** — Provider, model name, and system prompt. The example uses Groq's `llama-3.3-70b-versatile`.
+- **`[resources]`** — Rate limits such as `max_llm_tokens_per_hour`.
+- **`[capabilities]`** — Declares which tools the agent can use (`web_fetch`, `file_read`, `file_list`), memory scopes (`self.*`), and whether it can spawn sub-agents.
 
-### `custom-channel/`
+Copy `agent.toml`, modify the fields, and spawn it. See `docs/agent-templates.md` for the full schema.
 
-A comprehensive guide to implementing a new channel adapter in Rust. This integrates directly into `crates/librefang-channels/src/` and is gated behind a Cargo feature flag.
+---
 
-**Architecture overview:**
+## Custom Skills
 
-```mermaid
-flowchart LR
-    A["External Platform\n(Slack, Telegram, etc.)"] --> B["Channel Adapter\n(Rust)"]
-    B --> C["ChannelMessage Stream"]
-    C --> D["LibreFang Kernel"]
-    D --> E["Response"]
-    E --> B
-    B --> A
-```
+Skills are reusable capabilities that agents can invoke. There are two runtime types: `promptonly` (pure prompt templates) and `python` (code-based).
 
-**Required trait methods:**
+### Prompt-Only Skill
 
-| Method | Purpose |
-|--------|---------|
-| `name()` | Identifier (e.g., `"slack"`) |
-| `channel_type()` | `ChannelType` enum variant |
-| `start()` | Returns `Stream<Item = ChannelMessage>` |
-| `send()` | Deliver response to platform |
-| `stop()` | Clean shutdown |
+**Directory:** `custom-skill-prompt/`
 
-**Security pattern for credentials:**
+No code required — the skill is entirely defined in `skill.toml`. The example generates a meeting agenda from a topic and duration using Jinja-style `{{variable}}` interpolation in the prompt template.
 
-```rust
-use zeroize::Zeroizing;
-
-pub struct MyPlatformAdapter {
-    // Zeroized so memory is wiped on drop
-    api_key: Zeroizing<String>,
-    shutdown_tx: Arc<watch::Sender<bool>>,
-    // ...
-}
-```
-
-**Shutdown coordination:**
-
-```rust
-let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
-// In start():
-tokio::select! {
-    _ = shutdown_rx.changed() => return,
-    // poll/platform logic
-}
-
-// In stop():
-let _ = self.shutdown_tx.send(true);
-```
-
-**Feature gate registration** in `librefang-channels/Cargo.toml`:
-
-```toml
-[features]
-channel-myplatform = []
-all-channels = ["channel-myplatform", "channel-slack", ...]
-```
-
-## Skills
-
-Skills are executable units that process messages. LibreFang supports two runtime types: `promptonly` (pure LLM) and `python` (external interpreter).
-
-### Prompt-Only Skill: `custom-skill-prompt/`
-
-Uses only prompt engineering—no code. The template fills in user-provided variables:
-
-```toml
-[runtime]
-type = "promptonly"
-
-[input]
-topic = { type = "string", required = true }
-duration_minutes = { type = "string", required = true }
-
-[prompt]
-template = """
-Create a structured meeting agenda for:
-Topic: {{topic}}
-Duration: {{duration_minutes}} minutes
-..."""
-```
-
-Test with:
 ```bash
 librefang skill test ./examples/custom-skill-prompt \
   --input '{"topic": "Q1 planning", "duration_minutes": "30"}'
 ```
 
-### Python Skill: `custom-skill-python/`
+The `[input]` section declares typed parameters. The `[prompt]` section contains the template with placeholders. Set `runtime.type = "promptonly"`.
 
-A skill with an external Python runtime. The skill loads `main.py` and calls `run(input: dict) -> str`:
+### Python Skill
 
-```python
-def run(input: dict) -> str:
-    text = input.get("text", "")
-    words = len(text.split())
-    return f"Words: {words}\n..."
+**Directory:** `custom-skill-python/`
+
+A code-based skill with a `main.py` entry point. The Python file must export a `run(input: dict) -> str` function. The example counts words, sentences, and characters in input text.
+
+```bash
+librefang skill test ./examples/custom-skill-python --input '{"text": "Hello world"}'
 ```
 
-Configuration:
-```toml
-[runtime]
-type = "python"
-entry = "main.py"
+Configuration in `skill.toml` sets `runtime.type = "python"` and `runtime.entry = "main.py"`.
 
-[input]
-text = { type = "string", description = "The text to analyze", required = true }
-```
+---
+
+## Native Channel Adapters
+
+**Directory:** `custom-channel/`
+
+A complete guide for implementing channel adapters in Rust as part of the `librefang-channels` crate. Channel adapters bridge external messaging platforms into LibreFang by converting platform-specific messages into unified `ChannelMessage` events.
+
+### The `ChannelAdapter` Trait
+
+All native adapters implement `ChannelAdapter` from `crates/librefang-channels/src/types.rs`. Five methods are required; the rest have defaults:
+
+| Method | Required | Purpose |
+|--------|----------|---------|
+| `name()` | Yes | Human-readable adapter identifier |
+| `channel_type()` | Yes | Returns a `ChannelType` enum variant |
+| `start()` | Yes | Returns a `Stream<Item = ChannelMessage>` of incoming messages |
+| `send()` | Yes | Delivers a response to a user on the platform |
+| `stop()` | Yes | Graceful shutdown and cleanup |
+| `send_typing()` | No | Typing indicator |
+| `send_reaction()` | No | Emoji reaction to a message |
+| `send_in_thread()` | No | Threaded reply (falls back to `send()`) |
+| `status()` | No | Health status reporting |
+
+### Implementation Patterns
+
+The `MyPlatformAdapter` example in the README demonstrates the standard patterns:
+
+- **Secret management** — Use `Zeroizing<String>` for API keys and tokens so they are wiped from memory on drop.
+- **Shutdown signaling** — Use `watch::channel(false)` to broadcast a shutdown signal to all spawned tasks.
+- **Message bridging** — Use `mpsc::channel` to feed incoming platform messages into the `Stream` that the kernel consumes via `ReceiverStream`.
+- **Long messages** — Use `split_message(text, MAX_LEN)` from `crate::types` to chunk replies that exceed platform limits.
+
+### Integration Steps
+
+1. Create the adapter source file in `crates/librefang-channels/src/`.
+2. Add a `#[cfg(feature = "channel-myplatform")] pub mod myplatform;` gate in `lib.rs`.
+3. Add the feature flag to `Cargo.toml` (and to `all-channels` / `default` if appropriate).
+4. Write unit tests covering creation, parsing, and serialization.
+5. Build and test: `cargo build --workspace --features channel-myplatform`.
+
+### Reference Adapters
+
+Study existing adapters from simplest to most complex:
+
+- **ntfy** (`ntfy.rs`) — SSE subscription + plain POST
+- **webhook** (`webhook.rs`) — HTTP server with HMAC-SHA256 verification
+- **gotify** (`gotify.rs`) — WebSocket + REST
+- **slack** (`slack.rs`) — Socket Mode WebSocket + Web API
+- **telegram** (`telegram.rs`) — Long-polling + Bot API
+
+---
 
 ## Sidecar Channel Adapters
 
-Sidecar adapters provide a **language-agnostic** way to bridge external platforms. Instead of writing Rust, you write a simple subprocess that communicates via JSON-RPC over stdin/stdout.
+Sidecar adapters let you write channel integrations in **any language** without modifying the Rust codebase. LibreFang spawns your adapter as a subprocess and communicates via newline-delimited JSON over stdin/stdout.
 
-### Protocol Overview
+### Architecture
 
 ```mermaid
-sequenceDiagram
-    participant LF as LibreFang
-    participant Adapter as Sidecar Process
-
-    Adapter->>LF: {"method": "ready"}
-    Note over LF: Spawns adapter subprocess
-    Note over LF: Consumes message stream
-
-    loop Message Loop
-        LF->>Adapter: {"method": "send", "params": {"channel_id": "...", "text": "..."}}
-        Adapter-->>LF: {"method": "message", "params": {"user_id": "...", "text": "...", ...}}
+flowchart LR
+    subgraph "LibreFang Kernel"
+        Router[Message Router]
     end
-
-    LF->>Adapter: {"method": "shutdown"}
-    Adapter->>LF: exit(0)
+    subgraph "Sidecar Process"
+        STDIN[stdin]
+        STDOUT[stdout]
+        Adapter[Your Adapter]
+    end
+    Platform[External Platform]
+    Router -->|send/shutdown commands| STDIN
+    STDOUT -->|ready/message/error events| Router
+    Adapter <-->|API calls| Platform
+    STDIN --> Adapter
+    Adapter --> STDOUT
 ```
 
-### Events (Adapter → LibreFang)
+### Protocol
 
-```json
-{"method": "ready"}
-{"method": "message", "params": {"user_id": "...", "user_name": "...", "text": "...", "channel_id": "..."}}
-{"method": "error", "params": {"message": "..."}}
-```
+Communication is one JSON object per line.
 
-### Commands (LibreFang → Adapter)
+**Events** (adapter → LibreFang via stdout):
 
-```json
-{"method": "send", "params": {"channel_id": "...", "text": "..."}}
-{"method": "shutdown"}
-```
+| Method | Purpose |
+|--------|---------|
+| `{"method": "ready"}` | Signal initialization complete |
+| `{"method": "message", "params": {...}}` | Incoming message from the platform |
+| `{"method": "error", "params": {"message": "..."}}` | Report an error |
 
-### Language Implementations
+**Commands** (LibreFang → adapter via stdin):
 
-All four implementations follow the same pattern:
+| Method | Purpose |
+|--------|---------|
+| `{"method": "send", "params": {"channel_id": "...", "text": "..."}}` | Deliver a message to the platform |
+| `{"method": "shutdown"}` | Graceful termination request |
 
-1. Signal readiness via stdout
-2. Read JSON commands from stdin (one per line)
-3. Handle `send` by delivering to the platform
-4. Handle `shutdown` by exiting cleanly
-
-| Language | File | Notes |
-|----------|------|-------|
-| Python | `adapter.py` | Stdlib only, minimal echo adapter |
-| Python | `telegram_adapter.py` | Long-polling Telegram Bot API |
-| Python | `webhook_adapter.py` | HTTP server receiving webhooks |
-| Node.js | `adapter.js` | Echo adapter using `readline` |
-| Go | `adapter.go` | Echo adapter using `bufio.Scanner` |
-| Bash | `adapter.sh` | Minimal implementation using `jq` |
+`stderr` output is forwarded to LibreFang's logs for debugging.
 
 ### Configuration
 
-Add to `config.toml`:
+Add to `~/.librefang/config.toml`:
 
 ```toml
 [[sidecar_channels]]
-name = "telegram"
+name = "my-adapter"
 command = "python3"
-args = ["examples/sidecar-channel-python/telegram_adapter.py"]
-env = { TELEGRAM_BOT_TOKEN = "..." }
+args = ["path/to/adapter.py"]
+env = { API_KEY = "..." }        # optional environment variables
+# channel_type = "custom-name"   # optional, defaults to name
 ```
 
-### Python: Telegram Adapter
+### Provided Implementations
 
-Demonstrates a real-world integration with long-polling:
+#### Bash (`sidecar-channel-bash/adapter.sh`)
+
+The simplest possible adapter — requires only `bash` and `jq`. Echoes messages back. Useful as a minimal reference for the protocol.
+
+#### Go (`sidecar-channel-go/adapter.go`)
+
+A compiled adapter with proper JSON marshaling. Build with `go build -o adapter adapter.go`. Demonstrates typed structs for events and commands.
+
+#### Node.js (`sidecar-channel-node/adapter.js`)
+
+Uses Node's built-in `readline` module. Shows the same echo pattern with `process.stdout.write()` for explicit flushing.
+
+#### Python — Echo (`sidecar-channel-python/adapter.py`)
+
+The canonical reference implementation. The core structure used by all Python sidecars:
 
 ```python
-def poll_updates(allowed_ids):
-    offset = 0
-    while True:
-        resp = requests.get(f"{API_BASE}/getUpdates", params={
-            "offset": offset,
-            "timeout": 30,
-        }, timeout=35)
-        for update in data.get("result", []):
-            offset = update["update_id"] + 1
-            send_event("message", {
-                "user_id": str(msg["from"]["id"]),
-                "user_name": user.get("first_name", "unknown"),
-                "text": msg["text"],
-                "channel_id": str(msg["chat"]["id"]),
-                "platform": "telegram",
-            })
+def send_event(method, params=None):
+    event = {"method": method}
+    if params:
+        event["params"] = params
+    print(json.dumps(event), flush=True)
 ```
 
-Whitelist enforcement:
-```python
-if allowed_ids and user_id not in allowed_ids:
-    continue
-```
+- `send_event("ready")` on startup
+- Read stdin line-by-line, parse JSON, dispatch to `handle_command()`
+- `handle_command()` processes `"send"` and `"shutdown"` methods
+- Always `flush=True` on stdout writes
 
-### Python: Webhook Adapter
+#### Python — Telegram (`sidecar-channel-python/telegram_adapter.py`)
 
-Demonstrates receiving via HTTP server:
+A real-world adapter bridging the Telegram Bot API. Uses long-polling in a background thread (`poll_updates()`) while the main thread reads commands from stdin. Features:
 
-```python
-class WebhookHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        body = self.rfile.read(content_length)
-        if WEBHOOK_SECRET:
-            sig = self.headers.get("X-Signature", "")
-            expected = hmac.new(WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(sig, expected):
-                self.send_response(401)
-                return
-        send_event("message", {...})
-```
+- Configurable user whitelist via `ALLOWED_USERS` environment variable
+- Long-polling with 30-second timeout
+- Automatic error reporting back to LibreFang via `send_event("error", ...)`
 
-**Sending outbound** is a no-op for webhook-only integrations—acknowledge and log:
+#### Python — Webhook (`sidecar-channel-python/webhook_adapter.py`)
 
-```python
-elif method == "send":
-    sys.stderr.write(f"[webhook] outbound (no-op): {text}\n")
-```
+An HTTP server that receives POST requests and forwards them as messages. Useful for integrating GitHub, Stripe, or any webhook-capable service. Features:
 
-## Connecting the Examples
+- Stdlib-only HTTP server (no dependencies)
+- Optional HMAC-SHA256 signature validation via `WEBHOOK_SECRET`
+- Receive-only (outbound `send` commands are logged to stderr as no-ops)
 
-The extension points connect through the LibreFang kernel:
+### Writing Your Own Sidecar
 
-```mermaid
-flowchart TD
-    subgraph "Extension Types"
-        A["Agent TOML\n(custom-agent/)"]
-        B["Rust Channel Adapter\n(custom-channel/)"]
-        C["Skill TOML\n(custom-skill-prompt/)"]
-        D["Python Skill\n(custom-skill-python/)"]
-        E["Sidecar Adapter\n(sidecar-channel-*/)"]
-    end
+Every adapter follows the same lifecycle:
 
-    subgraph "Kernel Integration"
-        F["crates/librefang-core"]
-        G["crates/librefang-channels"]
-        H["crates/librefang-runtime"]
-    end
+1. **Initialize** — Set up connections, parse environment variables.
+2. **Signal ready** — Write `{"method": "ready"}` to stdout.
+3. **Main loop** — Read commands from stdin, handle platform I/O, write events to stdout.
+4. **Shutdown** — On receiving `{"method": "shutdown"}`, clean up resources and exit.
 
-    A --> F
-    B --> G
-    C --> H
-    D --> H
-    E --> G
-
-    F --> G
-    G --> H
-    H --> F
-```
-
-- **Agents** configure model selection, system prompts, and resource limits at the kernel level
-- **Channel adapters** (Rust or sidecar) feed messages into `ChannelBridge` in `librefang-channels`
-- **Skills** execute within `librefang-runtime`, which handles prompt rendering and response formatting
-
-## Testing Examples
-
-```bash
-# Build with a specific channel feature
-cargo build --workspace --features channel-myplatform
-
-# Test a Python skill
-librefang skill test ./examples/custom-skill-python \
-  --input '{"text": "Hello world"}'
-
-# Lint the workspace
-cargo clippy --workspace --all-targets -- -D warnings
-```
-
-## Reference Adapters by Complexity
-
-When implementing a Rust channel adapter, study these in order:
-
-1. **ntfy** — SSE subscription + plain POST publishing
-2. **webhook** — HTTP server with HMAC-SHA256 verification
-3. **gotify** — WebSocket subscription + REST API publishing
-4. **slack** — WebSocket (Socket Mode) + Web API
-5. **telegram** — Long-polling + Bot API
-
-For sidecar adapters, start with `adapter.py` (Python) or `adapter.sh` (Bash) for the minimal pattern, then extend to `telegram_adapter.py` or `webhook_adapter.py` for real-world platform integration.
+Key rules:
+- Write **one JSON object per line** to stdout, always flushing.
+- Never write non-JSON to stdout (use stderr for logs).
+- Exit cleanly on `shutdown` — the kernel may send SIGKILL after a timeout.

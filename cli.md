@@ -1,363 +1,215 @@
 # CLI
 
-# LibreFang CLI
-
-The CLI (`librefang-cli`) is the primary user-facing interface for LibreFang. It provides a comprehensive command-line toolkit for initializing, configuring, and operating the LibreFang Agent OS, as well as managing agents, skills, channels, and the daemon lifecycle.
+# LibreFang CLI Module
 
 ## Overview
 
-LibreFang operates in two distinct modes:
+The CLI (`crates/librefang-cli`) is the primary user-facing interface for LibreFang. It operates in two modes:
 
-**Daemon Mode**: When `librefang start` launches the daemon, subsequent CLI invocations communicate with it over HTTP. The CLI becomes a lightweight client, delegating work to the running kernel process.
+- **Daemon client mode** — when a kernel daemon is running (`librefang start`), the CLI communicates over HTTP to `librefang_api::server`.
+- **Single-shot mode** — when no daemon is available, commands that need a kernel boot one in-process via `LibreFangKernel::boot`, execute, and exit.
 
-**Single-Shot Mode**: When no daemon is running, CLI commands boot an in-process `LibreFangKernel` to execute the requested operation. This enables commands like `librefang init` and `librefang doctor` to work without a persistent daemon.
+The module is responsible for argument parsing, daemon lifecycle management, interactive onboarding, TUI screens, and all user-facing output formatting.
+
+## Architecture
 
 ```mermaid
-flowchart LR
-    subgraph "CLI Process"
-        A[librefang CLI] --> B{Command}
-        B -->|start| C[Daemon Process]
-        B -->|agent list| D{HTTP Request}
-        B -->|init| E[In-Process Kernel]
-    end
-    
-    C -->|runs| F[LibreFangKernel]
-    D -->|localhost| C
-    E -->|boots| F
-    
-    G[~/.librefang] --> |config, vault| C
-    G --> |config| E
+graph TD
+    A["main()"] --> B{"Daemon running?"}
+    B -->|Yes| C["HTTP client → daemon API"]
+    B -->|No| D["Boot in-process kernel"]
+    A --> E["clap Parser"]
+    E --> F["Commands enum"]
+    F --> G["cmd_* handlers"]
+    G --> C
+    G --> D
+    G --> H["TUI screens"]
+    H --> I["launcher / init_wizard / free_provider_guide"]
 ```
 
-## Entry Point and Command Dispatch
+## Entry Point Flow
 
-The `main()` function in `main.rs` handles several critical initialization steps before dispatching to command handlers:
+`main()` executes in this order:
 
-1. **rustls Crypto Provider**: Initializes the AWS-LC-RS crypto provider for TLS operations (required by rustls 0.23+)
-2. **Environment Loading**: Loads `~/.librefang/.env` into the process environment via `dotenv::load_dotenv()`
-3. **Internationalization**: Initializes i18n with the configured language (defaults to English)
-4. **Tracing Setup**: Configures logging based on whether the command uses TUI mode or CLI mode
-5. **Ctrl+C Handler**: Installs a platform-specific handler for clean interrupt handling (primarily Windows/MINGW)
+1. **Initialize rustls crypto provider** — required before any async/TLS operations with rustls 0.23.
+2. **Load `.env`** — `dotenv::load_dotenv()` reads `~/.librefang/.env` into the process environment (system env takes priority).
+3. **Load language** — `load_language_from_config()` reads the `language` key from config and calls `i18n::init()`.
+4. **Parse CLI** — `Cli::parse()` via `clap`.
+5. **Determine TUI mode** — checks if the command needs a full-screen terminal (launcher, `tui`, `chat`, `agent chat`). TUI modes use file-based tracing to avoid corrupting the terminal; CLI modes install a Ctrl+C handler and trace to stderr.
+6. **Initialize tracing** — either `init_tracing_file` (TUI) or `init_tracing_stderr` (CLI), respecting `log_level` from config.
+7. **Dispatch to handler** — the `match cli.command` block routes to `cmd_*` functions.
 
-### TUI vs CLI Mode Detection
+### No-Command Behavior
 
-The CLI detects whether it's entering TUI mode (terminal user interface) or remaining in standard CLI mode:
+When invoked with no subcommand:
 
-```rust
-let is_tui_mode = is_launcher
-    || matches!(cli.command, Some(Commands::Tui))
-    || matches!(cli.command, Some(Commands::Chat { .. }))
-    || matches!(cli.command, Some(Commands::Agent(AgentCommands::Chat { .. })));
-```
+- **In a terminal** — launches the interactive `launcher` which presents options (Get Started, Chat, Dashboard, Desktop App, TUI, Help, Quit).
+- **Piped/non-terminal** — prints `--help` text.
 
-TUI mode requires special handling:
-- **No Ctrl+C handler**: TUI mode bypasses the Ctrl+C handler because `process::exit()` bypasses `ratatui::restore()`, leaving the terminal in raw mode
-- **File-based tracing**: Logs write to `tui.log` instead of stderr to avoid corrupting the terminal display
+## Command Structure
 
-### Command Matching
+The CLI uses `clap` with a `Commands` enum containing top-level commands and nested subcommand groups:
 
-The `main()` function uses exhaustive pattern matching on `cli.command` to dispatch to handler functions. Each command variant maps to a dedicated `cmd_*` function:
+| Top-level command | Subcommands | Purpose |
+|---|---|---|
+| `init` | — | Create `~/.librefang/`, config, .env |
+| `start` | — | Launch daemon (background, foreground, or tail) |
+| `stop` / `restart` | — | Daemon lifecycle |
+| `agent` | `new`, `spawn`, `list`, `chat`, `kill`, `set` | Agent management |
+| `chat` | — | Quick chat with default agent |
+| `spawn` | — | Alias for agent creation by template |
+| `models` | `list`, `aliases`, `providers`, `set` | LLM model browsing |
+| `config` | `show`, `edit`, `get`, `set`, `unset`, `set-key`, `delete-key`, `test-key` | Configuration management |
+| `channel` | `list`, `setup`, `test`, `enable`, `disable` | Messaging channel integrations |
+| `hand` | `list`, `active`, `status`, `install`, `activate`, `deactivate`, `info`, `check-deps`, `install-deps`, `pause`, `resume`, `settings`, `set`, `reload`, `chat` | Autonomous execution modules |
+| `skill` | `install`, `list`, `remove`, `search`, `test`, `publish`, `create` | Skill management |
+| `cron` | `list`, `create`, `delete`, `enable`, `disable` | Scheduled jobs |
+| `vault` | `init`, `set`, `list`, `remove` | Encrypted credential storage |
+| `security` | `status`, `audit`, `verify` | Security audit trail |
+| `memory` | `list`, `get`, `set`, `delete` | Agent KV store |
+| `webhooks` | `list`, `create`, `delete`, `test` | HTTP callback triggers |
+| `workflow` | `list`, `create`, `run` | Multi-step agent workflows |
+| `trigger` | `list`, `create`, `delete` | Event-driven triggers |
+| `approvals` | `list`, `approve`, `reject` | Human-in-the-loop approvals |
+| `gateway` | `start`, `stop`, `restart`, `status` | Low-level daemon control |
+| `service` | `install`, `uninstall`, `status` | Boot service (systemd/launchd/Windows) |
+| `devices` | `list`, `pair`, `remove` | Device pairing |
 
-```rust
-match cli.command {
-    Some(Commands::Tui) => tui::run(cli.config),
-    Some(Commands::Init { quick, upgrade }) => { ... }
-    Some(Commands::Agent(sub)) => match sub {
-        AgentCommands::List { json } => cmd_agent_list(cli.config, json),
-        AgentCommands::Chat { agent_id } => cmd_agent_chat(cli.config, &agent_id),
-        // ...
-    },
-    // ... 60+ command variants
-}
-```
+Additionally, convenience aliases exist: `agents` → `agent list`, `kill` → `agent kill`, `logs` → tail daemon log, `health` → quick check, `dashboard` → open browser, `qr` → device pairing, `onboard`/`setup`/`configure` → init flows.
 
 ## Daemon Communication
 
-### Daemon Detection
+### Discovery
 
-When executing commands that require the daemon, the CLI first checks if one is running:
+`find_daemon()` locates a running daemon by:
 
-```rust
-pub(crate) fn find_daemon() -> Option<String> {
-    find_daemon_in_home(&cli_librefang_home())
-}
+1. Reading `~/.librefang/daemon.json` via `read_daemon_info` from `librefang_api`.
+2. Normalizing the listen address (replacing `0.0.0.0` with `127.0.0.1` to avoid macOS DNS hangs).
+3. Making a health-check GET to `http://{addr}/api/health` with a 1-second connect / 2-second total timeout.
 
-fn find_daemon_in_home(home_dir: &PathBuf) -> Option<String> {
-    let info = read_daemon_info(home_dir)?;
-    let addr = info.listen_addr.replace("0.0.0.0", "127.0.0.1");
-    let url = format!("http://{addr}/api/health");
-    // ...
-}
-```
+### HTTP Client
 
-The daemon writes its connection info to `~/.librefang/daemon.json`, which the CLI reads to discover the API endpoint.
+`daemon_client()` builds a `reqwest::blocking::Client` configured with:
 
-### HTTP Client Building
+- 120-second timeout for long-running agent operations.
+- Automatic `Authorization: Bearer <key>` header when `api_key` is set in config (read via `read_api_key()`).
 
-The `daemon_client()` function constructs an HTTP client with appropriate timeouts and authentication:
+`daemon_json()` is the standard response handler that parses JSON and exits with contextual error messages for timeouts, connection refused, or server errors.
 
-```rust
-pub(crate) fn daemon_client() -> reqwest::blocking::Client {
-    daemon_client_with_api_key(read_api_key().as_deref())
-}
+## Initialization System
 
-fn daemon_client_with_api_key(api_key: Option<&str>) -> reqwest::blocking::Client {
-    let mut builder = http_client::client_builder()
-        .timeout(Duration::from_secs(120));
+`cmd_init` has three paths:
 
-    if let Some(key) = api_key {
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {key}")).unwrap());
-        builder = builder.default_headers(headers);
-    }
-    builder.build().expect("Failed to build HTTP client")
-}
-```
+### Quick Mode (`--quick`)
 
-When `api_key` is configured in `config.toml`, the client automatically includes `Authorization: Bearer <key>` on every request.
+1. Creates `~/.librefang/` and `data/` subdirectory.
+2. Calls `sync_registry` to download provider/integration/assistant definitions.
+3. Initializes the credential vault and a git repo for config versioning.
+4. Auto-detects the best provider via `detect_best_provider()`.
+5. Writes `config.toml` from `INIT_DEFAULT_CONFIG_TEMPLATE` with detected values.
+6. Writes `config.example.toml` with the full annotated template.
 
-### JSON Response Handling
+### Interactive Mode (default)
 
-The `daemon_json()` helper parses responses and provides user-friendly error messages:
+Redirects to `cmd_init_upgrade()` if `config.toml` already exists (to avoid overwriting user settings — addresses issue #1862). Otherwise launches `tui::screens::init_wizard::run()`, a 5-step ratatui TUI wizard. On completion, executes the user's chosen launch action (Desktop, Dashboard, or Chat).
 
-```rust
-pub(crate) fn daemon_json(resp: Result<Response, reqwest::Error>) -> Value {
-    match resp {
-        Ok(r) => { /* check status, return body */ }
-        Err(e) => {
-            if msg.contains("Connection refused") {
-                ui::error_with_fix(&i18n::t("error-connect-refused"),
-                    &i18n::t("error-connect-refused-fix"));
-            }
-            std::process::exit(1);
-        }
-    }
-}
-```
+### Upgrade Mode (`--upgrade`)
 
-## Daemon Lifecycle Management
+1. Backs up existing `config.toml` with timestamp suffix.
+2. Forces registry sync (TTL=0).
+3. Ensures vault and git exist.
+4. Merges missing top-level config keys by appending TOML fragments — scalars are inserted before the first `[table]` header, tables are appended at the end. This preserves user comments and formatting.
+5. Checks for legacy `~/.openclaw` installations and outdated `require_approval` settings.
 
-### Starting the Daemon
+## Provider Detection
 
-`cmd_start()` handles daemon startup with three modes:
+`detect_best_provider()` probes in order:
 
-1. **Detached (default)**: Spawns the process in the background, waits for it to become healthy, then returns
-2. **Foreground**: Runs the kernel inline within the CLI process
-3. **Spawned (internal)**: Used when the detached child relaunches itself with `--spawned`
+1. **Cloud providers** — `librefang_runtime::drivers::detect_available_provider()` checks 13+ provider API keys (OpenAI, Anthropic, Gemini, Groq, DeepSeek, OpenRouter, Mistral, Together, Fireworks, xAI, Perplexity, Cohere, Azure OpenAI) plus `GOOGLE_API_KEY` alias.
+2. **Local Ollama** — TCP probe to `127.0.0.1:11434` with 500ms timeout.
+3. **Interactive guide** — launches `tui::screens::free_provider_guide` to help the user pick a free provider.
+4. **Fallback** — defaults to Groq with hints about free providers.
 
-```rust
-fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: bool) {
-    // Check if already running
-    if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
-        ui::error_with_fix(&i18n::t_args("daemon-already-running", &[("url", &base)]), ...);
-    }
+## Daemon Lifecycle
 
-    if !spawned && !foreground {
-        // Detached mode: spawn and wait
-        let log_path = daemon_log_path_for_config(config.as_deref());
-        let mut child = spawn_detached_daemon(config.as_deref(), &log_path)?;
-        // Wait for health check...
-    } else {
-        // Foreground mode: boot kernel inline
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let kernel = LibreFangKernel::boot(config.as_deref())?;
-            librefang_api::server::run_daemon(kernel, &listen_addr, ...).await
-        });
-    }
-}
-```
+### Background Start
 
-### Detached Daemon Spawning
+`cmd_start` with default flags spawns a detached child process:
 
-`spawn_detached_daemon()` creates a properly backgrounded process:
+1. Resolves the current executable path.
+2. Creates the log directory and opens the log file for stdout/stderr.
+3. On Unix: calls `setsid()` via `pre_exec` to detach from the terminal.
+4. On Windows: uses `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` creation flags.
+5. The child re-invokes the binary with `start --spawned`.
+6. The parent polls `find_daemon_in_home` for up to 10 seconds, then reports success or timeout.
 
-- **Unix**: Uses `setsid()` to create a new session, orphaning the process from the terminal
-- **Windows**: Uses `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` flags
-- **Log redirection**: Both stdout and stderr append to the daemon log file
+### Foreground Start
 
-```rust
-#[cfg(unix)]
-command.pre_exec(|| {
-    if libc::setsid() == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-});
-```
+With `--foreground` or `--spawned`, boots `LibreFangKernel` in-process and runs `librefang_api::server::run_daemon` on a tokio runtime.
 
-## Initialization (`librefang init`)
+## Ctrl+C Handling
 
-The init command sets up the LibreFang home directory and configuration:
+`install_ctrlc_handler()` is only installed for non-TUI CLI modes:
 
-1. **Create directories**: `~/.librefang/` and `~/.librefang/data/` with mode 0700
-2. **Sync registry**: Downloads provider/integration metadata from the registry
-3. **Initialize vault**: Creates the encrypted credential store
-4. **Init git repo**: Sets up version control for configuration
-5. **Detect provider**: Auto-detects available API keys
-6. **Write config**: Creates `config.toml` with sensible defaults
+- **Windows**: Uses `SetConsoleCtrlHandler` to intercept `CTRL_C_EVENT`. First press prints "Interrupted." and exits cleanly. Second press hard-exits with code 130.
+- **Unix**: Relies on the default SIGINT handler which already interrupts `read_line` and terminates.
 
-### Provider Auto-Detection
+TUI modes (`launcher`, `tui`, `chat`) skip this handler because `process::exit` bypasses ratatui's terminal restore, which would leave the terminal in raw mode.
 
-`detect_best_provider()` probes for available API keys across 13+ providers:
+## Tracing Configuration
 
-```rust
-fn detect_best_provider() -> (String, String, String) {
-    // 1. Check cloud providers via runtime registry
-    if let Some((provider, _model, env_var)) =
-        librefang_runtime::drivers::detect_available_provider()
-    {
-        return (provider, env_var, default_model_for_provider(provider));
-    }
+| Mode | Output | Notes |
+|---|---|---|
+| CLI subcommands | stderr + `~/.librefang/daemon.log` | `init_tracing_stderr` with dual layers |
+| TUI / chat | `~/.librefang/tui.log` | `init_tracing_file` — stderr would corrupt the TUI |
+| Log level | From `log_level` in config.toml | Falls back to `"info"`, respects `RUST_LOG` |
 
-    // 2. Check Ollama (local, no API key needed)
-    if check_ollama_available() {
-        return ("ollama".to_string(), "OLLAMA_API_KEY".to_string(),
-            default_model_for_provider("ollama"));
-    }
+## Configuration Helpers
 
-    // 3. Launch TUI guide for free provider setup
-    if let Some(result) = guide_free_provider_setup() {
-        return result;
-    }
-}
-```
+Several functions read single fields from config without full deserialization:
 
-### Upgrade Path
+- `load_log_level_from_config()` — reads `log_level`.
+- `load_update_channel_from_config()` — reads `update_channel`, parses as `UpdateChannel` enum.
+- `load_log_dir_from_config()` — reads custom `log_dir` path.
+- `load_language_from_config()` — reads `language` for i18n.
 
-When `config.toml` already exists, `librefang init` redirects to the upgrade flow (`cmd_init_upgrade()`) to preserve user settings:
+`daemon_config_context()` does full deserialization via `load_config()` and returns a `DaemonConfigContext` with `home_dir`, `api_key`, and `log_dir`.
 
-```rust
-if !quick && librefang_dir.join("config.toml").exists() {
-    ui::hint("Existing installation detected — running upgrade to preserve your settings.");
-    cmd_init_upgrade();
-    return;
-}
-```
+## File Permissions
 
-The upgrade process:
-1. Backs up existing config with timestamp
-2. Syncs registry (TTL=0 forces refresh)
-3. Merges new default fields without overwriting existing values
-4. Detects and warns about legacy `.openclaw` installations
+On Unix, the module restricts permissions for security:
 
-## Security Features
+- `restrict_file_permissions` — sets files to `0600` (owner-only read/write).
+- `restrict_dir_permissions` — sets directories to `0700` (owner-only rwx).
 
-### File Permission Hardening
+Applied to `config.toml`, backups, vault file, log directory, and the `~/.librefang/` directory itself.
 
-On Unix systems, sensitive files and directories receive restricted permissions:
+## Submodules
 
-```rust
-#[cfg(unix)]
-pub(crate) fn restrict_file_permissions(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-}
+| Module | Visibility | Purpose |
+|---|---|---|
+| `desktop_install` | private | Find, download, and launch the Tauri desktop app binary |
+| `http_client` | private | Shared `reqwest::Client` builder with TLS configuration |
+| `i18n` | public | Translation system — `t()` and `t_args()` functions for localized strings |
+| `launcher` | private | Interactive first-run launcher (Get Started / Chat / Dashboard / Desktop / TUI) |
+| `mcp` | private | MCP (Model Context Protocol) server over stdio — bridges to Claude Code, Cursor, etc. |
+| `progress` | public | Terminal progress bar rendering with OSC fallback for terminal emulators |
+| `table` | public | Shared table formatting used across CLI output and API route responses |
+| `templates` | private | Agent template loading and management |
+| `tui` | private | Full ratatui-based TUI screens: init wizard, free provider guide, chat interface, channel setup |
+| `ui` | private | Low-level terminal output helpers: banners, success/error/hint messages, KV formatting, next-steps blocks |
 
-#[cfg(unix)]
-pub(crate) fn restrict_dir_permissions(path: &Path) {
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
-}
-```
+## Key Integration Points
 
-Applied to:
-- `~/.librefang/` directory (0700)
-- `config.toml` (0600)
-- Config backups (0600)
+- **`librefang_kernel`** — `LibreFangKernel::boot()` for in-process kernel, `config::load_config()` for configuration.
+- **`librefang_api`** — `server::run_daemon()` for foreground mode, `read_daemon_info()` for daemon discovery.
+- **`librefang_types`** — shared types including `AgentId`, `AgentManifest`, `config::UpdateChannel`.
+- **`librefang_extensions`** — `dotenv` for `.env` loading, `vault::CredentialVault` for encrypted credential storage.
+- **`librefang_runtime`** — `registry_sync::sync_registry()` for provider/integration sync, `drivers::detect_available_provider()` for key detection, `model_catalog::ModelCatalog` for default model resolution.
 
-### Ctrl+C Handler
+## Adding a New Command
 
-Windows/MINGW environments receive special handling because the default signal handler doesn't reliably interrupt blocking `read_line` calls:
-
-```rust
-#[cfg(windows)]
-unsafe extern "system" fn handler(_ctrl_type: u32) -> i32 {
-    if CTRLC_PRESSED.swap(true, Ordering::SeqCst) {
-        // Second press: hard exit
-        std::process::exit(130);
-    }
-    // First press: exit cleanly
-    let _ = std::io::Write::write_all(&mut std::io::stderr(), b"\nInterrupted.\n");
-    std::process::exit(0);
-}
-```
-
-### Credential Vault
-
-API keys are stored in an encrypted vault (`vault.enc`) rather than plaintext in config files:
-
-```rust
-fn init_vault_if_missing(librefang_dir: &Path) {
-    let vault_path = librefang_dir.join("vault.enc");
-    if vault_path.exists() { return; }
-
-    let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
-    if let Err(e) = vault.init() {
-        tracing::debug!("vault init skipped: {e}"); // Silent failure
-    }
-}
-```
-
-## Configuration
-
-### Home Directory Resolution
-
-The LibreFang home directory resolves with this priority:
-
-```rust
-fn cli_librefang_home() -> PathBuf {
-    if let Ok(home) = std::env::var("LIBREFANG_HOME") {
-        return PathBuf::from(home);
-    }
-    dirs::home_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".librefang")
-}
-```
-
-### Lightweight Config Reading
-
-Commands that need specific config values without full deserialization use TOML parsing:
-
-```rust
-fn load_log_level_from_config() -> String {
-    let level = (|| -> Option<String> {
-        let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
-        let content = std::fs::read_to_string(&config_path).ok()?;
-        let config: toml::Value = toml::from_str(&content).ok()?;
-        config.get("log_level")?.as_str().map(|s| s.to_string())
-    })();
-    level.unwrap_or_else(|| "info".to_string())
-}
-```
-
-This avoids the overhead of fully deserializing the config struct when only one field is needed.
-
-## Module Structure
-
-| Module | Purpose |
-|--------|---------|
-| `main.rs` | Entry point, command dispatch, daemon management, init flow |
-| `ui.rs` | User-facing output helpers (success, error, hint, banner) |
-| `http_client.rs` | Reusable HTTP client configuration |
-| `i18n.rs` | Internationalization with runtime language loading |
-| `tui/` | Terminal user interface using ratatui |
-| `templates.rs` | Agent template loading and management |
-| `progress.rs` | OSC-based progress indicators for terminals |
-| `table.rs` | ASCII table formatting for CLI output |
-| `mcp.rs` | Model Context Protocol server over stdio |
-| `launcher.rs` | Interactive launcher for first-time users |
-| `dotenv.rs` | `.env` file loading |
-| `desktop_install.rs` | Tauri desktop app detection and installation |
-
-## Key Dependencies
-
-- **clap**: Command-line argument parsing with subcommands
-- **reqwest**: HTTP client for daemon communication
-- **tokio**: Async runtime for daemon foreground mode
-- **ratatui**: Terminal UI framework for TUI screens
-- **tracing/tracing-subscriber**: Structured logging
-- **toml**: Configuration file parsing
-- **librefang_kernel**: Core kernel implementation
-- **librefang_api**: Daemon HTTP API server
-- **librefang_runtime**: Model catalog, registry, drivers
+1. Add a variant to `Commands` (or a subcommand enum like `AgentCommands`) with `#[command(long_about = ...)]` and `#[arg(...)]` annotations.
+2. Add the match arm in `main()` dispatching to a `cmd_*` function.
+3. Implement the handler function — use `find_daemon()` + `daemon_client()` for daemon communication, or `LibreFangKernel::boot()` for single-shot execution.
+4. Use `ui::*` functions for output formatting and `i18n::t()` / `i18n::t_args()` for all user-facing strings.

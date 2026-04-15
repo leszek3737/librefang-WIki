@@ -1,79 +1,64 @@
 # Build System — rust-toolchain.toml
 
-# rust-toolchain.toml
+# Build System — `rust-toolchain.toml`
 
 ## Overview
 
-This file configures the Rust toolchain for the project. It ensures consistent Rust version and tooling across all developers and CI environments by pinning specific settings that `rustup` reads automatically when operating in the project directory.
+This file pins the Rust toolchain for the entire project. It is read automatically by **rustup** whenever any Rust command (`cargo build`, `cargo test`, `rustc`, etc.) is invoked inside this repository, ensuring that every developer and CI runner uses the same compiler version and component set.
 
 ## Configuration
 
-### Channel
-
 ```toml
+[toolchain]
 channel = "stable"
-```
-
-The project targets the **stable** Rust channel, meaning it uses the latest officially released Rust compiler. This ensures:
-
-- The project builds with a well-tested, production-ready compiler
-- No unstable features are required
-- Maximum compatibility with the Rust ecosystem
-
-### Components
-
-```toml
 components = ["rustfmt", "clippy"]
 ```
 
-Two additional components are installed alongside the base toolchain:
+| Field | Value | Purpose |
+|---|---|---|
+| `channel` | `"stable"` | Selects the latest stable release of the Rust compiler. This channel is updated every six weeks when a new Rust edition ships. |
+| `components` | `["rustfmt", "clippy"]` | Installs `rustfmt` (code formatting) and `clippy` (linting) alongside the compiler so they are guaranteed to be available. |
 
-| Component | Purpose |
-|-----------|---------|
-| `rustfmt` | Code formatter; ensures consistent code style across the codebase |
-| `clippy` | Linter; provides additional warnings and suggestions beyond the compiler |
+## How It Works
 
-## Toolchain Resolution
+When a Rust command runs in this directory, rustup checks for `rust-toolchain.toml` (or the legacy `rust-toolchain` file). If found, it:
 
-When `cargo`, `rustc`, or other Rust tools run from this directory or any subdirectory, `rustup` automatically reads this file and ensures the specified toolchain is active.
+1. Resolves the specified `channel` to an exact compiler version (e.g., `stable-x86_64-unknown-linux-gnu`).
+2. Ensures that toolchain is installed, downloading it if necessary.
+3. Ensures every listed `component` is installed for that toolchain.
+4. Activates the toolchain for the current command.
 
-The resolution order is:
+This happens transparently — no manual `rustup default` or `rustup override` is needed.
 
-1. `rust-toolchain.toml` or `rust-toolchain` file in current directory
-2. `rust-toolchain.toml` or `rust-toolchain` in parent directories (walked upward)
-3. `RUSTUP_TOOLCHAIN` environment variable override
-4. Default toolchain set via `rustup default`
+## Why `stable`
 
-## Developer Workflow
+Using the `stable` channel means:
 
-### Running Formatter Checks
+- The project relies only on features that have passed Rust's stabilization process.
+- No nightly-only APIs are used, reducing breakage risk from upstream changes.
+- CI and onboarding are predictable; there is no need to track a specific nightly date.
 
-```bash
-cargo fmt -- --check
+If a specific compiler version must be pinned for reproducibility, the `channel` value can be changed to an exact version string (e.g., `"1.78.0"`).
+
+## Modifying This File
+
+**Adding a component.** If a new tool is needed project-wide (e.g., `llvm-tools-preview` for coverage), append it to the `components` array:
+
+```toml
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
 ```
 
-### Running the Linter
+**Switching channels.** Change `channel` to `"nightly"` or a pinned version only with deliberate team agreement, as this affects every build in the repository.
 
-```bash
-cargo clippy
-```
+**Do not delete this file.** Removing it causes each developer's default toolchain to be used, which may differ in version or available components, leading to inconsistent formatting, lint results, or compilation errors.
 
-### Updating the Toolchain
+## Relationship to the Rest of the Build
 
-To switch to a different Rust version locally (for testing against nightly, beta, or a specific version):
+This file is the foundation for every other Rust-based step in the project:
 
-```bash
-rustup override set nightly
-rustup override set 1.70.0
-rustup override unset  # Remove override, return to toolchain.toml
-```
+- **`cargo build` / `cargo test`** — compile and test against the pinned compiler.
+- **`cargo fmt --check`** — requires the `rustfmt` component declared here.
+- **`cargo clippy`** — requires the `clippy` component declared here.
+- **CI pipelines** — rely on this file to provision the correct toolchain automatically, with no extra configuration in the CI YAML.
 
-This override takes precedence over `rust-toolchain.toml` until unset.
-
-### Verifying Current Toolchain
-
-```bash
-rustup show
-```
-
-Shows the currently active toolchain and its source (toolchain file vs. override vs. default).
+No module calls into this file and it calls nothing; it is purely declarative configuration consumed by the toolchain layer.

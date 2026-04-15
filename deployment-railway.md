@@ -1,80 +1,88 @@
 # Deployment — railway
 
-# Railway Deployment Module
+# Deployment — Railway
 
 ## Overview
 
-This module provides Railway deployment configuration for the application. Railway is a modern deployment platform that supports Docker-based deployments with built-in health checks and restart policies.
+This module contains the Railway deployment configuration for the application. Railway uses these files to build a Docker image and manage the deployment lifecycle, including health monitoring and restart behavior.
 
-The module contains two equivalent configuration files:
-- `railway.json` — JSON Schema format
-- `railway.toml` — TOML format
+The module provides the configuration in two formats — `railway.json` and `railway.toml` — both expressing identical settings. Railway supports either format; only one is required at runtime.
 
-Both files express the same configuration; Railway accepts either format.
+## Files
 
-## Configuration
+| File | Format | Purpose |
+|------|--------|---------|
+| `deploy/railway/railway.json` | JSON | Railway configuration conforming to the official `$schema`. Preferred for IDE validation and autocomplete. |
+| `deploy/railway/railway.toml` | TOML | Equivalent configuration in TOML. Provided for compatibility or developer preference. |
 
-### Build Configuration
+## Configuration Reference
+
+### Build
 
 ```json
-"build": {
-  "dockerfilePath": "./deploy/Dockerfile"
+{
+  "build": {
+    "dockerfilePath": "./deploy/Dockerfile"
+  }
 }
 ```
 
-| Field | Value | Description |
-|-------|-------|-------------|
-| `dockerfilePath` | `./deploy/Dockerfile` | Relative path from project root to the Dockerfile used for building the container image |
+- **`dockerfilePath`**: Points to the Dockerfile at `./deploy/Dockerfile` (relative to the project root). Railway uses this to build the container image. The Dockerfile itself lives in the `deploy/` directory alongside this configuration.
 
-### Deploy Configuration
+### Deploy
 
 ```json
-"deploy": {
-  "healthcheckPath": "/api/health",
-  "restartPolicyType": "ON_FAILURE"
+{
+  "deploy": {
+    "healthcheckPath": "/api/health",
+    "restartPolicyType": "ON_FAILURE"
+  }
 }
 ```
 
-| Field | Value | Description |
-|-------|-------|-------------|
-| `healthcheckPath` | `/api/health` | HTTP endpoint Railway uses to verify the container is healthy. The application must respond with a 2xx status code. |
-| `restartPolicyType` | `ON_FAILURE` | Container restarts only when the process exits with a non-zero status code. Does not restart on successful completion. |
+| Setting | Value | Description |
+|---------|-------|-------------|
+| `healthcheckPath` | `/api/health` | Railway sends periodic HTTP GET requests to this endpoint. A successful response (2xx) confirms the application is ready to receive traffic. |
+| `restartPolicyType` | `ON_FAILURE` | The container is restarted only when it exits with a non-zero status code (crash or error). Successful exits do not trigger a restart. |
 
-## Deployment Pipeline
+## Health Check Contract
 
-Railway reads this configuration and executes the following workflow:
+Railway expects the application to expose `GET /api/health` and return a 2xx status code once it is fully initialized and ready to serve requests. Until this endpoint responds successfully, Railway will not route traffic to the instance.
 
-1. **Build Phase** — Railway invokes Docker to build the image using the specified Dockerfile
-2. **Health Check** — After container starts, Railway polls `/api/health` to confirm readiness
-3. **Runtime** — Container runs continuously, restarting automatically on failure per the restart policy
+Make sure the application:
+1. Starts listening on the configured port before the health check timeout elapses.
+2. Returns a 2xx response from `/api/health` only when all critical dependencies (database, cache, etc.) are connected and ready.
 
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────────────┐
-│   Build     │────▶│   Start     │────▶│  Health Check Loop   │
-│  (Docker)   │     │  Container  │     │  GET /api/health     │
-└─────────────┘     └─────────────┘     └─────────────────────┘
-                                                    │
-                    ┌───────────────────────────────┘
-                    │  Container exits with code ≠ 0
-                    ▼
-              ┌───────────┐
-              │  Restart  │
-              │  Container│
-              └───────────┘
-```
+## Relationship to the Rest of the Codebase
 
-## Prerequisites
+This module is a deployment artifact — it contains no executable code, no imports, and no runtime dependencies.
 
-For this deployment to succeed, the application must expose:
-
-- **`/api/health`** — A `GET` endpoint that returns HTTP 200 when the service is ready to accept traffic
-
-The Dockerfile at `./deploy/Dockerfile` must exist and produce a working container image.
-
-## Relationship to Other Modules
-
-This module does not call or depend on application code at runtime. It is purely a platform configuration consumed by Railway's deployment system. The Dockerfile it references will typically bundle the compiled application and define the startup command.
+- **Dockerfile** (`deploy/Dockerfile`): Referenced by both config files. Defines the image build steps, including copying source, installing dependencies, and specifying the start command.
+- **Application code**: Must implement the `/api/health` endpoint that Railway probes during deployment.
 
 ## Usage
 
-Connect your GitHub repository to a Railway project. Railway automatically detects the `railway.json` or `railway.toml` file and applies the configuration during deployment.
+### Deploy via Railway CLI
+
+```bash
+# Link the project (if not already linked)
+railway link
+
+# Deploy using the configuration in this directory
+railway up
+```
+
+### Deploy via Railway Dashboard
+
+1. Connect your Git repository to a Railway project.
+2. Railway auto-detects `railway.json` or `railway.toml` in the `deploy/railway/` directory.
+3. Configure the **Root Directory** setting in the Railway service to point to `deploy/railway/` so Railway finds the config file, or ensure the config file is at the repository root.
+
+### Choosing Between Config Formats
+
+Both files are maintained in sync. Use whichever fits your workflow:
+
+- **`railway.json`** — enables schema validation in editors via the `$schema` field.
+- **`railway.toml`** — familiar syntax for teams using TOML across other tooling.
+
+Do **not** keep both files in the service root with conflicting values. Remove the one you are not using, or ensure they remain identical.

@@ -1,367 +1,211 @@
 # Deployment — whatsapp-gateway
 
-# WhatsApp Gateway — LibreFang
+# WhatsApp Gateway
 
-The WhatsApp gateway bridges WhatsApp Web with the LibreFang agent runtime. It handles QR-code authentication, incoming message routing, media processing, streaming LLM responses, and outbound messaging. Messages are persisted to a local SQLite database for history, retry recovery, and gap detection.
+The `whatsapp-gateway` is a standalone Node.js process that bridges WhatsApp (via the Baileys library) and the LibreFang agent platform. It receives WhatsApp messages, forwards them to a LibreFang agent for processing, and delivers the agent's responses back to WhatsApp contacts.
 
-## Architecture Overview
+## Architecture
 
 ```mermaid
-flowchart LR
-    subgraph WhatsApp["WhatsApp (Baileys)"]
-        WA["WhatsApp\nApp"]
-    end
-
-    subgraph Gateway["whatsapp-gateway"]
-        HTTP["HTTP Server\n:3009"]
-        SQLite["SQLite DB\nmessages.db"]
-        Socket["Baileys\nSocket"]
-        Router["Message\nRouter"]
-        Media["Media\nProcessor"]
-        Stream["Streaming\nHandler"]
-    end
-
-    subgraph LibreFang["LibreFang Daemon"]
-        API["/api/agents/{id}/message"]
-        StreamAPI["/api/agents/{id}/message/stream"]
-    end
-
-    WA <-->|Web Protocol| Socket
-    HTTP <-->|HTTP| Router
-    Router <-->|Context, Tags| Stream
-    Stream <-->|SSE, JSON| API
-    Stream <-->|SSE| StreamAPI
-    Router -->|Download/Upload| Media
-    Socket -->|Persist| SQLite
-    Media -->|HTTP| API
+graph LR
+    WA[WhatsApp] -->|Baileys| GW[Gateway]
+    GW -->|POST /message| LF[LibreFang Agent]
+    LF -->|SSE stream| GW
+    GW -->|sendMessage| WA
+    GW -->|SQLite| DB[(messages.db)]
+    GW -->|HTTP API| UI[Dashboard / CLI]
 ```
 
 ## Configuration
 
-The gateway reads configuration from two sources, in priority order:
+The gateway reads from two sources, merged at startup:
 
-1. **Environment variables** (override everything)
-2. **`~/.librefang/config.toml`** (primary source)
+| Source | Priority | Path |
+|--------|----------|------|
+| `config.toml` | base defaults | `~/.librefang/config.toml` (overridable via `LIBREFANG_CONFIG`) |
+| Environment variables | overrides | — |
 
 ### Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WHATSAPP_DB_PATH` | `messages.db` in gateway dir | SQLite database path |
-| `WHATSAPP_GATEWAY_PORT` | `3009` | HTTP server port |
-| `WHATSAPP_OWNER_JID` | — | Single owner number (alternative to config) |
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `WHATSAPP_GATEWAY_PORT` | `3009` | HTTP API listen port |
 | `LIBREFANG_URL` | `http://127.0.0.1:4545` | LibreFang daemon URL |
-| `LIBREFANG_DEFAULT_AGENT` | `assistant` | Default agent name |
-| `LIBREFANG_CONFIG` | `~/.librefang/config.toml` | Config file path |
-| `CONVERSATION_TTL_HOURS` | `24` | Conversation expiration time |
+| `LIBREFANG_DEFAULT_AGENT` | from config.toml | Agent name or UUID |
+| `WHATSAPP_DB_PATH` | `./messages.db` | SQLite database path |
+| `WHATSAPP_OWNER_JID` | — | Single owner JID (overrides config.toml `owner_numbers`) |
+| `CONVERSATION_TTL_HOURS` | `24` | Stranger conversation expiry |
+| `WA_HEARTBEAT_MS` | `180000` | Heartbeat timeout before forced reconnect |
+| `WA_HEARTBEAT_CHECK_MS` | `30000` | Heartbeat check interval |
+| `LIBREFANG_ECHO_TRACKER` | — | Set to `off` to disable echo suppression |
 
-### config.toml Structure
+### config.toml (WhatsApp section)
 
 ```toml
 [channels.whatsapp]
 default_agent = "assistant"
-owner_numbers = ["+1234567890", "+0987654321"]
+owner_numbers = ["+391234567890"]
 conversation_ttl_hours = 24
 ```
 
-### Owner Routing
+`owner_numbers` is critical — it determines which WhatsApp contacts are treated as the **owner** (full agent access + relay capabilities) versus **strangers** (sandboxed conversations with escalation tags).
 
-Owner numbers from config are normalized to JIDs (`+1234567890` → `1234567890@s.whatsapp.net`). The **primary owner** (first in the list) receives escalation notifications. All owners can send relay commands.
+## Startup Flow
 
-## Message Flow
+1. Initialize SQLite (`messages.db`) with WAL mode and `messages` + `jid_last_seen` tables
+2. Read `config.toml` for agent name, owner numbers, conversation TTL
+3. Validate owner number format (7–15 digits)
+4. Build `OWNER_JIDS` set via `deriveOwnerJids()` from `lib/identity`
+5. Start HTTP server on `127.0.0.1:PORT`
+6. If `auth_store/creds.json` exists, auto-connect to WhatsApp
+7. Schedule background tasks: conversation eviction, DB cleanup, catch-up sweep
 
-### Incoming Messages (WhatsApp → LibreFang → WhatsApp)
+## Connection Lifecycle
+
+### QR Pairing (`POST /login/start`)
+
+Creates a Baileys socket with `useMultiFileAuthState` from `./auth_store`. The QR code is converted to a base64 data URL and returned to the caller. Credentials are persisted on `creds.update` events so subsequent starts skip the QR flow.
+
+### Reconnection
+
+Non-terminal disconnects trigger exponential backoff reconnection via `computeBackoffDelay()`:
+
+- Base: `2s × 1.8^(attempt-1)`, capped at 30s
+- ±25% jitter
+- No hard stop — retries continue indefinitely at the capped interval
+
+Terminal disconnects (`loggedOut`, `forbidden`) clear the auth store and require manual re-pairing.
+
+### Heartbeat Watchdog (ST-01)
+
+A periodic check (`WA_HEARTBEAT_CHECK_MS` interval) compares `Date.now()` against `lastInboundAt`. If no inbound `messages.upsert` event arrives within `WA_HEARTBEAT_MS` (default 180s), the socket is force-closed to trigger the reconnect path.
+
+## Message Processing Pipeline
 
 ```mermaid
-sequenceDiagram
-    participant WA as WhatsApp
-    participant GW as Gateway
-    participant DB as SQLite
-    participant LF as LibreFang
-
-    WA->>GW: Incoming message (Baileys event)
-    GW->>GW: Deduplicate (60s window)
-    GW->>GW: Rate limit check (3/min per JID)
-    GW->>DB: Save message (processed=0)
-    GW->>GW: Route by sender type
-    GW->>GW: Build context prefix
-    alt Media attached
-        GW->>GW: Download from WhatsApp
-        GW->>GW: Upload to LibreFang
-    end
-    GW->>LF: POST /api/agents/{id}/message
-    LF-->>GW: LLM response
-    alt Stranger sender
-        GW->>GW: Extract NOTIFY_OWNER tags
-        GW->>WA: Send reply to stranger
-        GW->>WA: Notify owner (if escalated)
-    else Owner sender
-        GW->>GW: Extract RELAY_TO_STRANGER tags
-        GW->>WA: Send relay(s)
-    end
-    GW->>DB: Mark message processed
+graph TD
+    RX[messages.upsert] --> DEDUP{Duplicate?}
+    DEDUP -->|Yes| DROP[Drop]
+    DEDUP -->|No| STORE[Store raw msg]
+    STORE --> SELF{fromMe?}
+    SELF -->|Not self-chat| DROP2[Drop]
+    SELF -->|Self-chat or inbound| LID[Resolve LID → PN]
+    LID --> OWNER{Is owner?}
+    OWNER -->|Yes| OWNER_PATH[Owner routing]
+    OWNER -->|No, stranger| STRANGER_PATH[Stranger routing]
+    OWNER -->|Group| GROUP_PATH[Group routing]
 ```
 
-### Sender Types
+### Inbound Message Handling (`messages.upsert`, type `notify`)
 
-The gateway classifies each incoming message:
+For each message:
 
-| Type | Condition | Routing |
-|------|-----------|---------|
-| **Owner** | Sender JID in `OWNER_JIDS` | Reply directly; allow RELAY commands |
-| **Stranger** | Not in `OWNER_JIDS`, not group | Reply directly; allow NOTIFY_OWNER |
-| **Group** | JID ends with `@g.us` | Reply if mentioned |
+1. **Raw storage** — store in `messageStore` Map for Baileys retry decryption
+2. **Deduplication** — `recentMessageIds` Map with 60s window
+3. **Self-chat filter** — `fromMe` messages are only processed if addressed to own JID (WhatsApp "Notes to Self")
+4. **LID resolution** — resolve opaque `<digits>@lid` identifiers to phone-number JIDs via `resolvePeerId()` from `lib/identity`, with proactive `sock.onWhatsApp()` lookup for first-seen LIDs (`resolveLidProactively`)
+5. **Owner/stranger classification** — based on `OWNER_JIDS` and `ownerLidJids` sets
+6. **Rate limiting** — 3 messages per 60s window for strangers and groups
+7. **Agent resolution** — resolve `DEFAULT_AGENT` name → UUID via `GET /api/agents`
+8. **Media processing** — download from WhatsApp, upload to LibreFang (`POST /api/agents/{id}/upload`)
+9. **Echo suppression** — drop messages matching recently-sent outbound text (EB-01)
+10. **Context enrichment** — reply quotes, forwarded flags, location/contact parsing
+11. **DB save** — insert into `messages` table with `processed=0`
+12. **Read receipt** — send blue ticks immediately
+13. **Forward to LibreFang** — via streaming SSE endpoint with progressive WhatsApp edits
+14. **Response delivery** — strip `NO_REPLY` sentinel, convert markdown, send or edit message
+15. **DB update** — mark message as `processed=1`
 
-### Context Prefixes
+### Stranger Routing (Step C)
 
-Stranger messages receive a contextual prefix so the LLM understands the routing context:
+Strangers receive a `[WHATSAPP_STRANGER_CONTEXT]` prefix injected before their message, containing:
+- Sender identity (push name, phone)
+- Conversation metadata (message count, start time)
+- Available routing tags (`[NOTIFY_OWNER]`)
 
-```
-[WHATSAPP_STRANGER_CONTEXT]
-Incoming WhatsApp message from: Alice (+1234567890)
-This person is NOT the owner. They are an external contact.
-Active conversation: 5 messages, started 2024-01-15T10:30:00Z
+Agent responses to strangers are:
+- Cleaned of `[NOTIFY_OWNER]` tags before delivery to the stranger
+- Any extracted notifications are forwarded to the owner JID with 5-minute debounce per stranger
 
-Available routing tags:
-- [NOTIFY_OWNER]{"reason": "...", "summary": "..."}[/NOTIFY_OWNER]
-[/WHATSAPP_STRANGER_CONTEXT]
-```
+### Owner Routing (Step E)
 
-Owner messages include active conversation summaries when strangers are being managed:
+When the owner messages the gateway and active stranger conversations exist, the agent receives:
+- `[ACTIVE_STRANGER_CONVERSATIONS]` block listing all active strangers with last message excerpts
+- `[SYSTEM_INSTRUCTION_WHATSAPP_RELAY]` instructing the agent to use `[RELAY_TO_STRANGER]` tags
 
-```
-[ACTIVE_STRANGER_CONVERSATIONS]
-1. Alice (+1234567890) [JID: ...] — last: "Hello?" (5min ago)
-[/ACTIVE_STRANGER_CONVERSATIONS]
+Relay commands are validated:
+- Target JID must exist in `activeConversations`
+- Message is reformulated by the agent (never raw owner text)
+- Audit-logged with timestamp, recipient, and message excerpt
+- Failed relays report errors back to the owner
 
-[OWNER_MESSAGE]
-The user wants to reply to the stranger
-```
+### Group Routing
 
-## Agent Commands
+Group messages include sender identity prefix `[Group message from ...]`. Participant rosters are fetched via `sock.groupMetadata()` and cached for 5 minutes (`GROUP_METADATA_TTL_MS`). The roster is forwarded to LibreFang in the `group_participants` payload field. Mention detection checks `mentionedJid` arrays against own JID.
 
-The gateway recognizes special tags in LLM responses:
+### NO_REPLY Sentinel
 
-### NOTIFY_OWNER (Stranger Escalation)
+Agents can emit `NO_REPLY` to silently decline answering. The `stripNoReply()` function handles three observed patterns:
+- Bare: entire response is `NO_REPLY`
+- Trailing: `...text\nNO_REPLY`
+- Glued: `...emoji🎩NO_REPLY`
 
-```json
-[NOTIFY_OWNER]{"reason": "urgent", "summary": "Customer needs help with billing"}[/NOTIFY_OWNER]
-```
+When the stripped result is empty, message delivery is suppressed entirely.
 
-When the agent includes this tag, the gateway sends a notification to the primary owner. Escalations are debounced (5-minute cooldown per stranger) to prevent notification spam.
+## Streaming (Progressive Edits)
 
-### RELAY_TO_STRANGER (Owner-Initiated Outreach)
+When the LibreFang SSE endpoint (`/api/agents/{id}/message/stream`) is available, the gateway:
 
-```json
-[RELAY_TO_STRANGER]{"jid":"1234567890@s.whatsapp.net","message":"Your order has shipped!"}[/RELAY_TO_STRANGER]
-```
-
-When the owner sends a message that the agent interprets as a reply to a stranger, the gateway extracts this tag and sends the reformulated message. Relay commands are validated:
-
-- JID must correspond to an active conversation (prevents arbitrary outreach)
-- Socket must be connected
-- All relays are audit-logged
-
-## Streaming Responses
-
-The gateway uses Server-Sent Events (SSE) for progressive LLM responses. As tokens arrive, the gateway edits the WhatsApp message in-place, giving users a "typing" effect:
-
-1. Agent sends first token → initial message sent to WhatsApp
-2. Subsequent tokens arrive → message edited in-place (`edit` parameter)
-3. Stream completes → final message confirmed
-
-This works because Baileys supports editing sent messages. The streaming endpoint is `/api/agents/{id}/message/stream`. If SSE fails (wrong content-type, connection error), it falls back to non-streaming.
-
-**Minimum edit interval**: 2000ms to avoid WhatsApp rate limiting on edits.
+1. Opens a POST with `Accept: text/event-stream`
+2. Accumulates `chunk` events into a growing text buffer
+3. Calls `onProgress(accumulatedText)` at most every 2 seconds (`STREAMING_EDIT_INTERVAL_MS`)
+4. `onProgress` sends the first message via `sock.sendMessage({ text })`, then edits it in-place via `{ edit: key }`
+5. Internal tags (`[NOTIFY_OWNER]`, `[RELAY_TO_STRANGER]`, `NO_REPLY`) are scrubbed from partial text before each edit
+6. Falls back to non-streaming `forwardToLibreFang()` on any SSE error
 
 ## Media Processing
 
-### Download Flow
+Supported media types: image, video, audio (including voice notes/Push-to-Talk), stickers, documents.
 
-1. Detect downloadable media type (image, video, audio, sticker, document)
-2. Download from Baileys (30s timeout, one retry)
-3. Check size limit (50MB)
-4. Upload to LibreFang (`/api/agents/{id}/upload`)
-5. Return `{ file_id, transcription? }`
+Flow:
+1. `getDownloadableMedia()` detects the media type key in the Baileys message object
+2. `downloadMedia()` calls Baileys' `downloadMediaMessage()` with a 30s timeout and one retry
+3. Size check against `MAX_MEDIA_SIZE` (50MB)
+4. `uploadToLibreFang()` POSTs the buffer to `POST /api/agents/{id}/upload` with content type and filename headers
+5. If the upload response includes a `transcription` field (for audio), it's used as the message text
+6. On failure, falls back to a text descriptor like `[Photo from Alice]`
 
-### Supported Types
+Audio messages with PTT flag (voice notes) are transcribed when LibreFang's upload endpoint returns a transcription.
 
-| Type | Caption Handling | Transcription |
-|------|------------------|---------------|
-| Image | Caption becomes message text | No |
-| Video | Caption becomes message text | No |
-| Audio (voice note) | None | Yes (if available) |
-| Audio (file) | Caption becomes message text | Yes (if available) |
-| Sticker | Metadata descriptor | No |
-| Document | Caption becomes message text | No |
+## SQLite Message Store
 
-### Location Messages
+WAL-mode database with two tables:
 
-Location and live location messages are converted to a Google Maps link:
+**`messages`** — every inbound/outbound message:
+- `id` (primary key), `jid`, `sender_jid`, `push_name`, `phone`, `text`
+- `direction` (`inbound`/`outbound`), `timestamp` (epoch ms)
+- `processed`: `0` = pending, `1` = done, `-1` = permanently failed
+- `retry_count`, `raw_type` (`text`, `image`, `audio`, `location`, `contact`, `decryption_error`, etc.)
 
-```
-[Location: Central Park — 40.7829, -73.9654 — https://maps.google.com/?q=40.7829,-73.9654]
-```
+**`jid_last_seen`** — last message timestamp per JID for gap detection.
 
-### Contact Messages
+Prepared statements are created once at module load for performance.
 
-Shared contacts are parsed from vCard format:
+### Catch-Up Sweep (Fase 3.1)
 
-```
-[Shared contact: John Doe +1234567890]
-```
+Runs every 5 minutes. Selects messages with `processed=0` older than 30 seconds and re-forwards them to LibreFang. Messages with null/empty `jid` are skipped (`shouldSkipCatchupForMissingJid`). Group messages are skipped entirely (cannot determine mention context for replay). After `CATCHUP_MAX_RETRIES` (3) failures, messages are marked `processed=-1`.
 
-## SQLite Schema
+### Gap Detection (Fase 3.2 Option C)
 
-```sql
-CREATE TABLE messages (
-    id TEXT PRIMARY KEY,
-    jid TEXT NOT NULL,
-    sender_jid TEXT,
-    push_name TEXT,
-    phone TEXT,
-    text TEXT,
-    direction TEXT NOT NULL,  -- 'inbound' | 'outbound'
-    timestamp INTEGER NOT NULL,
-    processed INTEGER DEFAULT 0,  -- 0=pending, 1=success, -1=failed
-    retry_count INTEGER DEFAULT 0,
-    raw_type TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
-);
+Runs every 10 minutes. Warns if a JID with recent activity (within 2 hours) has been silent for more than 30 minutes while an active conversation exists — indicates possible message loss.
 
-CREATE TABLE jid_last_seen (
-    jid TEXT PRIMARY KEY,
-    last_timestamp INTEGER NOT NULL,
-    updated_at TEXT DEFAULT (datetime('now'))
-);
-```
+### DB Cleanup
 
-### Indexes
+Runs daily. Deletes processed/failed messages older than 7 days.
 
-- `idx_messages_jid_ts`: Query messages by JID and timestamp range
-- `idx_messages_processed`: Find unprocessed messages for catch-up
+## Markdown → WhatsApp Formatting
 
-## Background Tasks
-
-| Task | Interval | Description |
-|------|----------|-------------|
-| Catch-up sweep | 5 min | Re-process messages stuck with `processed=0` (30s age threshold) |
-| DB cleanup | 24 hours | Delete processed/failed messages older than 7 days |
-| Conversation eviction | 15 min | Remove conversations inactive for `CONVERSATION_TTL_HOURS` |
-| Rate limit cleanup | 5 min | Remove expired rate limit entries |
-| Dedup cleanup | 2 min | Remove expired message IDs from dedup cache |
-| Escalation cleanup | 10 min | Remove stale escalation debounce entries |
-| Decrypt retry cleanup | 60s | Remove expired decryption retry entries |
-| Gap detection | 10 min | Warn if active conversation silent for 30+ minutes |
-
-## Decryption Retry Handling
-
-When Baileys reports a decryption failure (stub type 39 or status ERROR):
-
-1. Increment retry counter in `decryptRetryMap`
-2. After 3 retries, mark message as permanently failed
-3. Notify the owner with a system message
-4. After cleanup interval, remove from retry map
-
-## HTTP API
-
-All endpoints accept CORS requests from `localhost`, `127.0.0.1`, `tauri://localhost`, and `app://localhost`.
-
-### POST /login/start
-
-Initiates Baileys connection and returns QR code.
-
-```json
-// Response
-{
-  "qr_data_url": "data:image/png;base64,...",
-  "session_id": "uuid",
-  "message": "Scan this QR code...",
-  "connected": false
-}
-```
-
-### GET /login/status
-
-Poll for connection status.
-
-```json
-{
-  "connected": true,
-  "message": "Connected to WhatsApp",
-  "expired": false
-}
-```
-
-### POST /message/send
-
-Send outbound message from LibreFang daemon.
-
-```json
-// Request
-{ "to": "+1234567890", "text": "Hello!" }
-
-// Response
-{ "success": true, "message": "Sent" }
-```
-
-### POST /message/send-image
-
-Send image by URL.
-
-```json
-// Request
-{ "to": "+1234567890", "image_url": "https://...", "caption": "Check this out" }
-```
-
-### GET /conversations
-
-List active stranger conversations.
-
-```json
-{
-  "conversations": [
-    {
-      "jid": "1234567890@s.whatsapp.net",
-      "pushName": "Alice",
-      "phone": "+1234567890",
-      "messageCount": 12,
-      "lastActivity": 1705312200000,
-      "escalated": false,
-      "lastMessage": { "text": "Hello", "direction": "inbound", "timestamp": 1705312200000 }
-    }
-  ]
-}
-```
-
-### GET /messages/:jid
-
-Message history for a chat (newest first).
-
-```
-GET /messages/1234567890@s.whatsapp.net?limit=50&since=0
-```
-
-### GET /messages/unprocessed
-
-Messages that failed to forward (for debugging).
-
-### GET /health
-
-Health check endpoint.
-
-```json
-{
-  "status": "ok",
-  "connected": true,
-  "session_id": "uuid",
-  "active_conversations": 3
-}
-```
-
-## Markdown Conversion
-
-LLM responses use standard Markdown, which the gateway converts to WhatsApp formatting:
+`markdownToWhatsApp()` converts LLM Markdown output to WhatsApp's formatting syntax:
 
 | Markdown | WhatsApp |
 |----------|----------|
@@ -370,45 +214,107 @@ LLM responses use standard Markdown, which the gateway converts to WhatsApp form
 | `~~strike~~` | `~strike~` |
 | `` `code` `` | ` ```code``` ` |
 
-Special cases handled:
-- Bullet list items (`* item`) are not converted to italic
-- Inline code is protected before formatting runs
-- Backslash-escaped stars (`\*`) become literal `*`
-- Python dunders (`__init__`) are not converted to bold
+Notable edge cases handled:
+- `__init__` (Python dunders) is **not** converted to bold
+- Bullet list items (`* item`) are **not** converted to italic
+- Inline code content is protected from bold/italic conversion
+- Backslash-escaped stars (`\*`) are preserved as literal `*`
+- Bold content containing `*` is shielded from italic regex collision
 
-## Termux/Android Support
+## Identity Resolution (LID ↔ Phone Number)
 
-The `postinstall.js` script handles native addon compilation on Termux, where `node-gyp` references undefined `android_ndk_path`. It patches `common.gypi` to remove the NDK reference, then rebuilds `better-sqlite3`.
+WhatsApp assigns opaque LID identifiers (`<digits>@lid`) that are unrelated to phone numbers. The gateway maintains two caches:
 
-## Exports (for testing)
+- `lidToPnJid` (Map) — populated from `msg.key.senderPn` and proactive `sock.onWhatsApp()` lookups
+- `ownerLidJids` (Set) — resolved once at connection open for all `OWNER_NUMBERS`
 
-```javascript
-module.exports = {
-  markdownToWhatsApp,
-  extractNotifyOwner,
-  extractRelayCommands,
-  buildConversationsContext,
-  isRateLimited,
-  buildCorsHeaders,
-  isAllowedOrigin,
-  parseBody,
-  MAX_BODY_SIZE,
-};
+Resolution priority in `resolvePeerId()`:
+1. `msg.key.senderPn` (Baileys-provided)
+2. `lidToPnJid` cache
+3. `msg.key.participant` (group sender)
+4. Raw `remoteJid` if already `@s.whatsapp.net`
+
+Unresolved identities log a structured `identity_unresolved` event with a reason tag.
+
+## Decryption Retry
+
+Baileys may fail to decrypt messages (stub type 39 / status `ERROR`). The gateway:
+
+1. Tracks retry counts in `decryptRetryMap` (keyed by `jid:msgId`)
+2. After `DECRYPT_RETRY_MAX` (3) failures, marks the message as permanently failed
+3. Sends a fallback notification to the owner with the message ID and a hint to ask the contact to resend
+4. Successful retries (arriving via later `messages.upsert`) clear the retry entry
+
+## Conversation Tracker
+
+In-memory `Map<jid, ConversationState>` for stranger conversations only:
+
+- TTL-based eviction (configurable, default 24h) via 15-minute sweep
+- Capped at 20 messages per conversation
+- Tracks push name, phone, message count, escalation status
+- Provides context blocks for owner-facing agent prompts
+
+## HTTP API
+
+All endpoints accept/return JSON. CORS is restricted to `localhost`, `127.0.0.1`, `tauri://localhost`, and `app://localhost` origins.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/login/start` | Start Baileys connection, returns QR data URL |
+| `GET` | `/login/status` | Poll connection status |
+| `POST` | `/message/send` | Send text message (`{ to, text }`) |
+| `POST` | `/message/send-image` | Send image (`{ to, image_url, caption }`) |
+| `POST` | `/message/send-audio` | Send audio/voice note (`{ to, audio_url, ptt }`) |
+| `GET` | `/conversations` | List active stranger conversations |
+| `GET` | `/messages/unprocessed` | List failed-to-forward messages |
+| `GET` | `/messages/:jid` | Message history for a chat (`?limit=&since=`) |
+| `GET` | `/health` | Health check with connection status |
+
+Request body size is capped at 64KB.
+
+## Session Isolation
+
+Each WhatsApp conversation gets its own LibreFang session via the `channel_type` field:
+
+```
+channel_type: "whatsapp:<chatJid>"
 ```
 
-## Error Handling
+This ensures the kernel creates separate sessions per contact. The gateway fails fast (throws `CHATJID_EMPTY`) if `chatJid` is missing, preventing unrelated chats from merging into a single session.
 
-- **Connection loss**: Exponential backoff reconnection (max 10 attempts, 60s cap)
-- **Forward failure**: Message stays `processed=0`; catch-up sweep retries
-- **Media download failure**: Fall back to text descriptor (e.g., `[Photo from Alice]`)
-- **Agent UUID stale**: Auto-retry with fresh UUID resolution
-- **Rate limited**: Message dropped; logged but not stored as error
-- **Logged out**: Auth cleared; new QR required
+## Background Tasks
 
-## Security Notes
+| Task | Interval | Purpose |
+|------|----------|---------|
+| Conversation eviction | 15 min | Remove expired stranger conversations |
+| Rate limit cleanup | 5 min | Purge expired rate limit entries |
+| Dedup cleanup | 2 min | Purge expired message IDs |
+| Escalation debounce cleanup | 10 min | Purge stale escalation timestamps |
+| Message store + decrypt retry cleanup | 1 min | Purge expired raw message cache and decrypt retry entries |
+| Catch-up sweep | 5 min | Re-process unprocessed messages |
+| Gap detection | 10 min | Warn on suspicious silence |
+| DB cleanup | 24 hr | Delete old processed/failed messages |
+| Heartbeat check | 30s | Force-reconnect if no inbound activity |
 
-- SQLite database file permissions set to `0o600` (owner read/write only)
-- CORS restricted to local origins only
-- Relay commands validated against active conversations (no arbitrary outreach)
-- Escalation debounced to prevent notification spam
-- Message deduplication prevents processing the same message twice
+## Graceful Shutdown
+
+On `SIGINT`/`SIGTERM`:
+
+1. Re-entry guarded (prevents double-shutdown from overlapping signals)
+2. Stops heartbeat watchdog
+3. Tears down Baileys socket (`cleanupSocket`)
+4. Closes HTTP server (drains connections via `closeAllConnections`)
+5. Force-exits after 10s timeout
+
+## Exported API (for testing)
+
+The module exports internal functions for unit testing:
+
+- `markdownToWhatsApp`, `extractNotifyOwner`, `extractRelayCommands`
+- `buildConversationsContext`, `isRateLimited`
+- `buildCorsHeaders`, `isAllowedOrigin`, `parseBody`
+- `forwardToLibreFang`, `forwardToLibreFangStreaming`
+- `shouldSkipCatchupForMissingJid`, `resolveLidProactively`
+- `checkHeartbeat`, `computeBackoffDelay`
+- `getGroupParticipants`, `invalidateGroupRoster`, `groupMetadataCache`
+- `echoTracker`, `ECHO_TRACKER_ENABLED`, `EchoTracker`

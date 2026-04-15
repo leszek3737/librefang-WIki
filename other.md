@@ -1,189 +1,139 @@
 # Other
 
-# Other Module
+# Supporting Infrastructure
 
-This module contains miscellaneous infrastructure components that support the documentation site and web presence but don't belong to other specific feature modules. It includes URL redirects for backward compatibility, the main site header component, and Cloudflare Workers for analytics tracking.
-
-## Module Structure
-
-```
-docs/public/_redirects              # URL redirect rules for backward compatibility
-docs/src/components/Header.tsx      # Site-wide header component
-web/workers/github-stats-worker/    # Cloudflare Worker for GitHub statistics
-web/workers/visit-counter-worker/   # Cloudflare Worker for visit tracking
-```
+This module contains auxiliary pieces that support the LibreFang documentation site and web presence: URL redirect rules for backward compatibility, the site header component with internationalization, and two Cloudflare Workers for runtime statistics.
 
 ---
 
-## URL Redirects (`docs/public/_redirects`)
+## URL Redirect Map
+
+**File:** `docs/public/_redirects`
 
 ### Purpose
 
-When the documentation site restructured its URLs from flat, top-level paths to a hierarchical group-based organization (April 2026), existing bookmarks and external links would break. This redirect configuration ensures all old URLs continue working by mapping them to their new hierarchical locations.
+During the 2026-04 docs restructure, all pages moved from flat URLs (e.g., `/agents`) to hierarchical group-based URLs (e.g., `/agent/templates`). This Netlify-format `_redirects` file issues `301` (permanent) redirects so that every existing external link, bookmark, and search index entry continues to resolve.
 
-### Redirect Format
+### URL Grouping Scheme
 
-The file uses [Netlify's redirect format](https://docs.netlify.com/routing/redirects/), where each line specifies a source path, destination path, and HTTP status code:
+The restructure organizes pages into five top-level groups, plus a `/zh` locale mirror:
+
+| Group | New Prefix | Representative Redirect |
+|---|---|---|
+| Getting Started | `/getting-started` | `/librefang` → `/getting-started` |
+| Configuration | `/configuration` | `/providers` → `/configuration/providers` |
+| Architecture | `/architecture` | `/security` → `/architecture/security` |
+| Agent | `/agent` | `/agents` → `/agent/templates` |
+| Integrations | `/integrations` | `/api` → `/integrations/api` |
+| Operations | `/operations` | `/faq` → `/operations/faq` |
+
+### Wildcard Rules
+
+Several sections use `:splat` wildcards to catch nested paths. These must be listed **after** their exact-match counterpart because Netlify evaluates rules top-to-bottom and stops at the first match:
 
 ```
-/old-path    /new-path    301
+/providers            /configuration/providers         301
+/providers/*          /configuration/providers/:splat  301
 ```
 
-### Redirect Groups
+### Locale Handling
 
-The redirects are organized into logical groups matching the new documentation hierarchy:
+The `/zh` (Chinese) section duplicates every rule with the `/zh` prefix preserved on both sides:
 
-| Group | Old Prefix | New Prefix | Purpose |
-|-------|-----------|------------|---------|
-| Getting Started | `/librefang`, `/roadmap`, `/examples`, `/glossary`, `/comparison` | `/getting-started/*` | Core docs entry points |
-| Configuration | `/providers`, `/providers/*` | `/configuration/providers*` | Provider configuration |
-| Architecture | `/security` | `/architecture/security` | Security documentation |
-| Agent | `/agents`, `/hands`, `/memory`, `/skills`, `/plugins`, `/prompt-intelligence`, `/workflows` | `/agent/*` | Agent-related docs |
-| Integrations | `/channels`, `/api`, `/sdk`, `/cli`, `/android-termux`, `/mcp-a2a`, `/migration`, `/desktop`, `/development` | `/integrations/*` | External integrations |
-| Operations | `/troubleshooting`, `/production`, `/faq` | `/operations/*` | Deployment and operations |
-| Chinese locale | `/zh/*` | `/zh/getting-started/*`, etc. | zh-Hans translations |
-
-### Key Rules
-
-```nginx
-# Exact matches must come before wildcards
-/providers              /configuration/providers         301
-/providers/*            /configuration/providers/:splat  301
+```
+/zh/providers         /zh/configuration/providers         301
+/zh/providers/*       /zh/configuration/providers/:splat  301
 ```
 
-The wildcard rule with `:splat` captures any path segments beyond `/providers/` and appends them to the destination.
+When adding a new page redirect, update both the English and `/zh` blocks to keep them in sync.
 
 ---
 
-## Header Component (`docs/src/components/Header.tsx`)
+## Header Component
+
+**File:** `docs/src/components/Header.tsx`
 
 ### Purpose
 
-The `Header` component provides the persistent top navigation bar across all documentation pages. It integrates search, navigation, language switching, and theme controls.
+The site-wide header bar. It provides navigation links, a search trigger, a language toggle between English and Chinese, and a dark/light theme toggle. On mobile it collapses into a hamburger menu.
 
-### Component Architecture
+### Key Behaviors
 
-```mermaid
-graph TD
-    Header --> Search
-    Header --> MobileNavigation
-    Header --> Logo
-    Header --> ThemeToggle
-    Header --> LangSwitch
-    Header -.-> useMobileNavigationStore
-    Header -.-> useIsInsideMobileNavigation
-    
-    LangSwitch --> usePathname
-    Header --> useScroll
-```
+**Scroll-aware transparency.** The header uses `motion/react`'s `useScroll` and `useTransform` to interpolate background opacity as the user scrolls:
 
-### Key Features
+- **Light mode:** opacity transitions from 50% to 90% over the first 72px of scroll.
+- **Dark mode:** opacity transitions from 20% to 80%.
 
-#### Scroll-Based Blur Effect
+This creates a semi-transparent glass effect at the top of the page that solidifies as content scrolls underneath.
 
-The header applies a dynamic backdrop blur that increases as the user scrolls:
+**Language switching.** The `LangSwitch` component reads the current pathname via `usePathname()`. If the path starts with `/zh`, it strips that prefix to link to the English version; otherwise it prepends `/zh`. The toggle button displays `中文` when on the English site and `EN` when on the Chinese site.
 
-```typescript
-const { scrollY } = useScroll();
-const bgOpacityLight = useTransform(scrollY, [0, 72], ["50%", "90%"]);
-const bgOpacityDark = useTransform(scrollY, [0, 72], ["20%", "80%"]);
-```
+**Mobile layout.** Below the `lg` breakpoint, the header renders `MobileNavigation` (hamburger menu) and a `Logo` link instead of the desktop nav bar. `MobileSearch` replaces the desktop `Search` component.
 
-At scroll position 0, the background is 50% opaque (light) / 20% (dark). By 72px scroll depth, it reaches 90% / 80% opacity. This creates a smooth transition from transparent to solid as content scrolls beneath.
+### Component Props
 
-#### Language Switching
+`Header` is a `forwardRef` wrapping `motion.div`. It accepts all standard `motion.div` props and forwards the ref, enabling parent layouts to measure or scroll-link the header.
 
-The `LangSwitch` component detects the current locale from the pathname and toggles between English and Chinese:
+### External Dependencies
 
-```typescript
-// English path: /getting-started/overview
-// Chinese path:  /zh/getting-started/overview
-
-if (isZh) {
-  targetPath = pathname.replace(/^\/zh/, "") || "/";
-} else {
-  targetPath = `/zh${pathname === "/" ? "" : pathname}`;
-}
-```
-
-#### Responsive Behavior
-
-| Breakpoint | Behavior |
-|------------|----------|
-| Mobile | Logo, mobile nav, search, language/theme toggles visible |
-| Desktop (md+) | Full navigation links, condensed toolbar |
-
-The header shifts from a centered layout on mobile to a left-aligned sidebar-connected layout on larger screens (`lg:left-72 xl:left-80`).
-
-### Props
-
-The component forwards refs and additional props to the underlying `motion.div` for animation support, making it compatible with scroll-based entrance animations.
+| Import | Role |
+|---|---|
+| `@/components/Button` | Shared button primitive |
+| `@/components/Logo` | Brand logo SVG |
+| `@/components/MobileNavigation` | Hamburger nav drawer + open-state store |
+| `@/components/Search`, `MobileSearch` | Desktop and mobile search dialogs |
+| `@/components/ThemeToggle` | Dark/light mode switch |
+| `@/lib/utils#withPrefix` | Prepends the configured base path to internal links |
 
 ---
 
 ## Cloudflare Workers
 
+Two workers run on Cloudflare's edge network to provide lightweight runtime services.
+
 ### GitHub Stats Worker
 
-**Location:** `web/workers/github-stats-worker/`
+**Directory:** `web/workers/github-stats-worker/`
 
-A scheduled Cloudflare Worker that fetches repository statistics from GitHub's API daily and caches them in a KV namespace.
+| Field | Value |
+|---|---|
+| Worker name | `librefang-github-stats` |
+| Entry point | `index.js` |
+| KV binding | `KV` (namespace `5d12c668…`) |
+| Cron trigger | `0 0 * * *` (daily at UTC midnight) |
 
-**Configuration:**
-- **Cron trigger:** Runs daily at 00:00 UTC
-- **KV binding:** `KV` namespace for cached statistics
-- **Purpose:** Provides stars, forks, and other metrics for the documentation site without rate-limiting GitHub's API
+This worker fetches repository statistics from the GitHub API on a daily cron schedule and caches them in a Cloudflare KV namespace. The documentation site or other consumers read from KV to display star counts, contributor counts, etc., without hitting the GitHub API on every page load.
 
 ### Visit Counter Worker
 
-**Location:** `web/workers/visit-counter-worker/`
+**Directory:** `web/workers/visit-counter-worker/`
 
-A Cloudflare Worker that tracks page visits by incrementing counters stored in a KV namespace.
+| Field | Value |
+|---|---|
+| Worker name | `librefang-visit-counter` |
+| Entry point | `index.js` |
+| KV binding | `VISIT_COUNTER` (namespace `3ddec4f5…`) |
 
-**Configuration:**
-- **KV binding:** `VISIT_COUNTER` namespace for persistence
-- **Purpose:** Anonymously tracks documentation page views for analytics
+An edge function that increments and reads a page-view counter stored in KV. No cron trigger is configured — it runs on every incoming request to the documentation site.
 
-### Worker Architecture Pattern
+### Deployment
 
-Both workers follow a common pattern:
+Both workers use the standard `wrangler.toml` configuration format. To deploy:
 
-```mermaid
-sequenceDiagram
-    participant Cron as Cron Trigger
-    participant Worker as CF Worker
-    participant KV as KV Namespace
-    
-    Cron->>Worker: Scheduled event
-    Worker->>GitHub or Visit Data
-    Worker->>KV: Store/update
+```bash
+cd web/workers/<worker-name>
+npx wrangler deploy
 ```
 
-Workers use Cloudflare's edge runtime, enabling:
-- **Global distribution** — Workers run at edge locations near users
-- **Durable storage** — KV namespaces persist data across invocations
-- **Cost efficiency** — Scheduled workers have minimal compute costs
+Ensure the `CLOUDFLARE_API_TOKEN` environment variable is set with permissions for Workers and KV.
 
 ---
 
-## Integration Points
+## Adding a New Redirect
 
-| Component | Connects To | Purpose |
-|-----------|-------------|---------|
-| `Header.tsx` | `MobileNavigation` | Mobile menu state management |
-| `Header.tsx` | `Search` | Documentation search |
-| `Header.tsx` | `ThemeToggle` | Dark/light mode |
-| `Header.tsx` | `withPrefix` | Locale-aware URL generation |
-| `Header.tsx` | `usePathname` | Route detection for locale |
-| `_redirects` | Netlify CDN | Production redirect handling |
-| Workers | Cloudflare KV | Data persistence |
-| Workers | External APIs | GitHub stats retrieval |
+When a documentation page moves or is renamed:
 
----
-
-## Contribution Notes
-
-When adding new documentation pages:
-1. **Add redirects** if the URL pattern changes — follow the existing format with exact matches before wildcards
-2. **Update Header nav** if adding a major top-level section — the header lists primary navigation destinations
-3. **Consider locale parity** — both English and Chinese redirect patterns should be maintained
+1. Add an exact-match rule in the appropriate group section (English block).
+2. If the page has sub-paths, add a wildcard rule **after** the exact-match rule.
+3. Duplicate both rules in the `/zh` block, preserving the `/zh` prefix.
+4. Verify the redirect locally with `netlify dev` or by deploying to a preview environment.
