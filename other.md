@@ -1,139 +1,158 @@
 # Other
 
-# Supporting Infrastructure
+# Other — Supporting Crates & Infrastructure
 
-This module contains auxiliary pieces that support the LibreFang documentation site and web presence: URL redirect rules for backward compatibility, the site header component with internationalization, and two Cloudflare Workers for runtime statistics.
+This module group contains the bulk of the LibreFang Agent OS crate ecosystem — everything from foundational type definitions through the kernel, runtime, API surface, and user-facing clients. The crates are organized into layered clusters that build upward from pure data definitions to full user-facing applications.
 
----
+## Architecture
 
-## URL Redirect Map
+```mermaid
+graph TD
+    subgraph Clients
+        CLI[librefang-cli]
+        DASH[librefang-api-dashboard]
+        DESK[librefang-desktop]
+    end
 
-**File:** `docs/public/_redirects`
+    subgraph "API Layer"
+        API[librefang-api]
+        APITEST[librefang-api-tests]
+        APISTATIC[librefang-api-static]
+    end
 
-### Purpose
+    subgraph Kernel
+        KERN[librefang-kernel]
+        KROUTER[librefang-kernel-router]
+        KMETER[librefang-kernel-metering]
+        KHANDLE[librefang-kernel-handle]
+        KTESTS[librefang-kernel-tests]
+    end
 
-During the 2026-04 docs restructure, all pages moved from flat URLs (e.g., `/agents`) to hierarchical group-based URLs (e.g., `/agent/templates`). This Netlify-format `_redirects` file issues `301` (permanent) redirects so that every existing external link, bookmark, and search index entry continues to resolve.
+    subgraph Runtime
+        RT[librefang-runtime]
+        RTMCP[librefang-runtime-mcp]
+        RTOAUTH[librefang-runtime-oauth]
+        RTWASM[librefang-runtime-wasm]
+    end
 
-### URL Grouping Scheme
+    subgraph "LLM Integration"
+        LLMDRV[librefang-llm-driver]
+        LLMDRIVERS[librefang-llm-drivers]
+    end
 
-The restructure organizes pages into five top-level groups, plus a `/zh` locale mirror:
+    subgraph "Agent Subsystems"
+        MEM[librefang-memory]
+        CH[librefang-channels]
+        SKILLS[librefang-skills]
+        HANDS[librefang-hands]
+        EXT[librefang-extensions]
+        WIRE[librefang-wire]
+    end
 
-| Group | New Prefix | Representative Redirect |
-|---|---|---|
-| Getting Started | `/getting-started` | `/librefang` → `/getting-started` |
-| Configuration | `/configuration` | `/providers` → `/configuration/providers` |
-| Architecture | `/architecture` | `/security` → `/architecture/security` |
-| Agent | `/agent` | `/agents` → `/agent/templates` |
-| Integrations | `/integrations` | `/api` → `/integrations/api` |
-| Operations | `/operations` | `/faq` → `/operations/faq` |
+    subgraph Foundation
+        TYPES[librefang-types]
+        HTTP[librefang-http]
+        TELE[librefang-telemetry]
+        TESTING[librefang-testing]
+    end
 
-### Wildcard Rules
+    CLI --> KERN
+    CLI --> API
+    DESK --> API
+    DESK --> KERN
+    DASH --> API
 
-Several sections use `:splat` wildcards to catch nested paths. These must be listed **after** their exact-match counterpart because Netlify evaluates rules top-to-bottom and stops at the first match:
+    API --> KERN
+    API --> RT
 
+    KERN --> KROUTER
+    KERN --> KMETER
+    KERN --> RT
+    KERN --> MEM
+    KERN --> CH
+    KERN --> SKILLS
+
+    RT --> RTMCP
+    RT --> RTOAUTH
+    RT --> RTWASM
+    RT --> LLMDRV
+    RT --> MEM
+
+    LLMDRIVERS --> LLMDRV
+
+    CH --> HTTP
+    EXT --> HTTP
+    RT --> HTTP
+
+    TESTING --> KERN
+    APITEST --> TESTING
+    KTESTS --> KHANDLE
 ```
-/providers            /configuration/providers         301
-/providers/*          /configuration/providers/:splat  301
-```
 
-### Locale Handling
+## Layer Overview
 
-The `/zh` (Chinese) section duplicates every rule with the `/zh` prefix preserved on both sides:
+### Foundation
 
-```
-/zh/providers         /zh/configuration/providers         301
-/zh/providers/*       /zh/configuration/providers/:splat  301
-```
-
-When adding a new page redirect, update both the English and `/zh` blocks to keep them in sync.
-
----
-
-## Header Component
-
-**File:** `docs/src/components/Header.tsx`
-
-### Purpose
-
-The site-wide header bar. It provides navigation links, a search trigger, a language toggle between English and Chinese, and a dark/light theme toggle. On mobile it collapses into a hamburger menu.
-
-### Key Behaviors
-
-**Scroll-aware transparency.** The header uses `motion/react`'s `useScroll` and `useTransform` to interpolate background opacity as the user scrolls:
-
-- **Light mode:** opacity transitions from 50% to 90% over the first 72px of scroll.
-- **Dark mode:** opacity transitions from 20% to 80%.
-
-This creates a semi-transparent glass effect at the top of the page that solidifies as content scrolls underneath.
-
-**Language switching.** The `LangSwitch` component reads the current pathname via `usePathname()`. If the path starts with `/zh`, it strips that prefix to link to the English version; otherwise it prepends `/zh`. The toggle button displays `中文` when on the English site and `EN` when on the Chinese site.
-
-**Mobile layout.** Below the `lg` breakpoint, the header renders `MobileNavigation` (hamburger menu) and a `Logo` link instead of the desktop nav bar. `MobileSearch` replaces the desktop `Search` component.
-
-### Component Props
-
-`Header` is a `forwardRef` wrapping `motion.div`. It accepts all standard `motion.div` props and forwards the ref, enabling parent layouts to measure or scroll-link the header.
-
-### External Dependencies
-
-| Import | Role |
+| Crate | Role |
 |---|---|
-| `@/components/Button` | Shared button primitive |
-| `@/components/Logo` | Brand logo SVG |
-| `@/components/MobileNavigation` | Hamburger nav drawer + open-state store |
-| `@/components/Search`, `MobileSearch` | Desktop and mobile search dialogs |
-| `@/components/ThemeToggle` | Dark/light mode switch |
-| `@/lib/utils#withPrefix` | Prepends the configured base path to internal links |
+| [librefang-types](librefang-types.md) | Shared data structures, traits, enums, and error types — the vocabulary every other crate speaks |
+| [librefang-types-locales](librefang-types-locales.md) | Localized API error messages (6 languages via Project Fluent) |
+| [librefang-http](librefang-http.md) | Centralized `reqwest` client builder with TLS and proxy configuration |
+| [librefang-telemetry](librefang-telemetry.md) | OpenTelemetry metric definitions and instrumentation macros |
+| [librefang-testing](librefang-testing.md) | Mock kernel, mock LLM driver, and API route test helpers used across the workspace |
 
----
+### Kernel
 
-## Cloudflare Workers
+[librefang-kernel](librefang-kernel.md) is the central orchestrator. It owns the agent lifecycle — loading config, initializing subsystems, coordinating message flow, and managing SQLite state. Its focused sub-crates handle specific concerns:
 
-Two workers run on Cloudflare's edge network to provide lightweight runtime services.
+- [librefang-kernel-router](librefang-kernel-router.md) — resolves input to the correct hand/template
+- [librefang-kernel-metering](librefang-kernel-metering.md) — cost tracking and quota enforcement
+- [librefang-kernel-handle](librefang-kernel-handle.md) — the `KernelHandle` trait, a lightweight interface crate that breaks circular dependencies
 
-### GitHub Stats Worker
+### Runtime
 
-**Directory:** `web/workers/github-stats-worker/`
+[librefang-runtime](librefang-runtime.md) is the execution environment. It wires together LLM drivers, skill execution, memory access, and channel I/O into a coherent agent lifecycle. Sub-crates provide specific capabilities:
 
-| Field | Value |
+- [librefang-runtime-wasm](librefang-runtime-wasm.md) — WASM sandbox for isolated skill execution
+- [librefang-runtime-mcp](librefang-runtime-mcp.md) — Model Context Protocol client for external tool servers
+- [librefang-runtime-oauth](librefang-runtime-oauth.md) — OAuth 2.0 PKCE flows for ChatGPT and GitHub Copilot providers
+
+### LLM Integration
+
+[librefang-llm-driver](librefang-llm-driver.md) defines the `LlmDriver` trait that decouples the rest of the system from any specific provider. [librefang-llm-drivers](librefang-llm-drivers.md) contains the concrete implementations for Anthropic, OpenAI, Gemini, and others — translating generic requests into provider-specific HTTP payloads.
+
+### Agent Subsystems
+
+| Crate | Role |
 |---|---|
-| Worker name | `librefang-github-stats` |
-| Entry point | `index.js` |
-| KV binding | `KV` (namespace `5d12c668…`) |
-| Cron trigger | `0 0 * * *` (daily at UTC midnight) |
+| [librefang-memory](librefang-memory.md) | Persistence substrate — conversation history, task state, session-scoped context with cross-session isolation |
+| [librefang-channels](librefang-channels.md) | Bridge layer to 40+ messaging platforms, each feature-gated for compile-time selection |
+| [librefang-skills](librefang-skills.md) | Skill registry, loader, marketplace client, and OpenClaw compatibility |
+| [librefang-hands](librefang-hands.md) | Curated autonomous capability packages — what an agent can do and what it requires |
+| [librefang-extensions](librefang-extensions.md) | MCP server setup, encrypted credential vault (AES-256-GCM), and OAuth2 PKCE for integrations |
+| [librefang-wire](librefang-wire.md) | Agent-to-agent networking via the LibreFang Protocol (OFP) — serialization, framing, cryptographic auth |
 
-This worker fetches repository statistics from the GitHub API on a daily cron schedule and caches them in a Cloudflare KV namespace. The documentation site or other consumers read from KV to display star counts, contributor counts, etc., without hitting the GitHub API on every page load.
+### API & Dashboard
 
-### Visit Counter Worker
+[librefang-api](librefang-api.md) exposes the full system through RESTful JSON and WebSocket endpoints. It integrates nearly every other crate into a unified network service built on axum.
 
-**Directory:** `web/workers/visit-counter-worker/`
+[librefang-api-dashboard](librefang-api-dashboard.md) is the React 19 SPA that provides the management UI — agent lifecycle, workflows, scheduling, analytics, and configuration. [librefang-api-static](librefang-api-static.md) holds its i18n translation files (English and Japanese).
 
-| Field | Value |
-|---|---|
-| Worker name | `librefang-visit-counter` |
-| Entry point | `index.js` |
-| KV binding | `VISIT_COUNTER` (namespace `3ddec4f5…`) |
+### Clients
 
-An edge function that increments and reads a page-view counter stored in KV. No cron trigger is configured — it runs on every incoming request to the documentation site.
+- [librefang-cli](librefang-cli.md) — the `librefang` binary; a feature-rich CLI for configuring, running, and debugging agents
+- [librefang-cli-locales](librefang-cli-locales.md) — CLI localization in Fluent format (English, Simplified Chinese)
+- [librefang-cli-templates](librefang-cli-templates.md) — TOML config templates written during `librefang init`
+- [librefang-desktop](librefang-desktop.md) — Tauri 2.0 native desktop app wrapping the kernel and web UI, with system tray, auto-updates, and notifications. Supported by [librefang-desktop-capabilities](librefang-desktop-capabilities.md) (security config) and [librefang-desktop-gen](librefang-desktop-gen.md) (auto-generated permission schemas)
 
-### Deployment
+### Migration & Testing
 
-Both workers use the standard `wrangler.toml` configuration format. To deploy:
+[librefang-migrate](librefang-migrate.md) imports agent configurations from other frameworks into LibreFang's native format. Test suites at each layer ensure correctness: [librefang-api-tests](librefang-api-tests.md) (HTTP integration, load, OpenAPI spec), [librefang-kernel-tests](librefang-kernel-tests.md) and [librefang-kernel-src](librefang-kernel-src.md) (kernel lifecycle, WASM, workflows), [librefang-channels-tests](librefang-channels-tests.md) (bridge dispatch), [librefang-memory-tests](librefang-memory-tests.md) (session isolation regression), and [librefang-runtime-tests](librefang-runtime-tests.md) (OAuth/MCP integration).
 
-```bash
-cd web/workers/<worker-name>
-npx wrangler deploy
-```
+## Key Cross-Module Workflows
 
-Ensure the `CLOUDFLARE_API_TOKEN` environment variable is set with permissions for Workers and KV.
+**Agent message processing:** A message arrives through [librefang-channels](librefang-channels.md) → [librefang-kernel](librefang-kernel.md) routes it via [librefang-kernel-router](librefang-kernel-router.md) → [librefang-runtime](librefang-runtime.md) executes through an [librefang-llm-driver](librefang-llm-driver.md) implementation → [librefang-memory](librefang-memory.md) persists context → response flows back through channels.
 
----
+**Dashboard to kernel:** [librefang-api-dashboard](librefang-api-dashboard.md) calls API endpoints on [librefang-api](librefang-api.md) → which exercises the full path through [librefang-testing](librefang-testing.md)'s mock infrastructure in tests → validated end-to-end by [librefang-api-tests](librefang-api-tests.md) against a real kernel on a random port.
 
-## Adding a New Redirect
-
-When a documentation page moves or is renamed:
-
-1. Add an exact-match rule in the appropriate group section (English block).
-2. If the page has sub-paths, add a wildcard rule **after** the exact-match rule.
-3. Duplicate both rules in the `/zh` block, preserving the `/zh` prefix.
-4. Verify the redirect locally with `netlify dev` or by deploying to a preview environment.
+**Type-driven consistency:** Every crate depends on [librefang-types](librefang-types.md) for shared vocabulary. [librefang-types-tests](librefang-types-tests.md) guards against drift between the dashboard's TypeScript serializer and the Rust deserializer, ensuring the TOML contract holds across the boundary.

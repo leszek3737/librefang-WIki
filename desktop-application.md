@@ -2,261 +2,159 @@
 
 # LibreFang Desktop Application
 
-Native desktop client for the LibreFang Agent Operating System, built on Tauri 2.0. Wraps the kernel and embedded API server in a native window with system tray integration, global shortcuts, auto-update, and support for connecting to either a local or remote LibreFang instance.
+A Tauri 2.0 native desktop wrapper for the LibreFang Agent OS. The application can either boot an embedded kernel and API server locally, or connect to a remote LibreFang instance. It provides a system tray, global keyboard shortcuts, native OS notifications, auto-start on login, and automatic updates.
 
 ## Architecture Overview
 
 ```mermaid
 graph TD
-    CLI["main.rs<br/>CLI (clap)"] --> RUN["lib.rs run()"]
-    RUN --> MODE{StartupMode?}
-    MODE -->|Remote URL| NAV_REMOTE["Navigate WebView<br/>to remote URL"]
-    MODE -->|Local| BOOT["server.rs<br/>start_server()"]
-    MODE -->|ConnectionScreen| CONN_SCREEN["connection.rs<br/>connection_html()"]
-    BOOT --> KERNEL["LibreFangKernel::boot()"]
-    KERNEL --> AXUM["axum server<br/>127.0.0.1:0"]
-    AXUM --> NAV_LOCAL["Navigate WebView<br/>to local server"]
-    CONN_SCREEN -->|user picks remote| CONNECT_REMOTE["connect_remote()"]
-    CONN_SCREEN -->|user picks local| START_LOCAL["start_local()"]
-    START_LOCAL --> BOOT
-    CONNECT_REMOTE --> NAV_REMOTE
-    RUN --> TRAY["tray.rs<br/>System tray"]
-    RUN --> SHORTCUTS["shortcuts.rs<br/>Global hotkeys"]
-    RUN --> UPDATER["updater.rs<br/>Auto-update"]
+    CLI["main.rs<br/>CLI parsing"] --> RUN["lib.rs run()"]
+    RUN --> MODE{"Resolve<br/>StartupMode"}
+    MODE -->|Remote URL| REMOTE["WebView → remote server"]
+    MODE -->|Local| BOOT["server::start_server()"]
+    MODE -->|No preference| CONN["Connection Screen HTML"]
+    CONN -->|User picks remote| CR["connect_remote()"]
+    CONN -->|User picks local| SL["start_local()"]
+    CR --> REMOTE
+    SL --> BOOT
+    BOOT --> KERNEL["LibreFangKernel"]
+    BOOT --> AXUM["axum HTTP server<br/>background thread"]
+    KERNEL --> EVENTS["Event bus"]
+    EVENTS --> NOTIFY["forward_kernel_events()<br/>→ OS notifications"]
+    RUN --> TRAY["System tray"]
+    RUN --> SHORTCUTS["Global shortcuts"]
+    RUN --> UPDATER["Auto-updater"]
 ```
 
 ## Startup and Connection Mode Resolution
 
-The entry point is `main()`, which parses CLI arguments via clap and calls `librefang_desktop::run()`. Before any async work begins, `load_dotenv()` is called synchronously to populate the process environment from `~/.librefang/.env` — this must happen before spawning any threads because `std::env::set_var` is undefined safe once concurrent threads exist.
+The application resolves how to connect through a priority chain:
 
-### Startup Priority Chain
+1. **CLI `--server-url <URL>`** — immediate remote connection
+2. **CLI `--local`** — skip connection screen, boot local server
+3. **`LIBREFANG_SERVER_URL` environment variable** — remote connection
+4. **Saved preference** in `~/.librefang/desktop.toml` — uses last choice
+5. **Connection screen** — user decides at runtime
 
-`run()` resolves the connection mode in this order:
+`main()` loads environment variables from `~/.librefang/.env` at the synchronous boundary (before any threads spawn, since `std::env::set_var` is UB with concurrent threads), parses CLI arguments via `clap`, and delegates to `lib::run()`.
 
-1. **CLI `--server-url <URL>`** — Immediate remote mode
-2. **CLI `--local`** — Immediate local mode, skip connection screen
-3. **Environment variable `LIBREFANG_SERVER_URL`** — Remote mode
-4. **Saved preference** from `~/.librefang/desktop.toml` — Restores last choice
-5. **Connection screen** — Interactive HTML page letting the user decide
+### Connection Preference Persistence
 
-The resolved mode is represented by the private `StartupMode` enum (`Remote(String)`, `Local`, `ConnectionScreen`). Depending on the variant, the kernel may be booted immediately or deferred until the user chooses via the connection screen.
-
-### CLI Flags
-
-```
-librefang-desktop [--server-url <URL>] [--local]
-```
-
-- `--server-url` — Connect to a remote server (e.g., `http://192.168.1.100:4545`). Must include scheme.
-- `--local` — Force local server boot, skipping the connection screen.
+`connection::load_saved_preference()` and `connection::save_preference()` read/write a `DesktopConfig` struct to `~/.librefang/desktop.toml`. The `ConnectionPreference` struct stores the mode (`"local"` or `"remote"`) and an optional `server_url`.
 
 ## Managed State
 
-Tauri managed state is registered once at startup with interior-mutable wrappers (`RwLock`, `Mutex`). All state updates go through these locks — `manage()` is never called a second time.
+Tauri managed state is registered once during setup with interior-mutable wrappers (`RwLock`). All state updates go through these locks rather than re-registering state.
 
 | State Type | Inner Type | Purpose |
 |---|---|---|
 | `PortState` | `RwLock<Option<u16>>` | Local server port. `None` in remote mode or before boot. |
 | `KernelState` | `RwLock<Option<KernelInner>>` | Kernel handle + startup timestamp. `None` in remote mode. |
-| `ServerUrlState` | `RwLock<String>` | Current dashboard URL (local or remote) the WebView points at. |
+| `ServerUrlState` | `RwLock<String>` | The URL the WebView points at (local or remote). |
 | `RemoteMode` | `RwLock<bool>` | `true` when connected to a remote server. |
-| `ServerHandleHolder` | `Mutex<Option<ServerHandle>>` | Handle to the running embedded server for shutdown. Filled after boot or by `start_local`. |
+| `ServerHandleHolder` | `Mutex<Option<ServerHandle>>` | Owning handle to the embedded server. Filled after boot. |
 
-`KernelInner` holds an `Arc<LibreFangKernel>` and the `Instant` the server started (used for uptime display).
+`KernelInner` holds an `Arc<LibreFangKernel>` and the `Instant` the server started, used for uptime calculation and agent counts.
 
-## Embedded Server Lifecycle
+## Embedded Server (`server.rs`)
 
-The `server` module handles local kernel + API server management.
+`start_server()` boots the kernel synchronously, binds a `TcpListener` to `127.0.0.1:0` (OS-assigned port), then spawns a dedicated background thread running its own tokio runtime. Inside that runtime:
 
-### Boot Sequence (`start_server`)
+1. `kernel.start_background_agents().await` — boot agents marked for auto-start
+2. `kernel.spawn_approval_sweep_task()` — periodic approval expiry cleanup
+3. `run_embedded_server()` — builds the axum router via `librefang_api::server::build_router`, converts the std `TcpListener` to tokio, and serves with graceful shutdown via a `watch` channel
 
-1. **Kernel boot** — `LibreFangKernel::boot(None)` runs synchronously (no tokio needed)
-2. **Port binding** — A `TcpListener` binds to `127.0.0.1:0` on the calling thread, guaranteeing the port is known before any Tauri window is created
-3. **Background thread** — A dedicated OS thread (`librefang-server`) creates its own multi-thread tokio runtime and runs the axum server
-4. **Background agents** — `kernel.start_background_agents()` is called inside the tokio context
-5. **Approval sweep** — `kernel.spawn_approval_sweep_task()` starts the periodic approval expiry checker
-6. **Dashboard sync** — `sync_dashboard()` downloads/updates the WebUI assets in the background
-
-Returns a `ServerHandle` containing the port, kernel reference, shutdown channel, and thread join handle.
+The background thread also spawns a task to sync dashboard assets via `librefang_api::webchat::sync_dashboard`.
 
 ### Shutdown
 
-`ServerHandle` uses `compare_exchange` on an `AtomicBool` to prevent double-shutdown. There are two paths:
+`ServerHandle` owns the shutdown `watch::Sender` and the server thread's `JoinHandle`. Calling `shutdown()` sends `true` on the channel, waits for the thread to join, then calls `kernel.shutdown()`. The `Drop` impl does a best-effort shutdown signal without blocking. An `AtomicBool` guard prevents double-shutdown.
 
-- **Explicit `shutdown()`** — Sends the shutdown signal via `watch` channel, joins the background thread, calls `kernel.shutdown()`
-- **Drop** — Sends the shutdown signal but does not block on the thread join (best-effort cleanup)
+## IPC Commands (`commands.rs`)
 
-The graceful shutdown flow inside `run_embedded_server`:
-1. The `watch` receiver waits for `true`
-2. Axum's `with_graceful_shutdown` completes
-3. Channel bridges are stopped via `bridge_manager.lock().await`
+All commands are registered via `tauri::generate_handler![]` and invoked from the WebView frontend.
 
-## IPC Commands
+| Command | Parameters | Returns | Description |
+|---|---|---|---|
+| `get_port` | — | `u16` | Local server port |
+| `get_status` | — | `JSON` | Status object: `status`, `port`, `agents`, `uptime_secs` |
+| `get_agent_count` | — | `usize` | Number of registered agents |
+| `import_agent_toml` | — | `String` | Opens file picker, validates TOML as `AgentManifest`, copies to `~/.librefang/workspaces/agents/{name}/agent.toml`, spawns the agent |
+| `import_skill_file` | — | `String` | Opens file picker (`.md/.toml/.py/.js/.wasm`), copies to `~/.librefang/skills/`, triggers hot-reload |
+| `get_autostart` | — | `bool` | Whether auto-start is enabled |
+| `set_autostart` | `enabled: bool` | `bool` | Enable/disable auto-start |
+| `check_for_updates` | — | `UpdateInfo` | On-demand update check |
+| `install_update` | — | `()` | Download, install, restart |
+| `open_config_dir` | — | `()` | Opens `~/.librefang/` in OS file manager |
+| `open_logs_dir` | — | `()` | Opens `~/.librefang/logs/` in OS file manager |
 
-All commands are registered via `tauri::generate_handler![]` in `run()`. They communicate with the WebView frontend through Tauri's IPC layer.
+## Connection Screen and Mode Switching (`connection.rs`)
 
-### Status and Query Commands
+### Connection Screen
 
-| Command | Returns | Description |
-|---|---|---|
-| `get_port` | `u16` | Port the embedded server is listening on |
-| `get_status` | `serde_json::Value` | JSON with `status`, `port`, `agents`, `uptime_secs` |
-| `get_agent_count` | `usize` | Number of registered agents |
-| `get_autostart` | `bool` | Whether auto-start on login is enabled |
+When no startup mode is resolved, `connection_html()` returns a self-contained HTML/CSS/JS page injected into a blank WebView. The page provides:
+- A URL input with **Test Connection** and **Connect** buttons for remote servers
+- A **Start Local Server** button
+- A **Remember this choice** checkbox
+- Status feedback area
 
-### Import Commands
+The frontend calls Tauri IPC commands (`test_connection`, `connect_remote`, `start_local`) via `window.__TAURI__.core.invoke`.
 
-**`import_agent_toml`** — Opens a native file picker filtered to `.toml`, parses the file as an `AgentManifest`, copies it to `~/.librefang/workspaces/agents/{name}/agent.toml`, then calls `kernel.spawn_agent()`. Returns the agent name on success.
+### IPC Commands
 
-**`import_skill_file`** — Opens a file picker accepting `.md`, `.toml`, `.py`, `.js`, `.wasm` files, copies to `~/.librefang/skills/`, then calls `kernel.reload_skills()` to hot-reload the skill registry.
+**`test_connection(url)`** — Validates the URL scheme, sends `GET /api/health` with a 10-second timeout, returns the JSON response body.
 
-### Connection Commands
+**`connect_remote(url, remember)`** — Validates and health-checks the URL, saves preference if requested, updates all managed state to remote mode (clears `PortState`, `KernelState`, sets `RemoteMode = true`, sets `ServerUrlState`), then navigates the WebView to the remote URL.
 
-Defined in the `connection` module, exposed via IPC:
+**`start_local(remember)`** — Spawns `crate::server::start_server()` on a blocking thread, fills all managed state with the local server's details, stores the `ServerHandle`, starts event forwarding, saves preference if requested, and navigates the WebView to `http://127.0.0.1:{port}`.
 
-- **`test_connection(url)`** — HTTP GET to `{url}/api/health` with a 10-second timeout. Returns the JSON response on success.
-- **`connect_remote(url, remember)`** — Validates URL, verifies health endpoint, updates all managed state (sets `RemoteMode = true`, clears `PortState` and `KernelState`), optionally saves preference, navigates the WebView via `window.location.href`.
-- **`start_local(remember)`** — Spawns the embedded server via `tokio::task::spawn_blocking(start_server)`, fills all managed state, stores the `ServerHandle`, starts event forwarding, optionally saves preference, navigates the WebView.
+## System Tray (`tray.rs`)
 
-### System Commands
+`setup_tray()` builds a tray icon with a context menu:
 
-| Command | Description |
-|---|---|
-| `set_autostart(enabled)` | Enable/disable OS login auto-start via `tauri-plugin-autostart` |
-| `check_for_updates` | On-demand update check, returns `UpdateInfo` |
-| `install_update` | Downloads and installs the latest update, then restarts the app |
-| `open_config_dir` | Opens `~/.librefang/` in the OS file manager |
-| `open_logs_dir` | Opens `~/.librefang/logs/` in the OS file manager |
+- **Show Window** / **Open in Browser** / **Change Server...** — actions
+- **Agents: N running** / **Status: Running/Remote (uptime)** — informational (disabled items)
+- **Launch at Login** — toggle via `CheckMenuItem`
+- **Check for Updates...** — runs `updater::check_for_update()`, installs if available, sends notifications
+- **Open Config Directory** — opens `~/.librefang/`
+- **Quit LibreFang** — calls `app.exit(0)`
 
-## Connection Screen
+The **Change Server** action shuts down any running local server, clears local state, and re-injects the connection screen HTML into the WebView.
 
-When no startup mode is determined, the app renders a self-contained HTML page inside the WebView. The `connection_html()` function returns a complete HTML/CSS/JS document with:
+Left-clicking the tray icon shows and focuses the window.
 
-- A URL input field for remote server connection
-- "Test Connection" and "Connect" buttons for remote mode
-- "Start Local Server" button for local mode
-- A "Remember this choice" checkbox
-- Status display area for feedback
+## Global Shortcuts (`shortcuts.rs`)
 
-The HTML calls Tauri IPC commands via `window.__TAURI__.core.invoke()`. On connection success, the server-side command navigates the WebView to the dashboard URL.
-
-### Persisted Preferences
-
-Connection preferences are stored in `~/.librefang/desktop.toml`:
-
-```toml
-[connection]
-mode = "remote"        # or "local"
-server_url = "http://..."  # absent for local mode
-```
-
-`load_saved_preference()` and `save_preference()` handle reading/writing this file. The preference is only saved after a successful connection (health check passes).
-
-## System Tray
-
-The `tray` module creates a rich context menu on the system tray icon. Menu items are built dynamically based on current state:
-
-**Actions:**
-- **Show Window** — Focuses and unhides the main window
-- **Open in Browser** — Opens the current dashboard URL in the default browser
-- **Change Server** — Shuts down any local server, clears state, navigates back to the connection screen
-
-**Status (read-only):**
-- Displays agent count and uptime (for local mode) or remote URL
-- Uptime is formatted via `format_uptime()` (e.g., `45s`, `12m 30s`, `2h 15m`)
-
-**Settings:**
-- **Launch at Login** — Toggle via `CheckMenuItem`, backed by `tauri-plugin-autostart`
-- **Check for Updates** — Triggers a manual update check and install flow with native notifications
-- **Open Config Directory** — Opens `~/.librefang/`
-
-**Quit** — Calls `app.exit(0)` for clean shutdown.
-
-Left-click on the tray icon shows/focuses the window.
-
-## Global Shortcuts
-
-Three system-wide keyboard shortcuts registered via `tauri-plugin-global-shortcut`:
+`build_shortcut_plugin()` registers three system-wide hotkeys:
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+Shift+O` | Show/focus the LibreFang window |
-| `Ctrl+Shift+N` | Show window + emit `navigate` event with payload `"agents"` |
-| `Ctrl+Shift+C` | Show window + emit `navigate` event with payload `"chat"` |
+| `Ctrl+Shift+O` | Show/focus window |
+| `Ctrl+Shift+N` | Show window + emit `navigate` event with `"agents"` |
+| `Ctrl+Shift+C` | Show window + emit `navigate` event with `"chat"` |
 
-The `navigate` event is emitted via `app.emit()` — the WebView frontend listens for it to change routes. Registration failure is non-fatal (logged as a warning).
+The WebUI listens for the `navigate` event to switch pages. Registration failure is non-fatal — the app logs a warning and continues.
 
-## Auto-Update System
+## Auto-Updater (`updater.rs`)
 
-The `updater` module wraps `tauri-plugin-updater`.
+`spawn_startup_check()` runs after a 10-second delay, checks for updates via the Tauri updater plugin, and if found, sends a notification, waits 3 seconds, then installs and restarts.
 
-### Startup Auto-Update
+`check_for_update()` returns an `UpdateInfo` struct with `available`, `version`, and `body` fields. `download_and_install_update()` performs the actual download and calls `app_handle.restart()` — on success the function never returns.
 
-`spawn_startup_check()` runs after a 10-second delay to avoid competing with startup I/O. If an update is found, it:
-
-1. Sends a native notification ("Installing v{version}...")
-2. Waits 3 seconds for the notification to be visible
-3. Downloads and installs the update
-4. Calls `app_handle.restart()` — the process exits and relaunches
-
-All errors are logged; the app continues running normally if the update fails.
-
-### On-Demand Update
-
-The `check_for_updates` IPC command returns an `UpdateInfo` struct:
-
-```rust
-pub struct UpdateInfo {
-    pub available: bool,
-    pub version: Option<String>,
-    pub body: Option<String>,
-}
-```
-
-The `install_update` IPC command downloads and installs — on success, `restart()` is called and the function never returns `Ok`.
-
-### Tray-Initiated Update
-
-The "Check for Updates" tray menu item runs the same check/install flow with native notifications for each stage (downloading, success, failure).
+Both the tray menu's **Check for Updates** and the IPC commands `check_for_updates` / `install_update` go through the same `do_check()` / `download_and_install_update()` functions.
 
 ## Event Forwarding and Notifications
 
-`forward_kernel_events()` subscribes to the kernel's event bus and converts critical events into native OS notifications:
+`forward_kernel_events()` subscribes to the kernel's event bus via `subscribe_all()` and converts critical events into native OS notifications:
 
-| Event | Notification Title | Condition |
-|---|---|---|
-| `LifecycleEvent::Crashed` | "Agent Crashed" | Agent terminated unexpectedly |
-| `SystemEvent::KernelStopping` | "Kernel Stopping" | Kernel shutdown initiated |
-| `SystemEvent::QuotaEnforced` | "Quota Enforced" | Agent hit spending limit |
+- `LifecycleEvent::Crashed` → "Agent Crashed"
+- `SystemEvent::KernelStopping` → "Kernel Stopping"
+- `SystemEvent::QuotaEnforced` → "Quota Enforced" with spend details
 
-All other events are ignored. The listener handles broadcast channel lag gracefully (logs a warning) and exits cleanly when the channel closes.
+All other events are ignored. Broadcast lag is logged but doesn't stop the listener.
 
-Event forwarding is started:
-- In `run()` setup for direct local boot mode
-- In `start_local()` when the user chooses local from the connection screen
+## Window Lifecycle
 
-## Window Behavior
+On desktop, closing the window hides it to the system tray instead of quitting (`CloseRequested` → `api.prevent_close()` + `window.hide()`). The app only truly exits when the user selects **Quit** from the tray menu.
 
-- **Close** — Intercepted via `on_window_event`. The window is hidden instead of destroyed, keeping the app running in the tray.
-- **Single instance** — `tauri-plugin-single-instance` focuses the existing window if a second instance is launched.
-- **Minimum size** — 800×600. Default size 1280×800, centered.
-
-## Feature Flags
-
-| Feature | Effect |
-|---|---|
-| `default` | Builds `librefang-api` with default features |
-| `all-channels` | Enables all channel backends in the API |
-| `mini` | Minimal API feature set |
-| `custom-protocol` | Uses Tauri's custom protocol scheme (production builds) |
-
-## Key File Locations
-
-| Path | Purpose |
-|---|---|
-| `~/.librefang/` | Root config directory |
-| `~/.librefang/desktop.toml` | Saved connection preference |
-| `~/.librefang/.env` | Environment variables loaded at startup |
-| `~/.librefang/skills/` | Imported skill files |
-| `~/.librefang/workspaces/agents/{name}/agent.toml` | Imported agent manifests |
-| `~/.librefang/logs/` | Log files |
+Single-instance enforcement (`tauri_plugin_single_instance`) focuses the existing window if a second instance is launched.
