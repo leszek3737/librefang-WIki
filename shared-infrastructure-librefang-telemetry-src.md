@@ -2,7 +2,7 @@
 
 # librefang-telemetry
 
-OpenTelemetry + Prometheus metrics instrumentation for LibreFang. This crate provides centralized telemetry (metrics and tracing) used across all LibreFang crates.
+Centralized telemetry (metrics + tracing) for the LibreFang Agent OS. This crate provides HTTP metrics instrumentation backed by the `metrics` crate facade, with a Prometheus exporter installed at runtime by `librefang-api`.
 
 ## Architecture
 
@@ -12,26 +12,23 @@ graph TD
     RHR --> NP[normalize_path]
     NP --> IDS[is_dynamic_segment]
     IDS --> IU[is_uuid]
-    RHR -->|metrics::counter!| MC[metrics crate<br>counter macro]
-    RHR -->|metrics::histogram!| MH[metrics crate<br>histogram macro]
-    MC --> PR[Prometheus Recorder<br>installed by librefang-api]
+    RHR --> MC[metrics::counter!]
+    RHR --> MH[metrics::histogram!]
+    MC --> PR[Prometheus recorder]
     MH --> PR
+    PR --> EP["/api/metrics endpoint"]
 ```
 
-## Module Structure
+The crate itself is a thin utility layer. It does **not** own the metrics recorder — that lifecycle is managed by `crates/librefang-api/src/telemetry.rs`, which installs a `PrometheusHandle` into the global `metrics` recorder at startup.
 
-| Path | Purpose |
-|---|---|
-| `config` | Re-exports `TelemetryConfig` from `librefang-types::config` for convenient access |
-| `metrics` | HTTP metrics recording and path normalization |
+## Module Layout
+
+| Module | Purpose |
+|--------|---------|
+| `config` | Re-exports `TelemetryConfig` from `librefang-types` for convenience |
+| `metrics` | HTTP request recording and path normalization |
 
 ## Public API
-
-Three items are re-exported at the crate root:
-
-```rust
-pub use metrics::{get_http_metrics_summary, normalize_path, record_http_request};
-```
 
 ### `record_http_request`
 
@@ -39,13 +36,13 @@ pub use metrics::{get_http_metrics_summary, normalize_path, record_http_request}
 pub fn record_http_request(path: &str, method: &str, status: u16, duration: Duration)
 ```
 
-The main entry point for HTTP telemetry. Called by the `request_logging` middleware in `librefang-api` on every incoming request. It:
+The primary entry point. Called by the `request_logging` middleware in `librefang-api` after every HTTP response. It:
 
-1. Normalizes the request path via `normalize_path` (collapsing dynamic segments).
-2. Increments the `librefang_http_requests_total` counter with labels `method`, `path`, and `status`.
-3. Records `duration` into the `librefang_http_request_duration_seconds` histogram with labels `method` and `path`.
+1. Normalizes the request path to collapse high-cardinality segments.
+2. Emits a `librefang_http_requests_total` counter with labels `method`, `path`, and `status`.
+3. Emits a `librefang_http_request_duration_seconds` histogram with labels `method` and `path`.
 
-Both recordings use the standard `metrics` crate macros (`metrics::counter!`, `metrics::histogram!`). Data flows to whichever recorder has been installed — typically the Prometheus exporter set up in `librefang-api/src/telemetry.rs`.
+Both metrics flow through whichever `metrics::Recorder` is installed globally. In production, this is the Prometheus exporter.
 
 ### `normalize_path`
 
@@ -53,24 +50,25 @@ Both recordings use the standard `metrics` crate macros (`metrics::counter!`, `m
 pub fn normalize_path(path: &str) -> String
 ```
 
-Reduces metric label cardinality by replacing dynamic path segments with `{id}`. This prevents every unique UUID or hash from creating a new metric series.
+Replaces dynamic path segments (UUIDs, hex IDs) with the literal token `{id}`. This prevents metric label explosion when paths contain per-request identifiers.
 
 **How it works:**
 
 1. Splits the path on `/`.
-2. Preserves known structural segments: `api`, `v1`, `v2`, `a2a`.
-3. Looks ahead at each segment: if the *next* segment is dynamic (UUID or hex), the dynamic segment is replaced with `{id}`.
-4. Joins the result back with `/`.
+2. Preserves structural segments — `api`, `v1`, `v2`, `a2a` — verbatim.
+3. For every other segment, peeks at the *next* segment. If the next segment looks like a dynamic identifier (UUID or hex string of 8–64 characters), it is replaced with `{id}`.
 
-**Examples:**
+**Normalization examples:**
 
 | Input | Output |
-|---|---|
+|-------|--------|
 | `/api/health` | `/api/health` |
 | `/api/agents/550e8400-e29b-41d4-a716-446655440000/message` | `/api/agents/{id}/message` |
 | `/api/agents/deadbeef01234567/message` | `/api/agents/{id}/message` |
 | `/.well-known/agent.json` | `/.well-known/agent.json` |
 | `/api/my-agent/status` | `/api/my-agent/status` |
+
+Note that hyphenated words like `well-known` and `my-agent` are intentionally **not** treated as dynamic segments — only strings matching the UUID pattern (8-4-4-4-12 hex groups) or pure hex strings of 8–64 characters are collapsed.
 
 ### `get_http_metrics_summary`
 
@@ -78,30 +76,26 @@ Reduces metric label cardinality by replacing dynamic path segments with `{id}`.
 pub fn get_http_metrics_summary() -> String
 ```
 
-A backward-compatibility stub. Full Prometheus output is now rendered directly from the `PrometheusHandle` in the `/api/metrics` route handler in `librefang-api`. This function returns a comment explaining that.
+A backward-compatibility stub. The actual Prometheus text output is rendered directly from the `PrometheusHandle` in `librefang-api`'s `/api/metrics` route handler. This function returns an explanatory comment string. New code should use the handle directly.
 
-## Dynamic Segment Detection
+### `config::TelemetryConfig`
 
-Path segments are classified as dynamic by `is_dynamic_segment` (private). A segment matches as dynamic if it is either:
-
-- **A UUID** — exactly five hyphen-separated groups of hex digits with lengths 8-4-4-4-12 (checked by `is_uuid`).
-- **A hex string** — 8 to 64 ASCII hex characters with no hyphens.
-
-Importantly, hyphenated words like `well-known` or `my-agent` are **not** treated as dynamic. The UUID check requires the specific 8-4-4-4-12 structure, and the hex check rejects strings containing hyphens. This prevents false positives on human-readable slugs.
-
-## Prometheus Metrics Reference
-
-Two metrics are emitted by this crate:
-
-| Metric | Type | Labels | Description |
-|---|---|---|---|
-| `librefang_http_requests_total` | counter | `method`, `path`, `status` | Total HTTP requests processed |
-| `librefang_http_request_duration_seconds` | histogram | `method`, `path` | Request latency in seconds |
+Re-exported from `librefang-types::config::TelemetryConfig`. Importing from `librefang_telemetry::config` works identically to importing from the types crate.
 
 ## Integration Points
 
-**Consumer:** The `request_logging` middleware in `librefang-api/src/middleware.rs` calls `record_http_request` directly.
+**Where this crate is used:**
 
-**Recorder installation:** This crate emits metrics but does not install a recorder. The Prometheus recorder is set up in `librefang-api/src/telemetry.rs`, which means telemetry is a no-op until that initialization runs.
+- `librefang-api/src/middleware.rs` — the `request_logging` middleware calls `record_http_request` on every completed HTTP request.
 
-**Configuration:** `TelemetryConfig` (defined in `librefang-types::config::types`) controls telemetry behavior and is re-exported from the `config` submodule.
+**Where the recorder is installed:**
+
+- `librefang-api/src/telemetry.rs` — creates and installs the `PrometheusHandle` into the global `metrics` recorder at application startup. Without this step, calls to `metrics::counter!` and `metrics::histogram!` are no-ops.
+
+## Adding New Metrics
+
+To instrument additional subsystems:
+
+1. Use the `metrics` crate macros directly (`metrics::counter!`, `metrics::histogram!`, `metrics::gauge!`) with a `librefang_` prefixed name.
+2. Keep label cardinality low — reuse `normalize_path` or a similar strategy for any user-supplied strings.
+3. The Prometheus recorder installed by `librefang-api` will automatically collect them. No additional wiring is needed.

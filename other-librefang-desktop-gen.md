@@ -1,46 +1,41 @@
 # Other — librefang-desktop-gen
 
-# librefang-desktop-gen — Tauri Security Schema Layer
+# librefang-desktop-gen — Tauri Security & Permissions Layer
 
 ## Overview
 
-`librefang-desktop-gen` contains the **auto-generated Tauri capability and permission schemas** that govern what the LibreFang desktop application's frontend (webview) is allowed to do. These files are produced by the Tauri build system and should not be manually edited — they reflect the permissions declared in the application's Tauri configuration and plugin registrations.
+`librefang-desktop/gen` contains auto-generated Tauri security artifacts that define the **capability-based access control** (CBAC) boundary between the LibreFang desktop frontend (webview) and the native backend. These files are produced by the Tauri build system and should not be hand-edited — they are regenerated each build from the permissions declared in `src-tauri/capabilities/` and the plugin configurations in `Cargo.toml` / `tauri.conf.json`.
 
-The module consists of three schema files in `gen/schemas/`:
+## File Inventory
 
 | File | Purpose |
 |------|---------|
-| `acl-manifests.json` | Exhaustive registry of every permission every plugin can grant or deny |
-| `capabilities.json` | The actual capability sets currently assigned to application windows |
-| `desktop-schema.json` | JSON Schema (Draft 7) for validating capability files |
+| `schemas/acl-manifests.json` | Exhaustive registry of every permission, permission set, and global scope schema for all loaded plugins |
+| `schemas/capabilities.json` | Resolved capability objects mapping windows to their granted permissions at build time |
+| `schemas/desktop-schema.json` | JSON Schema (draft-07) that validates capability files authored by developers |
 
-## Capability Model
+---
 
-Tauri uses a **capability-based access control** system. A *capability* binds a set of permissions to specific windows (or webviews). If a window doesn't match any capability, it has **zero access** to the IPC layer.
+## Architecture
 
 ```mermaid
-graph LR
-    A[Window: main] --> B[Capability: default]
-    B --> C[Permission Set: core:default]
-    B --> D[Permission Set: notification:default]
-    B --> E[Permission Set: shell:default]
-    B --> F[Individual Permissions...]
-    C --> G[Commands allowed on frontend]
+flowchart LR
+    A[Developer-authored<br>capability files] --> B[Tauri build]
+    B --> C[acl-manifests.json]
+    B --> D[capabilities.json]
+    B --> E[desktop-schema.json]
+    C --> F[Runtime IPC<br>permission checks]
+    D --> F
+    E --> A
 ```
 
-### How Permissions Work
+At build time, Tauri reads every plugin's permission manifest, the developer's capability files, and produces the three schema files in `gen/schemas/`. At runtime, the Tauri IPC layer consults the resolved capabilities to allow or deny each frontend-to-backend command invocation.
 
-Each permission follows the pattern `plugin-name:permission-name` and either **allows** or **denies** a specific IPC command. Permissions are resolved as follows:
+---
 
-- **`allow-*`** — explicitly permits a command
-- **`deny-*`** — explicitly blocks a command (takes priority over allow)
-- **`default`** — a bundled set of `allow-*` permissions that represent the plugin's recommended baseline
+## Capability Resolution — `capabilities.json`
 
-Permissions can also carry a **scope** (seen in the shell plugin) that constrains not just *whether* a command runs, but *with what arguments*.
-
-## Default Capability
-
-Defined in `capabilities.json`, the `default` capability is assigned to the `"main"` window and is **local only** (not served to remote URLs):
+The resolved default capability grants the following to the `"main"` window:
 
 ```json
 {
@@ -61,115 +56,139 @@ Defined in `capabilities.json`, the `default` capability is assigned to the `"ma
 }
 ```
 
-### Granted Access Summary
+Key points:
 
-| Plugin / Permission | What the frontend can do |
-|---------------------|--------------------------|
-| `core:default` | Path operations, events, window/webview queries, app metadata, images, resources, menus, tray |
-| `notification:default` | Full notification lifecycle: request permissions, show, cancel, batch, manage channels |
-| `shell:default` | Open `http(s)://`, `tel:`, and `mailto:` links via the system handler |
-| `dialog:default` | Show ask, confirm, message, save, and open dialogs |
-| `global-shortcut:allow-*` | Register, unregister, and check global keyboard shortcuts (no wildcard registration) |
-| `autostart:default` | Enable, disable, and query auto-start on boot |
-| `updater:default` | Check, download, and install application updates |
+- **`local: true`** — Only local (app-bundled) URLs may exercise these permissions. No remote origin gets access.
+- **`windows: ["main"]`** — Only the window labelled `main` receives these grants. Any secondary window has zero IPC access unless additional capabilities are defined.
+- **`global-shortcut`** is granted on a per-command basis rather than via its `default` (which is intentionally empty) — only `register`, `unregister`, and `is-registered` are exposed.
 
-## Plugin Permission Breakdown
+---
 
-### Core Plugins (via `core:default`)
+## Permission Plugin Reference — `acl-manifests.json`
 
-`core:default` is a meta-set that includes the defaults of nine sub-plugins:
+Every top-level key is a plugin namespace. Each namespace declares:
 
-| Sub-plugin | Default Commands |
-|------------|-----------------|
-| `core:path` | `resolve`, `resolve_directory`, `normalize`, `join`, `dirname`, `extname`, `basename`, `is_absolute` |
-| `core:event` | `listen`, `unlisten`, `emit`, `emit_to` |
-| `core:window` | Read-only window queries: `get_all_windows`, `scale_factor`, `inner/outer_position`, `inner/outer_size`, `is_*` state checks, `current/primary/available_monitors`, `cursor_position`, `theme`, `internal_toggle_maximize` |
-| `core:webview` | `get_all_webviews`, `webview_position`, `webview_size`, `internal_toggle_devtools` |
-| `core:app` | `version`, `name`, `tauri_version`, `identifier`, `bundle_type`, `register_listener`, `remove_listener` |
-| `core:image` | `new`, `from_bytes`, `from_path`, `rgba`, `size` |
-| `core:resources` | `close` |
-| `core:menu` | Full menu CRUD: `new`, `append`, `prepend`, `insert`, `remove`, `remove_at`, `items`, `get`, `popup`, `create_default`, `set_as_app_menu`, `set_as_window_menu`, text/enabled/checked/accelerator/icon setters, macOS-specific NSApp helpers |
-| `core:tray` | Full tray management: `new`, `get_by_id`, `remove_by_id`, `set_icon`, `set_menu`, `set_tooltip`, `set_title`, `set_visible`, `set_temp_dir_path`, `set_icon_as_template`, `set_show_menu_on_left_click` |
+1. **`default_permission`** — The permission set activated when you write `"plugin-name:default"` in a capability.
+2. **`permissions`** — Individual `allow-*` / `deny-*` entries, each mapping to one Tauri IPC command.
+3. **`global_scope_schema`** (optional) — JSON Schema for scoped data that constrains the command at runtime.
 
-**Notable restrictions in the default set:**
-- `core:window:default` does **not** include mutating commands like `create`, `destroy`, `set_size`, `set_position`, `maximize`, `minimize`, `close`, or `set_fullscreen`. These must be individually added if needed.
-- `core:app:default` does **not** include `app_hide`, `app_show`, `set_app_theme`, `set_dock_visibility`, or data store operations.
-- `core:webview:default` does **not** include `create_webview`, `create_webview_window`, `webview_close`, navigation, or zoom commands.
+### Plugin Breakdown
 
-### Shell Plugin
+#### `core` (aggregate)
+Bundles all core sub-plugin defaults: `path`, `event`, `window`, `webview`, `app`, `image`, `resources`, `menu`, `tray`.
 
-The shell plugin is unique in that it supports a **global scope schema** (`ShellScopeEntry`). This allows fine-grained control over which system commands the webview can execute:
+#### `core:app`
+App metadata queries (`version`, `name`, `tauri-version`, `identifier`, `bundle-type`) plus listener registration/removal. The default explicitly **excludes** destructive operations like `app_hide`, `app_show`, `remove_data_store`, `set_app_theme`, and `set_dock_visibility`.
 
-```json
-{
-  "identifier": "shell:allow-execute",
-  "allow": [{
-    "name": "my-cmd",
-    "cmd": "$HOME/my-script.sh",
-    "args": [{ "validator": "^\\w+$" }]
-  }]
-}
-```
+#### `core:event`
+Full event bus access: `listen`, `unlisten`, `emit`, `emit_to`. No restrictions in the default set.
 
-The scope supports:
-- **Regular commands** — requires `cmd` (may use `$HOME`, `$CONFIG`, etc. variables) and `name`
-- **Sidecar commands** — requires `name` and `"sidecar": true`
-- **Argument validation** — `true` (allow all), `false` (allow none), or an array of `{ validator: "<regex>" }` objects
+#### `core:window`
+Read-only window queries (position, size, state flags like `is_fullscreen`, `is_maximized`, etc.) plus `internal_toggle_maximize`. Mutating commands (`create`, `destroy`, `set_size`, `set_position`, etc.) require explicit individual permission grants.
 
-The `shell:default` permission only grants `allow-open`, which opens URLs matching `http(s)://`, `tel:`, and `mailto:` schemes.
+#### `core:webview`
+Query webview list, position, size, and toggle devtools. Creating webviews, zooming, or clearing browsing data requires explicit opt-in.
 
-### Global Shortcut Plugin
+#### `core:path`, `core:image`, `core:resources`, `core:menu`, `core:tray`
+Standard utility plugins with full command access in their defaults.
 
-The default permission set for `global-shortcut` is intentionally **empty** — no shortcuts are registered by default because the security implications are application-specific. The `default` capability manually adds the three individual allow permissions:
+#### `autostart`
+Three commands — `enable`, `disable`, `is_enabled` — all included in the default. Controls whether the app launches at OS login.
 
-- `global-shortcut:allow-register` — register a single shortcut
-- `global-shortcut:allow-unregister` — unregister a single shortcut
-- `global-shortcut:allow-is-registered` — check if a shortcut is registered
+#### `dialog`
+Five dialog types — `ask`, `confirm`, `message`, `save`, `open` — all allowed by default.
 
-Notably absent from the default capability are `allow-register-all` and `allow-unregister-all`.
+#### `global-shortcut`
+Deliberately ships an **empty default** (no permissions). The app must explicitly grant individual commands. In LibreFang's case, `allow-register`, `allow-unregister`, and `allow-is-registered` are granted in the default capability.
 
-## Desktop Schema (desktop-schema.json)
+#### `notification`
+Full notification pipeline: permission checks, channel management (create/delete/list), sending, batching, and cancelling. All 16 commands are included in the default.
 
-This file is a JSON Schema Draft 7 definition that validates the structure of Tauri capability files. Key definitions:
+#### `shell`
+Default allows only `open` (for `http(s)://`, `tel:`, `mailto:` links). This is the only plugin with a non-null `global_scope_schema`, which defines `ShellScopeEntry` objects for whitelisting specific commands or sidecars with argument validation.
 
-| Definition | Purpose |
-|------------|---------|
-| `CapabilityFile` | Top-level — accepts a single `Capability`, an array, or `{ capabilities: [...] }` |
-| `Capability` | Binds `permissions` to `windows`/`webviews` with optional `platforms` filter and `remote` URL config |
-| `CapabilityRemote` | Lists URL patterns (URLPattern spec) allowed to use the capability |
-| `PermissionEntry` | Either a bare identifier string or `{ identifier, allow?, deny? }` with scope data |
-| `Identifier` | Enumerates every valid permission string across all plugins |
+**Shell scope entries** support two forms:
 
-The schema includes conditional logic (`if`/`then`) that adds scope validation specifically for shell-related permissions, requiring `ShellScopeEntry` shapes for the `allow`/`deny` arrays.
+- **System command** — `{ "name": "...", "cmd": "...", "args": ... }` where `cmd` can start with directory variables like `$HOME`, `$CONFIG`, `$APPDATA`, etc.
+- **Sidecar** — `{ "name": "...", "sidecar": true, "args": ... }` for bundled sidecar binaries.
 
-## Modifying Capabilities
+Arguments can be a boolean (`true` = allow all, `false` = allow none) or an array of `ShellScopeEntryAllowedArg` objects that either pass a literal string or define a regex `validator` for dynamic input.
+
+#### `updater`
+Full update lifecycle: `check`, `download`, `install`, `download_and_install`.
+
+---
+
+## Capability File Schema — `desktop-schema.json`
+
+This is the JSON Schema that validates developer-authored capability files under `src-tauri/capabilities/`. A valid file can be:
+
+- A single `Capability` object
+- An array of `Capability` objects
+- An object with a `capabilities` array
+
+### Capability Object Structure
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `identifier` | **yes** | Unique string ID (e.g. `"main-user-files-write"`) |
+| `permissions` | **yes** | Array of `PermissionEntry` items, unique |
+| `description` | no | Human-readable intent |
+| `windows` | no | Glob patterns matching window labels |
+| `webviews` | no | Glob patterns matching webview labels (finer-grained than `windows`) |
+| `local` | no | Whether local app URLs can use this capability (default `true`) |
+| `remote` | no | `CapabilityRemote` with `urls` array using URLPattern syntax |
+| `platforms` | no | Restrict to specific OS targets (e.g. `["macOS", "windows"]`) |
+
+### PermissionEntry
+
+Each entry is either:
+
+- A plain identifier string (e.g. `"core:default"`, `"shell:allow-open"`)
+- An object with `identifier` plus optional `allow` / `deny` arrays for scoped permissions (used exclusively with `shell:*` permissions in this app)
+
+---
+
+## Modifying Permissions
 
 To change what the frontend can access:
 
-1. **Edit the Tauri configuration** (typically `tauri.conf.json` or `capabilities/*.json` in the source directory — **not** the `gen/` files).
-2. **Rebuild** — Tauri regenerates `gen/schemas/` during the build process.
-3. **Verify** — Check `capabilities.json` in `gen/schemas/` to confirm the new permissions took effect.
+1. Edit or create a capability file in `src-tauri/capabilities/`.
+2. Reference permission identifiers using the `{plugin}:{permission}` format.
+3. Rebuild — Tauri regenerates `gen/schemas/` automatically.
+4. Never edit files in `gen/` directly; changes will be overwritten on the next build.
 
-### Adding a new capability
-
-Create a new capability file (e.g., `capabilities/admin.json`) with a structure like:
+### Adding a new capability example
 
 ```json
 {
-  "identifier": "admin-ops",
-  "description": "Extended permissions for admin windows",
-  "windows": ["admin-*"],
+  "identifier": "main-shell-scripts",
+  "description": "Allow the main window to run specific shell commands",
+  "windows": ["main"],
+  "local": true,
   "permissions": [
-    "core:default",
-    "core:window:allow-close",
-    "core:window:allow-set-fullscreen"
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "ping",
+          "cmd": "ping",
+          "args": [
+            { "validator": "\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}" }
+          ]
+        }
+      ]
+    }
   ]
 }
 ```
 
+---
+
 ## Security Considerations
 
-- **Principle of least privilege**: The `core:window:default` set is read-heavy by design. Mutating operations (resize, reposition, close, destroy) must be explicitly added.
-- **Remote access is disabled by default**: The `default` capability sets `"local": true` with no `"remote"` block. Never enable remote access without understanding the implications.
-- **Shell execute/spawn are not in the default capability**: Only `shell:allow-open` (URL opening) is granted. Arbitrary command execution requires explicit opt-in with scope constraints.
-- **Deny overrides allow**: If both an `allow-*` and `deny-*` permission exist for the same command, the deny always wins, regardless of ordering.
+- The default capability is intentionally **local-only** — no remote URL can invoke IPC commands.
+- `global-shortcut` registration requires explicit opt-in because keyboard shortcuts can conflict with OS-level bindings.
+- Shell `execute` and `spawn` are **not** included in `shell:default`. They must be granted with explicit scope entries that constrain the command and validate arguments.
+- Window/webview creation and destruction commands are not in any default set and must be individually granted if needed.
+- The `deny` arrays in permission entries take precedence over `allow` during runtime validation.

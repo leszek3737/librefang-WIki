@@ -1,309 +1,252 @@
 # Shared Infrastructure — librefang-migrate-src
 
-# librefang-migrate-src — Migration Engine
+# librefang-migrate
 
-## Purpose
+Migration engine for importing agents, configuration, memory, sessions, and channel setups from other agent frameworks into LibreFang.
 
-This crate imports agents, configuration, memory, sessions, and channel setups from external agent frameworks into LibreFang's native format. It is the engine behind the `librefang migrate` CLI command, the `/api/config/migrate` HTTP endpoints, and the TUI init wizard's import flow.
+## Overview
 
-Currently supported sources:
+This crate converts workspace layouts and configuration formats from external agent frameworks (OpenClaw, OpenFang) into LibreFang's native TOML-based structure. It handles two distinct OpenClaw generations—modern JSON5 monolithic configs and legacy YAML scattered files—as well as OpenFang's nearly identical format. A scan-only mode lets callers preview what would be imported before committing.
 
-| Source | Status | Notes |
-|---|---|---|
-| **OpenClaw** | Fully supported | JSON5 (modern) and legacy YAML layouts |
-| **OpenFang** | Fully supported | Same config format as LibreFang (community fork), schema-drift checked |
-| **LangChain** | Not yet implemented | Returns `MigrateError::UnsupportedSource` |
-| **AutoGPT** | Not yet implemented | Returns `MigrateError::UnsupportedSource` |
+The module is consumed by the CLI (`librefang migrate`), the HTTP API (`/api/config/migrate`), and the TUI init wizard.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    CLI["librefang-cli<br/>cmd_migrate"] --> run_migration
-    API["HTTP API<br/>routes/config"] --> run_migration
-    TUI["TUI init wizard"] --> run_migration
-    
-    API --> detect["detect_openclaw_home()"]
-    API --> scan["scan_openclaw_workspace()"]
-    TUI --> detect
-    TUI --> scan
-    
-    run_migration -->|OpenClaw| openclaw["openclaw::migrate()"]
-    run_migration -->|OpenFang| openfang["openfang::migrate()"]
-    
-    openclaw -->|JSON5| json5flow["JSON5 pipeline"]
-    openclaw -->|YAML| yamlflow["Legacy YAML pipeline"]
-    
-    json5flow --> cfg["config.toml"]
-    json5flow --> agents["agents/*/agent.toml"]
-    json5flow --> mem["imported_memory.md"]
-    json5flow --> ws["workspace/ dirs"]
-    json5flow --> sess["imported_sessions/"]
-    
-    run_migration --> report["MigrationReport"]
+    CLI["librefang-cli<br/>cmd_migrate"]
+    API["HTTP API<br/>run_migrate"]
+    TUI["TUI Init Wizard<br/>handle_migration_key"]
+
+    CLI --> run_migration
+    API --> run_migration
+    TUI --> run_migration
+
+    run_migration --> |OpenClaw| OC["openclaw::migrate"]
+    run_migration --> |OpenFang| OF["openfang::migrate"]
+
+    OC --> JSON5["JSON5 flow<br/>openclaw.json"]
+    OC --> YAML["Legacy YAML flow<br/>config.yaml"]
+
+    TUI --> |preview| detect["detect_openclaw_home"]
+    TUI --> |preview| scan["scan_openclaw_workspace"]
+    API --> detect
+    API --> scan
+
+    OC --> report["MigrationReport"]
+    OF --> report
 ```
 
-## Module Layout
-
-```
-librefang-migrate/src/
-├── lib.rs          # Public API: run_migration, MigrateSource, MigrateOptions, MigrateError
-├── openclaw.rs     # OpenClaw parser and migration (~1300 lines)
-├── openfang.rs     # OpenFang migration with schema-drift warnings
-└── report.rs       # MigrationReport, MigrateItem, SkippedItem, rendering
-```
-
-## Public API
-
-### `run_migration`
+## Entry Point
 
 ```rust
 pub fn run_migration(options: &MigrateOptions) -> Result<MigrationReport, MigrateError>
 ```
 
-The single entry point. Dispatches to `openclaw::migrate()` or `openfang::migrate()` based on `options.source`. Returns a `MigrationReport` detailing every imported, skipped, or warned item.
+`MigrateOptions` specifies the source framework, source directory, target LibreFang home directory, and whether to run in dry-run mode. `run_migration` dispatches to the appropriate sub-module:
 
-### `MigrateOptions`
-
-```rust
-pub struct MigrateOptions {
-    pub source: MigrateSource,    // Which framework to import from
-    pub source_dir: PathBuf,      // Path to source workspace (e.g. ~/.openclaw)
-    pub target_dir: PathBuf,      // Path to LibreFang home (e.g. ~/.librefang)
-    pub dry_run: bool,            // If true, report only — no filesystem changes
-}
-```
-
-Dry-run mode is the recommended first pass. It populates the full `MigrationReport` without writing any files, so callers can show a preview.
-
-### `MigrateError`
-
-Variants cover every failure mode:
-
-| Variant | When |
-|---|---|
-| `SourceNotFound(PathBuf)` | Source directory doesn't exist |
-| `ConfigParse(String)` | Config file couldn't be parsed |
-| `AgentParse(String)` | Agent file couldn't be parsed |
-| `Io(std::io::Error)` | Filesystem I/O failure |
-| `Yaml(serde_yaml::Error)` | YAML deserialization failure |
-| `Json5Parse(String)` | JSON5 deserialization failure |
-| `TomlSerialize(toml::ser::Error)` | TOML serialization failure |
-| `UnsupportedSource(String)` | Framework not yet implemented |
-
----
+| `MigrateSource` | Handler | Status |
+|---|---|---|
+| `OpenClaw` | `openclaw::migrate` | Fully supported |
+| `OpenFang` | `openfang::migrate` | Fully supported |
+| `LangChain` | — | Returns `UnsupportedSource` |
+| `AutoGpt` | — | Returns `UnsupportedSource` |
 
 ## OpenClaw Migration
 
-The `openclaw` module handles the bulk of the work. OpenClaw has two distinct config layouts.
+The OpenClaw importer handles two generations of workspace layout.
 
-### Source Layout Detection
+### Modern JSON5 (primary)
 
-`find_config_file()` probes for config files in order:
-
-1. **Modern JSON5** — `openclaw.json`, `clawdbot.json`, `moldbot.json`, `moltbot.json` (single file containing everything)
-2. **Legacy YAML** — `config.yaml` (separate `agents/` and `messaging/` directories)
-
-The file extension determines which migration pipeline runs.
-
-### Auto-Detection
-
-`detect_openclaw_home()` searches standard locations:
-
-- `$OPENCLAW_STATE_DIR` environment override
-- `~/.openclaw/`, `~/.clawdbot/`, `~/.moldbot/`, `~/.moltbot/`
-- `~/openclaw/`, `~/.config/openclaw/`
-- `%APPDATA%/openclaw/`, `%LOCALAPPDATA%/openclaw/` (Windows)
-
-A candidate directory is accepted if it contains a recognized config file, or has `sessions/` or `memory/` subdirectories.
-
-### Pre-Migration Scan
-
-`scan_openclaw_workspace()` inspects a source directory without modifying anything and returns a `ScanResult`:
-
-```rust
-pub struct ScanResult {
-    pub path: String,
-    pub has_config: bool,
-    pub agents: Vec<ScannedAgent>,
-    pub channels: Vec<String>,
-    pub skills: Vec<String>,
-    pub has_memory: bool,
-}
-```
-
-Each `ScannedAgent` includes its name, provider, model, tool count, and whether it has memory, sessions, and workspace data. This powers the "what will be migrated" preview in the CLI and TUI.
-
-### JSON5 Migration Pipeline
+A single `openclaw.json` at the workspace root contains everything. The file is located by `find_config_file`, which checks for `openclaw.json`, `clawdbot.json`, `moldbot.json`, and `moltbot.json` in order.
 
 ```
-openclaw.json
-    │
-    ├─► migrate_config_from_json()    →  config.toml + secrets.env
-    ├─► migrate_agents_from_json()    →  agents/<id>/agent.toml
-    ├─► migrate_memory_files()        →  agents/<id>/imported_memory.md
-    ├─► migrate_workspace_dirs()      →  agents/<id>/workspace/
-    └─► migrate_sessions()            →  imported_sessions/*.jsonl
+~/.openclaw/
+├── openclaw.json          # JSON5 — global config, agents, channels, models, tools
+├── auth-profiles.json     # (skipped — security)
+├── sessions/              # JSONL conversation logs
+├── memory/<agent>/MEMORY.md
+├── workspaces/<agent>/
+├── memory-search/         # SQLite vector index (skipped)
+├── skills/                # (skipped — reinstall required)
+├── cron/                  # (skipped)
+└── hooks/                 # (skipped)
 ```
 
-Each step appends `MigrateItem` entries to the report. Non-migratable features (cron, hooks, auth profiles, skills, vector indexes) are recorded as `SkippedItem` entries via `report_skipped_features()`.
+### Legacy YAML (fallback)
 
-### Legacy YAML Migration Pipeline
+Very old installations use scattered YAML files. Detected when no JSON5 config is found but a `config.yaml` exists.
 
 ```
-config.yaml + agents/*/agent.yaml + messaging/*.yaml
-    │
-    ├─► migrate_legacy_config()       →  config.toml
-    ├─► parse_legacy_channels()       →  [channels.*] sections in config.toml
-    ├─► migrate_legacy_agents()       →  agents/<name>/agent.toml
-    ├─► migrate_legacy_memory()       →  agents/<name>/imported_memory.md
-    ├─► migrate_legacy_workspaces()   →  agents/<name>/workspace/
-    └─► scan_legacy_skills()          →  SkippedItem entries (need reinstall)
+~/.openclaw/
+├── config.yaml            # Provider, model, API key
+├── agents/<name>/
+│   ├── agent.yaml
+│   ├── MEMORY.md
+│   └── workspace/
+├── messaging/<channel>.yaml
+└── skills/
+    ├── community/
+    └── custom/
 ```
 
-### What Gets Mapped
+### Migration pipeline
 
-#### Providers
+Both flows follow the same ordered steps inside `migrate_from_json5` / `migrate_from_legacy_yaml`:
 
-`map_provider()` normalizes OpenClaw provider names to LibreFang conventions:
+1. **Config** → `config.toml` with version, default model, memory settings
+2. **Agents** → `agents/<id>/agent.toml` per agent
+3. **Memory** → `agents/<id>/imported_memory.md`
+4. **Workspaces** → `agents/<id>/workspace/` (recursive copy)
+5. **Sessions** → `imported_sessions/*.jsonl` (raw copy)
+6. **Skipped features** → reported (cron, hooks, auth profiles, vector indexes, skills)
 
-| OpenClaw | LibreFang |
+### Agent conversion
+
+Each agent is converted by `convert_agent_from_json` (or `convert_legacy_agent`). The output is a TOML manifest with these sections:
+
+- **Top-level**: `name`, `version`, `description`, `module` (`"builtin:chat"`), `profile`, `skills`, `tool_blocklist`, `workspace`
+- **`[model]`**: `provider`, `model`, `system_prompt`, `api_key_env`
+- **`[[fallback_models]]`**: one entry per fallback model (JSON5 only)
+- **`[capabilities]`**: `tools`, `memory_read`, `memory_write`, `network`, `shell`, `agent_message`, `agent_spawn`
+
+Key fields preserved from OpenClaw that were previously silently dropped during migration:
+- `tools.deny` → `tool_blocklist`
+- `workspace` path
+- `skills` allowlist
+
+### Tool and profile mapping
+
+Tools are resolved in this priority order per agent:
+
+1. `tools.allow` + `tools.also_allow` explicit lists → mapped through `librefang_types::tool_compat::map_tool_name`
+2. `tools.profile` → resolved via `ToolProfile::tools()` (profiles: `minimal`, `coding`, `research`, `messaging`, `automation`, `full`)
+3. Agent defaults → same resolution
+4. Fallback: `["file_read", "file_list", "web_fetch"]`
+
+Unmappable tools are collected and reported as warnings rather than failing the migration.
+
+### Provider mapping
+
+`split_model_ref` parses `"provider/model"` strings. `map_provider` normalizes known provider names:
+
+| OpenClaw name | LibreFang provider |
 |---|---|
 | `anthropic`, `claude` | `anthropic` |
 | `openai`, `gpt` | `openai` |
 | `google`, `gemini` | `google` |
 | `xai`, `grok` | `xai` |
-| `deepseek` | `deepseek` |
 | `ollama` | `ollama` |
-| *(unknown)* | *passthrough unchanged* |
+| (unknown) | passed through unchanged |
 
-#### Model References
+`default_api_key_env` derives the standard env var name for each provider (e.g. `"anthropic"` → `"ANTHROPIC_API_KEY"`).
 
-`split_model_ref()` handles `"provider/model"` strings. A bare model name without a slash defaults to provider `"anthropic"`.
+### Channel migration
 
-Agent entries support both simple (`"anthropic/claude-sonnet-4"`) and detailed model references with fallbacks:
+13 channel types are recognized from the `OpenClawChannels` struct. Each is converted to a TOML table under `[channels.<name>]` with policy overrides mapped through `map_dm_policy` and `map_group_policy`:
 
-```json5
-{
-  model: {
-    primary: "deepseek/deepseek-chat",
-    fallbacks: ["groq/llama-3.3-70b-versatile"]
-  }
+| OpenClaw DM policy | LibreFang `dm_policy` |
+|---|---|
+| `open` | `respond` |
+| `allowlist`, `allow_list` | `allowed_only` |
+| `pairing`, `disabled` | `ignore` |
+| (other) | `respond` |
+
+| OpenClaw group policy | LibreFang `group_policy` |
+|---|---|
+| `open`, `all` | `all` |
+| `mention`, `mention_only` | `mention_only` |
+| `commands`, `commands_only`, `slash_only` | `commands_only` |
+| `disabled`, `ignore` | `ignore` |
+| (other) | `mention_only` |
+
+**Supported channels**: telegram, discord, slack, whatsapp, signal, matrix, google_chat, teams, irc, mattermost, feishu
+
+**Skipped channels**:
+- `imessage` — macOS-only, requires manual setup
+- `bluebubbles` — no LibreFang adapter
+- Any unknown channel from the `#[serde(flatten)]` catch-all
+
+**Secrets handling**: Tokens and passwords from the JSON5 config are extracted and written to `secrets.env` in the target directory. The file is created with mode `0o600` on Unix. The TOML config references them via `_env` keys (e.g. `bot_token_env = "TELEGRAM_BOT_TOKEN"`). Credential files (WhatsApp Baileys auth dir, Google Chat service account JSON) are copied to `credentials/` in the target.
+
+**Policy limitation warnings**: When `allow_from` cannot be mapped to the LibreFang channel struct (e.g. Slack has no per-user allowlist, only `allowed_channels`), a warning is added to the report rather than silently dropping the restriction.
+
+## Auto-Detection and Scanning
+
+### `detect_openclaw_home()`
+
+Searches for an existing OpenClaw installation directory. Checks in order:
+
+1. `OPENCLAW_STATE_DIR` environment variable
+2. `~/.openclaw/`, `~/.clawdbot/`, `~/.moldbot/`, `~/.moltbot/`
+3. `~/openclaw/`, `~/.config/openclaw/`
+4. `%APPDATA%/openclaw/`, `%LOCALAPPDATA%/openclaw/` (Windows)
+
+Returns only directories that contain a recognized config file or `sessions/`/`memory/` subdirectories.
+
+### `scan_openclaw_workspace(path)`
+
+Read-only scan that returns a `ScanResult` containing:
+- Whether a config file was found
+- List of agents with their provider, model, tool count, and whether they have memory/sessions/workspace
+- List of configured channel types
+- List of installed skills
+- Whether memory data exists
+
+Used by the TUI init wizard and API routes to preview migrations.
+
+## Dry Run Mode
+
+When `MigrateOptions::dry_run` is `true`, the migration pipeline runs all parsing and conversion logic but skips all filesystem writes. The returned `MigrationReport` still contains full `imported` and `skipped` lists showing what would happen, but no files are created.
+
+## Report Generation
+
+`MigrationReport` tracks:
+
+| Field | Contents |
+|---|---|
+| `imported` | `Vec<MigrateItem>` — each successfully migrated item with kind, name, destination path |
+| `skipped` | `Vec<SkippedItem>` — items that cannot be migrated, with reasons |
+| `warnings` | `Vec<String>` — non-fatal issues (unmapped tools, policy mapping limitations) |
+| `source` | Human-readable source framework name |
+| `dry_run` | Whether the report reflects a dry run |
+
+`ItemKind` variants: `Config`, `Agent`, `Channel`, `Memory`, `Session`, `Secret`, `Skill`.
+
+The report is serialized to `migration_report.md` in the target directory (skipped in dry-run mode). The CLI additionally calls `print_summary` for terminal output and `to_markdown` for the file.
+
+## Error Handling
+
+`MigrateError` covers all failure modes:
+
+```rust
+pub enum MigrateError {
+    SourceNotFound(PathBuf),     // source_dir doesn't exist
+    ConfigParse(String),         // malformed config
+    AgentParse(String),          // malformed agent definition
+    Io(std::io::Error),          // filesystem errors
+    Yaml(serde_yaml::Error),     // legacy YAML parse failures
+    Json5Parse(String),          // JSON5 parse failures
+    TomlSerialize(toml::ser::Error), // output serialization
+    UnsupportedSource(String),   // LangChain, AutoGPT, etc.
 }
 ```
 
-Fallback models are written as `[[fallback_models]]` TOML array-of-tables.
-
-#### Tools
-
-Tool names are resolved through `librefang_types::tool_compat`:
-
-- `is_known_librefang_tool()` — checks if a name is native to LibreFang
-- `map_tool_name()` — maps OpenClaw tool names to LibreFang equivalents
-
-Unrecognized tools are collected as warnings in the report rather than failing the migration.
-
-Tool profiles (`"minimal"`, `"coding"`, `"research"`, `"messaging"`, `"automation"`, `"custom"`, `"full"`) are mapped via `tools_for_profile()` which delegates to `librefang_types::agent::ToolProfile`.
-
-#### Capabilities
-
-`derive_capabilities()` infers LibreFang capability grants from the resolved tool list:
-
-| Tool | Capability |
-|---|---|
-| `*` (wildcard) | `shell = ["*"]`, `network = ["*"]`, `agent_message = ["*"]`, `agent_spawn = true` |
-| `shell_exec` | `shell = ["*"]` |
-| `web_fetch`, `web_search`, `browser_navigate` | `network = ["*"]` |
-| `agent_send`, `agent_list` | `agent_message = ["*"]`, `agent_spawn = true` |
-
-#### Identity / System Prompts
-
-OpenClaw's `identity` field can be a plain string or a deeply nested JSON object. `extract_identity_prompt()` recursively searches for the prompt through a priority-ordered list of keys: `systemPrompt`, `system_prompt`, `prompt`, `instructions`, `instruction`, `content`, `text`, `value`, `persona`, `identity`, `description`. If none of those match, it recurses into nested objects and arrays. This defensive approach avoids failing the migration when OpenClaw's config shape changes.
-
-#### Channel Policies
-
-| OpenClaw DM Policy | LibreFang DM Policy |
-|---|---|
-| `open` | `respond` |
-| `allowlist` / `allow_list` | `allowed_only` |
-| `pairing` / `disabled` | `ignore` |
-
-| OpenClaw Group Policy | LibreFang Group Policy |
-|---|---|
-| `open` / `all` | `all` |
-| `mention` / `mention_only` | `mention_only` |
-| `commands` / `commands_only` / `slash_only` | `commands_only` |
-| `disabled` / `ignore` | `ignore` |
-
-#### Secrets Handling
-
-Channel tokens and passwords from the JSON5 config are written to `secrets.env` (one `KEY=value` per line) rather than embedded in `config.toml`. On Unix systems, `write_secret_env()` restricts the file to mode `0o600`. The TOML config references them via `_env` suffixed fields (e.g. `bot_token_env = "TELEGRAM_BOT_TOKEN"`).
-
-Legacy YAML configs already use env var references, so no secret extraction is needed — they pass through directly.
-
-#### Supported Channels (13 types)
-
-Telegram, Discord, Slack, WhatsApp, Signal, Matrix, IRC, Mattermost, Feishu, Google Chat, Microsoft Teams, iMessage, and BlueBubbles.
-
-Two channels are flagged during migration:
-
-- **iMessage** — skipped with a note that it requires manual macOS setup
-- **BlueBubbles** — skipped with a note that no LibreFang adapter exists
-
-Some channels (Slack, Matrix, Teams, Mattermost, IRC) emit warnings when OpenClaw's `allow_from` (per-user allowlist) has no corresponding field in LibreFang's config structs.
-
-### What Is Skipped
-
-These OpenClaw features have no LibreFang equivalent and are reported as `SkippedItem`:
-
-- **Cron jobs** — use LibreFang's `ScheduleMode::Periodic` instead
-- **Webhook hooks** — use LibreFang's event system
-- **Auth profiles** (`auth-profiles.json`) — security-sensitive, must be set manually as env vars
-- **Skills** — must be reinstalled via `librefang skill install`
-- **SQLite vector index** (`memory-search/index.db`) — not portable, LibreFang rebuilds embeddings
-- **Memory backend config** — LibreFang uses SQLite with vector embeddings
-- **Session scope config** — LibreFang uses per-agent sessions by default
-
----
-
-## OpenFang Migration
-
-OpenFang uses the same TOML config format as LibreFang (it's a community fork). The `openfang::migrate()` function:
-
-1. Copies config files with field rewrites via `rewrite_content()`
-2. Runs `warn_on_schema_drift()` to detect unknown fields, using `librefang_types::config::validation::detect_unknown_fields()`
-3. Copies agents, memory, sessions, and workspace directories
-
----
+Individual agent failures are reported as `SkippedItem` entries rather than aborting the entire migration.
 
 ## Integration Points
 
-### From the CLI
+| Consumer | Functions used |
+|---|---|
+| `librefang-cli/src/main.rs` (`cmd_migrate`) | `run_migration`, `MigrationReport::to_markdown`, `MigrationReport::print_summary` |
+| `src/routes/config.rs` (`migrate_detect`) | `detect_openclaw_home`, `scan_openclaw_workspace` |
+| `src/routes/config.rs` (`run_migrate`) | `run_migration` |
+| `tui/screens/init_wizard.rs` | `detect_openclaw_home`, `scan_openclaw_workspace` (preview), `run_migration` (execute) |
 
-`cmd_migrate` in `librefang-cli` calls `run_migration()` and then renders the report via `report::print_summary()`.
+## Adding a New Source Framework
 
-### From the HTTP API
-
-Three endpoints in `src/routes/config.rs`:
-
-- `migrate_detect` — calls `detect_openclaw_home()` to locate an existing installation
-- `migrate_scan` — calls `scan_openclaw_workspace()` for a preview
-- `run_migrate` — calls `run_migration()` to execute the import
-
-### From the TUI
-
-The init wizard (`tui/screens/init_wizard.rs`) calls `detect_openclaw_home()` and `scan_openclaw_workspace()` to offer an import option during first-time setup, then calls `run_migration()` via `handle_migration_key()`.
-
----
-
-## Key Design Decisions
-
-**Defensive parsing.** Identity fields, tool lists, and channel configs all accept multiple shapes (strings, arrays, objects). Every extraction function returns `Option` or a default rather than panicking. Structurally unfamiliar configs produce warnings, not failures.
-
-**Dry-run first.** The `dry_run` flag is threaded through every migration step. No file is written unless `dry_run == false`. This lets callers present a complete preview before committing.
-
-**Secret separation.** Raw tokens from JSON5 configs are never written into `config.toml`. They go to `secrets.env` with restricted permissions, and the TOML references them by env var name.
-
-**Tool compatibility bridge.** The `librefang_types::tool_compat` module provides `is_known_librefang_tool()` and `map_tool_name()`, ensuring both the migration engine and the running kernel use identical tool-name mappings.
-
-**Idempotent output.** Running the migration twice over the same target is safe. File writes are simple overwrites, and `copy_dir_recursive()` replaces existing files.
+1. Add a variant to `MigrateSource` in `lib.rs` and update `Display`.
+2. Create a new submodule (e.g. `pub mod langchain;`).
+3. Implement `pub fn migrate(options: &MigrateOptions) -> Result<MigrationReport, MigrateError>`.
+4. Wire it into the `match` in `run_migration`.
+5. Optionally add `detect_<source>_home()` and `scan_<source>_workspace()` functions for the TUI/API preview flow.

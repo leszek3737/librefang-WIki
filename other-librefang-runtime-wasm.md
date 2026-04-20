@@ -2,85 +2,68 @@
 
 # librefang-runtime-wasm
 
-WASM skill sandbox for the LibreFang runtime. This module provides a sandboxed WebAssembly execution environment where game skills and abilities are loaded, instantiated, and run in isolation from the core engine.
+WASM skill sandbox for the LibreFang runtime.
 
 ## Purpose
 
-LibreFang skills are authored as WebAssembly modules. This runtime component is responsible for:
+This crate provides a **sandboxed WebAssembly execution environment** for running LibreFang skills. By executing skills as compiled WASM modules inside a wasmtime sandbox, the runtime gains:
 
-- Loading compiled WASM skill modules
-- Sandboxing execution so skill code cannot access host resources directly
-- Providing a controlled API surface (host functions) that skills can call into
-- Bridging skill invocations with the kernel and HTTP subsystems
-
-By running skills in WASM via [wasmtime](https://wasmtime.dev/), the engine gets memory-safe, deterministic execution with fine-grained control over what each skill is permitted to do.
-
-## Dependencies & Relationships
-
-```mermaid
-graph TD
-    A[librefang-runtime-wasm] -->|uses types from| B[librefang-types]
-    A -->|communicates with kernel via| C[librefang-kernel-handle]
-    A -->|makes outbound HTTP| D[librefang-http]
-    A -->|embeds| E[wasmtime]
-    A -->|async runtime| F[tokio]
-```
-
-| Dependency | Role |
-|---|---|
-| `librefang-types` | Shared data types exchanged between the sandbox and the rest of the engine |
-| `librefang-kernel-handle` | Handle used to send commands and queries back to the LibreFang kernel |
-| `librefang-http` | HTTP client capabilities exposed to skills that are allowed network access |
-| `wasmtime` | The underlying WebAssembly runtime — compiles, instantiates, and runs WASM modules |
-| `tokio` | Async runtime backing all WASM invocation and I/O |
-| `serde` / `serde_json` | Serialization of arguments and return values across the WASM/host boundary |
-| `reqwest` | Underlying HTTP client used by `librefang-http` |
-| `tracing` | Structured logging of sandbox lifecycle events |
-| `thiserror` / `anyhow` | Error types for sandbox setup and invocation failures |
+- **Isolation** — skills cannot directly access the host filesystem, network, or memory outside their linear memory
+- **Determinism** — skill behavior is bounded by the capabilities explicitly granted through the host interface
+- **Portability** — skills can be authored in any language that compiles to WASM (Rust, C, AssemblyScript, etc.)
 
 ## Architecture
 
-### Sandbox Lifecycle
+```mermaid
+graph LR
+    A[librefang-kernel] -->|"dispatches skill"| B[librefang-runtime-wasm]
+    B -->|"loads & runs"| C[WASM Skill Module]
+    C -->|"host calls"| B
+    B -->|"kernel API"| D[librefang-kernel-handle]
+    B -->|"HTTP requests"| E[librefang-http]
+    B -->|"shared types"| F[librefang-types]
+```
 
-1. **Module loading** — A compiled `.wasm` binary is read and validated by wasmtime.
-2. **Linker configuration** — Host functions are registered with a `wasmtime::Linker`. These are the only entry points a skill can call to interact with the outside world.
-3. **Store creation** — A `wasmtime::Store` is created per-skill instance, carrying its own state and resource limits.
-4. **Instantiation** — The module is instantiated against the configured linker, producing a skill instance.
-5. **Invocation** — The skill's exported functions (e.g., `on_activate`, `on_tick`, `on_deactivate`) are called by the runtime as game events demand.
+The runtime sits between the LibreFang kernel and individual skill modules. When the kernel needs to execute a skill, it delegates to this crate, which:
 
-### Host Function Surface
+1. Instantiates a wasmtime engine configured with appropriate limits
+2. Loads the skill's WASM module
+3. Injects host functions (via `librefang-kernel-handle`) that the skill can call to interact with the game world
+4. Executes the skill's entry point
+5. Returns results back to the kernel
 
-Skills communicate with the engine exclusively through host functions injected into the linker. The expected categories include:
+## Dependencies
 
-- **Kernel commands** — routed through `librefang-kernel-handle`, allowing skills to query game state or request actions.
-- **HTTP requests** — proxied through `librefang-http` for skills that need external data, gated by permission checks.
-- **Serialization helpers** — utilities for skills to serialize/deserialize structured data using `serde_json`.
+| Dependency | Role in this crate |
+|---|---|
+| `wasmtime` | Core WASM runtime — engine, store, module instantiation, and invocation |
+| `librefang-kernel-handle` | Provides the typed handle that WASM host functions use to communicate back to the kernel |
+| `librefang-http` | Enables HTTP fetch capabilities exposed to skills (if permitted by the sandbox policy) |
+| `librefang-types` | Shared domain types passed between host and guest (serialized via JSON) |
+| `serde` / `serde_json` | Serialization boundary between host Rust types and WASM linear memory |
+| `tokio` | Async runtime — WASM instantiation and host calls are async |
+| `tracing` | Structured logging for sandbox lifecycle events |
+| `thiserror` / `anyhow` | Error types for sandbox setup failures and runtime errors |
+| `reqwest` | HTTP client backing `librefang-http` |
 
-The exact function signatures depend on the WASI or custom ABI this module defines. When extending the host surface, prefer narrow, capability-based APIs over broad access.
+## Key Concepts
 
-### Isolation Model
+### Serialization Boundary
 
-Each skill runs in its own wasmtime `Store`. This provides:
+Skills run in WASM linear memory, which is fundamentally `&[u8]`. All structured data crossing the host/guest boundary is serialized to JSON using `serde_json`. Skills receive arguments as JSON byte buffers and return results the same way. This keeps the host interface simple and language-agnostic.
 
-- **Memory isolation** — a skill cannot read or write another skill's linear memory.
-- **Resource limits** — CPU and memory caps can be enforced per-store.
-- **Capability restriction** — only host functions explicitly registered in the linker are callable.
+### Async Execution
+
+Skill execution is fully async via `tokio` and wasmtime's async support. Host functions imported by the skill (e.g., querying game state, making HTTP requests) are async and yield back to the tokio runtime when awaiting I/O.
+
+### Capability-Based Security
+
+Skills can only perform actions that the host explicitly exposes. The host function surface defined in this crate determines what a skill can do. Skills that attempt to import functions not provided by the host will fail to instantiate.
 
 ## Integration Points
 
-### For Engine Developers
-
-To embed this runtime in the LibreFang kernel:
-
-1. Depend on `librefang-runtime-wasm` in your crate.
-2. Construct the runtime, passing a `librefang-kernel-handle` instance.
-3. Load skill modules from your asset pipeline.
-4. Call skill entry points in response to game events.
-
-### For Skill Authors
-
-Skills are compiled to WASM and export well-known functions. They import host functions provided by this runtime. Refer to the skill SDK documentation for the guest-side API.
+This crate is consumed by the kernel at the **runtime layer**. The kernel selects this WASM runtime when it needs to run a skill that has been compiled to a `.wasm` binary. The crate is decoupled from the kernel through `librefang-kernel-handle`, which defines the interface the sandbox uses to talk back to the game engine.
 
 ## Current Status
 
-The call graph shows no detected internal, incoming, or outgoing calls, which indicates this module is in an early or scaffolded state — the dependency declarations and description define the intended architecture, but the execution paths have not yet been wired up. Contributors should expect the public API to evolve as the sandbox is implemented.
+The module is in early stages — the dependency declarations and crate metadata are in place, but no execution flows or call graphs have been wired yet. The core sandbox infrastructure (engine configuration, module loading, host function registration, and invocation) is the expected next milestone.

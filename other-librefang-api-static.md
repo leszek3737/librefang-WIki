@@ -1,135 +1,228 @@
 # Other — librefang-api-static
 
-# librefang-api-static — Locale / i18n Translations
+# librefang-api-static — Static Frontend Assets (Locales)
 
 ## Purpose
 
-This directory holds the **static internationalization (i18n) translation files** for the LibreFang dashboard UI. Every piece of user-facing text in the web frontend — button labels, page titles, error messages, toast notifications, section descriptions, and contextual help — is defined here rather than hardcoded in components. This allows the UI to be rendered in multiple languages by swapping locale files at runtime.
+This module provides the internationalization (i18n) locale files for the LibreFang web dashboard. All user-facing text displayed in the frontend UI — labels, button captions, status messages, toast notifications, page descriptions, error messages, and onboarding copy — is defined here rather than hardcoded in components. This allows the dashboard to be presented in multiple languages without modifying application logic.
 
-## Files
+Currently supported languages:
 
-| File | Language | Status |
-|---|---|---|
-| `locales/en.json` | English | Complete — authoritative source |
-| `locales/ja.json` | Japanese | Complete (parallel structure to `en.json`) |
+| Locale | File | Language |
+|--------|------|----------|
+| `en` | `locales/en.json` | English (default) |
+| `ja` | `locales/ja.json | Japanese |
 
-Additional locales can be added by creating a new `{lang_code}.json` file that mirrors the same key structure.
-
-## Structure and Key Organization
-
-Translation keys are organized by **UI section or feature page**, using dot-notation paths that correspond to the logical grouping of components. The top-level namespaces are:
+## File Structure
 
 ```
-nav            – Sidebar / top navigation labels
-status         – Connection and system status strings
-btn            – Shared button labels (save, delete, cancel, etc.)
-label          – Common field labels
-auth           – API key authentication prompt
-page           – Page-level headings
-health         – Health check status
-stat           – Dashboard stat card labels
-card           – Dashboard card titles
-agents         – Agent list page
-detail         – Agent detail panel (info, files, config tabs)
-mode           – Agent mode labels (observe, assist, full)
-category       – Template category filters
-profile        – Tool profile labels and descriptions
-template       – Agent template names and descriptions
-time           – Relative time formatting
-onboarding     – First-run onboarding banner
-provider       – LLM provider setup strings
-overview       – Overview / dashboard page
-security       – Security feature short names
-agentChat      – Chat interface (messages, commands, toasts)
-sessionsPage   – Sessions management page
-agentsPage     – Agent creation and management page
-approvals      – Execution approval queue
-logsPage       – Live logs and audit trail
-runtimePage    – Runtime information page
-settingsPage   – Settings (providers, models, tools, security, network, budget, memory, migration)
-workflowsPage  – Workflow creation and execution
-workflowBuilder – Visual workflow builder (node palette, canvas controls)
-schedulerPage  – Cron jobs, event triggers, run history
-channelsPage   – Messaging channel configuration
-skillsPage     – Skills marketplace, MCP servers, quick-start skills
-handsPage      – Curated autonomous capability packages
-pluginsPage    – Plugin management
-commsPage      – Inter-agent communication
-setupWizard    – Guided setup wizard (5 steps)
-goalsPage      – Goal tracking
-analyticsPage  – Usage analytics, costs, breakdowns
-memoryPage     – Proactive memory browser
-theme          – Theme selector labels
-sidebar        – Sidebar shortcut hints
-confirm        – Shared confirmation dialog buttons
+static/
+└── locales/
+    ├── en.json
+    └── ja.json
 ```
 
-Additional supplemental namespaces (`agentChat2`, `settingsPage2`, `agentsPage2`, etc.) hold secondary/extended keys that are added incrementally without modifying the primary namespace.
+The JSON files are flat key-value maps organized into nested namespaces by feature area. The frontend's i18n library resolves translation keys at render time using dot-path notation (e.g., `agentsPage.spawnAgent`, `agentChat.cmd.help`).
 
-## Interpolation Syntax
+## Translation Key Architecture
 
-Strings use **brace-delimited placeholders** for dynamic values:
+### Interpolation
+
+Strings use `{variableName}` placeholders that the i18n runtime replaces with dynamic values:
 
 ```json
-"secondsAgo": "{count}s ago",
-"providersConfigured": "{configured}/{total} configured",
-"errorPrefix": "Error: {message}"
+"agentsStopped": "{count} agent(s) stopped"
 ```
 
-The frontend rendering layer substitutes these at runtime with actual values. There is no pluralization library in the JSON itself — plural handling is done either by the consuming component or by having separate keys for singular/plural forms.
+Rendered as: `"3 agent(s) stopped"` when `{count}` is `3`.
+
+Common interpolation variables across the locale files:
+
+| Variable | Used For |
+|----------|----------|
+| `{count}` | Numeric counts (agents, tokens, entries, files) |
+| `{name}` | Agent, channel, schedule, or skill names |
+| `{message}` | Error/detail message strings |
+| `{provider}` | LLM provider name (anthropic, openai, etc.) |
+| `{model}` | Model identifier |
+| `{time}` | Timestamp display |
+| `{key}` | Memory key name |
+| `{tool}` | Tool name |
+| `{old}`, `{new}` | Previous and updated values in memory conflicts |
+| `{filtered}`, `{total}` | Filtered vs total result counts |
+| `{configured}`, `{total}` | Configured vs total providers/channels |
+
+### Namespace Organization
+
+Each JSON file is organized into top-level namespaces corresponding to dashboard sections and shared UI components:
+
+```mermaid
+graph TD
+    ROOT[en.json / ja.json] --> NAV[nav]
+    ROOT --> SHARED[btn, label, status, time, theme, confirm]
+    ROOT --> AUTH[auth, onboarding]
+    ROOT --> CHAT[agentChat, agentChat2]
+    ROOT --> PAGES[Page-specific namespaces]
+    ROOT --> SETTINGS[settingsPage, settingsPage2]
+    ROOT --> WIZARD[setupWizard, setupWizard2]
+
+    PAGES --> P1[overview]
+    PAGES --> P2[agentsPage, agentsPage2]
+    PAGES --> P3[sessionsPage]
+    PAGES --> P4[approvals]
+    PAGES --> P5[logsPage]
+    PAGES --> P6[runtimePage]
+    PAGES --> P7[workflowsPage]
+    PAGES --> P8[workflowBuilder]
+    PAGES --> P9[schedulerPage]
+    PAGES --> P10[channelsPage]
+    PAGES --> P11[skillsPage]
+    PAGES --> P12[handsPage]
+    PAGES --> P13[pluginsPage]
+    PAGES --> P14[commsPage]
+    PAGES --> P15[analyticsPage]
+    PAGES --> P16[goalsPage]
+    PAGES --> P17[memoryPage]
+```
+
+## Key Sections
+
+### Shared UI Elements
+
+**`nav`** — Sidebar navigation labels for all dashboard sections (Chat, Monitor, Overview, Analytics, Logs, Agents, Sessions, Approvals, Comms, Automation, Workflows, Scheduler, Goals, Extensions, Channels, Skills, Hands, Plugins, System, Runtime, Settings, Memory).
+
+**`btn`** — Generic button labels reused across the entire UI: `refresh`, `unlock`, `retry`, `send`, `stop`, `cancel`, `save`, `delete`, `edit`, `add`, `close`, `back`, `next`, `skip`, `test`, `go`, `chat`, `copy`, `copied`.
+
+**`label`** — Common field labels: `status`, `version`, `provider`, `model`, `agent`, `messages`, `actions`, `name`, `key`, `value`.
+
+**`status`** — Connection state indicators: `connecting`, `reconnecting`, `disconnected`, `ready`, `error`, `notConfigured`, `unknown`.
+
+**`time`** — Relative time formatting strings with `{count}` interpolation: `now`, `secondsAgo`, `minutesAgo`, `hoursAgo`, `daysAgo`.
+
+**`confirm`** — Shared confirmation dialog buttons: `cancel`, `confirm`.
+
+### Authentication and Onboarding
+
+**`auth`** — API key gate screen shown when the instance requires authentication: title, description, placeholder, and hint pointing users to `~/.librefang/config.toml`.
+
+**`onboarding`** — First-launch banner: welcome message, "Launch Setup Wizard" and "Configure Manually" options, dismiss action.
+
+**`setupWizard` / `setupWizard2`** — Multi-step guided setup flow covering provider configuration, agent creation, test message, optional channel connection, and completion summary. Contains ~60 keys covering every label, toast, and error message in the wizard flow.
+
+### Agent Chat
+
+**`agentChat`** — The largest single namespace (~100+ keys). Covers:
+- Session management (create, switch, list)
+- Message rendering states (`generating`, `processing`, `thinking`, `thinkingWithLevel`, `usingTool`, `working`)
+- Slash command definitions (`cmd.help`, `cmd.new`, `cmd.model`, `cmd.think`, `cmd.context`, `cmd.verbose`, etc.)
+- File attachment and voice recording UX
+- Toast notifications for model switches, session resets, compaction results
+- System status output (`sys.systemStatus`, `sys.budgetStatus`, `sys.ofpNetwork`)
+- Welcome tips and keyboard shortcut hints
+
+### Agent Management
+
+**`agentsPage`** — Agent creation (wizard and raw TOML modes), spawning, stopping, cloning, model switching, history clearing, tool filter management, archetype and vibe labels.
+
+**`detail`** — Agent detail panel: info tab, files tab, config tab, tool filters (allowlist/blocklist), fallback chain management.
+
+**`profile`** — Tool profile descriptions: `minimal`, `coding`, `research`, `messaging`, `automation`, `balanced`, `precise`, `creative`, `full`.
+
+**`template`** — Built-in agent template names and descriptions: `GeneralAssistant`, `CodeHelper`, `Researcher`, `Writer`, `DataAnalyst`, `DevOpsEngineer`, `CustomerSupport`, `Tutor`, `APIDesigner`, `MeetingNotes`.
+
+### Settings
+
+**`settingsPage`** — The second-largest namespace, covering nine settings tabs:
+
+| Sub-namespace | Content |
+|---------------|---------|
+| Provider config | API key management, OAuth flows, custom provider setup |
+| Model catalog | Browsing, filtering, custom model addition, catalog sync |
+| Tools | Tool listing and search |
+| Security | Full descriptions of 15 security features organized into `coreFeatures`, `configurableFeatures`, `monitoringFeatures` |
+| Network / OFP | Peer networking, A2A agent discovery |
+| Budget | Spending limits (hourly/daily/monthly), alert thresholds, top spenders |
+| Proactive Memory | mem0-style auto-memorize/auto-retrieve configuration |
+| System | Raw config JSON editing |
+| Migration | OpenClaw/OpenFang data import flow |
+
+The security feature descriptions include structured objects with `name`, `description`, and either `threat` (for core features) or `hint` (for configurable features):
+
+```json
+"coreFeatures": {
+  "ssrf_protection": {
+    "name": "SSRF Protection",
+    "description": "Blocks outbound requests to private IPs...",
+    "threat": "Internal network reconnaissance, cloud credential theft"
+  }
+}
+```
+
+### Automation
+
+**`workflowsPage`** — Workflow CRUD, step definition, execution, and run history.
+
+**`workflowBuilder`** — Visual drag-and-drop workflow editor: node palette (Agent Step, Parallel Fan-out, Condition, Loop, Collect, Start, End), connection management, TOML export, node configuration labels.
+
+**`schedulerPage`** — Cron-based scheduled jobs and event triggers. Includes human-readable cron presets (`cron.everyMinute`, `cron.daily9am`, `cron.weekdays9am`, etc.), trigger type labels, and run history.
+
+**`goalsPage`** — Hierarchical goal tracking with sub-goals, status progression (Pending → In Progress → Completed/Cancelled), and progress tracking.
+
+### Extensions
+
+**`channelsPage`** — Messaging channel configuration (Telegram, Discord, Slack, WhatsApp, etc.). Three-step setup flow (Configure → Verify → Ready), QR code management for WhatsApp, Business API fallback, connection testing.
+
+**`skillsPage`** — Installed skills, ClawHub browsing and search, MCP server management, quick-start skill creation. Category labels covering 18 domains (coding, git, web, devops, browser, search, ai, data, productivity, communication, media, notes, security, cli, marketing, finance, smart-home, docs).
+
+**`handsPage`** — Curated autonomous capability packages. Three-step activation flow (Dependencies → Configure → Launch), browser session viewing, pause/resume/deactivate controls.
+
+**`pluginsPage`** — Plugin management with install sources (Registry, Local Path, Git URL), plugin scaffolding, and hook type labels (`ingest`, `after_turn`).
+
+### Monitoring and Analytics
+
+**`logsPage`** — Live log streaming and tamper-evident audit trail. States: `paused`, `live`, `polling`, `disconnected`. Chain verification output: `valid` / `broken`.
+
+**`approvals`** — Execution approval workflow: pending/approved/rejected/expired statuses, approval and rejection actions with confirmations.
+
+**`analyticsPage`** — Usage analytics with four tabs: Summary, By Model, By Agent, Costs. Token breakdowns, cost tracking, daily cost charts, provider/model cost breakdowns, tier classifications (Frontier, Smart, Balanced, Fast).
+
+**`runtimePage`** — Runtime information display: platform, architecture, API listen address, provider status with latency, uptime formatting.
+
+### Memory
+
+**`memoryPage`** — Proactive memory system UI: search, filtering by agent/level/category, version history display, CRUD operations, memory-level breakdown (User, Session, Agent).
 
 ## Adding a New Locale
 
-1. Copy `locales/en.json` to `locales/{lang_code}.json`.
-2. Translate all string values while **preserving the exact key paths**. Do not rename, remove, or reorder keys.
-3. Placeholders like `{count}`, `{name}`, `{message}` must remain untranslated — they are substitution tokens.
-4. Register the new locale in the frontend's i18n initialization code (typically wherever the locale loader/importer is configured).
+To add support for a new language:
 
-**Checklist for completeness:**
+1. **Copy `en.json`** as the starting template:
+   ```
+   cp locales/en.json locales/<locale-code>.json
+   ```
 
-- Every top-level namespace present in `en.json` exists in the new file.
-- All nested keys within each namespace match.
-- All interpolation placeholders are preserved verbatim.
-- No keys are missing — missing keys will fall back to English or render the raw key path.
+2. **Translate all values** — Do not modify keys or structural nesting. Only translate the string values.
 
-## Adding New UI Strings
+3. **Preserve interpolation placeholders** — Keep `{count}`, `{name}`, `{message}`, etc. exactly as-is. Reorder surrounding text as needed for target-language grammar.
 
-When new UI features are added:
+4. **Preserve Markdown formatting** — Some strings contain Markdown (e.g., `agentChat.welcomeTips` uses `**bold**` and `- ` list markers). Maintain these verbatim.
 
-1. Determine the appropriate top-level namespace. If the feature is a new page, create a new namespace (e.g., `newFeaturePage`). If it extends an existing page, add keys under the existing namespace.
-2. Add the key to **`en.json` first** — it is the canonical source.
-3. Add the same key (translated) to all other locale files.
-4. Use the key in the frontend component via the i18n library's lookup function (e.g., `t('newFeaturePage.title')`).
+5. **Register the locale** in the frontend's i18n configuration (outside this module).
 
-## Conventions
+## Adding New Translation Keys
 
-| Convention | Example |
-|---|---|
-| Toast notifications use past tense or result state | `"agentStopped": "Agent \"{name}\" stopped"` |
-| Error messages include the dynamic `{message}` placeholder | `"loadFailed": "Failed: {message}"` |
-| Confirmation dialogs have paired `Title`/`Confirm` keys | `"stopAgentTitle"` / `"stopAgentConfirm"` |
-| Status enums use lowercase or capitalized single words | `"pending"`, `"Approved"` |
-| Button labels are imperative verbs | `"save"`, `"delete"`, `"cancel"` |
-| Section descriptions end with periods | `"...to enrich context."` |
-| Nested enums go under a sub-object | `"filter"`, `"status"`, `"cmd"`, `"toast"`, `"sys"` |
+When adding a new UI feature or page:
 
-## Relationship to the Rest of the Codebase
+1. **Namespace by page/component** — Create a new top-level key matching the page or component name (e.g., `"graphsPage"` for a new Graphs page).
 
-```
-┌─────────────────────┐
-│  Frontend Components │  ← Reference keys via t('namespace.key')
-│  (Svelte / React)   │
-└────────┬────────────┘
-         │ imports
-┌────────▼────────────┐
-│  i18n Runtime Layer  │  ← Loads active locale, resolves keys
-└────────┬────────────┘
-         │ reads
-┌────────▼────────────┐
-│  locales/*.json      │  ← This module
-└─────────────────────┘
-```
+2. **Group related strings** — Use shallow nesting for sub-sections (e.g., `filter`, `status`, `toast` within a page namespace).
 
-The locale files are **pure data** — no code, no imports, no side effects. They are consumed at build time or runtime by the frontend's i18n system. The backend API serves them as static assets under the `/static/locales/` path.
+3. **Use consistent suffixes** across namespaces:
+   - `*Title` — Dialog/section titles
+   - `*Desc` / `*Description` — Descriptive text
+   - `*Placeholder` — Input placeholders
+   - `*Failed` — Error toast messages
+   - `*Toast` — Success toast messages
+   - `*Confirm` — Confirmation dialog body text
 
-Because the files contain no executable logic, there are no call graph edges or execution flows associated with this module.
+4. **Update all locale files** — Every key in `en.json` must have a corresponding entry in every other locale file, even if the initial value is the English string (to be translated later).

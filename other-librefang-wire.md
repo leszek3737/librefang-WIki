@@ -2,97 +2,65 @@
 
 # librefang-wire
 
-Agent-to-agent networking layer for the LibreFang Protocol (OFP).
+Agent-to-agent networking layer for the LibreFang Protocol (OFP). Handles authenticated message framing, serialization, and transport over asynchronous connections.
 
 ## Purpose
 
-`librefang-wire` implements the wire protocol that allows LibreFang agents to communicate with each other over the network. It handles message serialization, framing, cryptographic authentication, and connection lifecycle management. This crate sits between the high-level agent logic and the raw TCP/Tokio transport, providing a typed, authenticated, and async-ready messaging layer.
+This crate implements the wire protocol that LibreFang agents use to communicate with each other. It is responsible for:
 
-## Role in the System
+- **Message framing** — delineating discrete protocol messages on a byte stream
+- **Authentication** — HMAC-SHA256 message authentication with constant-time verification
+- **Serialization** — encoding and decoding structured messages via JSON
+- **Connection management** — tracking active peer connections with concurrent state
 
-```
-┌─────────────────┐
-│  Agent Logic     │
-│  (application)   │
-└────────┬────────┘
-         │  calls
-┌────────▼────────┐
-│ librefang-wire  │  ← this crate
-│ (OFP messaging) │
-└────────┬────────┘
-         │  uses
-┌────────▼────────┐
-│ librefang-types │  shared message & error types
-└─────────────────┘
-```
+Every agent-to-agent exchange in LibreFang flows through this module.
 
-Other crates in the workspace depend on `librefang-wire` to send and receive OFP messages. The crate itself depends on `librefang-types` for shared type definitions (message envelopes, error codes, identifiers) and on Tokio for async I/O.
-
-## Key Capabilities
-
-The dependency list reveals the core concerns of this module:
-
-### Message Authentication (HMAC-SHA256)
-
-Every message on the wire is authenticated using HMAC with SHA-256. The `hmac`, `sha2`, and `subtle` crates work together for this:
-
-- **`hmac` + `sha2`**: Compute HMAC-SHA256 digests over serialized message payloads.
-- **`subtle`**: Constant-time comparison of MAC tags to prevent timing side-channel attacks during verification.
-- **`hex`**: Encode/decode MAC tags for wire transmission.
-
-Agents share a pre-shared key. The sender computes a MAC over the message body and attaches it; the receiver recomputes and verifies in constant time before accepting the message.
-
-### Concurrent Connection Tracking
-
-The `dashmap` dependency indicates that the module maintains a concurrent map of active connections or pending handshakes. This allows multiple agents to connect simultaneously without contention, as `DashMap` provides sharded internal locking.
-
-### Serialization
-
-Messages are serialized to JSON via `serde` and `serde_json`. This keeps the protocol human-readable during development and simplifies interop, at the cost of some bandwidth efficiency.
-
-### Unique Identification
-
-- **`uuid`**: Generates unique message IDs for request-response correlation and deduplication.
-- **`chrono`**: Timestamps for message expiry, replay protection, and logging.
-
-### Error Handling
-
-`thiserror` provides typed, ergonomic error enums for protocol-level failures — malformed frames, authentication failures, timeouts, and unexpected message types.
-
-### Observability
-
-`tracing` spans are embedded throughout the networking code so that every message send, receive, and authentication event can be correlated in structured logs.
-
-## Protocol Handshake
-
-Based on the dependencies, the expected connection flow is:
+## Architecture
 
 ```mermaid
-sequenceDiagram
-    participant A as Agent A
-    participant B as Agent B
-    A->>B: Hello (random nonce)
-    B->>A: HelloAck (random nonce)
-    Note over A,B: Both derive session context from nonces + shared key
-    A->>B: Authenticated message (HMAC-SHA256)
-    B->>A: Authenticated message (HMAC-SHA256)
+graph TD
+    A[Agent Application Logic] --> B[librefang-wire]
+    B --> C[librefang-types]
+    B --> D[Tokio Async Transport]
+    B --> E[HMAC-SHA256 Auth Layer]
+    E --> F[Serialized Frame]
+    F --> D
 ```
 
-1. **Hello exchange** — Each agent generates a random nonce (`rand`) and sends it to the peer. This ensures freshness and prevents replay.
-2. **Session derivation** — Both agents use the exchanged nonces along with the pre-shared key to compute a session-specific HMAC key.
-3. **Steady-state messaging** — All subsequent messages carry an HMAC computed with the session key. The receiver verifies in constant time (`subtle`) before processing.
+Messages originate from application logic, pass through serialization and HMAC signing, and are transmitted over a Tokio-backed transport. Incoming messages follow the reverse path: read from transport, verify HMAC, deserialize, and dispatch.
 
-## Usage from Other Crates
+## Key Dependencies and Their Roles
 
-Other workspace members bring in `librefang-wire` as a dependency and use it to establish authenticated channels between agents. The `async-trait` dependency suggests that the crate exposes trait-based interfaces for transport abstraction, allowing tests or alternative transports to be swapped in.
+| Dependency | Role |
+|---|---|
+| `librefang-types` | Shared type definitions — message enums, error types, and protocol constants used across all LibreFang crates |
+| `tokio` | Async runtime for non-blocking I/O on TCP or similar transports |
+| `serde` / `serde_json` | Message serialization to JSON for wire encoding |
+| `hmac` / `sha2` / `subtle` | HMAC-SHA256 computation for message authentication; `subtle` provides constant-time comparison to prevent timing attacks during verification |
+| `hex` | Hex encoding/decoding of HMAC digests and keys |
+| `rand` | Cryptographically secure random number generation, used for nonces or session challenges |
+| `uuid` | Unique identifiers for messages and agent sessions |
+| `chrono` | Timestamp generation for message headers |
+| `dashmap` | Lock-free concurrent hashmap for tracking active peer connections and session state |
+| `async-trait` | Async trait definitions for transport abstraction |
+| `thiserror` | Ergonomic error type derivation |
+| `tracing` | Structured logging and diagnostic spans |
 
-The typical integration pattern is:
+## Security Model
 
-1. Create a transport (likely a Tokio TCP stream wrapper).
-2. Perform the OFP handshake to establish a session.
-3. Send and receive typed messages from `librefang-types`, with authentication handled transparently by this crate.
-4. The concurrent connection map (`dashmap`) tracks active sessions internally.
+Authentication uses **HMAC-SHA256**. Each message carries a keyed hash that the recipient verifies before processing. The `subtle` crate ensures that HMAC comparison runs in constant time, preventing timing side-channels that could leak information about valid digests.
+
+Key material and random values are generated via `rand`, which should be configured to use a secure RNG backend at the application level.
+
+## Relationship to Other Crates
+
+- **`librefang-types`** — this crate consumes the shared types but does not define protocol-level data structures itself. Any new message kind or error variant belongs in `librefang-types`.
+- **Application crates** — consume `librefang-wire` to open authenticated channels to peers. They register handlers for deserialized messages and provide the HMAC key material.
 
 ## Testing
 
-The `tokio-test` dev-dependency is used for writing async tests that exercise the handshake, message round-tripping, and authentication failure paths without requiring a live network.
+Tests use `tokio-test` (declared in `[dev-dependencies]`) for async test scaffolding. Run the test suite with:
+
+```bash
+cargo test -p librefang-wire
+```

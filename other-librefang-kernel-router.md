@@ -2,85 +2,74 @@
 
 # librefang-kernel-router
 
-Hand and template routing engine for the LibreFang kernel. This module is responsible for resolving incoming input to the correct hand definition and template, serving as the primary dispatch layer between raw input and kernel execution.
+Hand and template routing engine for the LibreFang kernel. This module is responsible for matching incoming kernel messages to registered **hands** based on configurable **template** patterns, loading route definitions from configuration files, and dispatching execution to the appropriate handler.
 
 ## Purpose
 
-When the LibreFang kernel receives input (typically from a character or stroke recognition pipeline), it needs to determine which *hand* — a defined gesture or character shape — the input matches, and which *template* governs that match. The router owns this resolution logic, including:
+Within the LibreFang kernel, multiple hands (message handlers) can be registered to process different types of events or data. The router sits between message ingestion and hand execution, determining **which** hand should handle **which** message based on template-matching rules.
 
-- Loading and caching hand/template definitions from configuration files.
-- Pattern matching incoming stroke data against registered hands.
-- Scoring and ranking candidate matches.
-- Returning routing decisions to the kernel for downstream processing.
+This decouples hand registration from message dispatch, allowing new hands to be added or existing routes modified without changes to the kernel's core message loop.
 
 ## Architecture
 
-The router sits between the type system (`librefang-types`) and the hand definitions (`librefang-hands`), consuming structured input and producing routing outcomes.
-
 ```mermaid
 graph LR
-    A[Input Data] --> B[Router]
-    B --> C[librefang-hands]
-    C --> B
-    B --> D[Routing Decision]
-    D --> E[Kernel / Runtime]
-    B --> F[TOML Config Files]
-    F --> B
+    A[Incoming Message] --> B[Router]
+    B -->|template match| C[Hand A]
+    B -->|template match| D[Hand B]
+    B -->|no match| E[Default / Drop]
+    F[Route Config TOML] --> B
 ```
 
-## Dependencies
+The router loads a set of route definitions (typically from TOML configuration), each associating a **template pattern** with a **hand identifier**. When a message arrives, the router evaluates it against all registered templates and dispatches to the first matching hand.
 
-| Crate | Purpose |
-|-------|---------|
-| `librefang-types` | Core type definitions used across all LibreFang crates — stroke data, match results, routing tables. |
-| `librefang-hands` | Hand and template definitions that the router loads, indexes, and matches against. |
-| `serde` / `serde_json` | Deserialization of configuration files and serialization of routing state. |
-| `regex-lite` | Lightweight regex support for pattern-based template matching rules. |
-| `toml` | Parsing of TOML-based hand and template configuration files. |
-| `dirs` | Resolving platform-specific configuration directories where hand/template definitions are stored. |
-| `tracing` | Structured logging of routing decisions, match scores, and diagnostic information. |
+## Key Dependencies
 
-## Configuration Loading
+| Dependency | Role in this module |
+|---|---|
+| `librefang-types` | Shared type definitions for messages, hand identifiers, and route descriptors |
+| `librefang-hands` | Hand registry and trait definitions; the router resolves route targets against this |
+| `regex-lite` | Powers template pattern matching for route evaluation |
+| `serde` / `serde_json` | Deserialization of route definitions and message payloads |
+| `toml` | Parsing of TOML-based route configuration files |
+| `dirs` | Resolves platform-specific config directories for route file discovery |
+| `tracing` | Structured logging of route resolution, matches, and misses |
 
-The router uses `dirs` to locate platform-appropriate configuration directories and `toml` to parse hand/template definition files. Configuration is typically loaded at startup and cached for the lifetime of the kernel process.
+## Route Configuration
 
-Expected configuration locations follow the standard `dirs` conventions:
+Routes are defined in TOML files, discovered via platform-standard configuration directories (resolved through the `dirs` crate). The typical structure involves:
 
-- **Linux:** `~/.config/librefang/` or `$XDG_CONFIG_HOME/librefang/`
-- **macOS:** `~/Library/Application Support/librefang/`
-- **Windows:** `%APPDATA%\librefang\`
+- **Template**: A pattern string (evaluated with `regex-lite`) tested against incoming message content.
+- **Hand**: An identifier corresponding to a hand registered in `librefang-hands`.
+- **Priority** (optional): Controls evaluation order when multiple templates could match.
 
-## Pattern Matching
+Configuration is loaded at kernel startup and can define any number of routes. The router evaluates them in priority order, dispatching to the first hand whose template matches.
 
-The `regex-lite` dependency indicates that template routing supports regex-based pattern rules. This allows hands to define flexible matching criteria rather than relying solely on exact structural comparison.
+## Template Matching
 
-## Development
+Templates use regular expression syntax supported by `regex-lite`. When a message arrives, its content is tested against each registered template pattern. The router selects the highest-priority matching route and resolves the associated hand through the hand registry provided by `librefang-hands`.
 
-### Running Tests
-
-The crate uses `tempfile` (dev dependency) for tests that involve file I/O — configuration loading, caching behavior, and directory resolution. The `librefang-runtime` dev dependency allows integration-level tests that exercise the router within a minimal runtime context.
-
-```sh
-cargo test -p librefang-kernel-router
-```
-
-### Adding New Routing Rules
-
-When extending the router with new matching strategies:
-
-1. Define the matching logic using the primitives from `librefang-types`.
-2. Register any new configuration keys in the TOML schema.
-3. Add unit tests with `tempfile`-based fixtures for config loading.
-4. Add integration tests under `dev-dependencies` using `librefang-runtime` to validate end-to-end routing behavior.
+Unmatched messages are either routed to a configured default hand or dropped, depending on kernel configuration.
 
 ## Integration with the Kernel
 
-The router is consumed by the kernel layer, which calls into it after preprocessing raw input. The router produces a routing decision that the kernel then passes to the execution layer. It has no direct dependency on the runtime — that relationship is inverted, with the runtime consuming the router during kernel initialization.
+This module is a library crate consumed by the LibreFang kernel's message loop. The kernel:
 
-## Logging and Diagnostics
+1. Initializes the router by loading route configuration.
+2. Passes each incoming message to the router for resolution.
+3. Receives back the matched hand identifier (or nothing).
+4. Dispatches execution to the resolved hand via `librefang-hands`.
 
-All routing decisions are instrumented with `tracing` spans. Enable `debug` or `trace` level logging for this crate to inspect:
+The router itself has no direct outgoing calls to other kernel modules — it returns resolution results to its caller, keeping the dispatch decision separate from dispatch execution.
 
-- Configuration file discovery and loading.
-- Candidate hand evaluation and scoring.
-- Final routing decisions and match confidence.
+## Testing
+
+Tests use `tempfile` to create temporary configuration files and `librefang-runtime` to simulate a minimal kernel environment for end-to-end route resolution scenarios.
+
+When writing tests:
+
+- Create a temp directory and write a TOML route config file.
+- Register mock hands via `librefang-hands`.
+- Initialize the router with the temp config path.
+- Assert that test messages resolve to the expected hands.
+- Verify that unmatched messages behave correctly (default route or no match).

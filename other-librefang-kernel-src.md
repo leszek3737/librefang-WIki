@@ -1,263 +1,285 @@
 # Other — librefang-kernel-src
 
-# librefang-kernel-src — Kernel Test Suite
+# librefang-kernel Test Suite
 
-## Purpose
+## Overview
 
-This module is the integration and behavioral test suite for `LibreFangKernel`. It validates the kernel's core invariants—agent lifecycle, privilege delegation, tool resolution, skill registry management, notification routing, and LLM response parsing—under realistic conditions. Every test boots a temporary kernel instance against an isolated `tempdir` home, so no shared state leaks between runs.
+The `kernel/tests.rs` module is the integration and unit test suite for the LibreFang kernel (`librefang-kernel`). It validates the kernel's core subsystems — agent lifecycle, capability enforcement, skill registry, approval routing, model switching, and LLM response parsing — through a combination of in-process kernel boots (using `tempfile::tempdir` for isolation) and lightweight unit tests on pure functions.
 
-The test file lives at `kernel/tests.rs` and is compiled as part of the kernel crate's `#[cfg(test)]` module (`use super::*` pulls in the parent `kernel` mod).
+Tests are organized by functional domain rather than by internal module, which means this single file covers behaviors spanning the registry, config, manifest helpers, channel adapters, skill registry, and runtime tool runner.
 
-## Test Helpers
+## Test Infrastructure
 
-### `RecordingChannelAdapter`
+### RecordingChannelAdapter
 
-A `ChannelAdapter` implementation that records every sent text message into an `Arc<Mutex<Vec<String>>>` shared with the test harness. Its `start` stream is permanently empty, and `send` captures `"user_id:text"` pairs. Used by async tests that need to assert notification routing without a real chat backend.
+A stub `ChannelAdapter` implementation used by approval and notification tests. It produces an empty message stream on `start()`, records every `send()` call into a shared `Arc<Mutex<Vec<String>>>`, and captures messages in `"{platform_id}:{text}"` format. This allows tests to assert exactly which recipients were notified and what content was delivered — without requiring a real channel backend.
 
-### `EnvVarGuard` / `set_test_env`
+### EnvVarGuard / set_test_env
 
-Sets an environment variable and returns a guard that removes it on drop. Prevents environment pollution across tests that exercise `api_key_env` resolution.
-
-```rust
-let _guard = set_test_env("LIBREFANG_TEST_ROTATION_PRIMARY_KEY_A", "key-1");
-// variable is unset when _guard drops at end of scope
-```
-
-### `install_test_skill`
-
-Writes a minimal valid `skill.toml` (plus a stub `prompt_context.md`) into a directory so the skill registry's loader accepts it. Accepts a name and tags:
+A RAII guard that sets an environment variable on creation and removes it on drop. Used by key-rotation tests to inject test API keys without polluting the process environment:
 
 ```rust
-install_test_skill(&skills_parent, "kept-skill", &["coding", "rust"]);
+let _guard = set_test_env("LIBREFANG_TEST_ROTATION_KEY_A", "key-1");
+// env var is cleaned up when _guard goes out of scope
 ```
 
-### `test_manifest` / `make_trace`
+### install_test_skill
 
-Convenience constructors for `AgentManifest` and `DecisionTrace` that reduce boilerplate in registry and trace-summarization tests.
+A helper that writes a minimal valid `skill.toml` (with a `promptonly` runtime type) and a stub `prompt_context.md` into a given parent directory. Used by skill-registry tests to create on-disk skills that the kernel can discover at boot:
 
----
+```rust
+install_test_skill(&skills_parent, "my-skill", &["coding", "rust"]);
+```
 
-## Behavioral Contracts Verified
+### test_manifest
 
-### 1. API Key Rotation Deduplication
+Constructs a minimal `AgentManifest` with the given name, description, and tags. Used to avoid repetitive boilerplate in registry tests.
 
-**Tests:** `test_collect_rotation_key_specs_dedupes_primary_profile_key`, `test_collect_rotation_key_specs_prepends_distinct_primary_and_skips_missing_profiles`
+## Test Domains
 
-`collect_rotation_key_specs(profiles, primary_key)` builds a list of `RotationKeySpec` entries for LLM provider key rotation. The invariants are:
+### API Key Rotation (`collect_rotation_key_specs`)
 
-- If an `AuthProfile` references the same env var as the primary driver key, it gets `use_primary_driver: true` and appears exactly once (no duplicates).
-- If the primary key differs from all profiles, a synthetic `"primary"` entry is prepended.
-- Profiles whose `api_key_env` points to an unset variable are silently skipped.
+Tests that the key-spec collector for multi-profile API key rotation correctly:
 
-### 2. Escalated Approval Notification Routing
+- **Deduplicates the primary key** — when a profile's `api_key_env` resolves to the same key as the current primary driver key, only one `RotationKeySpec` is emitted (marked `use_primary_driver: true`), and it appears first (lowest priority number wins).
+- **Prepends a distinct primary** — when no profile shares the primary key, a synthetic `"primary"` spec is prepended.
+- **Skips profiles with missing env vars** — profiles whose `api_key_env` points to an unset variable are silently excluded, not errored.
 
-**Test:** `test_notify_escalated_approval_prefers_request_route_to`
+### Approval Notification Routing (`notify_escalated_approval`)
 
-When an `ApprovalRequest` is escalated (`escalation_count > 0`), `notify_escalated_approval` must route notifications to the request's `route_to` field **in preference to** all other targets—routing rules, agent notification rules, and global approval channels. This prevents escalation spam from broadcasting to irrelevant recipients.
+A multi-threaded tokio test that boots a full kernel, registers a `RecordingChannelAdapter`, and verifies the escalation notification priority hierarchy:
 
-### 3. Manifest → Capabilities Expansion
+> **Per-request `route_to`** > routing rules > agent notification rules > global `approval_channels`
 
-**Tests:** `test_manifest_to_capabilities`, `test_manifest_to_capabilities_with_profile`, `test_manifest_to_capabilities_profile_overridden_by_explicit_tools`
+The test configures all four layers with different recipients, sets `escalation_count: 1` on the request, and asserts that only the explicit per-request target receives the notification. This prevents regressions where escalated approvals would spam all configured channels.
 
-`manifest_to_capabilities` converts an `AgentManifest` into a `Vec<Capability>`:
+### Manifest → Capabilities (`manifest_to_capabilities`)
 
-- Explicit `capabilities.tools` entries map to `Capability::ToolInvoke(name)`.
-- `capabilities.agent_spawn = true` maps to `Capability::AgentSpawn`.
-- A `ToolProfile` (e.g. `Coding`) expands into its full tool set (`file_read`, `file_write`, `file_list`, `shell_exec`, `web_fetch`) **only when** `capabilities.tools` is empty. Explicit tools always take precedence over the profile.
-- Profiles also imply `Capability::ShellExec(_)` and `Capability::NetConnect(_)`.
+Tests the `manifest_to_capabilities` helper that converts an `AgentManifest` into the kernel's internal `Capability` set:
 
-### 4. Agent Registry Lookup
+| Scenario | Expected behavior |
+|----------|-------------------|
+| Explicit `capabilities.tools` | Each tool name becomes `Capability::ToolInvoke(name)` |
+| `capabilities.agent_spawn = true` | Adds `Capability::AgentSpawn` |
+| `profile = Some(ToolProfile::Coding)` | Expands to `file_read`, `file_write`, `file_list`, `shell_exec`, `web_fetch` plus `ShellExec` and `NetConnect` capabilities |
+| Explicit tools override profile | Profile expansion is suppressed — only the explicitly listed tools appear |
 
-**Tests:** `test_send_to_agent_by_name_resolution`, `test_find_agents_by_tag`
+This defends against a design where explicit tool declarations silently merge with (rather than replace) profile defaults.
 
-`AgentRegistry` supports three lookup strategies:
+### Agent Registry (`AgentRegistry`)
 
-| Method | Key | Returns |
-|---|---|---|
-| `register(entry)` | `AgentId` | Inserts by ID + name index |
-| `get(id)` | `AgentId` | Exact `Option<AgentEntry>` |
-| `find_by_name("coder")` | Name string | Exact match `Option<AgentEntry>` |
-| Tag-based filtering | `entry.tags` | Manual `.iter().filter()` on `list()` |
+Tests the `AgentRegistry`'s lookup operations:
 
-### 5. Agent Spawning & Privilege Delegation
+- **`find_by_name("coder")`** resolves an agent by its human-readable name.
+- **`get(agent_id)`** resolves by UUID.
+- **Tag filtering** — `registry.list()` returns all entries; callers filter by `tags` or `name` substring. Validates that the registry stores tags at registration time and they survive retrieval.
 
-**Tests:** `test_spawn_agent_applies_local_default_model_override`, `test_spawn_child_exceeding_parent_is_rejected`, `test_spawn_child_with_subset_capabilities_is_allowed`, `test_spawn_with_unknown_parent_fails_closed`
+### Agent Spawning and Capability Enforcement
+
+This is the most heavily tested domain. It covers `spawn_agent_inner` and its security invariants:
+
+#### Privilege escalation prevention (`test_spawn_child_exceeding_parent_is_rejected`)
+
+A regression test ensuring that `spawn_agent_inner` (not just the higher-level `spawn_agent_checked`) enforces the **capability subset rule**: a child agent's declared capabilities must be a subset of its parent's. Before this check was pushed down, any caller routing through `spawn_agent_with_parent` directly (channel handlers, workflow engines, LLM routing, bulk spawn) would silently bypass the restriction.
+
+The test spawns a parent with only `file_read`, then attempts a child requesting `["*"]` tools, `["*"]` shell, and `["*"]` network. It asserts:
+
+1. The spawn returns an error containing `"Privilege escalation denied"`.
+2. No agent named `"escalated-child"` exists in the registry (the check runs before `register()`).
+
+#### Subset allowed (`test_spawn_child_with_subset_capabilities_is_allowed`)
+
+The positive counterpart — a child requesting only `file_read` under a parent that has both `file_read` and `file_write` spawns successfully, and `entry.parent` is correctly set.
+
+#### Unknown parent fails closed (`test_spawn_with_unknown_parent_fails_closed`)
+
+Passing a stale `AgentId` as the parent argument fails with `"not registered"`, preventing a ghost parent from silently landing on the non-parent code path.
+
+#### Default model override (`test_spawn_agent_applies_local_default_model_override`)
+
+When a `default_model_override` is set (e.g., for a local Ollama instance), spawned agents store `"default"/"default"` as their provider/model. Concrete resolution is deferred to `execute_llm_agent` at execution time, not at spawn — so provider changes propagate without re-spawning.
+
+### Model/Provider Switching (`set_agent_model`)
+
+A regression test for issue #2380. When `set_agent_model` switches an agent's provider (e.g., `cloudverse` → `openrouter`), it must clear the per-agent `api_key_env` and `base_url` overrides from the previous provider. Before the fix, the stale credentials persisted, causing requests to hit the old endpoint with the wrong key (surfacing as upstream 401s).
+
+The test also verifies that **same-provider** model swaps (e.g., `claude-3.5-sonnet` → `claude-3.7-sonnet` within `openrouter`) preserve per-agent overrides — they may be legitimate custom configurations.
+
+### Hand Activation
+
+Tests for the "hand" subsystem (named persistent agent instances like `"apitester"`):
+
+- **No runtime tool filter seeding** — `activate_hand` must not populate `tool_allowlist` or `tool_blocklist` on the manifest, so skill and MCP tools remain visible.
+- **Reactivation idempotency** — deactivating and reactivating the same hand produces an agent with identical `capabilities.tools`, `profile`, `tool_allowlist`, `tool_blocklist`, and `mcp_servers`.
+
+Both tests gracefully skip if the `apitester` hand has unsatisfied requirements (missing dependencies).
+
+### Available Tools Filtering
+
+#### tools_disabled flag
+
+Setting `tools_disabled: true` on a manifest causes `available_tools()` to return an empty set, suppressing all builtin, skill, and MCP tools.
+
+#### Glob pattern matching
+
+A regression test: declared tools previously used exact `==` matching, so `"mcp_filesystem_*"` never matched `"mcp_filesystem_list_directory"`. The fix uses glob matching. The test verifies `"file_*"` matches `file_read`, `file_write`, `file_list` but not `web_fetch` or `shell_exec`.
+
+#### Shell exec auto-promotion
+
+When `shell_exec` is declared in `capabilities.tools` and `shell: ["*"]` is set, but no explicit `exec_policy` is provided, the kernel auto-promotes the agent's `exec_policy` to `Full` mode. Without this, the global default `ExecSecurityMode::Deny` would strip `shell_exec` from `available_tools()` even though the agent explicitly requested it.
+
+### Route Caching (`should_reuse_cached_route`, `assistant_route_key`)
+
+- **`should_reuse_cached_route`** — brief follow-up messages (e.g., `"fix that"`, `"继续"`) return `true`; acknowledgments (`"thanks"`) and substantive prompts return `false`. This powers the `/btw` ephemeral-message optimization.
+- **`assistant_route_key`** — the cache key incorporates `channel`, `user_id`, and `thread_id` from the `SenderContext`, ensuring different conversation contexts don't share cached routes.
+
+### Kernel Boot (`test_boot_spawns_assistant_as_default_agent`)
+
+A freshly booted kernel auto-spawns an `"assistant"` agent. This validates the default-agent provisioning path.
+
+### Ephemeral Messaging (`send_message_ephemeral`)
+
+Two async tests:
+
+1. **Unknown agent → error** — sending to a random `AgentId` returns an error.
+2. **Session isolation** — even when the ephemeral call fails (no LLM provider), the real session's message count is unchanged. Ephemeral `/btw` messages never persist to the agent's conversation history.
+
+### Approval Sweep Idempotency
+
+`spawn_approval_sweep_task` sets an `AtomicBool` guard. Calling it twice does not spawn a second task. After `shutdown()`, the flag is cleared.
+
+### Condition Evaluation (`evaluate_condition`)
+
+Tests the tag-based condition evaluator used by skill and routing matchers:
+
+| Input | Result |
+|-------|--------|
+| `None` | `true` (no condition = always match) |
+| `Some("")` | `true` (empty = always match) |
+| `Some("agent.tags contains 'chat'")` with matching tags | `true` |
+| `Some("agent.tags contains 'chat'")` without matching tags | `false` |
+| Unknown format | `false` (strict default — prevents accidental injection) |
+
+### Peer-Scoped Keys (`peer_scoped_key`)
+
+Tests the key-namespacing function:
+
+- With `peer_id`: `"peer:user-123:car"`
+- Without `peer_id`: `"car"` (unchanged)
+
+This enables per-user state isolation in shared memory stores.
+
+### Thinking Override (`apply_thinking_override`)
+
+Tests the three-way override logic for agent thinking/reasoning budgets:
+
+| Override value | Existing thinking config | Result |
+|---------------|------------------------|--------|
+| `None` | Preserved as-is | Unchanged |
+| `Some(false)` | Cleared to `None` | Forced off |
+| `Some(true)` with no existing config | Default `ThinkingConfig` inserted | Forced on with defaults |
+| `Some(true)` with existing config | Budget preserved | Forced on but respects existing `budget_tokens` |
+
+### JSON Extraction (`extract_json_from_llm_response`)
+
+Tests the LLM response parser that extracts structured JSON from freeform text:
+
+| Input format | Handling |
+|-------------|----------|
+| `` ```json {...} ``` `` code block | Extracts JSON from first valid code block |
+| Bare `{...}` object | Extracts directly |
+| JSON surrounded by prose | Finds the outermost balanced `{`...`}` pair |
+| Nested braces in string values | Handles correctly (the old `find/rfind` approach failed here) |
+| Multiple code blocks | Returns the first valid one |
+| No JSON present | Returns `None` |
+| Malformed JSON | Returns `None` (validates before returning) |
+
+### Background Review Error Classification (`is_transient_review_error`)
+
+Determines whether a failed background skill-review should be retried:
+
+- **Transient** (retry): timeouts, connection closures, network unreachable, 429 rate limits, provider overloaded.
+- **Permanent** (skip): missing JSON, missing required fields, security blocks, validation errors. Retrying these wastes tokens since the same prompt will produce the same failure.
+
+### Trace Summarization (`summarize_traces_for_review`)
+
+Tests the head-and-tail trace summarizer that compresses long tool-call histories for the skill-review LLM:
+
+- **60 traces** → first and last are preserved, middle is elided with an `"omitted"` marker. Line count stays well below 60.
+- **5 traces** → no elision, all names present.
+
+Uses the `make_trace` helper to generate `DecisionTrace` objects with configurable names and rationales.
+
+### Reviewer Block Sanitization (`sanitize_reviewer_block`, `sanitize_reviewer_line`)
+
+Tests the input sanitizer that prevents a compromised prior LLM response from injecting instructions into the reviewer:
+
+| Attack vector | Mitigation |
+|--------------|------------|
+| Triple-backtick JSON blocks (`` ``` ``) | Neutralized to prevent the reviewer from interpreting forged JSON as its own output |
+| `</data>` / `<data>` envelope markers | Stripped to prevent escaping the prompt envelope |
+| Newlines in single-line context | Collapsed to spaces |
+| Square brackets `[...]` | Replaced with parentheses `(...)` to prevent `[EXTERNAL SKILL CONTEXT]` injection |
+| Null bytes, bell characters | Removed |
+| Oversized content | Truncated by character count (not bytes), with `…[truncated]` suffix, safe at UTF-8 boundaries |
+
+### Skill Registry Configuration
+
+Four tests validating the `SkillsConfig` wiring that connects kernel configuration to the skill registry:
+
+#### Disabled list filtering (`test_skills_config_disabled_list_filters_at_boot`)
+
+A regression test: `skills.disabled` was dead code before the wiring was added. Skills listed in `config.skills.disabled` are excluded from the registry at boot even though their directories exist on disk.
+
+#### Extra directories overlay (`test_skills_config_extra_dirs_loaded_as_overlay`)
+
+Skills from `config.skills.extra_dirs` are loaded on top of the primary skills directory. When a skill exists in both locations, the **local install wins** — operators can override a shared skill locally.
+
+#### Reload preservation (`test_reload_skills_preserves_disabled_and_extra_dirs`)
+
+A regression test: `reload_skills()` used to instantiate a fresh `SkillRegistry` without re-applying policy, silently re-enabling disabled skills and dropping the overlay. The test triggers a reload and asserts both policies survive.
+
+#### Stable mode freeze (`test_stable_mode_freezes_registry_and_skips_review_gate`)
+
+When `config.mode = KernelMode::Stable`, the skill registry is frozen at boot (`is_frozen() == true`). Pre-existing skills remain visible, but:
+- `reload_skills()` becomes a no-op.
+- The background-review pre-claim gate refuses to spawn new reviews (preventing LLM budget drain with no visible effect until restart).
+
+### Skill Evolution Default Availability
+
+`test_skill_evolve_tools_default_available_to_restricted_agent` validates the core design promise: **every agent can self-evolve skills**. Even an agent whose `capabilities.tools` is restricted to `["memory_store"]` sees the full skill-evolution tool surface:
+
+- `skill_read_file`
+- `skill_evolve_create`
+- `skill_evolve_update`
+- `skill_evolve_patch`
+- `skill_evolve_delete`
+- `skill_evolve_rollback`
+- `skill_evolve_write_file`
+- `skill_evolve_remove_file`
+
+This works because the kernel's tool-filtering Step 1 treats these names as `default_available`, bypassing the `capabilities.tools` allowlist check.
+
+## Test Execution Model
 
 ```mermaid
 graph TD
-    A[spawn_agent_inner] --> B{Parent ID?}
-    B -- None --> C[Top-level spawn]
-    B -- Some(id) --> D{Parent in registry?}
-    D -- No --> E[FAIL: "not registered"]
-    D -- Yes --> F{Child caps ⊆ Parent caps?}
-    F -- No --> G[FAIL: "Privilege escalation denied"]
-    F -- Yes --> H[Register child]
-    C --> I[Store "default"/"default" model]
-    I --> H
+    A["Unit tests<br/>(pure functions, no kernel)"] --> B["cargo test"]
+    C["Integration tests<br/>(kernel boot with tempdir)"] --> B
+    D["Async tests<br/>(tokio multi_thread)"] --> B
+    C --> E["tempfile::tempdir()"]
+    E --> F["Isolated home_dir"]
+    F --> G["KernelConfig::default()"]
+    G --> H["LibreFangKernel::boot_with_config()"]
+    H --> I["kernel.shutdown()"]
 ```
 
-Key invariants:
+Most integration tests follow a pattern:
 
-- **Capability subset rule:** A child's declared capabilities (tools, shell, network) must be a subset of its parent's. The check runs in `spawn_agent_inner` itself, not just in the higher-level `spawn_agent_checked`. This closes a bypass where direct callers (channel handlers, workflow engines) could silently escalate.
-- **Unknown parent fails closed:** Passing a stale `AgentId` as `parent` results in an error, not silent top-level promotion.
-- **Deferred model resolution:** The spawn stores `"default"` for both `provider` and `model` on the manifest. Concrete provider resolution happens at `execute_llm_agent` time, so the runtime picks up `default_model_override` changes without re-spawning.
+1. Create a temporary directory via `tempfile::tempdir()`.
+2. Construct a `KernelConfig` with isolated `home_dir` and `data_dir`.
+3. Boot the kernel with `LibreFangKernel::boot_with_config(config)`.
+4. Perform assertions against the kernel's registry, skill registry, or other subsystems.
+5. Call `kernel.shutdown()` to clean up background tasks.
 
-### 6. Provider Switching & Override Cleanup
-
-**Test:** `test_set_agent_model_clears_overrides_when_provider_changes`
-
-`set_agent_model(agent_id, model, provider)` handles two cases:
-
-- **Different provider** (e.g. `cloudverse` → `openrouter`): Clears `api_key_env` and `base_url` on the agent's `ModelConfig` so `resolve_driver` falls back to the new provider's global credentials and URL. Prevents issue #2380 where stale keys produced 401 errors.
-- **Same provider, different model**: Preserves any per-agent `api_key_env`/`base_url` overrides since they remain valid.
-
-### 7. Hand Activation
-
-**Tests:** `test_hand_activation_does_not_seed_runtime_tool_filters`, `test_hand_reactivation_rebuilds_same_runtime_profile`
-
-`activate_hand` / `deactivate_hand` manage persistent agent instances tied to external integrations ("hands"):
-
-- Activation must **not** set `tool_allowlist` or `tool_blocklist` on the manifest—skill and MCP tools must remain visible.
-- Re-activating the same hand after deactivation must rebuild an identical runtime profile (capabilities, profile, allowlist, blocklist, MCP servers).
-
-### 8. Tool Availability Resolution
-
-**Tests:** `test_available_tools_returns_empty_when_tools_disabled`, `test_available_tools_glob_pattern_matches_mcp_tools`, `test_shell_exec_available_when_declared_in_tools_without_explicit_exec_policy`, `test_skill_evolve_tools_default_available_to_restricted_agent`
-
-`available_tools(agent_id)` applies these rules in order:
-
-1. If `manifest.tools_disabled == true`, return empty regardless of all other config.
-2. Filter the global `builtin_tool_definitions()` against the agent's declared `capabilities.tools` using **glob matching** (`file_*` matches `file_read`, `file_write`, `file_list`).
-3. `shell_exec` is auto-promoted: if it appears in `capabilities.tools` and `capabilities.shell` is non-empty, the agent's `exec_policy` is promoted to `Full` even if the global default is `Deny`.
-4. Skill-evolution tools (`skill_evolve_create`, `skill_evolve_update`, etc.) are always available regardless of `capabilities.tools`—every agent can self-evolve.
-
-### 9. Route Caching Heuristics
-
-**Tests:** `test_should_reuse_cached_route_for_brief_follow_up`, `test_assistant_route_key_scopes_sender_and_thread`
-
-- `should_reuse_cached_route(text)` returns `true` for short follow-ups ("fix that", "继续") and `false` for gratitude ("thanks") or substantive new requests. This determines whether the assistant reuses its last active agent or re-routes.
-- `assistant_route_key(agent_id, sender)` produces a cache key that includes the channel, user ID, and thread ID from the `SenderContext`, ensuring per-conversation isolation.
-
-### 10. Ephemeral Messaging
-
-**Tests:** `test_send_message_ephemeral_unknown_agent_returns_not_found`, `test_send_message_ephemeral_does_not_modify_session`
-
-`send_message_ephemeral(agent_id, text)` is a side-effect-free query path:
-
-- Returns an error for unknown agent IDs.
-- Does **not** append to the agent's session history, even if the LLM call fails. The session message count is identical before and after.
-
-### 11. Approval Sweep Idempotency
-
-**Test:** `test_spawn_approval_sweep_task_is_idempotent`
-
-`spawn_approval_sweep_task()` sets `approval_sweep_started` (an `AtomicBool`) to guard against duplicate background tasks. Calling it twice is a no-op. After `shutdown()`, the flag resets to `false`.
-
-### 12. Condition Evaluation
-
-**Tests:** `test_evaluate_condition_none`, `test_evaluate_condition_empty`, `test_evaluate_condition_tag_match`, `test_evaluate_condition_tag_no_match`, `test_evaluate_condition_unknown_format`
-
-`evaluate_condition(condition, tags)` implements a simple DSL:
-
-| Condition | Result |
-|---|---|
-| `None` | `true` (no filter) |
-| `Some("")` | `true` (empty filter) |
-| `Some("agent.tags contains 'chat'")` | `true` if `"chat"` is in `tags` |
-| Unknown format | `false` (strict deny) |
-
-### 13. Peer-Scoped Memory Keys
-
-**Test:** `test_peer_scoped_key`
-
-`peer_scoped_key(key, peer_id)` namespaces memory keys per-user when a peer is present:
-
-- `peer_scoped_key("car", Some("user-123"))` → `"peer:user-123:car"`
-- `peer_scoped_key("car", None)` → `"car"`
-
-### 14. Thinking Override
-
-**Tests:** `test_apply_thinking_override_none_leaves_manifest_untouched`, `test_apply_thinking_override_force_off_clears_thinking`, `test_apply_thinking_override_force_on_inserts_default`, `test_apply_thinking_override_force_on_keeps_existing_budget`
-
-`apply_thinking_override(manifest, override)` controls the agent's extended-thinking budget:
-
-- `None`: no change.
-- `Some(false)`: clears `manifest.thinking` entirely (forces thinking off).
-- `Some(true)`: inserts default `ThinkingConfig` if absent, preserves existing `budget_tokens` if present.
-
-### 15. JSON Extraction from LLM Responses
-
-**Tests:** `test_extract_json_from_code_block` through `test_extract_json_multiple_code_blocks`
-
-`extract_json_from_llm_response(text)` handles the full spectrum of LLM output formats:
-
-- JSON inside `` ```json `` code fences (extracts the first valid block).
-- Bare JSON objects in free text.
-- JSON surrounded by prose.
-- Nested braces inside string values (handled correctly, not by naive `find/rfind`).
-- Returns `None` for text with no JSON or malformed JSON.
-
-### 16. Transient Error Classification
-
-**Tests:** `test_is_transient_review_error_timeouts`, `test_is_transient_review_error_rate_limits`, `test_is_transient_review_error_permanent`
-
-`is_transient_review_error(msg)` determines whether a background skill review error is worth retrying:
-
-- **Transient** (retry): timeouts, connection closures, network failures, 429 rate limits.
-- **Permanent** (no retry): parse failures, missing fields, security blocks, validation errors.
-
-### 17. Trace Summarization
-
-**Tests:** `test_summarize_traces_head_and_tail`, `test_summarize_traces_short_no_elision`
-
-`summarize_traces_for_review(traces)` produces a bounded summary of tool execution traces:
-
-- For ≤5 traces: includes all.
-- For >5 traces: includes the first, last, and marks the middle as `"omitted"`.
-- Guarantees the output is shorter than the raw trace count.
-
-### 18. Reviewer Block Sanitization
-
-**Tests:** `sanitize_reviewer_block_strips_code_fences_and_data_markers`, `sanitize_reviewer_block_preserves_structure_but_drops_controls`, `sanitize_reviewer_block_truncates_by_chars_not_bytes`, `sanitize_reviewer_line_strips_newlines_and_brackets`
-
-Two functions harden the background skill review pipeline against prompt injection from compromised prior LLM output:
-
-- `sanitize_reviewer_block(input, max_chars)`: Strips triple backticks (prevents code-fence injection), removes `<data>`/`</data>` envelope markers (prevents escape from the prompt envelope), drops control characters (`\x00`, `\x07`), preserves structural whitespace (`\n`, `\t`), and truncates by **character count** (not bytes) with a `…[truncated]` marker.
-- `sanitize_reviewer_line(input, max_chars)`: Collapses whitespace to spaces, replaces `[`/`]` with `(`/`)` to prevent `[EXTERNAL SKILL CONTEXT]` injection.
-
-### 19. Skills Configuration
-
-**Tests:** `test_skills_config_disabled_list_filters_at_boot`, `test_skills_config_extra_dirs_loaded_as_overlay`, `test_reload_skills_preserves_disabled_and_extra_dirs`, `test_stable_mode_freezes_registry_and_skips_review_gate`
-
-The kernel's skill loading pipeline respects `SkillsConfig`:
-
-```mermaid
-graph LR
-    A[Primary skills dir] --> D[SkillRegistry]
-    B[extra_dirs overlay] --> D
-    C[disabled list] -->|filters out| D
-    D --> E{KernelMode::Stable?}
-    E -- Yes --> F[Freeze registry]
-    E -- No --> G[Mutable registry]
-    G --> H[reload_skills re-applies B + C]
-```
-
-- **`skills.disabled`**: Skill names in this list are excluded from the registry at boot, even though their directories exist on disk.
-- **`skills.extra_dirs`**: External skill directories loaded as an overlay. On name collisions, the **local** install wins over the external overlay.
-- **Hot reload**: `reload_skills()` re-applies both the disabled list and extra_dirs overlay. A regression ensured these were preserved across reloads.
-- **Stable mode**: `KernelMode::Stable` freezes the registry at boot (`is_frozen() == true`). Background review gates refuse to spawn new reviews when frozen, preventing wasted LLM budget.
-
----
-
-## Relationship to Other Modules
-
-| Dependency | Usage |
-|---|---|
-| `librefang_types::approval` | `ApprovalRequest`, `NotificationConfig`, `RiskLevel`, routing types |
-| `librefang_types::config` | `KernelConfig`, `DefaultModelConfig`, `KernelMode`, `ThinkingConfig`, `ExecSecurityMode` |
-| `librefang_types::agent` | `AgentManifest`, `ManifestCapabilities`, `ToolProfile`, `ModelConfig` |
-| `librefang_types::tool` | `DecisionTrace` |
-| `librefang_channels::types` | `ChannelAdapter`, `ChannelContent`, `ChannelType`, `ChannelUser` |
-| `librefang_runtime::tool_runner` | `builtin_tool_definitions()` for tool availability assertions |
-| `kernel::manifest_helpers` | `manifest_to_capabilities()` |
-| `kernel::registry` | `AgentRegistry` with `register`, `get`, `find_by_name`, `list` |
+Async tests use `#[tokio::test(flavor = "multi_thread")]` to support the kernel's internal tokio runtime.

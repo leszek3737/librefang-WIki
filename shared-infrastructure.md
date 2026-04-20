@@ -2,34 +2,98 @@
 
 # Shared Infrastructure
 
-Cross-cutting infrastructure concerns that every other LibreFang module depends on: outbound HTTP, observability, and data migration.
+Foundational crates that every other layer of LibreFang depends on. These modules handle cross-cutting concerns — HTTP transport, telemetry, cost enforcement, message routing, sandboxed skill execution, kernel-runtime decoupling, test mocking, and framework migration — so that higher-level crates don't duplicate plumbing.
 
-## Sub-Modules
+## Sub-modules
 
-| Module | Role |
-|---|---|
-| [librefang-http](librefang-http-src.md) | Single source of truth for outbound HTTP — seeds Mozilla CA roots, supplements with system certs, and centralizes proxy configuration |
-| [librefang-telemetry](librefang-telemetry-src.md) | OpenTelemetry + Prometheus metrics and tracing used across all crates |
-| [librefang-migrate](librefang-migrate-src.md) | Imports agents, config, sessions, and memory from external frameworks (OpenClaw, OpenFang) into LibreFang's native format |
+| Crate | Responsibility |
+|-------|---------------|
+| [librefang-http](librefang-http-src.md) | Uniform `reqwest::Client` construction with portable TLS roots and proxy support |
+| [librefang-telemetry](librefang-telemetry-src.md) | HTTP metrics instrumentation (`metrics` facade) exported to Prometheus |
+| [librefang-kernel-handle](librefang-kernel-handle-src.md) | Async trait that breaks the kernel ↔ runtime circular dependency |
+| [librefang-kernel-metering](librefang-kernel-metering-src.md) | Per-agent, per-provider, and global LLM spending quotas |
+| [librefang-kernel-router](librefang-kernel-router-src.md) | Keyword + embedding-based message-to-agent routing |
+| [librefang-runtime-wasm](librefang-runtime-wasm-src.md) | Wasmtime sandbox for untrusted WASM skills with fuel metering and capability gating |
+| [librefang-migrate](librefang-migrate-src.md) | Imports agents and config from OpenClaw and OpenFang into LibreFang's TOML format |
+| [librefang-testing](librefang-testing-src.md) | `MockKernelBuilder` and test helpers used workspace-wide |
 
-## How They Fit Together
+## How they fit together
 
-```mermaid
-graph LR
-  API[librefang-api] -->|every outbound call| HTTP[librefang-http]
-  API -->|request metrics & traces| TEL[librefang-telemetry]
-  MIG[librefang-migrate] -->|HTTP during import| HTTP
-  API -->|/api/config/migrate endpoints| MIG
-  TEL -->|Prometheus recorder| API
-  HTTP -->|proxy resolution| HTTP
+```
+┌──────────────────────────────────────────────────────────┐
+│                    Application Layer                      │
+│         CLI  ·  HTTP API  ·  TUI                         │
+└──────┬──────────┬──────────────┬────────────────────────┘
+       │          │              │
+       ▼          ▼              ▼
+┌──────────┐ ┌──────────┐ ┌──────────────┐
+│ migrate  │ │ telemetry│ │   testing    │
+│          │ │          │ │(MockKernel   │
+│          │ │          │ │ Builder)     │
+└──────────┘ └────┬─────┘ └──────┬───────┘
+                  │              │
+       ┌──────────┼──────────────┘
+       ▼          ▼
+┌──────────┐ ┌──────────┐ ┌──────────────┐  ┌─────────┐
+│   http   │ │ kernel-  │ │ kernel-      │  │ kernel- │
+│ (client  │ │ handle   │ │ metering     │  │ router  │
+│  builder)│ │ (trait)  │ │ (quotas)     │  │ (route) │
+└────┬─────┘ └────┬─────┘ └──────┬───────┘  └─────────┘
+     │            │              │
+     └────────────┼──────────────┘
+                  ▼
+        ┌──────────────────┐
+        │  runtime-wasm    │
+        │  (WASM sandbox)  │
+        └──────────────────┘
 ```
 
-**librefang-http** is the foundation — every outbound HTTP connection in the application flows through it, regardless of which crate initiates the request. **librefang-telemetry** instruments those calls (and everything else) via the `metrics` crate, with the Prometheus recorder installed at the API layer. **librefang-migrate** is primarily a data-pipeline tool but relies on the shared HTTP client when migration involves network fetches.
+Three key dependency chains define the architecture:
 
-## Key Cross-Module Workflows
+1. **Every outbound HTTP call flows through [librefang-http](librefang-http-src.md).** The API routes, WASM host functions (`host_net_fetch`), catalog sync, CLI daemon health checks, and the migration scanner all use the same client builder, ensuring consistent proxy routing and TLS trust regardless of the host environment.
 
-**Outbound requests with proxy & TLS fallback** — API routes like `comms_send` and `catalog_update` both flow through `proxied_client_builder` → `build_http_client` → `tls_config` + `active_proxy`. This ensures consistent proxy resolution and CA trust across provider catalog syncs, agent URL attachment resolution, and comms delivery.
+2. **The runtime talks to the kernel through [librefang-kernel-handle](librefang-kernel-handle-src.md).** The WASM sandbox, the agent loop, and tool execution all invoke methods on the `KernelHandle` trait rather than depending on the kernel crate directly. The kernel injects its concrete implementation at startup. This keeps the runtime compilable and testable in isolation.
 
-**Migration pipeline** — The `librefang migrate` CLI command, `/api/config/migrate` HTTP endpoints, and the TUI init wizard all drive into `librefang-migrate`. The engine scans external workspaces (OpenClaw JSON5/legacy YAML, OpenFang configs), produces a `MigrationReport` with `MigrateItem` and `SkippedItem` entries, and writes LibreFang-native output — with dry-run support via `MigrateOptions`.
+3. **[librefang-testing](librefang-testing-src.md) underpins the entire test suite.** Every crate from the CLI to the runtime modules (OAuth, MCP, provider health, skill registries) uses `MockKernelBuilder` to spin up a lightweight kernel without external services. The mock kernel itself wires in [librefang-http](librefang-http-src.md) for realistic HTTP behaviour during tests.
 
-**Request observability** — The API's request-logging middleware calls into `librefang-telemetry`'s `record_http_request`, which normalizes paths (detecting UUIDs and dynamic segments via `is_dynamic_segment` / `is_uuid`) before emitting `metrics::counter!` and `metrics::histogram!` readings to the shared Prometheus recorder.
+## Key cross-cutting workflows
+
+### LLM request lifecycle
+
+```
+User message
+  → kernel-router selects agent/template
+  → agent loop runs
+  → LLM dispatch calls kernel-metering to check quotas
+  → metering records cost and enforces limits
+  → telemetry increments counters and histograms
+  → any outbound fetch uses http client builder
+```
+
+### WASM skill execution
+
+```
+kernel.spawn_agent / execute_skill
+  → runtime-wasm WasmSandbox.execute
+  → host functions dispatched (fs_read, net_fetch, agent_spawn, …)
+  → each host call checks capabilities, then invokes kernel-handle
+  → kernel-handle implementation delegates to the real kernel
+  → metering tracks any LLM calls triggered by the skill
+```
+
+### Migration import
+
+```
+CLI / API / TUI invokes migrate
+  → scans source framework layout (OpenClaw JSON5/YAML or OpenFang)
+  → converts to LibreFang TOML workspace structure
+  → uses http client for any URL resolution during scan
+  → produces a Markdown report via migrate::report
+```
+
+## Design principles
+
+- **One client, one TLS story.** Building your own `reqwest::Client` anywhere else is a lint error in practice. Use [librefang-http](librefang-http-src.md).
+- **Trait-based decoupling.** The kernel and runtime never import each other directly; they agree on [librefang-kernel-handle](librefang-kernel-handle-src.md).
+- **Deny-by-default sandboxing.** [librefang-runtime-wasm](librefang-runtime-wasm-src.md) grants no capabilities unless explicitly requested; fuel and epoch timeouts prevent runaway computation.
+- **Observability from day one.** [librefang-telemetry](librefang-telemetry-src.md) instruments every HTTP request automatically via middleware — no manual metric calls needed in route handlers.
