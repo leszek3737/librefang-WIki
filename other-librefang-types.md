@@ -6,99 +6,87 @@ Core type definitions, traits, and shared data structures for the LibreFang Agen
 
 ## Purpose
 
-This crate serves as the foundational type layer for the entire LibreFang system. It defines the canonical data structures, error types, configuration models, trait interfaces, and cryptographic primitives that all other crates in the workspace depend on. It contains no business logic or I/O — only definitions that establish contracts between modules.
+This crate serves as the foundational type library for the entire LibreFang ecosystem. It defines the canonical data models, error types, configuration structures, cryptographic primitives, and trait contracts that all other crates depend on. It contains no business logic or I/O — only declarations and trait definitions.
 
-## Role in the Architecture
+Because every other crate in the workspace references `librefang-types`, this module must remain lightweight, stable, and free of heavy side-effect dependencies.
+
+## Architectural Role
 
 ```mermaid
 graph TD
-    A[librefang-types] --> B[Agent Daemon]
-    A --> C[CLI Tools]
-    A --> D[Network Layer]
-    A --> E[Plugin System]
-    style A fill:#f9f,stroke:#333,stroke-width:2px
+    A[librefang-types] --> B[Agent runtime crates]
+    A --> C[Networking / messaging crates]
+    A --> D[CLI and tooling]
+    A --> E[Plugin / extension crates]
+    style A fill:#2d6a4f,color:#fff
 ```
 
-Every other crate in the workspace depends on `librefang-types`. It sits at the bottom of the dependency graph, which means changes here have broad impact. The crate intentionally avoids depending on anything with a runtime or external service connection.
+All crates import from `librefang-types` but this crate imports nothing from other workspace members. This unidirectional dependency keeps the type layer free of circular references and compilation coupling.
 
 ## Key Dependency Domains
 
-The crate's `Cargo.toml` dependencies reveal the major areas it covers:
+The crate's responsibilities can be inferred from its dependency set. Each dependency group maps to a distinct domain of type definitions:
 
-### Serialization & Configuration
-- **serde**, **serde_json**, **toml** — All core types implement `Serialize` and `Deserialize`. Configuration files use TOML, while network payloads and persistent storage use JSON or other serde-compatible formats.
+### Serialization (`serde`, `serde_json`, `toml`)
 
-### Identity & Identification
-- **uuid** — Unique identifiers for agents, tasks, sessions, and other entities throughout the system.
-- **ed25519-dalek**, **sha2**, **hex**, **rand** — Cryptographic signing and verification. Ed25519 keypairs identify agents, and SHA-256 hashing supports integrity checks. These are the building blocks for agent authentication and message authenticity.
+All public data structures derive `Serialize` and `Deserialize`, enabling wire-format agnostic serialization. The `toml` dependency indicates configuration types are deserialized from TOML files. The `serde_json` dependency supports JSON as an interchange format, likely for agent-to-server communication and API boundaries.
 
-### Time Handling
-- **chrono** — Timestamps on events, log entries, task scheduling, and certificate validity periods.
+### Identity and Integrity (`uuid`, `ed25519-dalek`, `sha2`, `hex`, `rand`)
 
-### Error Handling
-- **thiserror** — Derive-based error types that compose cleanly across crate boundaries. All domain-specific errors are defined here so that consuming crates can match on them without creating circular dependencies.
+Agent identity, message signing, and payload integrity verification are core to LibreFang. The `ed25519-dalek` crate provides Ed25519 public/private key types and signature operations. Combined with `sha2` for hashing and `uuid` for unique identifiers, this crate defines types for:
 
-### Async Traits
-- **async-trait** — Trait definitions for async operations (agent backends, transport layers, storage drivers). Consumers provide the implementations; this crate only defines the interfaces.
+- Agent identity keys and key fingerprints
+- Signed messages and envelopes
+- Payload digests and verification metadata
+- Cryptographic randomness for key generation
 
-### Localization
-- **fluent**, **unic-langid** — User-facing message strings and locale identifiers. The type system here supports loading and selecting localized messages at runtime.
+### Temporal Types (`chrono`)
 
-### Pattern Matching
-- **regex-lite** — Lightweight regex support, likely used in configuration validation or event filtering rule definitions.
+Timestamps on events, messages, log entries, and configuration artifacts use `chrono` types. All timestamp-bearing structs use `chrono::DateTime<Utc>` (or similar) to ensure consistent timezone handling across the system.
 
-### Filesystem Paths
-- **dirs** — Resolution of standard OS directories (config home, data home, etc.) for default path construction in configuration types.
+### Error Handling (`thiserror`)
 
-## Design Conventions
+Custom error enums for the domain are defined here using `thiserror` derives. These error types are re-exported so that downstream crates can return unified `Result<T, librefang_types::Error>` variants without defining their own error hierarchies for cross-cutting concerns.
 
-### No Runtime Behavior
+### Asynchronous Contracts (`async-trait`)
 
-This crate exports types, traits, constants, and pure functions only. It does not spawn tasks, open sockets, or perform I/O. This keeps compile times manageable for downstream crates that only need type information.
+Trait definitions for async operations — such as message handlers, transport layers, or storage backends — use the `#[async_trait]` macro. Concrete implementations live in other crates; only the trait signatures live here.
 
-### Owned Types Over Lifetimes
+### Localization (`fluent`, `unic-langid`)
 
-Structures prefer owned data (`String`, `Vec<T>`, `DateTime<Utc>`) over borrowed references. This simplifies serialization, cross-task transmission, and async boundaries at the cost of occasional allocations.
+The Fluent i18n system and Unicode language identifiers support multi-language agent responses and log messages. This crate defines locale-aware types and possibly the trait for resolving localized strings, keeping internationalization concerns centralized.
 
-### Trait-Driven Abstraction
+### Pattern Matching (`regex-lite`)
 
-Major subsystem interactions are defined as traits with `async-trait`:
+Lightweight regex types for input validation, identifier parsing, or configuration matching. The `regex-lite` choice over full `regex` signals that only basic pattern matching is needed without full Unicode word boundary support.
 
-```rust
-// Example pattern (actual trait names may differ)
-#[async_trait]
-pub trait AgentBackend: Send + Sync {
-    async fn register(&self, keypair: &Keypair) -> Result<AgentId, AgentError>;
-    async fn heartbeat(&self, id: &AgentId) -> Result<(), AgentError>;
-}
-```
+### Filesystem Paths (`dirs`)
 
-Implementations live in their own crates. This crate owns the trait definition and the error type.
+Standard platform directory resolution (`dirs`) is used to define default path constants — such as configuration directories, data directories, and key storage locations — as part of the configuration type layer.
 
-### Error Hierarchy
+## Design Principles
 
-Errors use `thiserror` derives and are organized by domain:
+1. **Zero business logic.** Structs, enums, traits, and constants only. Any function that performs I/O, network calls, or state mutation belongs in a different crate.
 
-| Error Type | Purpose |
-|---|---|
-| `AgentError` | Agent lifecycle, registration, heartbeat failures |
-| `ConfigError` | Configuration parsing, validation, missing fields |
-| `CryptoError` | Key generation, signing, verification failures |
-| `NetworkError` | Connection, timeout, and protocol-level issues |
+2. **Serde-first modeling.** Every serializable type is designed with `serde` in mind. Field names use `#[serde(rename = "...")]` where needed for stable wire formats.
 
-Each error type wraps underlying causes (IO, serde, cryptographic) while presenting a domain-specific surface to callers.
+3. **Trait-driven extensibility.** Core behaviors (messaging, signing, storage) are expressed as traits with `async_trait`, allowing concrete implementations to be swapped or mocked in downstream crates.
 
-## Testing
+4. **Dev dependency isolation.** The `rmp-serde` dev dependency (`MessagePack` serialization) is used only in tests to verify that types round-trip correctly through non-JSON formats, confirming format-agnostic serde correctness.
 
-The dev-dependency on `rmp-serde` (MessagePack) indicates that serialization round-trip tests verify types can cross format boundaries. This is particularly relevant for scenarios where types are serialized to JSON for the API layer but encoded as MessagePack for compact storage or wire transfer.
+## Testing Conventions
 
-## When to Modify This Crate
+Tests in this crate focus on:
 
-- **Adding a new domain concept** — If a new entity (e.g., `Policy`, `Certificate`, `Deployment`) needs to be shared across multiple crates, define it here.
-- **Changing a trait signature** — Any change to a trait in this crate requires updating all implementations across the workspace.
-- **Adding a new error variant** — Error enums live here. Add variants with `#[from]` where a new underlying error type needs automatic conversion.
+- **Serialization round-trips.** Every struct serializes to JSON, TOML, and MessagePack (via `rmp-serde`) and deserializes back to an equal value.
+- **Default and builder patterns.** Types with `Default` implementations are verified for sensible values.
+- **Validation logic.** Any inherent validation methods on types (e.g., key length checks, identifier format) are tested here.
 
-## When Not to Modify This Crate
+## Adding New Types
 
-- **Adding logic** — If you're writing functions that perform I/O, transform data, or make decisions, that code belongs in a higher crate.
-- **Adding a dependency with a runtime** — Avoid pulling in async runtimes, database drivers, or HTTP clients. This crate must remain lightweight to import.
+When adding types to this crate:
+
+- Ensure all structs and enums derive `Serialize`, `Deserialize`, `Debug`, `Clone` at minimum.
+- Add `#[cfg(test)]` round-trip tests for any new serializable type.
+- Avoid adding runtime dependencies. If a new dependency is needed, evaluate whether the type truly belongs in this foundational crate or in a higher-level crate.
+- Re-export new types from the crate root (`lib.rs`) so consumers can import with `use librefang_types::MyType` without navigating internal module paths.

@@ -2,55 +2,64 @@
 
 # librefang-telemetry
 
-OpenTelemetry + Prometheus metrics instrumentation for LibreFang.
+OpenTelemetry and Prometheus metrics instrumentation for the LibreFang project.
 
-## Purpose
+## Overview
 
-This crate provides the observability layer for LibreFang. It wraps the `metrics` facade and exposes helpers for recording, labeling, and exporting application telemetry — primarily targeting Prometheus-compatible scraping.
+`librefang-telemetry` provides a centralized metrics layer for the LibreFang ecosystem. It wraps the `metrics` crate and exposes a consistent instrumentation surface that other LibreFang crates can depend on without each one needing to configure exporters or metric sinks independently.
 
 ## Dependencies
 
-| Dependency | Role |
+| Dependency | Purpose |
 |---|---|
-| `metrics` | The underlying metrics facade. Provides the `counter!`, `gauge!`, `histogram!`, and related macros used throughout the codebase. |
-| `librefang-types` | Shared domain types. Metrics labels and values are derived from these types (e.g., event variants, connection states) so instrumentation stays consistent with the rest of the codebase. |
-| `tokio-test` *(dev)* | Used only in tests for async runtime support. |
+| `metrics` | Core metrics facade — provides counters, gauges, histograms, and the macro interface for recording values |
+| `librefang-types` | Shared type definitions across the LibreFang workspace |
 
-## How It Fits In
+**Dev dependencies:**
 
-`librefang-telemetry` is a **leaf library crate** — it has no outgoing calls to other LibreFang crates and nothing in the workspace calls into it directly at compile time (modules use the `metrics` macros instead). Its role is:
+| Dependency | Purpose |
+|---|---|
+| `tokio-test` | Async test utilities for validating telemetry under simulated runtime conditions |
 
-1. **Initializing** the metrics exporter/pipeline at application startup.
-2. **Defining helper functions or constants** for metric names, labels, and default dimensions so they aren't scattered across the codebase.
-3. **Optionally re-exporting** the `metrics` macros so downstream crates only need one dependency.
+## Role in the Workspace
 
-Other crates in the workspace emit metrics via the `metrics` facade macros. At runtime, whatever exporter this crate configures receives those emissions.
+This crate sits at the foundation of the LibreFang observability stack. Other workspace members import `librefang-telemetry` to record metrics, while the top-level binary (or a dedicated telemetry initializer) is responsible for installing the actual exporter backend (e.g., Prometheus scrape endpoint).
+
+```mermaid
+graph TD
+    A[librefang-telemetry] -->|depends on| B[metrics crate]
+    A -->|depends on| C[librefang-types]
+    D[Workspace binaries] -->|installs exporter| B
+    E[Other LibreFang crates] -->|records metrics via| A
+```
 
 ## Usage
 
-Add to your crate's `Cargo.toml`:
+### Recording metrics from other crates
+
+Add `librefang-telemetry` as a dependency in your crate's `Cargo.toml`:
 
 ```toml
 [dependencies]
 librefang-telemetry = { path = "../librefang-telemetry" }
 ```
 
-Initialize early in your application's `main` or `tokio::main`, before spawning any workers that would emit metrics:
+Then use the `metrics` macros or the re-exported helpers provided by this crate to instrument your code.
 
-```rust
-librefang_telemetry::init();
+### Setting up the exporter (binary side)
+
+The application binary is responsible for initializing a metrics exporter before any measurements are recorded. This separation keeps library crates free of exporter-specific configuration.
+
+## Architecture Notes
+
+- **No internal call graph.** This crate is a leaf dependency — it does not call into other LibreFang modules at runtime. It re-exports or wraps the `metrics` facade and may define shared metric name constants or helper functions.
+- **No incoming calls detected in static analysis.** Other crates consume this module through the `metrics` macro layer, which is resolved at compile time rather than through direct function calls, making the dependency invisible to a simple call-graph trace.
+- The `librefang-types` dependency suggests that metric labels or identifiers may be derived from domain types shared across the project (e.g., player identifiers, game states, room codes).
+
+## Testing
+
+Tests use `tokio-test` to simulate asynchronous contexts. Run the test suite with:
+
+```sh
+cargo test -p librefang-telemetry
 ```
-
-From that point on, any `metrics::counter!()`, `metrics::histogram!()`, or `metrics::gauge!()` call anywhere in the process is captured by the configured exporter.
-
-## Architecture
-
-```mermaid
-graph LR
-    A[librefang-telemetry] -->|configures exporter| B[metrics facade]
-    C[librefang-types] -->|provides domain types| A
-    D[other workspace crates] -->|emits via macros| B
-    B -->|scraped by| E[Prometheus]
-```
-
-The crate sits between the shared type definitions and the runtime metrics pipeline. Other crates remain decoupled from the telemetry implementation — they only depend on the `metrics` macros, while this crate owns the plumbing.

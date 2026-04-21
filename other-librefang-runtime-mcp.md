@@ -2,69 +2,72 @@
 
 # librefang-runtime-mcp
 
-MCP (Model Context Protocol) client for the LibreFang runtime. This module provides the integration layer that allows the LibreFang runtime to communicate with MCP-compatible tool servers, enabling dynamic tool discovery, invocation, and resource management.
+MCP (Model Context Protocol) client for the LibreFang runtime. This module provides the integration layer between the LibreFang runtime and MCP-compatible services, enabling communication with AI model endpoints and tool servers using the Model Context Protocol specification.
 
 ## Purpose
 
-The Model Context Protocol (MCP) standardizes how AI runtimes interact with external tools and data sources. This module implements the client side of that protocol, allowing the LibreFang runtime to:
+The Model Context Protocol standardizes how applications communicate with language models and their associated tooling. This crate implements the client side of that protocol, allowing the LibreFang runtime to:
 
-- Discover available tools exposed by MCP servers
-- Invoke tools with structured parameters
-- Manage tool lifecycle and connection state
-- Handle authentication and transport security
-
-## Dependencies & What They Indicate
-
-The dependency profile reveals the module's operational character:
-
-| Dependency | Role |
-|---|---|
-| `rmcp` | Core MCP protocol implementation — handles message framing, negotiation, and the protocol state machine |
-| `librefang-types` | Shared type definitions across the LibreFang ecosystem (tool schemas, error types, etc.) |
-| `librefang-http` | HTTP transport layer, used for streamable HTTP-based MCP server connections |
-| `reqwest` | Low-level HTTP client backing the transport |
-| `tokio` | Async runtime for concurrent tool invocations and connection management |
-| `serde` / `serde_json` | Serialization of MCP messages, tool parameters, and response payloads |
-| `http` | HTTP type primitives (headers, status codes, method types) |
-| `async-trait` | Async trait definitions for transport abstraction and handler interfaces |
-| `base64` / `sha2` | Likely used for authentication tokens, challenge-response flows, or payload integrity verification |
-| `url` | MCP server endpoint parsing and validation |
-| `rand` | Nonce generation, session identifiers, or other cryptographic randomness needs |
-| `tracing` | Structured logging and diagnostic spans for connection lifecycle events |
+- Discover and invoke tools exposed by MCP servers
+- Manage connections to MCP-compatible endpoints
+- Serialize and deserialize MCP protocol messages using the shared `librefang-types` definitions
 
 ## Architecture
 
 ```mermaid
-graph TD
-    A[LibreFang Runtime] -->|tool requests| B[librefang-runtime-mcp]
-    B -->|MCP protocol| C[rmcp]
-    C -->|HTTP transport| D[librefang-http / reqwest]
-    D -->|network| E[MCP Tool Servers]
-    B -->|shared types| F[librefang-types]
+graph LR
+    A[LibreFang Runtime] --> B[librefang-runtime-mcp]
+    B --> C[rmcp]
+    B --> D[librefang-http]
+    B --> E[librefang-types]
+    C --> F[MCP Server]
+    D --> F
 ```
 
-The module sits between the core LibreFang runtime and external MCP servers. It translates internal tool invocation requests into MCP protocol messages, sends them over HTTP, and returns structured results back to the runtime.
+The module sits between the LibreFang runtime core and external MCP servers. It relies on `rmcp` for the core MCP client implementation, `librefang-http` for transport-level HTTP communication, and `librefang-types` for shared data structures used across the codebase.
+
+## Dependencies
+
+### Internal Crates
+
+| Crate | Role |
+|---|---|
+| `librefang-types` | Shared type definitions for MCP messages, tool schemas, and protocol structures |
+| `librefang-http` | HTTP client abstraction used for transport-level communication with MCP servers |
+
+### External Crates
+
+| Crate | Role |
+|---|---|
+| `rmcp` | Rust MCP client library providing protocol-level primitives |
+| `reqwest` | Underlying HTTP client (used transitively via `librefang-http`) |
+| `tokio` | Async runtime for non-blocking I/O |
+| `serde` / `serde_json` | Serialization of MCP request/response payloads |
+| `http` | HTTP type primitives (method, header map, status codes) |
+| `base64` / `sha2` | Encoding and hashing, likely for authentication or payload verification |
+| `url` | URL parsing and construction for MCP endpoints |
+| `rand` | Random number generation, likely for nonce or session identifiers |
+| `tracing` | Structured logging and diagnostics |
+| `async-trait` | Async trait support for trait definitions |
 
 ## Integration Points
 
-### Upstream
+This module is consumed by higher-level runtime components that need to interact with MCP servers. It does not directly call into other LibreFang crates beyond `librefang-http` and `librefang-types`, keeping its responsibility focused on MCP protocol handling.
 
-The runtime core calls into this module when it needs to interact with an MCP server — for example, to enumerate available tools or execute a specific tool call during fang execution.
+Consumers of this crate should expect to:
 
-### Downstream
+1. Initialize an MCP client with a target endpoint URL
+2. Use the client to list available tools, invoke tools, and handle responses
+3. Rely on the crate for proper serialization of MCP-compliant messages
 
-This module depends on:
-- **`librefang-types`** for domain types that cross module boundaries
-- **`librefang-http`** for HTTP transport infrastructure, avoiding duplication of connection pooling, TLS configuration, and error handling
+## Building
 
-### External
+```bash
+cargo build -p librefang-runtime-mcp
+```
 
-Communication with MCP servers happens over HTTP, using the protocol defined by the MCP specification. The `rmcp` crate handles protocol-level concerns while `reqwest` (via `librefang-http`) handles the actual network I/O.
+## Testing
 
-## Key Design Decisions
-
-**Transport abstraction via `async-trait`**: The module defines async trait interfaces for transports, allowing the MCP protocol to potentially run over different transports in the future (stdio, WebSocket, etc.), though currently only HTTP is supported.
-
-**Cryptographic utilities (`sha2`, `base64`, `rand`)**: The presence of these dependencies suggests the module handles some form of authentication or message integrity, which is common when connecting to remote tool servers that require verified identities or signed requests.
-
-**Structured logging with `tracing`**: Connection events, tool invocations, and errors are instrumented with structured spans, making it possible to trace a single tool invocation from request through response in production logs.
+```bash
+cargo test -p librefang-runtime-mcp
+```

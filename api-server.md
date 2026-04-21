@@ -2,251 +2,241 @@
 
 # API Server (`librefang-api`)
 
-The HTTP/WebSocket API server that exposes the LibreFang Agent OS daemon to CLI clients, dashboard SPAs, channel adapters, and external integrations. It runs the kernel in-process and serves all management, status, and chat endpoints over JSON REST and WebSocket.
+The HTTP/WebSocket API server for the LibreFang Agent OS daemon. It boots the in-process kernel, wires up route handlers, middleware, and background tasks, then serves the JSON REST API, WebSocket chat endpoints, and the WebChat dashboard SPA.
 
-## Architecture
+## Architecture Overview
 
 ```mermaid
 graph TD
-    CLI[CLI / Desktop Client]
-    SPA[Dashboard SPA]
-    EXT[External Integrations]
-    WS[WebSocket Clients]
-
-    subgraph "Middleware Stack"
-        LOG[request_logging]
-        SEC[security_headers]
-        VER[api_version_headers]
-        RL[gcra_rate_limit]
-        OIDC[oidc_auth_middleware]
-        AUTH[auth]
-        LANG[accept_language]
+    CLI[CLI / External Clients] -->|HTTP / WebSocket| Axum[Axum Router]
+    Axum --> MW[Middleware Stack]
+    MW --> V1Routes[v1 API Routes]
+    MW --> Dashboard[Dashboard SPA]
+    MW --> Webhook[Channel Webhooks]
+    V1Routes --> Kernel[LibreFangKernel]
+    Webhook --> Bridge[Channel Bridge]
+    Bridge --> Kernel
+    Kernel --> Agents[Agent Runtimes]
+    subgraph Background Tasks
+        CAT[Catalog Sync]
+        CFG[Config Hot-Reload]
+        GC[Cache GC]
+        KEYS[Key Validation]
     end
-
-    subgraph "Route Domains"
-        AGENTS[routes::agents]
-        CHANNELS[routes::channels]
-        SYSTEM[routes::system]
-        MEM[routes::memory]
-        TOOLS[routes::skills / workflows]
-        NET[routes::network / mcp]
-        PROV[routes::providers / budget]
-    end
-
-    KERNEL[LibreFangKernel]
-
-    CLI --> LOG
-    SPA --> LOG
-    EXT --> LOG
-    WS --> LOG
-    LOG --> SEC --> VER --> RL --> OIDC --> AUTH --> LANG
-    LANG --> AGENTS
-    LANG --> CHANNELS
-    LANG --> SYSTEM
-    LANG --> MEM
-    LANG --> TOOLS
-    LANG --> NET
-    LANG --> PROV
-    AGENTS --> KERNEL
-    CHANNELS --> KERNEL
-    SYSTEM --> KERNEL
-    MEM --> KERNEL
-    TOOLS --> KERNEL
-    NET --> KERNEL
-    PROV --> KERNEL
+    Kernel --- Background Tasks
 ```
 
 ## Entry Points
 
 ### `run_daemon()`
 
-The primary entry point called by the CLI's `cmd_start`. It:
+The primary entry point. Blocks until Ctrl+C, SIGTERM, or an API-initiated shutdown:
 
-1. Parses the listen address and wraps the kernel in `Arc`
-2. Starts background agents via `kernel.start_background_agents()`
-3. Optionally initializes OpenTelemetry tracing (feature-gated)
-4. Calls `build_router()` to construct the full Axum app
-5. Spawns background tasks: dashboard asset sync, provider key validation, approval expiry sweep, config hot-reload watcher, model catalog sync, cache GC
-6. Writes a `daemon.json` file so the CLI can discover the running daemon
-7. Optionally starts the observability stack (Prometheus + Grafana via Docker Compose)
-8. Binds with `SO_REUSEADDR` and serves with graceful shutdown
-
-On shutdown (SIGINT, SIGTERM, or API-triggered), it aborts background tasks, removes the daemon info file, stops channel bridges and observability, cleans up tmux sessions, and shuts down the kernel.
+1. Parses the listen address into a `SocketAddr`
+2. Wraps the `LibreFangKernel` in `Arc`
+3. Starts background agents via `kernel.start_background_agents()`
+4. Calls `build_router()` to construct the Axum app
+5. Writes `daemon.json` (PID, listen address, version) for CLI discovery — rejects startup if another daemon is already alive at the same address
+6. Spawns background tasks: dashboard sync, provider key validation, approval sweep, config hot-reload, model catalog sync, cache GC
+7. Optionally starts the Docker-based observability stack (Prometheus + Grafana)
+8. Binds with `SO_REUSEADDR` and runs `axum::serve` with graceful shutdown
+9. On shutdown: aborts background tasks, stops channel bridges, cleans up tmux sessions, shuts down the kernel
 
 ### `build_router()`
 
-Constructs the full `Router` without starting the server. Used by `run_daemon()` internally and by `librefang-desktop` for embedded deployments. Returns `(Router, Arc<AppState>)` so callers can access `state.bridge_manager` for cleanup.
-
-## Request Lifecycle
-
-Requests pass through the middleware stack in this order (outermost first):
-
-| Layer | Purpose |
-|---|---|
-| `CorsLayer` | Allows configured origins (localhost + explicit `cors_origin` from config) |
-| `TraceLayer` | Tower-HTTP tracing for request spans |
-| `CompressionLayer` | gzip/deflate response compression |
-| `request_logging` | Generates `x-request-id`, logs method/path/status/latency, records HTTP metrics |
-| `security_headers` | Injects CSP, HSTS, X-Frame-Options, nosniff, no-cache headers |
-| `api_version_headers` | Adds `X-API-Version` response header; rejects unknown vendor media types with 406 |
-| `gcra_rate_limit` | Per-IP GCRA rate limiting (configurable `api_requests_per_minute`) |
-| `oidc_auth_middleware` | External OAuth/OIDC token validation |
-| `auth` | Bearer token, session cookie, and per-user API key validation |
-| `accept_language` | Parses `Accept-Language`, sets `Content-Language` response header |
-
-## Authentication and Authorization
-
-The auth system supports multiple methods that can be combined:
-
-### Static API Key
-
-The `api_key` field in `config.toml`. Passed via `Authorization: Bearer <key>` or `X-API-Key` header. Validated with constant-time comparison (`subtle`). When empty, auth is disabled entirely (open development mode).
-
-### Dashboard Session Tokens
-
-Username/password login at `POST /api/auth/dashboard-login` returns a randomly generated session token. Tokens are stored in memory (`active_sessions`) and persisted to `sessions.json` for restart survival. Session cookies are scoped to `Path=/dashboard` and get the `Secure` attribute automatically when the request arrives over HTTPS (detected via `X-Forwarded-Proto`).
-
-### Per-User API Keys
-
-Individual users with hashed API keys and assigned roles. The middleware verifies the key against Argon2id hashes and enforces role-based ACL:
-
-| Role | GET | Agent messages/clone/approvals | All other writes | Config/users/shutdown |
-|---|---|---|---|---|
-| `Owner` | ✅ | ✅ | ✅ | ✅ |
-| `Admin` | ✅ | ✅ | ✅ | ❌ |
-| `User` | ✅ | ✅ | ❌ | ❌ |
-| `Viewer` | ✅ | ❌ | ❌ | ❌ |
-
-### OAuth/OIDC
-
-External identity provider integration with endpoints for login redirect, callback, userinfo, introspection, and token refresh.
-
-### `require_auth_for_reads`
-
-When any auth method is configured, the server auto-enables read authentication for dashboard data endpoints (agents, config, budget, sessions, approvals, etc.) unless the operator explicitly sets `require_auth_for_reads = false`. The derivation logic in `derive_require_auth_for_reads()`:
-
-- `None` (default) → `true` if any auth is configured, `false` otherwise
-- `Some(true)` → always require auth (even without auth configured — warns on startup)
-- `Some(false)` → never require auth for reads (for external auth proxy setups)
-
-Always-public endpoints that bypass this flag: `/api/health`, static assets, auth flow entry points, `/api/versions`.
-
-### Credential Resolution
-
-`resolve_dashboard_credential()` resolves config values with this priority:
-
-1. Environment variable (e.g. `LIBREFANG_DASHBOARD_USER`)
-2. `vault:KEY` syntax — reads from the encrypted credential vault
-3. Literal value from `config.toml`
+Constructs the full `Router` without starting the server. Used by `run_daemon()` and by embedders (e.g., `librefang-desktop`) that need the router but manage their own lifecycle. Returns `(Router, Arc<AppState>)`.
 
 ## Route Structure
 
-All API routes are defined in `api_v1_routes()` and mounted at both `/api` and `/api/v1` for backward compatibility. Future versions can be added as separate routers.
+All API routes are defined once in `api_v1_routes()` and mounted at both `/api` and `/api/v1` for backward compatibility. Future versions get their own mount point.
 
-| Route Domain | Prefix | Module |
+```
+/                          → WebChat SPA HTML
+/dashboard/{*path}         → React SPA assets
+/api/v1/*                  → Versioned API (stable)
+/api/*                     → Unversioned alias (latest)
+/v1/chat/completions       → OpenAI-compatible chat endpoint
+/v1/models                 → OpenAI-compatible model list
+/mcp                       → MCP HTTP endpoint
+/hooks/wake                → Webhook: wake trigger
+/hooks/agent               → Webhook: agent trigger
+/channels/*                → Channel adapter webhooks (Feishu, Teams, etc.)
+```
+
+### Route Domains
+
+Each domain lives in its own submodule under `routes::` and provides a `router()` function merged into the v1 tree:
+
+| Domain | Module | Key Endpoints |
 |---|---|---|
-| Configuration | `/api/config` | `routes::config` |
-| Agents | `/api/agents` | `routes::agents` |
-| Channels | `/api/channels` | `routes::channels` |
-| System | `/api/system` | `routes::system` |
-| Memory | `/api/memory` | `routes::memory` |
-| Workflows | `/api/workflows` | `routes::workflows` |
-| Skills | `/api/skills` | `routes::skills` |
-| Network/A2A | `/api/network`, `/a2a` | `routes::network` |
-| Plugins | `/api/plugins` | `routes::plugins` |
-| Providers | `/api/providers` | `routes::providers` |
-| Budget | `/api/budget` | `routes::budget` |
-| Auto-dream | `/api/auto-dream` | `routes::auto_dream` |
-| Goals | `/api/goals` | `routes::goals` |
-| Inbox | `/api/inbox` | `routes::inbox` |
-| Media | `/api/media` | `routes::media` |
-| Prompts | `/api/prompts` | `routes::prompts` |
-| Terminal | `/api/terminal` | `routes::terminal` |
-| Auth | `/api/auth/*` | inline in `server.rs` + `oauth` |
+| System | `routes::system` | Health, version, status, shutdown |
+| Agents | `routes::agents` | CRUD, messaging, sessions, file upload |
+| Channels | `routes::channels` | Channel configuration |
+| Config | `routes::config` | Get/set/reload config, schema |
+| Memory | `routes::memory` | Agent memory management |
+| Workflows | `routes::workflows` | Workflow CRUD and execution |
+| Skills | `routes::skills` | Skill install, evolve, marketplace |
+| Network | `routes::network` | A2A protocol, peers |
+| Plugins | `routes::plugins` | Plugin management |
+| Providers | `routes::providers` | LLM provider config |
+| Budget | `routes::budget` | Token spend tracking |
+| Terminal | `routes::terminal` | Terminal session management |
+| Auth | (inline in `server.rs`) | Login, logout, change-password, OAuth |
 
-Non-API routes:
-- `GET /` — WebChat dashboard SPA
-- `GET /dashboard/*` — React dashboard assets
-- `POST /v1/chat/completions`, `GET /v1/models` — OpenAI-compatible API
-- `POST /hooks/wake`, `POST /hooks/agent` — Webhook triggers (unversioned)
-- `POST /mcp` — MCP HTTP endpoint
-- `* /channels/*` — Dynamic channel webhook routes (bypass auth; external platforms verify signatures)
+## Middleware Stack
+
+Middleware is applied in reverse order (last `.layer()` runs first). The effective execution order per request:
+
+1. **CORS** (`CorsLayer`) — allows localhost + configured origins
+2. **Tracing** (`TraceLayer`) — tower-http structured tracing
+3. **Compression** (`CompressionLayer`) — gzip/deflate responses
+4. **Request logging** — injects `x-request-id`, logs method/path/status/latency, records Prometheus metrics
+5. **Security headers** — `X-Content-Type-Options`, `X-Frame-Options`, CSP, HSTS, `Cache-Control: no-store`
+6. **API version headers** — adds `X-API-Version` to responses, negotiates via `Accept: application/vnd.librefang.v1+json`
+7. **Rate limiting** (`gcra_rate_limit`) — GCRA-based per-IP rate limiting
+8. **OIDC auth middleware** — external OAuth/OIDC token validation
+9. **Auth** — bearer token / API key / session cookie validation (see below)
+10. **Accept-Language** — parses `Accept-Language`, stores resolved language in request extensions for i18n error responses
+
+## Authentication & Authorization
+
+### Auth Methods (in precedence order)
+
+1. **Loopback bypass** — requests from `127.0.0.1` / `::1` skip all auth (CLI on same machine)
+2. **Bearer token** — `Authorization: Bearer <key>` validated against the configured `api_key`
+3. **X-API-Key header** — fallback for clients that can't set `Authorization`
+4. **Query parameter** — `?token=<key>` for SSE/EventSource clients
+5. **Session cookie** — `librefang_session` cookie, only accepted on `/dashboard/*` paths (prevents CSRF on API endpoints)
+6. **Per-user API keys** — Argon2id-hashed keys with role-based access control
+
+### Token Resolution (`resolve_dashboard_credential`)
+
+Credentials are resolved from three sources in priority order:
+
+1. Environment variable (e.g., `LIBREFANG_DASHBOARD_USER`)
+2. `vault:KEY_NAME` syntax — reads from the encrypted credential vault
+3. Literal value from `config.toml`
+
+### Role-Based Access Control
+
+Per-user API keys carry a `UserRole` that gates endpoint access:
+
+| Role | GET | POST | Owner-only writes |
+|---|---|---|---|
+| **Owner** | ✅ | ✅ | ✅ (config, shutdown, change-password) |
+| **Admin** | ✅ | ✅ | ❌ |
+| **User** | ✅ | Message/clone/approval only | ❌ |
+| **Viewer** | ✅ | ❌ | ❌ |
+
+The `is_owner_only_write()` function explicitly enumerates paths that require `Owner` role for non-GET methods: `/api/config`, `/api/config/set`, `/api/config/reload`, `/api/auth/change-password`, `/api/shutdown`.
+
+### Public Endpoint Classification
+
+Endpoints fall into three visibility tiers:
+
+- **Always public** (no auth regardless of config): `/`, `/api/health`, `/api/versions`, auth flow endpoints, dashboard assets, static files
+- **Dashboard reads** (public by default, locked down with `require_auth_for_reads`): `/api/agents`, `/api/status`, `/api/config`, `/api/budget`, `/api/skills`, `/api/workflows`, etc.
+- **Always authenticated**: all POST/PUT/DELETE, `/api/health/detail`, `/api/shutdown`
+
+The `require_auth_for_reads` config option controls the dashboard-reads tier. When unset (default), it auto-enables if any authentication is configured (`api_key`, user keys, or dashboard credentials). Explicitly set `false` to keep reads open behind an external auth proxy.
+
+### Session Management
+
+Sessions are randomly generated tokens stored in memory and persisted to `data/sessions.json`:
+
+- Created by `POST /api/auth/dashboard-login` after password + optional TOTP verification
+- Validated by the auth middleware with opportunistic expiry pruning
+- Persisted across daemon restarts via `save_sessions()` / `load_sessions()`
+- Invalidated globally on password change (`clear_sessions_file()`)
+- Scoped to `Path=/dashboard` with `HttpOnly; SameSite=Lax` (plus `Secure` when the request is HTTPS)
+
+## `AppState`
+
+Shared application state passed to all handlers via Axum's state extractor:
+
+```rust
+pub struct AppState {
+    pub kernel: Arc<LibreFangKernel>,
+    pub started_at: Instant,
+    pub peer_registry: Option<Arc<PeerRegistry>>,
+    pub bridge_manager: Mutex<ChannelBridge>,
+    pub channels_config: RwLock<ChannelsConfig>,
+    pub shutdown_notify: Arc<Notify>,
+    pub clawhub_cache: DashMap<...>,      // 120s TTL
+    pub skillhub_cache: DashMap<...>,     // 120s TTL
+    pub provider_probe_cache: ProbeCache,
+    pub provider_test_cache: DashMap<...>,
+    pub webhook_store: WebhookStore,
+    pub active_sessions: RwLock<HashMap<String, SessionToken>>,
+    pub api_key_lock: RwLock<String>,     // hot-reloadable via change_password
+    pub media_drivers: MediaDriverCache,
+    pub webhook_router: RwLock<Arc<Router>>,  // dynamic for hot-reload
+    pub config_write_lock: Mutex<()>,     // serializes config writes
+}
+```
 
 ## Background Tasks
 
-Spawned during `run_daemon()`, tracked via `JoinHandle` and aborted on shutdown:
+Spawned during `run_daemon()`, tracked for clean shutdown:
 
 | Task | Interval | Purpose |
 |---|---|---|
-| Dashboard asset sync | Once | Downloads/updates SPA bundle from release |
-| Provider key validation | Once | Validates API keys so dashboard shows status |
-| Approval expiry sweep | 10s | Resolves expired pending approval requests |
-| Config hot-reload | 30s | Polls `config.toml` mtime, reloads on change, restarts channel bridges if needed |
-| Model catalog sync | 24h | Syncs community model catalog, reloads catalog in memory |
-| API cache GC | 5m | Evicts expired clawhub/skillhub cache entries (120s TTL) and expired session tokens |
-
-## Session Persistence
-
-Sessions are stored in `sessions.json` in the home directory. On load, expired sessions are pruned. On write (login, logout, GC), the full map is serialized. The file is deleted on password change to force re-login.
-
-Key functions:
-- `load_sessions()` — reads and filters expired tokens
-- `save_sessions()` — serializes current sessions
-- `clear_sessions_file()` — removes the file entirely
+| Dashboard sync | Once at boot | Downloads/updates SPA assets from release |
+| Provider key validation | Once at boot | Validates API keys so dashboard shows status |
+| Approval sweep | Every 10s | Expires pending approval requests |
+| Config hot-reload | Polls every 30s | Detects `config.toml` mtime changes, reloads kernel + channel bridges |
+| Model catalog sync | Every 24h | Syncs community model catalog to local cache |
+| Cache GC | Every 5m | Evicts expired clawhub/skillhub entries and session tokens |
 
 ## Daemon Discovery
 
-`DaemonInfo` is written to `~/.librefang/daemon.json` on startup with PID, listen address, start time, version, and platform. The CLI reads this via `read_daemon_info()` to find running daemons. On startup, stale PID files are detected by checking if the process is alive (`kill -0` on Unix, `tasklist` on Windows) and the port is responding (TCP connect). File permissions are restricted to owner-only (0600 on Unix).
+`run_daemon()` writes a `daemon.json` file (default `~/.librefang/daemon.json`) containing:
 
-## OpenAPI Specification
-
-Auto-generated via `utoipa` from handler annotations and schema derives. Available at `GET /api/openapi.json`. The `ApiDoc` struct in `openapi.rs` collects all annotated handlers into an OpenAPI 3.1 document.
-
-## Password Change Flow
-
-`POST /api/auth/change-password` verifies the current password, validates the new credentials (password ≥ 8 chars, username ≥ 2 chars), writes updated fields to `config.toml`, triggers a kernel config reload, updates the in-memory API key lock, and invalidates all sessions.
-
-## Observability Stack
-
-When `telemetry.enabled = true` in config and Docker is available, `run_daemon()` attempts to start Prometheus (port 9090) and Grafana (port 3000) via `docker compose`. The compose file is located relative to the executable at `deploy/docker-compose.observability.yml`.
-
-## Submodule Overview
-
-| Module | Responsibility |
-|---|---|
-| `channel_bridge` | Starts/manages channel adapters (Telegram, etc.); webhook-based adapters register routes |
-| `middleware` | Auth, logging, security headers, rate limiting, i18n, version headers |
-| `oauth` | OAuth/OIDC provider configuration, login flow, callback handling |
-| `openai_compat` | OpenAI-compatible `/v1/chat/completions` and `/v1/models` endpoints |
-| `openapi` | utoipa-based OpenAPI spec generation |
-| `password_hash` | Argon2id hashing, session token derivation, verification with legacy fallback |
-| `rate_limiter` | GCRA-based per-IP rate limiting |
-| `routes` | All route handlers organized by domain |
-| `stream_chunker` | Splits streaming LLM output into logical chunks |
-| `stream_dedup` | Deduplicates streaming chunks across retries/reconnects |
-| `terminal` | PTY-based terminal session management |
-| `terminal_tmux` | tmux-backed terminal multiplexing |
-| `types` | Shared API types (request/response structs) |
-| `validation` | Input validation helpers with i18n error responses |
-| `versioning` | API version resolution from path and Accept headers |
-| `webchat` | Dashboard SPA serving, asset sync, locale files |
-| `webhook_store` | Persistent webhook registration with URL validation and SSRF protection |
-| `ws` | WebSocket handler for agent chat with origin validation and slot limits |
-| `telemetry` | OpenTelemetry OTLP tracing init and Prometheus metrics (feature-gated) |
-
-## Adding New Routes
-
-1. Create a `router()` function in the appropriate submodule under `routes/`
-2. Add `Router::new().merge(routes::your_domain::router())` to `api_v1_routes()` in `server.rs`
-3. Annotate handlers with `#[utoipa::path]` and add them to the `paths()` list in `openapi.rs`
-4. The route will automatically be available at both `/api/your-endpoint` and `/api/v1/your-endpoint`
-
-## Embedding
-
-Desktop and test consumers use `build_router()` directly instead of `run_daemon()`:
-
-```rust
-let kernel = Arc::new(kernel);
-let (router, state) = build_router(kernel, addr).await;
-// Use `state.bridge_manager` for cleanup on exit
+```json
+{
+  "pid": 12345,
+  "listen_addr": "127.0.0.1:4280",
+  "started_at": "2024-01-15T10:30:00Z",
+  "version": "0.8.0",
+  "platform": "linux"
+}
 ```
+
+The CLI reads this via `read_daemon_info()` to find the running daemon. On startup, if the file exists, the server checks whether the recorded PID is still alive and the listen address is responding before refusing to start.
+
+## API Versioning
+
+The current version is `"v1"`, defined in `versioning::CURRENT_VERSION`. The `api_version_headers` middleware:
+
+- Reads version from the path prefix (`/api/v1/...`) or `Accept: application/vnd.librefang.<version>+json`
+- Returns `406 Not Acceptable` for unknown versions
+- Adds `X-API-Version` to every response
+
+To add a new version: create `api_v2_routes()`, nest it at `/api/v2`, and update `API_VERSION_LATEST`.
+
+## Graceful Shutdown
+
+Triggered by SIGINT, SIGTERM, Ctrl+C, or the API shutdown endpoint. The shutdown sequence:
+
+1. Stop accepting new connections
+2. Abort tracked background tasks and await their termination
+3. Remove `daemon.json`
+4. Stop channel bridges
+5. Stop observability stack (Docker compose down)
+6. Kill tmux sessions (if terminal tmux is enabled)
+7. Shut down the kernel
+
+## Feature Flags
+
+- **`telemetry`** — enables `crate::telemetry` module with Prometheus metrics recorder and OpenTelemetry OTLP tracing initialization
+
+## Security Considerations
+
+- File permissions on `daemon.json` are restricted to `0600` (owner-only) on Unix
+- Password hashing uses Argon2id with transparent migration from legacy plaintext
+- All token comparisons use constant-time equality (`subtle::ConstantTimeEq`)
+- Session cookies are scoped to `/dashboard` to prevent CSRF on API endpoints
+- The `Secure` cookie flag is set automatically when the request arrives over HTTPS (detected via `X-Forwarded-Proto`)
+- Dashboard username is never echoed in unauthenticated responses (prevents credential half-leak)
+- Webhook URLs are validated against private IP ranges to prevent SSRF
+- Request body size is limited by `max_request_body_bytes` (upload routes are exempt and enforce their own limit)

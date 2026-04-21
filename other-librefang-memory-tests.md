@@ -1,99 +1,100 @@
 # Other — librefang-memory-tests
 
-# librefang-memory/tests — Canonical Chat-Scoped Integration Tests
+# librefang-memory-tests
 
-## Purpose
+Integration regression tests for the `librefang-memory` crate, specifically guarding **chat-scoped canonical context isolation** — a privacy-critical fix in `SessionStore` that prevents cross-session message leakage between conversations handled by the same agent.
 
-This directory contains an integration regression test that guards against a cross-session data-leak bug in canonical context storage. Before the fix in `session.rs`, every WhatsApp DM and group chat sharing the same `AgentId` could see each other's message history injected into the LLM prompt — a private DM could surface group messages and vice versa.
+## Background: The Privacy Bug
 
-The test exercises the full **append → load → context** roundtrip through the crate's public API (`SessionStore`), mirroring the actual call path the kernel uses on every inbound message.
+Before the fix under test, `CanonicalEntry` records in the session store were **not** tagged with the originating `SessionId`. When the kernel loaded canonical context to build an LLM prompt, every conversation sharing the same `AgentId` received the full union of all messages across all sessions. Concretely, a WhatsApp DM and a WhatsApp group chat — both routed to the same agent — would inject each other's history into the LLM context, leaking private messages into group prompts and vice versa.
 
-## The Bug It Prevents
+The fix adds a `SessionId` tag at write time (`append_canonical`) and filters by that tag at read time (`canonical_context`).
 
-`CanonicalEntry` rows were keyed only by `AgentId`. When the kernel loaded context for an LLM prompt, it pulled every canonical entry for that agent regardless of which chat session produced it. The fix added a `SessionId` tag to each entry and introduced filtering at read time in `canonical_context`.
+## Test Architecture
 
-## Test Infrastructure
+```mermaid
+flowchart TD
+    A["setup()"] --> B["Connection::open_in_memory"]
+    B --> C["run_migrations"]
+    C --> D["SessionStore::new"]
+
+    E["append_canonical"] --> F["canonical_context"]
+
+    subgraph "Session isolation boundary"
+        G["session_dm"]
+        H["session_group"]
+    end
+
+    F -. "filters by SessionId" .-> G
+    F -. "filters by SessionId" .-> H
+```
+
+## Test Harness
 
 ### `setup()`
 
-Creates a fresh, isolated test environment:
+Creates an ephemeral `SessionStore` backed by an in-memory SQLite database:
 
-```
-in-memory SQLite → run_migrations → SessionStore(Arc<Mutex<Connection>>)
-```
+1. Opens `Connection::open_in_memory`.
+2. Runs `run_migrations` to create the schema.
+3. Returns `SessionStore::new(Arc<Mutex<Connection>>)`.
 
-Each test gets its own database, so tests are independent and parallelizable.
+Every test starts from a blank slate. The `Arc<Mutex<Connection>>` mirrors the production wiring where the store is shared across async tasks.
 
 ### `user_msg(text)`
 
-Helper that constructs a `Message` with `Role::User`, text content, and `pinned: false`. Keeps test assertions readable.
+Helper that constructs a `Message` with `Role::User` and `MessageContent::Text`. Used to build payloads for `append_canonical`.
 
 ## Test Cases
 
 ### `canonical_context_isolates_two_whatsapp_chats_for_same_agent`
 
-The primary regression test. It verifies that two distinct chat sessions derived for the same agent produce isolated context windows.
+**Purpose:** Verifies that two distinct chat channels derived for the same agent produce isolated canonical contexts — the core privacy guarantee.
 
-**Setup:**
+**Steps:**
 
-- One `AgentId`.
-- Two `SessionId`s derived via `SessionId::for_channel`:
-  - `session_dm` — from a WhatsApp DM address (`…@s.whatsapp.net`)
-  - `session_group` — from a WhatsApp group address (`…@g.us`)
+1. Create a single `AgentId`.
+2. Derive two `SessionId` values via `SessionId::for_channel`:
+   - `session_dm` — from `"whatsapp:393331111111@s.whatsapp.net"` (DM)
+   - `session_group` — from `"whatsapp:120363111111111111@g.us"` (group)
+3. Assert the two session IDs differ (different chats must produce different sessions).
+4. Append messages interleaved across sessions:
+   - `"dm-1"` → `session_dm`
+   - `"group-1"` → `session_group`
+   - `"dm-2"` → `session_dm`
+5. Call `canonical_context(agent, Some(session_dm), None)` and assert returned messages are exactly `["dm-1", "dm-2"]` — no group content.
+6. Call `canonical_context(agent, Some(session_group), None)` and assert returned messages are exactly `["group-1"]` — no DM content.
 
-**Flow:**
-
-1. Assert the two sessions are not equal (different channels must produce different sessions).
-2. Append three messages in interleaved order: `dm-1`, `group-1`, `dm-2`.
-3. Load context filtered by `session_dm` → verify only `["dm-1", "dm-2"]`.
-4. Load context filtered by `session_group` → verify only `["group-1"]`.
-
-If this test fails, the session-scoping filter in `canonical_context` is broken and cross-chat leakage is happening.
+**What it catches:** A regression where `canonical_context` stops filtering by `SessionId`, or `append_canonical` stops tagging entries with the session. Both would cause cross-contamination of private and group message history.
 
 ### `canonical_context_unfiltered_returns_all_for_backward_compat`
 
-Ensures that callers passing `session_id = None` to `canonical_context` still receive all entries across every session. This preserves the original pre-fix semantics for code paths that haven't adopted per-session filtering.
+**Purpose:** Ensures that passing `session_id = None` to `canonical_context` returns **all** canonical entries across sessions, preserving backward compatibility for callers that haven't adopted per-session filtering.
 
-**Flow:**
+**Steps:**
 
-1. Append one message each to two different sessions (WhatsApp and Telegram channels).
-2. Call `canonical_context(agent, None, None)`.
-3. Assert both messages are returned.
+1. Append `"a-1"` under `session_a` (WhatsApp channel).
+2. Append `"b-1"` under `session_b` (Telegram channel).
+3. Call `canonical_context(agent, None, None)`.
+4. Assert both `"a-1"` and `"b-1"` appear in results.
 
-## Relationships to Production Code
+**What it catches:** A regression where `None` no longer acts as a "no filter" sentinel — for example, if the implementation mistakenly requires a `SessionId` and returns empty results or errors when none is provided.
 
-```mermaid
-graph TD
-    T[canonical_chat_scoped_integration.rs] -->|setup| M[run_migrations]
-    T -->|append_canonical| S[SessionStore]
-    T -->|canonical_context| S
-    T -->|for_channel| SID[SessionId]
-    S -->|reads/writes| DB[(SQLite)]
-```
+## API Surface Exercised
 
-The test calls into three production modules:
-
-| Production module | Functions used | Role in test |
+| Function | Crate | Role in test |
 |---|---|---|
-| `librefang_memory::migration` | `run_migrations` | Schema setup |
-| `librefang_memory::session` | `SessionStore::new`, `append_canonical`, `canonical_context` | Core API under test |
-| `librefang_types::agent` | `AgentId::new`, `SessionId::for_channel` | Identity derivation |
+| `SessionStore::new` | `librefang-memory` | Construct the store |
+| `run_migrations` | `librefang-memory::migration` | Initialize the schema |
+| `SessionStore::append_canonical` | `librefang-memory::session` | Write tagged messages |
+| `SessionStore::canonical_context` | `librefang-memory::session` | Read filtered messages |
+| `SessionId::for_channel` | `librefang-types::agent` | Derive session from channel identifier |
+| `AgentId::new` | `librefang-types::agent` | Create a unique agent |
 
 ## Running
 
-```sh
-# Run just these integration tests
+```bash
 cargo test -p librefang-memory --test canonical_chat_scoped_integration
-
-# Run with trace output to see SQL statements
-RUST_LOG=librefang_memory=trace cargo test -p librefang-memory --test canonical_chat_scoped_integration -- --nocapture
 ```
 
-## When to Extend
-
-Add a new test here when:
-
-- Changing how `SessionId` is derived from channel addresses (add a derivation-correctness test).
-- Modifying the `canonical_context` filtering logic or its `session_id` parameter semantics.
-- Introducing new backward-compatibility or migration paths for untagged canonical entries.
-- Adding support for a new channel type whose address format could collide with existing ones.
+Both tests are pure-unit (in-memory SQLite, no network) and complete in milliseconds. They should be run in CI on every push to guard against regressions in session-scoped memory isolation.

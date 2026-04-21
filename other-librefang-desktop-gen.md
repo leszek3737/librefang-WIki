@@ -1,45 +1,83 @@
 # Other — librefang-desktop-gen
 
-# librefang-desktop-gen — Tauri Security & Permissions Layer
+# librefang-desktop-gen
 
-## Overview
+Auto-generated Tauri build artifacts that define the security and permissions model for the LibreFang desktop application. The `gen/` directory is produced during the Tauri build process and is **not intended for manual editing**.
 
-`librefang-desktop/gen` contains auto-generated Tauri security artifacts that define the **capability-based access control** (CBAC) boundary between the LibreFang desktop frontend (webview) and the native backend. These files are produced by the Tauri build system and should not be hand-edited — they are regenerated each build from the permissions declared in `src-tauri/capabilities/` and the plugin configurations in `Cargo.toml` / `tauri.conf.json`.
+## Purpose
 
-## File Inventory
+Tauri uses a capability-based security system. Before any frontend (webview) code can invoke a Tauri command, that command must be explicitly allowed through the ACL (Access Control List) system. This module contains three generated files that together define what the LibreFang desktop app's frontend is permitted to do:
 
-| File | Purpose |
-|------|---------|
-| `schemas/acl-manifests.json` | Exhaustive registry of every permission, permission set, and global scope schema for all loaded plugins |
-| `schemas/capabilities.json` | Resolved capability objects mapping windows to their granted permissions at build time |
-| `schemas/desktop-schema.json` | JSON Schema (draft-07) that validates capability files authored by developers |
-
----
+| File | Role |
+|------|------|
+| `schemas/acl-manifests.json` | Registry of every permission available from every plugin used by the app |
+| `schemas/capabilities.json` | The resolved capability set assigned to app windows |
+| `schemas/desktop-schema.json` | JSON Schema for validating capability files at build time |
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    A[Developer-authored<br>capability files] --> B[Tauri build]
-    B --> C[acl-manifests.json]
-    B --> D[capabilities.json]
+graph TD
+    A[Tauri Plugins] --> B[acl-manifests.json]
+    C[Capability Config Files] --> D[capabilities.json]
     B --> E[desktop-schema.json]
-    C --> F[Runtime IPC<br>permission checks]
-    D --> F
-    E --> A
+    D --> F[Runtime Permission Check]
+    B --> F
+    F --> G[Frontend Webview]
 ```
 
-At build time, Tauri reads every plugin's permission manifest, the developer's capability files, and produces the three schema files in `gen/schemas/`. At runtime, the Tauri IPC layer consults the resolved capabilities to allow or deny each frontend-to-backend command invocation.
+At build time, Tauri reads the plugin manifests and the developer-authored capability configuration files (typically in `src-tauri/capabilities/`), then generates these three schema files. At runtime, every IPC call from the webview is validated against the resolved capability set.
 
----
+## acl-manifests.json
 
-## Capability Resolution — `capabilities.json`
+The manifest declares every permission exposed by each plugin integrated into the app. Each plugin entry follows a consistent structure:
 
-The resolved default capability grants the following to the `"main"` window:
+- **`default_permission`** — The permission set granted when a capability references `plugin-name:default`.
+- **`permissions`** — Individual `allow-*` and `deny-*` entries that map to specific commands.
+- **`global_scope_schema`** — Optional JSON Schema for scoped permissions (used by the `shell` plugin).
+
+### Plugin Permission Summary
+
+| Plugin | Default Grants | Key Commands |
+|--------|---------------|--------------|
+| `autostart` | `allow-enable`, `allow-disable`, `allow-is-enabled` | Boot auto-start control |
+| `core` | Aggregates all `core:*:default` sets | Umbrella for core sub-plugins |
+| `core:app` | `allow-version`, `allow-name`, `allow-tauri-version`, `allow-identifier`, `allow-bundle-type`, `allow-register-listener`, `allow-remove-listener` | App metadata and lifecycle listeners |
+| `core:event` | `allow-listen`, `allow-unlisten`, `allow-emit`, `allow-emit-to` | Event bus |
+| `core:image` | `allow-new`, `allow-from-bytes`, `allow-from-path`, `allow-rgba`, `allow-size` | Image handling |
+| `core:menu` | All menu commands (`allow-new`, `allow-append`, `allow-popup`, `allow-set-as-app-menu`, etc.) | Application and window menus |
+| `core:path` | `allow-resolve-directory`, `allow-resolve`, `allow-normalize`, `allow-join`, `allow-dirname`, `allow-extname`, `allow-basename`, `allow-is-absolute` | Path operations |
+| `core:resources` | `allow-close` | Resource cleanup |
+| `core:tray` | `allow-new`, `allow-get-by-id`, `allow-remove-by-id`, `allow-set-icon`, `allow-set-menu`, `allow-set-tooltip`, `allow-set-title`, `allow-set-visible`, etc. | System tray |
+| `core:webview` | `allow-get-all-webviews`, `allow-webview-position`, `allow-webview-size`, `allow-internal-toggle-devtools` | Webview management |
+| `core:window` | Window state queries (`allow-is-fullscreen`, `allow-is-minimized`, `allow-is-maximized`, etc.) and `allow-internal-toggle-maximize` | Window management |
+| `dialog` | `allow-ask`, `allow-confirm`, `allow-message`, `allow-save`, `allow-open` | Native dialogs |
+| `global-shortcut` | Empty by default | Keyboard shortcut registration (`allow-register`, `allow-unregister`, `allow-is-registered`) |
+| `notification` | All notification commands including `allow-notify`, `allow-request-permission`, `allow-batch`, channel management | System notifications |
+| `shell` | `allow-open` (http/https, tel:, mailto:) | Shell execution, process spawning, URL opening |
+| `updater` | `allow-check`, `allow-download`, `allow-install`, `allow-download-and-install` | Self-update workflow |
+
+### Permission Identifier Format
+
+Every permission follows the naming convention:
+
+```
+{plugin}:{scope}
+```
+
+Where `scope` is one of:
+- **`default`** — The plugin's recommended default set.
+- **`allow-{command}`** — Grants access to a specific command.
+- **`deny-{command}`** — Explicitly blocks a specific command.
+
+## capabilities.json
+
+Defines the resolved capabilities for the application. LibreFang uses a single capability called `default`:
 
 ```json
 {
   "identifier": "default",
+  "description": "Default permissions for the LibreFang desktop app",
   "local": true,
   "windows": ["main"],
   "permissions": [
@@ -56,139 +94,62 @@ The resolved default capability grants the following to the `"main"` window:
 }
 ```
 
-Key points:
+### What this means for the `main` window
 
-- **`local: true`** — Only local (app-bundled) URLs may exercise these permissions. No remote origin gets access.
-- **`windows: ["main"]`** — Only the window labelled `main` receives these grants. Any secondary window has zero IPC access unless additional capabilities are defined.
-- **`global-shortcut`** is granted on a per-command basis rather than via its `default` (which is intentionally empty) — only `register`, `unregister`, and `is-registered` are exposed.
+The `main` window's webview can:
 
----
+- Use all core Tauri commands (path, event, window, webview, app, image, resources, menu, tray).
+- Send and manage system notifications.
+- Open `http(s)://`, `tel:`, and `mailto:` URLs via the shell.
+- Show native dialogs (ask, confirm, message, save, open).
+- Register, unregister, and check global keyboard shortcuts.
+- Control auto-start behavior on boot.
+- Check for, download, and install application updates.
 
-## Permission Plugin Reference — `acl-manifests.json`
+The `local: true` setting means these permissions apply only to locally-served content (the bundled frontend), not to any remote URLs. No `remote` block is configured, and no additional windows or webviews are granted access.
 
-Every top-level key is a plugin namespace. Each namespace declares:
+## desktop-schema.json
 
-1. **`default_permission`** — The permission set activated when you write `"plugin-name:default"` in a capability.
-2. **`permissions`** — Individual `allow-*` / `deny-*` entries, each mapping to one Tauri IPC command.
-3. **`global_scope_schema`** (optional) — JSON Schema for scoped data that constrains the command at runtime.
+A JSON Schema (Draft-07) document that validates capability files. It defines the structure of:
 
-### Plugin Breakdown
+- **`CapabilityFile`** — Top-level container (single capability, array, or object with `capabilities` key).
+- **`Capability`** — A single capability definition with `identifier`, `permissions`, optional `windows`, `webviews`, `platforms`, `remote`, and `local` fields.
+- **`CapabilityRemote`** — Remote URL patterns allowed to use the capability.
+- **`PermissionEntry`** — Either a raw identifier string or an object with `identifier` plus scoped `allow`/`deny` arrays.
+- **`Identifier`** — Enumerates every valid permission string across all plugins.
 
-#### `core` (aggregate)
-Bundles all core sub-plugin defaults: `path`, `event`, `window`, `webview`, `app`, `image`, `resources`, `menu`, `tray`.
+The schema includes conditional validation: when a `PermissionEntry` references a `shell:*` identifier, the `allow` and `deny` arrays must conform to the `ShellScopeEntry` schema, which validates command configurations including:
+- `name` — The command name used from the webview API.
+- `cmd` — The actual system command (supports `$HOME`, `$APPDATA`, and other Tauri directory variables).
+- `sidecar` — Whether the command references a bundled sidecar binary.
+- `args` — Argument rules (`true` for any, `false` for none, or an array of specific validators with regex patterns).
 
-#### `core:app`
-App metadata queries (`version`, `name`, `tauri-version`, `identifier`, `bundle-type`) plus listener registration/removal. The default explicitly **excludes** destructive operations like `app_hide`, `app_show`, `remove_data_store`, `set_app_theme`, and `set_dock_visibility`.
+## Relationship to the Codebase
 
-#### `core:event`
-Full event bus access: `listen`, `unlisten`, `emit`, `emit_to`. No restrictions in the default set.
+These generated files sit between two layers:
 
-#### `core:window`
-Read-only window queries (position, size, state flags like `is_fullscreen`, `is_maximized`, etc.) plus `internal_toggle_maximize`. Mutating commands (`create`, `destroy`, `set_size`, `set_position`, etc.) require explicit individual permission grants.
+1. **Source of truth** — Developer-authored files in `src-tauri/capabilities/` and the plugin `tauri.conf.json` configuration.
+2. **Runtime consumer** — The Tauri runtime reads the generated capabilities to enforce permissions when the webview invokes commands.
 
-#### `core:webview`
-Query webview list, position, size, and toggle devtools. Creating webviews, zooming, or clearing browsing data requires explicit opt-in.
+To change permissions, edit the capability files in the source directory (not in `gen/`). The `gen/` contents are regenerated on every build. For example, to add filesystem write access, create or modify a capability file in `src-tauri/capabilities/` to include `fs:allow-write-text-file` with the appropriate scope, then rebuild.
 
-#### `core:path`, `core:image`, `core:resources`, `core:menu`, `core:tray`
-Standard utility plugins with full command access in their defaults.
+### Shell Scope Configuration
 
-#### `autostart`
-Three commands — `enable`, `disable`, `is_enabled` — all included in the default. Controls whether the app launches at OS login.
-
-#### `dialog`
-Five dialog types — `ask`, `confirm`, `message`, `save`, `open` — all allowed by default.
-
-#### `global-shortcut`
-Deliberately ships an **empty default** (no permissions). The app must explicitly grant individual commands. In LibreFang's case, `allow-register`, `allow-unregister`, and `allow-is-registered` are granted in the default capability.
-
-#### `notification`
-Full notification pipeline: permission checks, channel management (create/delete/list), sending, batching, and cancelling. All 16 commands are included in the default.
-
-#### `shell`
-Default allows only `open` (for `http(s)://`, `tel:`, `mailto:` links). This is the only plugin with a non-null `global_scope_schema`, which defines `ShellScopeEntry` objects for whitelisting specific commands or sidecars with argument validation.
-
-**Shell scope entries** support two forms:
-
-- **System command** — `{ "name": "...", "cmd": "...", "args": ... }` where `cmd` can start with directory variables like `$HOME`, `$CONFIG`, `$APPDATA`, etc.
-- **Sidecar** — `{ "name": "...", "sidecar": true, "args": ... }` for bundled sidecar binaries.
-
-Arguments can be a boolean (`true` = allow all, `false` = allow none) or an array of `ShellScopeEntryAllowedArg` objects that either pass a literal string or define a regex `validator` for dynamic input.
-
-#### `updater`
-Full update lifecycle: `check`, `download`, `install`, `download_and_install`.
-
----
-
-## Capability File Schema — `desktop-schema.json`
-
-This is the JSON Schema that validates developer-authored capability files under `src-tauri/capabilities/`. A valid file can be:
-
-- A single `Capability` object
-- An array of `Capability` objects
-- An object with a `capabilities` array
-
-### Capability Object Structure
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `identifier` | **yes** | Unique string ID (e.g. `"main-user-files-write"`) |
-| `permissions` | **yes** | Array of `PermissionEntry` items, unique |
-| `description` | no | Human-readable intent |
-| `windows` | no | Glob patterns matching window labels |
-| `webviews` | no | Glob patterns matching webview labels (finer-grained than `windows`) |
-| `local` | no | Whether local app URLs can use this capability (default `true`) |
-| `remote` | no | `CapabilityRemote` with `urls` array using URLPattern syntax |
-| `platforms` | no | Restrict to specific OS targets (e.g. `["macOS", "windows"]`) |
-
-### PermissionEntry
-
-Each entry is either:
-
-- A plain identifier string (e.g. `"core:default"`, `"shell:allow-open"`)
-- An object with `identifier` plus optional `allow` / `deny` arrays for scoped permissions (used exclusively with `shell:*` permissions in this app)
-
----
-
-## Modifying Permissions
-
-To change what the frontend can access:
-
-1. Edit or create a capability file in `src-tauri/capabilities/`.
-2. Reference permission identifiers using the `{plugin}:{permission}` format.
-3. Rebuild — Tauri regenerates `gen/schemas/` automatically.
-4. Never edit files in `gen/` directly; changes will be overwritten on the next build.
-
-### Adding a new capability example
+The `shell` plugin is the only plugin in this app with a `global_scope_schema`. When using `shell:allow-execute`, `shell:allow-spawn`, or `shell:allow-stdin-write` beyond the defaults, you must provide scoped entries in the permission configuration:
 
 ```json
 {
-  "identifier": "main-shell-scripts",
-  "description": "Allow the main window to run specific shell commands",
-  "windows": ["main"],
-  "local": true,
-  "permissions": [
+  "identifier": "shell:allow-execute",
+  "allow": [
     {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        {
-          "name": "ping",
-          "cmd": "ping",
-          "args": [
-            { "validator": "\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}" }
-          ]
-        }
+      "name": "my-command",
+      "cmd": "$APPDATA/scripts/myscript.sh",
+      "args": [
+        { "validator": "\\w+" }
       ]
     }
   ]
 }
 ```
 
----
-
-## Security Considerations
-
-- The default capability is intentionally **local-only** — no remote URL can invoke IPC commands.
-- `global-shortcut` registration requires explicit opt-in because keyboard shortcuts can conflict with OS-level bindings.
-- Shell `execute` and `spawn` are **not** included in `shell:default`. They must be granted with explicit scope entries that constrain the command and validate arguments.
-- Window/webview creation and destruction commands are not in any default set and must be individually granted if needed.
-- The `deny` arrays in permission entries take precedence over `allow` during runtime validation.
+This restricts which commands the frontend can execute and what arguments are accepted, validated by regex at runtime.

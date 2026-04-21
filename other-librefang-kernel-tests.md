@@ -2,75 +2,196 @@
 
 # librefang-kernel-tests
 
-Integration and end-to-end tests for the `librefang-kernel` crate. These tests exercise the kernel's major subsystems — agent spawning, hand lifecycle, WASM execution, workflow pipelines, and LLM-backed conversations — through the public API surface.
+Integration and end-to-end tests for the `librefang-kernel` crate. These tests exercise the kernel's major subsystems—agent spawning, hand lifecycle, WASM execution, workflow orchestration, and CLI tooling—against real infrastructure where possible.
 
-## Overview
+## Test Files
 
-The test suite is organized into five files, each targeting a distinct kernel capability:
-
-| File | Scope | Requires LLM? |
-|---|---|---|
-| `integration_test.rs` | Basic boot → spawn → message pipeline | Yes (Groq) |
-| `multi_agent_test.rs` | Hand lifecycle, agent registry, state persistence | Mostly no |
-| `wasm_agent_integration_test.rs` | WASM module loading, fuel limits, host calls | No |
-| `workflow_integration_test.rs` | Multi-step workflow registration and execution | Partial |
+| File | Scope | Requires LLM |
+|------|-------|-------------|
+| `integration_test.rs` | Basic agent spawn → message → response pipeline | Yes (`GROQ_API_KEY`) |
+| `multi_agent_test.rs` | Hand lifecycle, state persistence, agent registry | No (mostly) |
+| `wasm_agent_integration_test.rs` | WASM module loading, execution, fuel limits | No |
+| `workflow_integration_test.rs` | Workflow registration, multi-step pipelines | Yes (one test) |
 | `purge_sentinels_test.rs` | `purge_sentinels` CLI binary | No |
 
-Tests that require a live LLM (via Groq API) guard themselves with a `GROQ_API_KEY` environment variable check and gracefully skip when absent. All other tests run offline.
-
-## Running the Tests
+## Running
 
 ```bash
-# Offline tests only (no API key needed)
-cargo test -p librefang-kernel
+# All tests that don't need external services
+cargo test -p librefang-kernel -- --nocapture
 
 # Include live LLM integration tests
 GROQ_API_KEY=gsk_... cargo test -p librefang-kernel -- --nocapture
-
-# Run a specific test file
-cargo test -p librefang-kernel --test multi_agent_test
-
-# Run the WASM tests (uses multi_thread flavor)
-cargo test -p librefang-kernel --test wasm_agent_integration_test
 ```
 
-The `--nocapture` flag is recommended for integration tests so you can see agent responses and token usage printed to stdout.
+Tests that require `GROQ_API_KEY` print a skip message and return early when the variable is unset—they never fail due to missing credentials.
 
 ## Architecture
 
+Each test file follows the same pattern: construct a `KernelConfig` pointing at an isolated temp directory, boot the kernel, exercise a subsystem, assert invariants, then `kernel.shutdown()`.
+
 ```mermaid
 graph TD
-    subgraph Test Files
-        IT[integration_test.rs]
-        MA[multi_agent_test.rs]
-        WA[wasm_agent_integration_test.rs]
-        WF[workflow_integration_test.rs]
-        PS[purge_sentinels_test.rs]
-    end
-
-    subgraph Kernel API
-        KB[LibreFangKernel::boot_with_config]
-        SA[spawn_agent]
-        SM[send_message]
-        AH[activate_hand / deactivate_hand]
-        RW[register_workflow / run_workflow]
-        RT[register_trigger / list_triggers]
-    end
-
-    IT --> KB --> SA --> SM
-    MA --> KB --> AH
-    WA --> KB --> SA --> SM
-    WF --> KB --> SA
-    WF --> RW
-    WF --> RT
-    PS -->|subprocess| BIN[purge_sentinels binary]
+    TC[test_config helper] --> KC[KernelConfig]
+    KC --> BK[LibreFangKernel::boot_with_config]
+    BK --> SA[spawn_agent]
+    BK --> AH[activate_hand]
+    BK --> RW[register_workflow / run_workflow]
+    BK --> SM[send_message]
+    BK --> SM2[send_message_streaming]
+    BK --> SD[kernel.shutdown]
 ```
+
+## Test Coverage by Subsystem
+
+### Agent Spawning and Messaging (`integration_test.rs`)
+
+Two tests validate the core LLM pipeline:
+
+- **`test_full_pipeline_with_groq`** — Boots the kernel, spawns a single agent from a TOML `AgentManifest`, sends a message via the Groq API, asserts the response is non-empty and token usage is reported, then kills the agent.
+- **`test_multiple_agents_different_models`** — Spawns two agents configured with different Groq models (`llama-3.3-70b-versatile` and `llama-3.1-8b-instant`), sends each a message, verifies both respond independently.
+
+Both use `test_config()` which creates a fresh temp directory under `$TMPDIR/librefang-integration-test` and configures the default model provider as `"groq"`.
+
+### Hand Lifecycle (`multi_agent_test.rs`)
+
+The largest test file. Covers the hand activation/deactivation system and its interaction with the agent registry.
+
+**Test fixtures** are three hand TOML definitions:
+
+- `HAND_A` (`test-clip`) — single-agent hand with tools `["file_read", "file_write", "shell_exec"]`
+- `HAND_B` (`test-devops`) — single-agent hand with `["shell_exec"]`
+- `HAND_C` (`test-research`) — multi-agent hand with `analyst` and `planner` roles, where `planner` is the explicit coordinator
+
+**Lifecycle tests:**
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_activate_hand_spawns_agent` | Activation creates an agent in the registry |
+| `test_deactivate_kills_agent` | Deactivation removes the agent from the registry |
+| `test_pause_and_resume_hand` | Pause sets status to `"Paused"`, agent persists; resume restores `"Active"` |
+| `test_deterministic_agent_id` | `AgentId::from_hand_agent("test-clip", "main", None)` matches the spawned ID |
+| `test_deterministic_id_stable_across_reactivation` | Same hand+role produces the same agent ID after deactivate/reactivate |
+| `test_explicit_coordinator_role_used_for_routes` | `HAND_C` routes resolve to the `planner` coordinator, not `main` |
+
+**Metadata and inheritance:**
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_agent_tagged_with_hand_metadata` | Agent gets tags `"hand:test-clip"` and `"hand_instance:{uuid}"` |
+| `test_hand_tools_applied_to_agent` | Agent manifest inherits the hand's tool list |
+| `test_system_prompt_preserved` | Agent's system prompt contains the hand's prompt text |
+| `test_default_provider_resolved_to_kernel_default` | `provider = "default"` is resolved to the actual kernel provider, not left as the string `"default"` |
+
+**State persistence (`test_hand_state_persistence`):**
+
+After activation, the kernel writes `hand_state.json` to `{data_dir}/`. The test asserts:
+
+- Schema version is `4`
+- Instance fields (`instance_id`, `status`, `activated_at`, `updated_at`) are typed strings
+- `agent_ids` is a map from role names to `AgentId` strings
+- `coordinator_role` is persisted for multi-agent hands (`test_multi_agent_hand_state_persists_coordinator_role`)
+
+**Coexistence and isolation:**
+
+- `test_multiple_hands_coexist` — Two hands can be active simultaneously with distinct agent IDs
+- `test_deactivate_one_hand_preserves_other` — Deactivating one hand doesn't affect the other's agent
+- `test_find_instance_by_agent_id` — `kernel.hands().find_by_agent(id)` reverse-lookups work
+
+**Error cases:**
+
+- `test_activate_nonexistent_hand_fails`
+- `test_deactivate_nonexistent_instance_fails`
+- `test_pause_nonexistent_instance_fails`
+- `test_resume_nonexistent_instance_fails`
+
+**Trigger migration (`test_reactivation_restores_triggers_to_original_roles`):**
+
+Registers a trigger on the `analyst` role, deactivates the hand, reactivates it, and asserts the trigger stays attached to `analyst` and does not leak to `planner`. Validates that reactivation uses the legacy deterministic ID format so triggers survive.
+
+**Live LLM test (`test_six_agent_fleet`):**
+
+Spawns six agents (coder, researcher, writer, ops, analyst, hello-world) using two different Groq models, sends each a tailored prompt, asserts all responses are non-empty, and prints a fleet summary with aggregate token usage.
+
+### WASM Agent Execution (`wasm_agent_integration_test.rs`)
+
+Tests the `module = "wasm:..."` agent path using hand-written WAT (WebAssembly Text Format) modules. All tests are self-contained—no external services needed.
+
+**WAT modules defined as string constants:**
+
+| Constant | Behavior |
+|----------|----------|
+| `HELLO_WAT` | Returns fixed `{"response":"hello from wasm"}` from a data section |
+| `ECHO_WAT` | Returns the input JSON as-is (ptr/len passthrough) |
+| `INFINITE_LOOP_WAT` | Infinite `br` loop—tests fuel exhaustion |
+| `HOST_CALL_PROXY_WAT` | Forwards input to the `librefang.host_call` import |
+
+All modules export `memory`, `alloc` (bump allocator), and `execute` (returns `i64` with ptr in high 32 bits, len in low 32 bits).
+
+**Tests:**
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_wasm_agent_hello_response` | Fixed-response module returns `"hello from wasm"` |
+| `test_wasm_agent_echo` | Echo module's response contains the input message |
+| `test_wasm_agent_fuel_exhaustion` | Infinite loop returns an error containing `"Fuel exhausted"` or `"fuel"` |
+| `test_wasm_agent_missing_module` | Nonexistent `.wasm` file produces an error mentioning the filename |
+| `test_wasm_agent_host_call_time` | Host-call proxy executes end-to-end through the kernel's host function dispatch |
+| `test_wasm_agent_streaming_fallback` | `send_message_streaming` on a WASM agent produces at least 2 events (`TextDelta` + `ContentComplete`) and the final result matches the module output |
+| `test_multiple_wasm_agents` | Two WASM agents coexist in the registry; both execute correctly |
+| `test_mixed_wasm_and_llm_agents` | WASM and `builtin:chat` agents coexist; WASM agent executes while LLM agent is registered but not messaged |
+
+All WASM tests use `#[tokio::test(flavor = "multi_thread")]` and configure `provider = "ollama"` / `model = "test"` since no real LLM is needed—the WASM runtime handles execution directly.
+
+### Workflow Orchestration (`workflow_integration_test.rs`)
+
+Tests the workflow engine: registration, agent resolution, run creation, and full multi-step execution.
+
+**Kernel-level wiring (no LLM):**
+
+- **`test_workflow_register_and_resolve`** — Spawns `agent-alpha` and `agent-beta`, creates a two-step `Workflow` with `StepAgent::ByName` references, calls `kernel.register_workflow()`, verifies `workflow_engine().list_workflows()` returns the registered workflow, asserts `agent_registry().find_by_name()` resolves correctly, and creates a run via `workflow_engine().create_run()`.
+- **`test_workflow_agent_by_id`** — Creates a workflow referencing an agent by `StepAgent::ById` and verifies run creation succeeds.
+- **`test_trigger_registration_with_kernel`** — Registers `TriggerPattern::Lifecycle` and `TriggerPattern::SystemKeyword` triggers on an agent, verifies `kernel.list_triggers()` returns both, filters by agent ID, and tests `kernel.remove_trigger()`.
+
+**Full E2E with Groq (`test_workflow_e2e_with_groq`):**
+
+1. Boots kernel with Groq config, calls `kernel.set_self_handle()`
+2. Spawns `wf-analyst` and `wf-writer` agents
+3. Creates a two-step sequential workflow: analyze → summarize, with Mustache-style `{{input}}` templates
+4. Calls `kernel.run_workflow()` with input text
+5. Asserts the workflow completes with `WorkflowRunState::Completed`
+6. Verifies `step_results` has 2 entries with correct step names and positive token counts
+7. Verifies `workflow_engine().list_runs()` returns 1 run
+
+### Purge Sentinels CLI (`purge_sentinels_test.rs`)
+
+Black-box tests for the `purge_sentinels` binary that removes whole-line sentinel markers (e.g., `NO_REPLY`, `[no reply needed]`) from markdown files.
+
+Uses `env!("CARGO_BIN_EXE_purge_sentinels")` to locate the compiled binary and `tempfile::TempDir` for isolated fixtures.
+
+**Fixture setup (`fixture_dir()`):**
+
+Creates four files:
+- `a.md` — contains `NO_REPLY` and `[no reply needed]` as whole lines
+- `b.md` — `NO_REPLY` embedded mid-sentence (should be preserved)
+- `c.md` — clean file
+- `nested/d.md` — lowercase `no_reply` with whitespace
+
+**Tests:**
+
+| Test | Behavior |
+|------|----------|
+| `dry_run_reports_counts_and_touches_nothing` | `--dry-run` prints removed count but leaves all files unchanged, no `.bak` created |
+| `apply_creates_backup_and_rewrites` | `--apply` creates `.bak` with original content, rewrites file without whole-line sentinels, leaves mid-sentence sentinels intact, skips clean files, recurses into subdirectories |
+| `apply_is_idempotent` | Second `--apply` reports `removed=0` and leaves files/backups unchanged |
+| `apply_aborts_when_existing_bak_differs` | Pre-seeded stale `.bak` causes non-zero exit with `"backup mismatch"` error; stale `.bak` is preserved |
+| `nonexistent_path_exits_non_zero` | Invalid path produces error containing `"does not exist"` |
 
 ## Common Patterns
 
-### Kernel Configuration
+### Config Construction
 
-Every test creates an isolated `KernelConfig` pointing at a temporary directory. This prevents tests from interfering with each other or with real user data:
+Every test creates an isolated `KernelConfig`:
 
 ```rust
 fn test_config(name: &str) -> KernelConfig {
@@ -81,51 +202,15 @@ fn test_config(name: &str) -> KernelConfig {
     KernelConfig {
         home_dir: tmp.clone(),
         data_dir: tmp.join("data"),
-        default_model: DefaultModelConfig {
-            provider: "groq".to_string(),
-            model: "llama-3.3-70b-versatile".to_string(),
-            api_key_env: "GROQ_API_KEY".to_string(),
-            // ...
-        },
+        default_model: DefaultModelConfig { /* ... */ },
         ..KernelConfig::default()
     }
 }
 ```
 
-Key points:
-- Each test uses a unique subdirectory name to avoid collisions when tests run in parallel.
-- The directory is wiped and recreated at the start of each test.
-- `DefaultModelConfig` is configured even for non-LLM tests because the kernel requires it at boot.
-
-### Agent Manifest via TOML
-
-Tests define agents using inline TOML strings parsed into `AgentManifest`:
-
-```rust
-let manifest: AgentManifest = toml::from_str(r#"
-    name = "test-agent"
-    version = "0.1.0"
-    module = "builtin:chat"
-
-    [model]
-    provider = "groq"
-    model = "llama-3.3-70b-versatile"
-    system_prompt = "You are a test agent."
-
-    [capabilities]
-    tools = ["file_read"]
-    memory_read = ["*"]
-    memory_write = ["self.*"]
-"#).unwrap();
-```
-
-The `module` field determines the agent backend:
-- `"builtin:chat"` — standard LLM chat agent
-- `"wasm:<filename>"` — WASM module agent (see `wasm_agent_integration_test.rs`)
+Each test uses a unique subdirectory name so tests can run in parallel without conflict.
 
 ### Hand Installation
-
-Hand-based tests install hand definitions from TOML content using a helper:
 
 ```rust
 fn install_hand(kernel: &LibreFangKernel, toml_content: &str) {
@@ -136,11 +221,7 @@ fn install_hand(kernel: &LibreFangKernel, toml_content: &str) {
 }
 ```
 
-Three hand fixtures are defined as constants (`HAND_A`, `HAND_B`, `HAND_C`) covering single-agent hands, multi-agent hands with explicit coordinators, and varying tool configurations.
-
-### LLM Guard Pattern
-
-Tests that call live LLMs follow a consistent skip pattern:
+### Conditional LLM Tests
 
 ```rust
 if std::env::var("GROQ_API_KEY").is_err() {
@@ -149,135 +230,32 @@ if std::env::var("GROQ_API_KEY").is_err() {
 }
 ```
 
-This prints a message and returns early rather than panicking, so `cargo test` succeeds even without API access.
+### Cleanup
 
-## Test Coverage by File
+Every test calls `kernel.shutdown()` at the end. Temp directories are cleaned up when `TempDir` drops, or on the next test run via `remove_dir_all` in the config helper.
 
-### integration_test.rs
+## Key API Surfaces Tested
 
-Two tests validating the core message pipeline:
-
-- **`test_full_pipeline_with_groq`** — Boots the kernel, spawns a single agent with a Groq model, sends a message, asserts the response is non-empty and token usage is recorded, then kills the agent and shuts down.
-- **`test_multiple_agents_different_models`** — Spawns two agents with different Groq models (llama-3.3-70b-versatile and llama-3.1-8b-instant), sends messages to both, verifies independent responses.
-
-These tests confirm that the kernel can manage multiple concurrent LLM sessions through different model configurations.
-
-### multi_agent_test.rs
-
-The largest test file, covering the hand subsystem comprehensively:
-
-**Lifecycle:**
-- `test_activate_hand_spawns_agent` — Activation creates agents in the registry.
-- `test_deactivate_kills_agent` — Deactivation removes agents from the registry.
-- `test_pause_and_resume_hand` — Pause keeps agents alive; status transitions correctly.
-- `test_hand_instance_status_active_on_creation` — New instances start as `Active`.
-
-**Deterministic IDs:**
-- `test_deterministic_agent_id` — Agent IDs derive from hand ID + role via `AgentId::from_hand_agent`.
-- `test_deterministic_id_stable_across_reactivation` — Single-instance reactivation preserves the same agent ID (legacy format).
-- `test_agent_id_from_hand_id_is_deterministic` — Pure unit test for `AgentId::from_hand_id`.
-
-**Coordinator routing:**
-- `test_explicit_coordinator_role_used_for_routes` — When a hand declares a non-`main` coordinator, `agent_id()` and `agent_name()` resolve to that role.
-
-**Metadata and tooling:**
-- `test_agent_tagged_with_hand_metadata` — Agents receive `hand:<id>` and `hand_instance:<uuid>` tags.
-- `test_hand_tools_applied_to_agent` — Hand-level `tools` list propagates to the agent manifest capabilities.
-- `test_system_prompt_preserved` — The hand's `system_prompt` appears in the spawned agent's manifest.
-- `test_default_provider_resolved_to_kernel_default` — `provider = "default"` is resolved to the actual provider from `KernelConfig`.
-
-**State persistence:**
-- `test_hand_state_persistence` — After activation, `hand_state.json` exists with v4 format, including typed fields (`instance_id`, `status`, `activated_at`, `updated_at`) and the `agent_ids` map.
-- `test_multi_agent_hand_state_persists_coordinator_role` — The `coordinator_role` field is persisted for multi-agent hands.
-
-**Coexistence and isolation:**
-- `test_multiple_hands_coexist` — Two hands activated simultaneously have distinct agent IDs.
-- `test_deactivate_one_hand_preserves_other` — Deactivating one hand doesn't affect the other's agents.
-- `test_find_instance_by_agent_id` — `hands().find_by_agent()` looks up instances from agent IDs.
-
-**Error cases:**
-- `test_activate_nonexistent_hand_fails`
-- `test_deactivate_nonexistent_instance_fails`
-- `test_pause_nonexistent_instance_fails`
-- `test_resume_nonexistent_instance_fails`
-
-**Trigger migration:**
-- `test_reactivation_restores_triggers_to_original_roles` — Verifies that triggers registered on a specific agent role stay attached to that role after deactivation/reactivation, rather than migrating to the coordinator.
-
-**Live LLM:**
-- `test_six_agent_fleet` — Spawns 6 agents (coder, researcher, writer, ops, analyst, hello-world) with different models and tool sets, sends each a message, and reports aggregate token usage.
-
-### wasm_agent_integration_test.rs
-
-Tests WASM agent execution without any LLM dependency. Uses WAT (WebAssembly Text format) modules written inline as string constants:
-
-| Constant | Behavior |
-|---|---|
-| `ECHO_WAT` | Returns input JSON as-is (kernel extracts response) |
-| `HELLO_WAT` | Returns fixed `{"response":"hello from wasm"}` |
-| `INFINITE_LOOP_WAT` | Infinite `br` loop — tests fuel exhaustion |
-| `HOST_CALL_PROXY_WAT` | Forwards input to the `librefang.host_call` import |
-
-All WASM tests use `#[tokio::test(flavor = "multi_thread")]` because WASM execution requires a multi-threaded runtime.
-
-**Test cases:**
-- `test_wasm_agent_hello_response` — Fixed-response module returns expected string.
-- `test_wasm_agent_echo` — Echo module includes the input message in its output.
-- `test_wasm_agent_fuel_exhaustion` — Infinite loop module fails with a fuel-related error.
-- `test_wasm_agent_missing_module` — Referencing a nonexistent `.wasm` file produces a clear "Failed to read" error.
-- `test_wasm_agent_host_call_time` — Tests the host call import mechanism end-to-end.
-- `test_wasm_agent_streaming_fallback` — `send_message_streaming` on a WASM agent produces at least `TextDelta` + `ContentComplete` events, then resolves to the same response as non-streaming.
-- `test_multiple_wasm_agents` — Two WASM agents execute independently; registry count reflects both plus the default assistant.
-- `test_mixed_wasm_and_llm_agents` — WASM and LLM agents coexist in the same kernel. Killing the WASM agent leaves the LLM agent intact.
-
-### workflow_integration_test.rs
-
-Tests the workflow engine at two levels:
-
-**Kernel wiring (no LLM):**
-- `test_workflow_register_and_resolve` — Creates a 2-step `Workflow` with agents referenced by name via `StepAgent::ByName`. Verifies the workflow is registered, agents are resolvable via `agent_registry().find_by_name()`, and a `WorkflowRun` can be created with input.
-- `test_workflow_agent_by_id` — Uses `StepAgent::ById` to reference an agent directly by its string ID.
-- `test_trigger_registration_with_kernel` — Registers `TriggerPattern::Lifecycle` and `TriggerPattern::SystemKeyword` triggers on an agent, verifies listing and removal.
-
-**Full E2E with Groq:**
-- `test_workflow_e2e_with_groq` — Spawns two agents (analyst, writer), creates a 2-step sequential pipeline, runs it with real LLM calls. Asserts:
-  - Workflow completes successfully.
-  - Both steps have non-zero token usage.
-  - `step_results` records each step's name in order.
-  - `WorkflowRunState::Completed` is set on the run.
-  - `list_runs()` returns the run.
-
-The workflow uses `{{input}}` template variables in `prompt_template` fields. Output variable binding (`output_var`) is tested in the registration test but not in the live E2E test.
-
-### purge_sentinels_test.rs
-
-Tests the `purge_sentinels` CLI binary as a subprocess. This is the only test file that drives an external binary rather than calling the kernel API directly.
-
-The binary reference uses Cargo's built-in binary discovery:
-```rust
-const BIN: &str = env!("CARGO_BIN_EXE_purge_sentinels");
-```
-
-**Fixture setup** creates a temp directory with four test files:
-- `a.md` — Contains whole-line sentinels (`NO_REPLY`, `[no reply needed]`) plus real text.
-- `b.md` — Contains `NO_REPLY` embedded mid-sentence (should NOT be removed).
-- `c.md` — Clean file with no sentinels.
-- `nested/d.md` — Lowercase `no_reply` with surrounding whitespace.
-
-**Test cases:**
-- `dry_run_reports_counts_and_touches_nothing` — `--dry-run` reports `removed=3` but leaves all files unchanged and creates no `.bak` files.
-- `apply_creates_backup_and_rewrites` — `--apply` creates `.bak` files with original content, removes whole-line sentinels, preserves mid-sentence sentinels, leaves clean files untouched, and handles nested directories.
-- `apply_is_idempotent` — A second `--apply` run reports `removed=0` and leaves files/backups unchanged.
-- `apply_aborts_when_existing_bak_differs` — If a stale `.bak` exists with different content, the tool exits non-zero with a "backup mismatch" error and preserves the stale backup.
-- `nonexistent_path_exits_non_zero` — Invalid paths produce a clear error message.
-
-## Contributing New Tests
-
-When adding integration tests:
-
-1. **Isolate state** — Always create a unique temp directory via `test_config("descriptive-name")`. Never share state between tests.
-2. **Guard LLM tests** — Wrap any test calling `send_message` against a real provider with the `GROQ_API_KEY` check and early return.
-3. **Use `multi_thread` for WASM** — Any test exercising WASM agents needs `#[tokio::test(flavor = "multi_thread")]`.
-4. **Clean up** — Call `kernel.shutdown()` at the end of every test to release resources. Kill spawned agents if the test doesn't deactivate hands.
-5. **Prefer TOML manifests** — Define agent configurations as inline TOML strings parsed with `toml::from_str` rather than constructing `AgentManifest` structs manually. This mirrors real usage and catches serialization issues.
-6. **Assert meaningfully** — Beyond "is not empty," assert on specific field values, token counts, status strings, and error messages to catch regressions.
+| API | Tested In |
+|-----|-----------|
+| `LibreFangKernel::boot_with_config` | All kernel tests |
+| `kernel.spawn_agent(manifest)` | `integration_test`, `wasm_*`, `workflow_*`, `multi_agent_test` (fleet) |
+| `kernel.send_message(agent_id, msg)` | `integration_test`, `wasm_*` |
+| `kernel.send_message_streaming(agent_id, msg, None)` | `wasm_agent_streaming_fallback` |
+| `kernel.kill_agent(agent_id)` | `integration_test`, `wasm_*` |
+| `kernel.activate_hand(id, params)` | `multi_agent_test` |
+| `kernel.deactivate_hand(instance_id)` | `multi_agent_test` |
+| `kernel.pause_hand(instance_id)` | `multi_agent_test` |
+| `kernel.resume_hand(instance_id)` | `multi_agent_test` |
+| `kernel.hands().install_from_content(...)` | `multi_agent_test` |
+| `kernel.hands().get_instance(instance_id)` | `multi_agent_test` |
+| `kernel.hands().find_by_agent(agent_id)` | `multi_agent_test` |
+| `kernel.agent_registry().get(agent_id)` | All kernel tests |
+| `kernel.agent_registry().find_by_name(name)` | `workflow_integration_test` |
+| `kernel.agent_registry().count()` / `.list()` | `wasm_*`, `multi_agent_test` (fleet) |
+| `kernel.register_workflow(workflow)` | `workflow_integration_test` |
+| `kernel.run_workflow(wf_id, input)` | `workflow_integration_test` |
+| `kernel.workflow_engine().list_workflows()` | `workflow_integration_test` |
+| `kernel.workflow_engine().create_run(...)` / `.get_run(...)` / `.list_runs(...)` | `workflow_integration_test` |
+| `kernel.register_trigger(...)` / `.list_triggers(...)` / `.remove_trigger(...)` | `workflow_integration_test`, `multi_agent_test` |
+| `kernel.set_self_handle()` | `workflow_integration_test` (E2E) |

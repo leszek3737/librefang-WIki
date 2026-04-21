@@ -2,91 +2,113 @@
 
 # librefang-cli
 
-The command-line interface for LibreFang Agent OS. Produces the `librefang` binary that serves as the primary entry point for interacting with the agent system — whether through terminal commands, an interactive TUI, or shell completions.
+The command-line interface for LibreFang Agent OS. Produces the `librefang` binary that serves as the primary entry point for interacting with the agent system.
 
-## Build-Time Metadata
+## Role in the Workspace
 
-The `build.rs` script injects environment variables at compile time for version reporting:
-
-| Variable | Source | Example |
-|---|---|---|
-| `GIT_SHA` | `git rev-parse --short HEAD` | `a3f7c2d` |
-| `BUILD_DATE` | `date -u +%Y-%m-%d` | `2025-01-15` |
-| `RUSTC_VERSION` | `rustc --version` | `rustc 1.82.0` |
-
-As a side effect, the build script also configures Git to use the shared hooks in `scripts/hooks/` by running `git config core.hooksPath scripts/hooks`. This runs silently on every build and is non-fatal if it fails (e.g., outside a Git checkout).
-
-## Feature Flags
-
-The binary is compiled in one of three profiles, each propagating downstream into `librefang-api`:
-
-```
-default  →  librefang-api/all-channels + telemetry
-all-channels  →  librefang-api/all-channels
-mini  →  librefang-api/mini  (minimal channel set, no telemetry)
-telemetry  →  librefang-api/telemetry + OpenTelemetry SDK + tracing-otlp layer
-```
-
-The `mini` profile is useful for resource-constrained deployments where only a subset of communication channels are needed. The `default` profile is the full-fat build for developer and production workstations.
-
-## Dependency Architecture
+`librefang-cli` sits at the top of the dependency graph. It pulls in nearly every other workspace crate and orchestrates them behind a `clap`-based CLI surface. It does not contain business logic itself — it wires together the kernel, API, runtime, migrations, skills, and extensions, then delegates work to those layers.
 
 ```mermaid
 graph TD
-    CLI[librefang-cli] --> TYPES[librefang-types]
-    CLI --> KERNEL[librefang-kernel]
+    CLI[librefang-cli] --> Kernel[librefang-kernel]
     CLI --> API[librefang-api]
-    CLI --> MIGRATE[librefang-migrate]
-    CLI --> SKILLS[librefang-skills]
-    CLI --> EXT[librefang-extensions]
-    CLI --> RUNTIME[librefang-runtime]
-    API -.->|feature gates| CLI
+    CLI --> Runtime[librefang-runtime]
+    CLI --> Migrate[librefang-migrate]
+    CLI --> Skills[librefang-skills]
+    CLI --> Extensions[librefang-extensions]
+    CLI --> Types[librefang-types]
 ```
 
-The CLI is the top-level orchestrator. It pulls in every other workspace crate and wires them together based on user commands. Notable dependency roles:
+## Binary
 
-- **librefang-kernel / librefang-runtime** — Core execution engine and runtime environment.
-- **librefang-api** — Communication channel layer. Feature flags here control which protocols are available.
-- **librefang-migrate** — Database migration runner (backed by `rusqlite`).
-- **librefang-skills / librefang-extensions** — Plugin systems for agent capabilities.
-- **librefang-types** — Shared type definitions across the workspace.
-
-## Key External Dependencies
-
-| Crate | Role in the CLI |
+| Binary name | Source |
 |---|---|
-| `clap` + `clap_complete` | Argument parsing and shell completion generation |
-| `ratatui` | Interactive terminal UI mode |
-| `colored` | Colored terminal output for non-TUI commands |
-| `reqwest` (blocking) | Synchronous HTTP requests (e.g., fetching resources or updates) |
-| `rusqlite` | Local SQLite database access |
-| `toml` / `toml_edit` | Reading and writing TOML configuration files |
-| `fluent` + `unic-langid` | Internationalization (i18n) of CLI messages |
-| `tracing` + `tracing-subscriber` | Structured logging and diagnostics |
-| `rustls` | TLS without native OpenSSL dependency |
-| `opentelemetry_sdk` / `tracing-opentelemetry` | Optional distributed telemetry export |
+| `librefang` | `src/main.rs` |
 
-## Building and Running
+## Feature Flags
+
+Features control which channel backends and telemetry are compiled in. They gate the corresponding features in `librefang-api`.
+
+| Feature | Default | Effect |
+|---|---|---|
+| `all-channels` | **on** | Enables every channel backend in `librefang-api` |
+| `mini` | off | Minimal channel subset (useful for smaller builds) |
+| `telemetry` | **on** | Enables OpenTelemetry tracing via `opentelemetry_sdk` and `tracing-opentelemetry` |
+
+The default profile gives you a full-featured binary with all channels and telemetry. For constrained environments, build with `--no-default-features --features mini`.
+
+## Build Script (`build.rs`)
+
+The build script runs three tasks at compile time:
+
+### 1. Git Hooks Configuration
+
+Automatically sets the repository's hooks path to `scripts/hooks` so every developer gets consistent git hooks after their first build.
+
+### 2. Version Metadata Injection
+
+Captures three pieces of build-time metadata and exposes them as environment variables, available to the binary via `env!()` or `option_env!()`:
+
+| Variable | Source | Example Value |
+|---|---|---|
+| `GIT_SHA` | `git rev-parse --short HEAD` | `a1b2c3d` |
+| `BUILD_DATE` | `date -u +%Y-%m-%d` | `2025-01-15` |
+| `RUSTC_VERSION` | `rustc --version` | `rustc 1.75.0` |
+
+If any command fails (e.g., building from a tarball without git), the value falls back to `"unknown"`.
+
+These variables are intended for display in `--version` output or diagnostic logging.
+
+## Key Dependencies
+
+### Internal Workspace Crates
+
+- **librefang-types** — Shared type definitions
+- **librefang-kernel** — Core agent logic and state management
+- **librefang-api** — Channel backends and communication layer
+- **librefang-migrate** — Database schema migrations
+- **librefang-skills** — Skill/plugin definitions
+- **librefang-extensions** — Extension system
+- **librefang-runtime** — Agent runtime execution
+
+### Notable External Crates
+
+| Crate | Purpose |
+|---|---|
+| `clap` / `clap_complete` | CLI argument parsing and shell completion generation |
+| `ratatui` | Terminal UI rendering |
+| `colored` | Colored terminal output |
+| `fluent` / `unic-langid` | Internationalization (i18n) |
+| `rusqlite` | Embedded SQLite database |
+| `reqwest` (blocking) | HTTP client for operations that can't be async |
+| `rustls` | TLS without OpenSSL dependency |
+| `tokio` | Async runtime |
+| `tracing` / `tracing-subscriber` | Structured logging and diagnostics |
+| `toml` / `toml_edit` | Configuration file reading and modification |
+| `open` | Open URLs/files in the system default handler |
+| `walkdir` | Recursive directory traversal |
+| `zeroize` | Secure memory clearing for sensitive data |
+
+## Configuration and Data Paths
+
+The `dirs` crate resolves standard platform directories (config, data, cache) for the agent's filesystem layout. Configuration files are typically TOML, read with `toml` and edited in-place with `toml_edit`.
+
+## Adding a New CLI Subcommand
+
+1. Define the subcommand variant in the `clap` derive structure (in `src/main.rs` or a sub-module).
+2. Add a match arm in the main dispatch logic.
+3. Delegate to the appropriate workspace crate — avoid implementing logic directly in the CLI layer.
+4. If the subcommand needs new functionality, add it to `librefang-kernel` or the relevant crate first, then call it from the CLI.
+
+## Building
 
 ```bash
 # Full build (default features)
 cargo build -p librefang-cli
 
-# Minimal build for constrained environments
+# Minimal build without telemetry or all channels
 cargo build -p librefang-cli --no-default-features --features mini
 
-# Run the binary
-cargo run -p librefang-cli -- <args>
-
-# Or directly after install
-librefang --help
+# Install to ~/.cargo/bin
+cargo install --path librefang-cli
 ```
-
-The binary embeds its version metadata at compile time, so it can report exact commit, build date, and compiler version at runtime without needing Git or network access.
-
-## Notes for Contributors
-
-- The build script is non-hermetic: it shells out to `git`, `date`, and `rustc`. CI environments must have these available, or the variables fall back to `"unknown"`.
-- The `reqwest` dependency uses its **blocking** feature. If you need async HTTP elsewhere, prefer adding a separate `reqwest` entry or gating it behind a feature to avoid pulling in the blocking runtime in contexts that don't need it.
-- Shell completions are generated via `clap_complete`. If you add or rename subcommands, remember to regenerate completion scripts.
-- The `fluent` i18n system expects FTL resource files at a conventional path. When adding user-facing strings, add them to the FTL files rather than hardcoding English text.

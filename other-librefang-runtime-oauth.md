@@ -2,99 +2,100 @@
 
 # librefang-runtime-oauth
 
-OAuth authentication flows for LibreFang runtime drivers. This crate implements the OAuth 2.0 flows required to authenticate with AI service providers—specifically ChatGPT (OpenAI) and GitHub Copilot—so that runtime drivers can obtain and refresh access tokens.
+OAuth 2.0 authentication flows for LibreFang runtime drivers, providing token acquisition and refresh for third-party AI services (ChatGPT, GitHub Copilot).
 
 ## Purpose
 
-LibreFang drivers interact with third-party AI APIs that require user authentication. This crate encapsulates the full OAuth lifecycle so that individual driver implementations don't need to duplicate auth logic. It handles:
+This module encapsulates the full OAuth lifecycle required by runtime drivers that authenticate against external providers. It isolates credential handling, PKCE generation, token exchange, and refresh logic into a dedicated crate so that drivers remain focused on request orchestration rather than authentication mechanics.
 
-- Generating PKCE code verifiers and challenges
-- Managing authorization state parameters
-- Token exchange after user consent
-- Secure storage and rotation of tokens in memory
-- Automatic token refresh before expiry
+## Dependencies & What They Signal
 
-## Dependencies
-
-The crate relies on two sibling crates for core types and HTTP transport:
-
-| Crate | Role |
+| Dependency | Role in This Module |
 |---|---|
-| `librefang-types` | Shared data types (credentials, token representations) |
-| `librefang-http` | HTTP client construction and request execution |
+| `librefang-types` | Shared types — likely `TokenResponse`, credential structs, error enums |
+| `librefang-http` | Shared HTTP client configuration and middleware |
+| `reqwest` | Outbound HTTP calls to authorization and token endpoints |
+| `tokio` | Async runtime for I/O-bound OAuth exchanges |
+| `serde` / `serde_json` | Serialization of token payloads and provider responses |
+| `base64` / `sha2` / `hex` | PKCE code verifier/challenge generation (SHA-256 digest, base64url encoding) |
+| `rand` | Cryptographically secure random generation for `state` and `code_verifier` values |
+| `zeroize` | Secure memory clearing for secrets (verifiers, client secrets, tokens) |
+| `thiserror` | Typed error definitions for OAuth-specific failure modes |
+| `tracing` | Structured logging of flow progress and failures |
 
-External dependencies of note:
-
-- **sha2, base64, hex, rand** — PKCE challenge generation and random state tokens
-- **zeroize** — Secure clearing of sensitive values (secrets, tokens) from memory
-- **reqwest** — Underlying HTTP client used for token endpoint calls
-- **serde / serde_json** — Serialization of token responses and auth parameters
-- **tracing** — Structured logging of auth flow progress (no sensitive data logged)
-
-## OAuth Flow Architecture
+## Architecture
 
 ```mermaid
-flowchart TD
-    A[Driver requests auth] --> B[Generate PKCE verifier + state]
-    B --> C[Build authorization URL]
-    C --> D[User grants consent in browser]
-    D --> E[Callback with auth code]
-    E --> F[Exchange code for tokens]
-    F --> G{Token valid?}
-    G -- Yes --> H[Return access token]
-    G -- Expired --> I[Refresh token flow]
-    I --> H
-    H --> J[Driver makes API calls]
+graph TD
+    A[Runtime Driver] -->|requests token| B[librefang-runtime-oauth]
+    B -->|PKCE + auth URL| C[Browser / User Agent]
+    C -->|callback with code| B
+    B -->|token exchange| D[OAuth Provider]
+    D -->|access + refresh tokens| B
+    B -->|typed tokens| A
+    B -->|HTTP calls| E[librefang-http]
+    B -->|shared types| F[librefang-types]
 ```
+
+The module acts as a bridge between the runtime driver (which needs an access token to call an AI provider's API) and the OAuth provider's token endpoints. It does not embed a browser; it produces authorization URLs and consumes redirect callbacks.
 
 ## Key Concepts
 
 ### PKCE (Proof Key for Code Exchange)
 
-All flows use PKCE to protect against authorization code interception attacks. The crate generates a cryptographically random code verifier, derives the SHA-256 challenge, and includes both in the appropriate steps. The `sha2` and `base64` dependencies handle this derivation.
+All flows use PKCE to protect the authorization code exchange:
 
-### Secure Memory Handling
+1. **Generate** a random `code_verifier` (high-entropy string via `rand`).
+2. **Derive** the `code_challenge` by computing `SHA-256(code_verifier)` and base64url-encoding the digest (`sha2` + `base64`).
+3. **Include** the `code_challenge` and `code_challenge_method=S256` in the authorization URL.
+4. **Send** the original `code_verifier` during the token exchange to prove possession.
 
-Access tokens, refresh tokens, and intermediate secrets are held in types that implement `Zeroize`. When these values go out of scope, their memory is overwritten, reducing the window for credential extraction.
+The `zeroize` dependency ensures that `code_verifier` and any client secrets are cleared from memory once the exchange completes.
 
-### Token Refresh
+### Supported Providers
 
-The crate tracks token expiry and can transparently refresh access tokens using stored refresh credentials. Callers should attempt a request and, if the token is expired, invoke the refresh path rather than re-running the full authorization flow.
+- **ChatGPT (OpenAI)** — OAuth flow targeting OpenAI's authorization server.
+- **GitHub Copilot** — OAuth flow targeting GitHub's device-flow or web-flow authorization.
 
-## Integration with LibreFang
+Each provider has distinct endpoints, scopes, and token response shapes, but the underlying PKCE and token lifecycle is shared.
 
-This crate is consumed by runtime drivers (e.g., a ChatGPT driver or a GitHub Copilot driver). The typical integration pattern:
+### Token Lifecycle
 
-1. The driver calls into this crate to start an OAuth flow for a specific provider.
-2. This crate returns an authorization URL and opens or returns it for the user.
-3. After the user authenticates, the driver receives a callback with an authorization code.
-4. The driver passes the code back to this crate, which exchanges it for tokens.
-5. The driver stores the resulting credential and uses it for subsequent API requests via `librefang-http`.
-
-Because the call graph shows no outgoing calls to other LibreFang crates at the module level, this crate is entirely self-contained in its logic—it produces tokens and credentials that callers then feed into other parts of the system.
+1. **Authorization request** — Build a URL the user visits to grant consent.
+2. **Code exchange** — Redeem the authorization code (received via callback) for access and refresh tokens.
+3. **Token refresh** — Use the refresh token to obtain a new access token when the current one expires.
+4. **Secure disposal** — Zeroize all intermediate secrets.
 
 ## Error Handling
 
-Errors are defined using `thiserror` and cover common OAuth failure modes:
+Errors are defined via `thiserror` and cover:
 
-- Network failures during token exchange
-- Invalid or expired authorization codes
-- Malformed responses from the provider's token endpoint
-- Missing or invalid configuration (client ID, redirect URI)
+- Network failures during token exchange (`reqwest` errors)
+- Provider-specific error responses (`invalid_grant`, `expired_token`, etc.)
+- PKCE or state mismatches (possible tampering or session corruption)
+- Missing or malformed configuration
 
-All errors are structured so callers can distinguish between retryable conditions (network issues, temporary provider errors) and permanent failures (invalid credentials, user denial).
+All errors implement `std::error::Error` and integrate with `tracing` for structured diagnostics.
 
-## Logging
+## Integration Points
 
-The crate uses `tracing` spans to log the progression of OAuth flows. Logs include:
+### Consuming from a Runtime Driver
 
-- Flow initiation and provider identification
-- PKCE challenge generation (the challenge itself, never the verifier)
-- Token exchange initiation and completion status
-- Refresh attempts and outcomes
+A runtime driver depends on this crate and calls into it to:
 
-No secrets, authorization codes, or tokens are ever written to logs.
+1. Obtain an authorization URL to present to the user.
+2. Handle the callback containing the authorization code.
+3. Complete the exchange and receive a typed `TokenResponse`.
+4. Periodically refresh the token using the stored refresh token.
 
-## Configuration
+### Relationship to Other Crates
 
-Callers provide provider-specific configuration (client ID, redirect URI, token endpoint URLs, scopes) which this crate uses to construct the appropriate requests. Configuration is expected to come from `librefang-types` or the driver's own settings, not hardcoded within this crate.
+- **`librefang-types`** — This crate reuses or re-exports token and credential types rather than defining its own duplicates.
+- **`librefang-http`** — HTTP calls go through the shared HTTP layer, inheriting its proxy support, timeout configuration, and TLS settings.
+
+## Security Considerations
+
+- **`zeroize`** is used for all secret values to minimize the window of exposure in memory.
+- **`state` parameter** is randomly generated per-request and validated on callback to prevent CSRF.
+- **No secrets in logs** — `tracing` spans log flow progress (e.g., "token exchange started", "token refreshed") but never log credentials, verifiers, or token values.
+- **PKCE** eliminates the need to embed a `client_secret` in desktop/runtime applications where the secret cannot be safely stored.

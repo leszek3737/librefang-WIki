@@ -1,393 +1,282 @@
 # Authentication & Security — librefang-api-src
 
-# Authentication & Security — `librefang-api`
+# Authentication & Security — `librefang-api-src`
 
-This module provides the full authentication and security layer for the LibreFang API: OAuth2/OIDC external identity provider integration, Argon2id-based dashboard password authentication, and a webhook subscription system with SSRF mitigations and HMAC-signed deliveries.
+This module provides three layers of protection for the LibreFang API server:
 
----
+| Layer | File | Purpose |
+|-------|------|---------|
+| **OAuth2/OIDC** | `oauth.rs` | External identity provider federation |
+| **Password Hashing** | `password_hash.rs` | Argon2id dashboard authentication with transparent migration |
+| **Rate Limiting** | `rate_limiter.rs` | Cost-aware GCRA per-IP throttling |
 
 ## Architecture Overview
 
 ```mermaid
-graph TD
-    subgraph "Inbound Auth"
-        A[Browser / CLI] -->|Bearer JWT| MW[oidc_auth_middleware]
-        A -->|API Key / Session Token| AK[api_key middleware]
-        A -->|Username + Password| DP[verify_dashboard_password]
-    end
+flowchart TD
+    REQ[Incoming Request] --> RL{GCRA Rate Limiter}
+    RL -- exempt --> MW[Middleware Chain]
+    RL -- allowed --> MW
+    RL -- 429 --> REJECT[429 Too Many Requests]
 
-    subgraph "OAuth2/OIDC Flow"
-        A -->|GET /api/auth/login/:provider| LR[build_login_redirect]
-        LR -->|302 redirect| IdP[External IdP]
-        IdP -->|GET /api/auth/callback| CB[handle_code_exchange]
-        CB -->|code + state| TE[exchange_code]
-        TE -->|id_token| JV[validate_jwt_cached]
-        CB -->|access_token| UI[fetch_userinfo]
-    end
+    MW --> APIKEY{API Key Middleware}
+    APIKEY -- valid --> OIDC{OIDC Auth Middleware}
+    APIKEY -- invalid --> DENY1[401 Unauthorized]
 
-    subgraph "Caches"
-        DC[DiscoveryCache - 1h TTL]
-        JC[JwksCache - 1h TTL]
-        TS[TokenStore - 24h TTL]
-    end
+    OIDC -- Bearer token present --> VAL[Validate JWT via JWKS]
+    OIDC -- no token / disabled --> PASS[Pass through]
+    VAL -- valid --> INJECT[Inject IdTokenClaims into extensions]
+    VAL -- invalid domain --> DENY2[403 Forbidden]
+    VAL -- invalid signature --> PASS
+    INJECT --> HANDLER[Route Handler]
+    PASS --> HANDLER
 
-    subgraph "Webhook Security"
-        WS[WebhookStore]
-        WS -->|HMAC-SHA256| SIG[compute_hmac_signature]
-        WS -->|SSRF check| VU[validate_webhook_url]
+    subgraph Login Flow
+        BROWSER[Browser] -->|GET /api/auth/login/:provider| REDIRECT[302 → IdP]
+        REDIRECT -->|User authenticates| CB[GET /api/auth/callback]
+        CB -->|Exchange code + validate state| TOKENS[Session Tokens]
     end
-
-    JV --> JC
-    CB --> TS
-    LR --> DC
 ```
-
----
-
-## Module Composition
-
-| File | Responsibility |
-|------|---------------|
-| `oauth.rs` | OAuth2/OIDC provider integration, JWT validation, token lifecycle |
-| `password_hash.rs` | Argon2id password hashing, dashboard session management |
-| `webhook_store.rs` | Webhook subscription CRUD, HMAC signing, SSRF protection |
 
 ---
 
 ## OAuth2/OIDC — `oauth.rs`
 
-### Purpose
+### Multi-Provider OIDC Federation
 
-Enables users to authenticate against external identity providers (Google, GitHub, Azure AD, Keycloak, or any OIDC-compliant IdP) instead of managing local credentials. The module handles the full authorization code flow with PKCSRF protection, JWT validation via JWKS, and transparent token refresh.
+Supports Google, GitHub, Azure AD, Keycloak, and any standards-compliant OIDC provider. Each provider is resolved at request time from `ExternalAuthConfig` — either through OIDC discovery or explicit endpoint URLs.
 
-### Provider Resolution
+**Provider resolution flow** (`resolve_providers`):
 
-Providers are resolved from `ExternalAuthConfig` in one of two modes:
+1. Iterate `config.providers` and call `resolve_single_provider` for each.
+2. If a provider has explicit `auth_url` and `token_url`, use those directly (e.g., GitHub which is OAuth2 but not full OIDC).
+3. If a provider has an `issuer_url`, perform OIDC discovery at `{issuer}/.well-known/openid-configuration`.
+4. If no providers resolved and legacy single-provider config (`issuer_url` + `client_id`) exists, fall back to that as provider `"default"`.
 
-- **Multi-provider**: Each entry in `config.providers` is resolved independently. Providers with explicit `auth_url`/`token_url` use those directly (e.g., GitHub). Providers with only `issuer_url` trigger OIDC discovery.
-- **Legacy single-provider fallback**: If no `providers` array entries resolve but `issuer_url` and `client_id` are set at the top level, a single `"default"` provider is constructed from discovery.
+### Caching
 
-The function `resolve_providers()` orchestrates this and is called at the start of every auth route. Resolution failures for individual providers are logged but do not prevent other providers from functioning.
+Both discovery documents and JWKS keysets are cached in global `LazyLock` instances:
 
-### OIDC Discovery
+| Cache | TTL | Storage |
+|-------|-----|---------|
+| `DISCOVERY_CACHE` | 1 hour | `HashMap<String, CachedDiscovery>` keyed by issuer URL |
+| `JWKS_CACHE` | 1 hour | `HashMap<String, CachedJwks>` keyed by JWKS URI |
 
-`discover_oidc_cached()` fetches `{issuer_url}/.well-known/openid-configuration` and extracts endpoints, supported scopes, and the JWKS URI. Results are cached globally in `DISCOVERY_CACHE` (a `LazyLock<RwLock<HashMap>>`) with a 1-hour TTL. Cache hits skip the HTTP fetch entirely.
+Both use `RwLock` for concurrent read-heavy access. Cache TTL is checked against `fetched_at` timestamps — expired entries are re-fetched on next access.
 
-### CSRF State Tokens
+### CSRF Protection (State Tokens)
 
-The `state` parameter in OAuth redirects is an HMAC-SHA256-signed JSON payload, not a random string. This allows the callback to determine which provider to route to without additional server-side state.
-
-**Token structure**: `base64url(json_payload).base64url(hmac_signature)`
-
-The `OAuthStatePayload` contains:
-- `provider` — the provider ID string (e.g., `"google"`)
-- `nonce` — a UUID v4 random value, also used as the OIDC `nonce` parameter
-- `ts` — UNIX timestamp; tokens older than 10 minutes (`STATE_TOKEN_TTL_SECS = 600`) are rejected
-
-The HMAC key is derived from `LIBREFANG_STATE_SECRET` env var, falling back to a random per-process key on first access. If the process restarts without the env var set, in-flight state tokens become invalid — this is intentional for local-agent deployments.
-
-Key functions:
-- `build_state_token(provider_id)` — creates and signs a new state token
-- `verify_state_token(state)` — validates HMAC, decodes payload, checks expiry
-
-### Authentication Flow
-
-#### Login Redirect
+The OAuth2 `state` parameter is an HMAC-SHA256-signed JSON payload:
 
 ```
-GET /api/auth/login          → redirects to first configured provider
-GET /api/auth/login/:provider → redirects to the named provider
+base64url(JSON).base64url(HMAC-SHA256-signature)
 ```
 
-`build_login_redirect()` constructs the authorization URL with `response_type=code`, the client ID, redirect URI, scopes, and the signed state token. The nonce is extracted from the state token (re-verified internally) and passed as the OIDC `nonce` parameter.
+The payload (`OAuthStatePayload`) contains:
+- `provider` — which IdP to route back to during the callback
+- `nonce` — random UUID for OIDC nonce parameter and replay protection
+- `ts` — Unix timestamp; tokens expire after 10 minutes (`STATE_TOKEN_TTL_SECS`)
 
-#### Authorization Code Callback
+The HMAC key is derived from the `LIBREFANG_STATE_SECRET` environment variable. If unset, a random per-process key is generated (meaning state tokens are invalidated on restart).
 
-```
-GET  /api/auth/callback   → browser redirect from IdP
-POST /api/auth/callback   → programmatic clients (JSON body)
-```
-
-Both routes delegate to `handle_code_exchange()`, which:
-
-1. Validates the `state` parameter via `verify_state_token()` — rejects expired, tampered, or malformed tokens
-2. Routes to the provider encoded in the state payload
-3. Reads the client secret from the env var named in `provider.client_secret_env`
-4. Calls `exchange_code()` to POST to the token endpoint
-5. Attempts JWT validation of the `id_token` (if present) via `validate_jwt_cached()`
-6. Verifies the `nonce` in the ID token matches the state token nonce
-7. Falls back to `fetch_userinfo()` if no ID token or validation fails
-8. Checks `allowed_domains` against the email claim if configured
-9. Stores tokens in `TOKEN_STORE` for later refresh
-10. Returns a `CallbackResponse` with the access token, user info, and optional refresh token
-
-**Security note on refresh tokens**: The refresh token is returned to the client because LibreFang is a local-agent system bound to `127.0.0.1`. The existing API key middleware provides an additional access control layer.
-
-### JWT Validation
-
-`validate_jwt_cached()` validates a JWT against the provider's JWKS:
-
-1. Decodes the JWT header to extract `kid` and algorithm
-2. Fetches JWKS from `fetch_jwks_cached()` (1-hour TTL, global `JWKS_CACHE`)
-3. Matches the key by `kid`, or by key type (`RSA`/`EC`) if no `kid`
-4. Builds a `DecodingKey` from the JWK components (`n`/`e` for RSA, `x`/`y` for EC)
-5. Validates signature, expiration, and audience
-
-Supported algorithms: RS256, RS384, RS512, ES256, ES384.
-
-### Token Introspection
-
-```
-POST /api/auth/introspect
-```
-
-Follows RFC 7662 conventions. Accepts a `token` and optional `provider` hint. Tries JWT validation against candidate providers and returns `{"active": true, ...}` with claims or `{"active": false}`.
-
-### Token Refresh
-
-```
-POST /api/auth/refresh
-```
-
-Resolves the refresh token from one of three sources (in priority order):
-1. The `refresh_token` field in the request body
-2. The `TOKEN_STORE` lookup by provider ID
-3. Any stored entry with a refresh token (when no provider specified)
-
-Calls `exchange_refresh_token()` and updates `TOKEN_STORE` with the new tokens.
+**Key functions:**
+- `build_state_token(provider_id)` → creates a signed state token
+- `verify_state_token(state)` → validates HMAC, decodes payload, checks expiry
 
 ### Token Store
 
-`TOKEN_STORE` is a global in-memory `HashMap<String, StoredTokens>` keyed by user `sub`. Entries older than 24 hours are evicted on access. The store is used to:
-- Look up refresh tokens for the `/api/auth/refresh` endpoint
-- Track provider associations per user
+An in-memory `TokenStore` (`HashMap<String, StoredTokens>`) keyed by user `sub` claim. Stores access tokens, refresh tokens, and metadata for session management.
 
-### Auth Middleware
+- **TTL**: 24 hours — entries older than this are evicted on read.
+- **Methods**: `store`, `get`, `remove`, `find_by_provider`, `find_any_with_refresh`
 
-`oidc_auth_middleware()` is an Axum middleware layer that:
+The token store enables `POST /api/auth/refresh` to work without requiring the client to manage refresh tokens explicitly (though clients can also supply their own).
 
-1. Extracts the `Bearer` token from the `Authorization` header
-2. Validates it against each configured provider's JWKS
-3. If valid, checks `allowed_domains` and injects `IdTokenClaims` into request extensions
-4. Does **not** block requests — the API key middleware handles access control separately
+### API Routes
 
-Downstream handlers can retrieve claims via `request.extensions().get::<IdTokenClaims>()`.
+| Method | Path | Handler | Purpose |
+|--------|------|---------|---------|
+| `GET` | `/api/auth/providers` | `auth_providers` | List available OAuth providers |
+| `GET` | `/api/auth/login` | `auth_login` | Redirect to first configured IdP (legacy) |
+| `GET` | `/api/auth/login/:provider` | `auth_login_provider` | Redirect to a specific IdP |
+| `GET` | `/api/auth/callback` | `auth_callback` | Handle IdP redirect with auth code |
+| `POST` | `/api/auth/callback` | `auth_callback_post` | Programmatic callback |
+| `GET` | `/api/auth/userinfo` | `auth_userinfo` | Return current user claims |
+| `POST` | `/api/auth/introspect` | `auth_introspect` | RFC 7662-style token validation |
+| `POST` | `/api/auth/refresh` | `auth_refresh` | Exchange refresh token for new access token |
 
-### Public Helper
+### Login Flow (End-to-End)
 
-`validate_external_token(token, config)` — validates a token against all configured providers. Used by external modules (e.g., `librefang-api/src/server.rs`) for session token verification.
+1. **Client** calls `GET /api/auth/login/google`.
+2. `build_login_redirect` creates an HMAC-signed state token, builds the authorization URL with `response_type=code`, `client_id`, `redirect_uri`, `scope`, `state`, and `nonce`.
+3. **Browser** is redirected (302) to the IdP's authorization endpoint.
+4. After authentication, the IdP redirects to `GET /api/auth/callback?code=...&state=...`.
+5. `auth_callback` validates the state token (HMAC + expiry), extracts the provider ID and nonce.
+6. `handle_code_exchange` looks up the provider, reads the client secret from the environment variable specified in `client_secret_env`, and calls `exchange_code` to POST to the token endpoint.
+7. If an ID token is present, `validate_jwt_cached` fetches JWKS keys, finds the matching key by `kid` or key type, and validates the JWT (audience, expiration, signature). The nonce from the ID token is compared against the nonce from the state token.
+8. If no ID token or validation fails, falls back to `fetch_userinfo` using the access token against the provider's userinfo endpoint.
+9. **Domain restriction**: If `allowed_domains` is configured and the user's email domain doesn't match, the request is rejected with 403.
+10. Tokens are stored in `TokenStore` and a `CallbackResponse` is returned containing the access token, refresh token, and user info.
 
-### Key Types
+### JWT Validation
 
-| Type | Description |
-|------|-------------|
-| `OidcDiscovery` | Subset of the OIDC discovery document (issuer, endpoints, JWKS URI) |
-| `JwksKey` | Single JWK entry — supports RSA (`n`, `e`) and EC (`x`, `y`, `crv`) |
-| `IdTokenClaims` | Extracted user claims: `sub`, `email`, `name`, `picture`, `roles`, `nonce` |
-| `OidcAudience` | Union type for `aud` — either a single string or array |
-| `ResolvedProvider` | Fully resolved provider with endpoints, client ID, scopes, and domain restrictions |
+`validate_jwt_cached(token, jwks_uri, expected_audience)`:
+
+1. Decode JWT header to get `kid` and `alg`.
+2. Fetch JWKS keys (via cache).
+3. Match key by `kid`, or by key type (`RSA`/`EC`) if no `kid`.
+4. Build `DecodingKey` from RSA components (`n`, `e`) or EC components (`x`, `y`).
+5. Validate signature, expiration, and audience using `jsonwebtoken::decode`.
+
+Supports RS256/RS384/RS512 and ES256/ES384 algorithms.
+
+### OIDC Auth Middleware
+
+`oidc_auth_middleware` is an Axum middleware layer that:
+
+1. If external auth is disabled, passes through immediately.
+2. Extracts `Bearer` token from the `Authorization` header.
+3. Attempts JWT validation against each configured provider's JWKS.
+4. On success, checks `allowed_domains` if configured (rejects tokens without email claims when domain filtering is active).
+5. Injects validated `IdTokenClaims` into request extensions for downstream handlers.
+6. Does **not** block unauthenticated requests — the API key middleware handles access control. This middleware only enriches requests with identity data.
+
+**Public API**: `validate_external_token(token, config)` — used by other modules to verify OAuth session tokens.
+
+### Domain Restriction
+
+When `allowed_domains` is non-empty on a provider:
+- Tokens/claims **must** contain an `email` field, or the request is rejected (403).
+- The email's domain (after `@`) must appear in the allowed list.
+- This check is enforced in both the callback handler and the middleware.
 
 ---
 
 ## Password Hashing — `password_hash.rs`
 
-### Purpose
+### Argon2id Dashboard Authentication
 
-Provides Argon2id password hashing for dashboard authentication, replacing plaintext comparison. Supports transparent migration from legacy plaintext passwords.
+Provides password hashing and verification for the local dashboard login, replacing a previous plaintext comparison.
 
-### Password Hashing
+**Hashing parameters** (via `hash_password`):
+- Algorithm: Argon2id
+- Memory: 19,456 KiB
+- Iterations: 2
+- Parallelism: 1
+- Output: PHC-format string (`$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>`)
 
-`hash_password(password)` generates an Argon2id PHC-format hash with:
-- **Memory**: 19,456 KiB
-- **Iterations**: 2
-- **Parallelism**: 1
-- **Salt**: random, from OS CSPRNG
+### Transparent Migration
 
-Output format: `$argon2id$v=19$m=19456,t=2,p=1$<base64-salt>$<base64-hash>`
+`verify_dashboard_password` handles the transition from legacy plaintext passwords:
 
-`verify_password(password, hash_str)` parses the PHC string and verifies against it. Returns `false` for malformed hash strings rather than panicking.
+1. If `pass_hash` (Argon2id PHC string) is set → verify with Argon2id only.
+2. If only `cfg_pass` (plaintext) is set → constant-time plaintext comparison. On success, returns an `upgrade_hash` (fresh Argon2id hash) for the caller to persist.
+3. If neither is set → runs a dummy Argon2id hash to maintain constant timing, then returns `Denied`.
 
-### Dashboard Authentication
-
-`verify_dashboard_password()` handles the full credential verification flow:
-
-```
-verify_dashboard_password(input_user, input_pass, cfg_user, cfg_pass, pass_hash) -> VerifyResult
-```
-
-**Verification paths**:
-1. If `pass_hash` is non-empty → Argon2id verification only
-2. If only `cfg_pass` is set → constant-time plaintext comparison via `subtle::ConstantTimeEq`
-3. If neither is set → runs a dummy Argon2id hash to maintain constant timing, returns `Denied`
-
-**Timing safety**: The password verification path always executes regardless of whether the username matched. This prevents username enumeration via timing differences (Argon2id takes ~tens of milliseconds).
-
-**Migration support**: When legacy plaintext succeeds, the `VerifyResult::Ok` variant includes `upgrade_hash` — an Argon2id hash of the input password that the caller should persist for future logins.
-
-### Session Tokens
-
-Session tokens are cryptographically random 256-bit values (32 bytes from `OsRng`, hex-encoded to 64 characters) paired with a `created_at` timestamp.
-
-- `generate_session_token()` — creates a new random token
-- `is_token_expired(token, ttl_secs)` — checks if the token age exceeds the TTL
-- Default TTL: 30 days (`DEFAULT_SESSION_TTL_SECS = 30 * 24 * 3600`)
-
-Each successful login produces a unique token, enabling per-session revocation and expiration-based invalidation. This replaces the deprecated `derive_session_token()` which used deterministic HMAC-SHA256 derivation that could not be revoked.
-
-**Deprecated functions** (kept for migration compatibility):
-- `derive_session_token(username, password)` — HMAC-SHA256 derivation
-- `derive_dashboard_session_token(username, cfg_pass, pass_hash)` — picks the available credential and derives a token
-
-### VerifyResult Enum
+The `VerifyResult` enum communicates this:
 
 ```rust
 pub enum VerifyResult {
-    Ok {
-        token: SessionToken,
-        upgrade_hash: Option<String>,  // Some when migrating from plaintext
-    },
+    Ok { token: SessionToken, upgrade_hash: Option<String> },
     Denied,
 }
 ```
 
----
+Downstream, `change_password` in `server.rs` calls `hash_password` directly, and `dashboard_login` calls `verify_dashboard_password`.
 
-## Webhook Store — `webhook_store.rs`
+### Timing Safety
 
-### Purpose
+To prevent username enumeration via timing side-channels:
+- Username comparison uses `subtle::ConstantTimeEq`.
+- Password verification always runs (Argon2id takes ~tens of ms) even if the username didn't match — no early return on username mismatch.
+- When no credentials are configured, a dummy `hash_password` call maintains the same timing profile.
 
-Manages outbound webhook subscriptions with file persistence, HMAC-SHA256 payload signing, and SSRF protection.
+### Session Tokens
 
-### Data Model
+Session tokens are 256-bit random values generated by `generate_session_token`:
 
-| Type | Description |
-|------|-------------|
-| `WebhookId(Uuid)` | Unique subscription identifier |
-| `WebhookEvent` | Enum of subscribable events: `AgentSpawned`, `AgentStopped`, `MessageReceived`, `MessageCompleted`, `AgentError`, `CronFired`, `TriggerFired`, `All` |
-| `WebhookSubscription` | Full subscription: ID, name, URL, secret, events, enabled flag, timestamps |
+- Uses `OsRng` (OS-level CSPRNG).
+- Stored as 64-character hex strings.
+- Paired with a `created_at` Unix timestamp for expiration checks.
+- Default TTL: 30 days (`DEFAULT_SESSION_TTL_SECS`).
+- Each login produces a unique token (unlike the deprecated HMAC-derived deterministic tokens).
 
-### WebhookStore Operations
+`is_token_expired(token, ttl_secs)` checks whether a token has exceeded its lifetime. This is used by `auth` middleware, `agent_ws`, `load_sessions`, and `run_daemon`.
 
-`WebhookStore` wraps a `std::sync::RwLock<StoreData>` with JSON file persistence:
-
-- `load(path)` — reads existing JSON or creates empty store
-- `list()` → `Vec<WebhookSubscription>`
-- `get(id)` → `Option<WebhookSubscription>`
-- `create(req)` — validates, assigns UUID, persists. Max 100 subscriptions.
-- `update(id, req)` — partial update with per-field validation, persists
-- `delete(id)` → removes and persists
-
-All mutations immediately persist to disk. The persistence file is created with mode `0o600` on Unix systems (owner read/write only) since it contains webhook secrets.
-
-### Validation
-
-`CreateWebhookRequest::validate()` enforces:
-- Non-empty name (max 128 chars)
-- Non-empty URL (max 2048 chars)
-- Non-empty events list
-- Secret max 256 chars
-- Valid URL scheme (http/https only)
-- SSRF protection via `validate_webhook_url()`
-
-### SSRF Protection
-
-`validate_webhook_url()` blocks requests to internal/private addresses:
-
-| Category | What's blocked |
-|----------|---------------|
-| IPv4 loopback | `127.0.0.0/8` |
-| IPv4 private | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` |
-| IPv4 CGNAT | `100.64.0.0/10` |
-| IPv4 link-local | `169.254.0.0/16` (includes cloud metadata endpoint `169.254.169.254`) |
-| IPv4-mapped IPv6 | `::ffff:127.0.0.1`, `::ffff:10.0.0.1`, etc. — canonicalized via `canonical_ip()` |
-| Internal hostnames | `localhost`, `metadata.google.internal`, `*.internal` |
-
-The `canonical_ip()` function unwraps IPv4-mapped IPv6 addresses (e.g., `::ffff:7f00:1` → `127.0.0.1`) before checking against the blocklist. Without this step, the OS would transparently connect to the embedded IPv4 address while the checks would miss it in the V6 arm.
-
-### HMAC Signing
-
-`compute_hmac_signature(secret, payload)` produces a `sha256=<hex>` signature string for outbound webhook payloads. Recipients verify this against the `X-Webhook-Signature` header.
-
-`redact_webhook_secret()` replaces the secret with `"***"` in API responses to prevent leakage in list/get endpoints.
+**Deprecated functions** (`derive_session_token`, `derive_dashboard_session_token`): Legacy HMAC-SHA256-based deterministic token derivation. Retained for backward compatibility with existing sessions during migration.
 
 ---
 
-## Configuration Reference
+## Rate Limiting — `rate_limiter.rs`
 
-### External Auth (`ExternalAuthConfig`)
+### GCRA (Generic Cell Rate Algorithm)
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `enabled` | `false` | Enables OAuth2/OIDC |
-| `issuer_url` | `""` | Legacy single-provider issuer |
-| `client_id` | `""` | Legacy client ID |
-| `client_secret_env` | `"LIBREFANG_OAUTH_CLIENT_SECRET"` | Env var name for client secret |
-| `scopes` | `["openid", "profile", "email"]` | Default OAuth scopes |
-| `redirect_url` | `""` | OAuth callback URL |
-| `session_ttl_secs` | `86400` | Token lifetime (24h) |
-| `allowed_domains` | `[]` | Restrict login to these email domains |
-| `providers` | `[]` | Multi-provider array |
+Uses the `governor` crate to implement per-IP rate limiting with a token-bucket model. Default budget: **500 tokens per minute** per IP address.
 
-### Per-provider (`OidcProvider`)
+Each API operation has a **cost** assigned by `operation_cost(method, path)`:
 
-| Field | Description |
-|-------|-------------|
-| `id` | Unique provider identifier (e.g., `"google"`) |
-| `display_name` | Human-readable name for the UI |
-| `issuer_url` | Issuer URL for OIDC discovery |
-| `auth_url` | Explicit authorization endpoint (skips discovery) |
-| `token_url` | Explicit token endpoint |
-| `userinfo_url` | Explicit userinfo endpoint |
-| `jwks_uri` | Explicit JWKS URI |
-| `client_id` | OAuth client ID |
-| `client_secret_env` | Env var name holding the client secret |
-| `redirect_url` | Callback URL for this provider |
-| `scopes` | Scopes for this provider |
-| `allowed_domains` | Domain restriction for this provider |
-| `audience` | Expected JWT audience (defaults to `client_id`) |
+| Cost | Operations |
+|------|-----------|
+| 1 | `GET /api/health`, `/api/status`, `/api/version`, `/api/tools` |
+| 2 | `GET /api/agents`, `/api/skills`, `/api/peers`, `/api/config` |
+| 3 | `GET /api/usage` |
+| 5 | `GET /api/audit/*`, unauthenticated/fallback paths |
+| 10 | `GET /api/marketplace/*`, `PUT */update`, `POST /api/skills/uninstall` |
+| 30 | `POST */message` |
+| 50 | `POST /api/agents`, `POST /api/skills/install` |
+| 100 | `POST */run`, `POST /api/migrate` |
 
-### Environment Variables
+### Static Asset Exemption
 
-| Variable | Used by | Description |
-|----------|---------|-------------|
-| `LIBREFANG_STATE_SECRET` | `oauth.rs` | HMAC key for state tokens (random per-process if unset) |
-| `LIBREFANG_OAUTH_CLIENT_SECRET` | `oauth.rs` | Default client secret (legacy) |
-| Per-provider `client_secret_env` | `oauth.rs` | Provider-specific client secret |
+`is_rate_limit_exempt(path)` bypasses the limiter for non-API paths:
 
----
+- `/` (root)
+- `/favicon.ico`, `/logo.png`
+- `/dashboard/*` (SPA bundle, assets)
+- `/locales/*` (i18n JSON files)
 
-## Cache TTLs
+This prevents a cold dashboard page load (~20+ asset requests at the default fallback cost of 5 tokens each) from exhausting the 500-token budget before the page finishes rendering.
 
-| Cache | TTL | Storage |
-|-------|-----|---------|
-| OIDC Discovery (`DISCOVERY_CACHE`) | 1 hour | `LazyLock<RwLock<HashMap>>` |
-| JWKS Keys (`JWKS_CACHE`) | 1 hour | `LazyLock<RwLock<HashMap>>` |
-| Token Store (`TOKEN_STORE`) | 24 hours (entry eviction) | `LazyLock<RwLock<HashMap>>` |
-| State Tokens | 10 minutes | Stateless (embedded expiry) |
+**Prefix discipline**: Exemptions are exact-prefix-based. `/dashboard-login` and `/dashboardz` are **not** exempt. `/api/*`, `/v1/*`, `/mcp`, `/hooks/*`, and `/channels/*` are always metered.
 
----
+### Middleware Behavior
 
-## API Endpoints Summary
+`gcra_rate_limit` middleware:
 
-| Method | Path | Handler | Auth |
-|--------|------|---------|------|
-| GET | `/api/auth/providers` | `auth_providers` | None |
-| GET | `/api/auth/login` | `auth_login` | None |
-| GET | `/api/auth/login/:provider` | `auth_login_provider` | None |
-| GET | `/api/auth/callback` | `auth_callback` | None |
-| POST | `/api/auth/callback` | `auth_callback_post` | None |
-| GET | `/api/auth/userinfo` | `auth_userinfo` | Bearer token |
-| POST | `/api/auth/introspect` | `auth_introspect` | API key |
-| POST | `/api/auth/refresh` | `auth_refresh` | None |
+1. Checks if the path is exempt → passes through immediately.
+2. Extracts client IP from `ConnectInfo<SocketAddr>` (falls back to `127.0.0.1`).
+3. Computes operation cost.
+4. Calls `limiter.check_key_n(&ip, cost)` — a nested `Result<Result<(), NotUntil>, InsufficientCapacity>`.
+5. If rate-limited, returns **429** with `Retry-After` header and JSON error body.
+6. Otherwise, passes to the next handler.
+
+### Critical Implementation Detail
+
+The `check_key_n` return type is a nested `Result`. The normal "out of tokens" condition surfaces as `Ok(Err(NotUntil))`, while `Err(InsufficientCapacity)` means the cost exceeds the burst size entirely. Both cases must be treated as rate-limited. An earlier version only checked `.is_err()` on the outer `Result`, which allowed the `NotUntil` path to slip through unthrottled.
+
+### Setup
+
+`build_router` in `server.rs` creates the rate limiter via `create_rate_limiter(tokens_per_minute)` and wraps it in `GcraState`:
+
+```rust
+GcraState {
+    limiter: create_rate_limiter(tokens_per_minute),
+    retry_after_secs: 60,
+}
+```
+
+The middleware is applied as an Axum layer via `from_fn_with_state`.
 
 ---
 
-## Security Considerations
+## Configuration
 
-- **CSRF protection**: OAuth state tokens are HMAC-signed with embedded expiry. Tampering or replay beyond 10 minutes is rejected.
-- **Nonce verification**: The OIDC `nonce` parameter is bound to the state token and verified in the ID token callback.
-- **Timing-constant verification**: Dashboard login always runs password hashing even on username mismatch, preventing enumeration attacks.
-- **SSRF mitigation**: Webhook URLs are validated against private/link-local IPs, including IPv4-mapped IPv6 canonicalization that catches `::ffff:127.0.0.1` etc.
-- **Secret redaction**: Webhook secrets are replaced with `"***"` in all API responses.
-- **File permissions**: Webhook store persistence files are created with `0o600` on Unix.
-- **Error messages**: Detailed token exchange errors are logged at debug level; generic messages are returned to clients.
+All three layers are driven by `ExternalAuthConfig` and related types from `librefang-types::config`:
+
+- **`external_auth.enabled`** — master switch for OIDC.
+- **`external_auth.providers[]`** — array of `OidcProvider` entries, each with `id`, `issuer_url` or explicit endpoint URLs, `client_id`, `client_secret_env`, `scopes`, `allowed_domains`, `audience`.
+- **`external_auth.session_ttl_secs`** — session lifetime (default 86400 = 24 hours).
+- **Dashboard credentials** — `dashboard_user`, `dashboard_pass` (plaintext), or `dashboard_pass_hash` (Argon2id PHC string).
+- **Rate limit** — configured at router build time, default 500 tokens/minute.
+
+Client secrets are **never** stored in config files. Each provider specifies an environment variable name in `client_secret_env` (e.g., `LIBREFANG_OAUTH_CLIENT_SECRET`), and the secret is read at runtime.

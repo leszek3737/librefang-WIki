@@ -2,97 +2,106 @@
 
 # librefang-kernel
 
-The central orchestrator for the LibreFang Agent OS. This crate wires together all subsystems—routing, metering, memory, skills, hands, extensions, and LLM drivers—into a cohesive runtime that drives agent behavior.
+The core orchestration crate for the **LibreFang Agent OS**. This module acts as the central kernel that wires together all subsystems — runtime execution, LLM driving, skill dispatch, hand (action) execution, memory, metering, routing, channel I/O, and extensions — into a cohesive agent platform.
 
-## Role in the System
+## Architecture
 
-The kernel sits at the top of the dependency graph. It does not implement low-level logic itself; instead it initializes, configures, and coordinates the crates that do:
-
-| Subsystem | Crate | Purpose |
-|---|---|---|
-| Types | `librefang-types` | Shared domain types used across all crates |
-| Memory | `librefang-memory` | Conversation history, working memory, state persistence |
-| Routing | `librefang-kernel-router` | Message/request routing between components |
-| Metering | `librefang-kernel-metering` | Usage tracking, rate limiting, quota enforcement |
-| Runtime | `librefang-runtime` | Async task execution and lifecycle management |
-| Skills | `librefang-skills` | Agent capability definitions and dispatch |
-| Hands | `librefang-hands` | Tool-use / action execution layer |
-| Extensions | `librefang-extensions` | Plugin/extension loading and management |
-| LLM Driver | `librefang-llm-driver` | LLM provider abstraction and inference calls |
-| Wire Protocol | `librefang-wire` | Serialization format for inter-service communication |
-| Channels | `librefang-channels` | Async message channels (feature-gated, no default features) |
+`librefang-kernel` is an **integration layer**. It does not implement subsystem logic itself; instead, it imports every other `librefang-*` crate and coordinates them to provide the top-level agent lifecycle.
 
 ```mermaid
 graph TD
-    K[librefang-kernel] --> R[librefang-kernel-router]
-    K --> M[librefang-kernel-metering]
-    K --> MEM[librefang-memory]
-    K --> RT[librefang-runtime]
+    K[librefang-kernel] --> R[librefang-runtime]
+    K --> LD[librefang-llm-driver]
     K --> SK[librefang-skills]
     K --> H[librefang-hands]
-    K --> E[librefang-extensions]
-    K --> LLM[librefang-llm-driver]
+    K --> M[librefang-memory]
+    K --> KR[librefang-kernel-router]
+    K --> KM[librefang-kernel-metering]
+    K --> CH[librefang-channels]
     K --> W[librefang-wire]
-    K --> C[librefang-channels]
+    K --> E[librefang-extensions]
+    K --> T[librefang-types]
 ```
 
-## Key Capabilities
+## Key Responsibilities
 
-### Concurrency Model
+| Area | Delegated Crate | Role of the Kernel |
+|------|----------------|-------------------|
+| **Message routing** | `librefang-kernel-router` | Wires incoming messages to the correct handler pipeline |
+| **Metering / billing** | `librefang-kernel-metering` | Tracks token usage, operation counts, and enforces quotas |
+| **Agent runtime** | `librefang-runtime` | Manages agent lifecycle, task spawning, and execution context |
+| **LLM interaction** | `librefang-llm-driver` | Drives completion requests, handles streaming responses |
+| **Skill dispatch** | `librefang-skills` | Resolves and invokes registered skills based on agent intent |
+| **Action execution** | `librefang-hands` | Executes concrete actions (tool calls, API requests, etc.) |
+| **Persistence** | `librefang-memory` | Manages conversation history, agent state, and long-term recall |
+| **Channel I/O** | `librefang-channels` | Abstracts inbound/outbound communication channels |
+| **Wire protocol** | `librefang-wire` | Serialisation and framing for inter-service communication |
+| **Extensions** | `librefang-extensions` | Loads and manages third-party or user-supplied extensions |
+| **Shared types** | `librefang-types` | Common data structures used across all crates |
 
-The kernel relies on Tokio for async execution and supplements it with:
+## External Dependency Highlights
 
-- **`dashmap`** — concurrent hash maps for shared mutable state without global locks
-- **`arc-swap`** — lock-free atomic swapping of shared configuration or state snapshots
-- **`crossbeam`** — multi-producer/multi-consumer channels for inter-task messaging
+The kernel pulls in several categories of external crates to support its orchestration role:
 
-### Persistence
+- **Async runtime:** `tokio`, `futures`, `async-trait`
+- **Serialisation:** `serde`, `serde_json`, `toml`, `serde_yaml`
+- **Concurrency primitives:** `dashmap`, `arc-swap`, `crossbeam`
+- **Storage:** `rusqlite` (embedded SQLite for local state)
+- **Observability:** `tracing`, `tracing-subscriber`
+- **Time & scheduling:** `chrono`, `chrono-tz`, `cron`
+- **Security:** `totp-rs` (TOTP 2FA), `zeroize` (secure memory clearing), `subtle` (constant-time crypto utilities)
+- **Networking:** `reqwest` (HTTP client for outbound calls)
+- **Text processing:** `regex`, `regex-lite`
 
-SQLite via `rusqlite` provides local durable storage. This backs metering data, conversation history, and agent state that must survive restarts.
+### Platform-specific: Unix
 
-### Security
+On Unix targets, `libc` is included directly. This is typically used for low-level system interactions such as signal handling, file descriptor management, or process control that `tokio` does not expose.
 
-Several dependencies indicate security-sensitive operations:
+## Binary: `purge_sentinels`
 
-- **`totp-rs`** — TOTP-based two-factor authentication
-- **`subtle`** — constant-time comparisons for secret verification
-- **`zeroize`** — secure clearing of sensitive data from memory
-- **`rand`** / **`hex`** — cryptographic random generation and hex encoding
+The crate ships a utility binary:
 
-### Scheduling
+```
+bin/purge_sentinels.rs
+```
 
-The `cron` crate enables cron-expression-based task scheduling, used for periodic maintenance, metering rollups, or timed skill execution. Timezone-aware scheduling is supported through `chrono` and `chrono-tz`.
-
-### Configuration Loading
-
-The kernel loads configuration from multiple formats—**TOML**, **YAML**, and **JSON**—via `toml`, `serde_yaml`, and `serde_json` respectively. The `dirs` crate resolves platform-specific configuration paths.
-
-### HTTP Communication
-
-`reqwest` provides outbound HTTP capability, used by the LLM driver for API calls and potentially by extensions for webhook integrations.
-
-## Binaries
-
-### `purge_sentinels`
-
-Located at `bin/purge_sentinels.rs`. A maintenance utility that cleans up stale sentinel records. Sentinels are likely watchdog or lock markers used to coordinate running agents; this binary removes ones left behind by crashed or terminated processes.
-
-Run directly:
+This tool is responsible for cleaning up **sentinel** records — marker entries used to track in-progress or stale operations (for example, orphaned task locks, incomplete session markers, or expired scheduling tokens). Run it as a maintenance task to reclaim storage and ensure agent state consistency.
 
 ```bash
+# Run via cargo
 cargo run --bin purge_sentinels
 ```
 
-## Platform Notes
+## Integration Guide
 
-On Unix targets, `libc` is linked directly (`cfg(unix)` conditional dependency). This is typically used for low-level process signals, file descriptor management, or daemonization behavior not exposed through higher-level Rust crates.
+### Adding the Kernel to a Workspace Crate
 
-## Adding a New Subsystem
+```toml
+[dependencies]
+librefang-kernel = { path = "../librefang-kernel" }
+```
 
-When integrating a new crate into the kernel:
+This transitively brings in the full agent stack. If you only need a subset of functionality, depend on the specific sub-crate directly instead.
 
-1. Add the dependency in `Cargo.toml`.
-2. Initialize the subsystem during kernel startup, receiving shared state (database handle, channel senders, configuration) as constructor arguments.
-3. Register any routes with `librefang-kernel-router` if the subsystem handles incoming messages.
-4. Register metering hooks with `librefang-kernel-metering` if the subsystem consumes billable resources.
-5. Ensure sensitive data uses `zeroize::Zeroize` on drop where appropriate.
+### Feature Flags
+
+`librefang-channels` is imported with `default-features = false`, meaning the kernel explicitly opts into only the channel features it needs. If you are consuming the kernel and require additional channel backends, enable them at the `librefang-channels` level in your own `Cargo.toml`.
+
+## Testing
+
+Dev-dependencies include `tokio-test` and `tempfile`, indicating that kernel tests use:
+
+- **Async test utilities** (`tokio-test`) for running agent pipelines under a tokio runtime.
+- **Temporary filesystem resources** (`tempfile`) for SQLite databases and file-backed state in isolation.
+
+Run the test suite:
+
+```bash
+cargo test -p librefang-kernel
+```
+
+## Conventions
+
+1. **No business logic here.** The kernel wires crates together. If you find yourself writing domain logic in this crate, it likely belongs in a sub-crate.
+2. **Top-level entry points.** The agent boot sequence, configuration loading, and graceful shutdown live here because they require touching every subsystem.
+3. **Configuration is format-agnostic.** With `toml`, `serde_json`, and `serde_yaml` all available, configuration can be supplied in any of these formats. The kernel normalises them into a unified `Config` structure (defined in `librefang-types`).

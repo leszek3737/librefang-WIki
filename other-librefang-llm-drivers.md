@@ -2,94 +2,78 @@
 
 # librefang-llm-drivers
 
-Concrete LLM provider drivers implementing the `librefang-llm-driver` trait for Anthropic, OpenAI, Google Gemini, and other LLM backends.
+Concrete LLM provider drivers implementing the `librefang-llm-driver` trait. Each driver translates the crate's unified LLM interface into provider-specific HTTP API calls, handling authentication, request formatting, response parsing, and streaming.
 
 ## Purpose
 
-This crate provides the actual HTTP integrations with large language model APIs. Each provider gets its own driver that knows how to format requests, handle authentication, parse responses, and manage streaming — all behind a unified interface defined in `librefang-llm-driver`.
+This crate is the bridge between the abstract LLM driver interface and real-world provider APIs. It ships ready-to-use driver implementations for major LLM providers (Anthropic, OpenAI, Gemini, and others), so consumers can instantiate a driver and pass it to higher-level orchestration without worrying about each provider's unique API surface.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[Consumer Code] --> B[librefang-llm-driver<br/>trait definition]
-    B --> C[librefang-llm-drivers<br/>concrete implementations]
-    C --> D[Anthropic Driver]
-    C --> E[OpenAI Driver]
-    C --> F[Gemini Driver]
-    C --> G[Other Providers]
-    C --> H[librefang-http<br/>HTTP client layer]
-    D --- I[librefang-runtime-oauth<br/>OAuth token management]
-    F --- I
+    A[librefang-llm-driver<br/>trait definition] --> B[librefang-llm-drivers<br/>concrete implementations]
+    B --> C[librefang-http<br/>HTTP client layer]
+    B --> D[librefang-runtime-oauth<br/>OAuth token flow]
+    B --> E[librefang-types<br/>shared types & models]
+    F[Consumer code] --> A
+    F --> B
 ```
 
-The crate follows a provider-plugin model: callers depend on the abstract trait from `librefang-llm-driver` and instantiate whichever concrete driver they need from this crate.
+Each driver is a struct that implements the trait from `librefang-llm-driver`. Drivers delegate HTTP communication to `librefang-http` rather than constructing `reqwest` clients directly, keeping transport concerns in one place.
 
-## Key Dependencies and Their Roles
+## Dependency Breakdown
 
 | Dependency | Role in this crate |
 |---|---|
-| `librefang-llm-driver` | Defines the trait interface (`LlmDriver` or similar) that each provider implements |
-| `librefang-types` | Shared domain types — messages, tool calls, completion responses, etc. |
-| `librefang-http` | HTTP client abstraction layer, shared across the project |
-| `librefang-runtime-oauth` | OAuth 2.0 token acquisition and refresh, used by providers that require it (Google, Azure) |
-| `reqwest` | Underlying HTTP client for making API calls to provider endpoints |
-| `tokio` / `tokio-stream` / `futures` | Async runtime and stream processing for SSE-based streaming completions |
-| `serde` / `serde_json` | Request serialization and response deserialization for each provider's JSON schema |
-| `sha2` / `hmac` / `hex` | HMAC-SHA256 request signing for providers that use sigv4-style auth (AWS Bedrock) |
-| `base64` | Encoding binary content in multimodal messages |
-| `dashmap` | Concurrent hashmap for thread-safe state such as active stream tracking or request deduplication |
-| `zeroize` | Secure clearing of secrets (API keys, tokens) from memory |
-| `regex-lite` | Lightweight regex for response post-processing or content extraction |
-| `url` | URL construction and validation for provider endpoints |
-| `chrono` / `uuid` | Timestamps and correlation IDs for request tracing |
+| `librefang-llm-driver` | Provides the trait each concrete driver implements. |
+| `librefang-types` | Shared types — message formats, model identifiers, completion responses, error types. |
+| `librefang-http` | HTTP client abstraction; drivers use this to make requests instead of raw `reqwest`. |
+| `librefang-runtime-oauth` | OAuth flows required by providers like Gemini that use Google's auth. |
+| `serde` / `serde_json` | Serializing requests and deserializing provider-specific JSON responses. |
+| `tokio` / `tokio-stream` / `futures` | Async runtime support and SSE/response stream handling. |
+| `reqwest` | Underlying HTTP client (used via `librefang-http`). |
+| `bytes` | Efficient byte handling for streaming response bodies. |
+| `dashmap` | Concurrent hashmap — used for caching auth tokens, session state, or rate-limit counters across async tasks. |
+| `sha2` / `hmac` / `hex` | Request signing for providers that require HMAC-based authentication schemes. |
+| `zeroize` | Secure clearing of sensitive data (API keys, tokens) from memory. |
+| `rand` | Randomness for nonce generation or request IDs. |
+| `chrono` / `uuid` | Timestamps and unique identifiers for request metadata. |
+| `base64` | Encoding binary payloads or auth headers. |
+| `regex-lite` | Lightweight pattern matching on provider response payloads. |
+| `url` | Programmatic URL construction for provider endpoints. |
 
-## Provider Driver Pattern
+## Provider Implementations
 
-Each driver is expected to follow the same general structure:
+Based on the crate description, the following providers are supported:
 
-1. **Configuration struct** — Holds provider-specific settings: base URL, API key or credential reference, model name, timeout values, etc.
+- **Anthropic** — Claude API integration
+- **OpenAI** — GPT-family models via the OpenAI API
+- **Gemini** — Google's Gemini models, using OAuth from `librefang-runtime-oauth`
 
-2. **Request building** — Translates the generic request types from `librefang-types` into the provider's wire format. This includes message formatting, tool/function definition serialization, and any provider-specific parameters.
+Each provider driver is responsible for:
 
-3. **Authentication** — Applies the appropriate auth method:
-   - **Bearer token** (Anthropic, OpenAI): Header injection via `x-api-key` or `Authorization`.
-   - **OAuth 2.0** (Gemini, Azure): Token acquisition and refresh through `librefang-runtime-oauth`.
-   - **HMAC signing** (AWS Bedrock): Request signing using `sha2`/`hmac` with the provider's signing algorithm.
+1. **Authentication** — Attaching the correct auth mechanism (API key header, Bearer token, OAuth token, HMAC signature).
+2. **Request formatting** — Translating the generic message/completion request into the provider's JSON schema.
+3. **Response parsing** — Deserializing the provider's response into the shared types from `librefang-types`.
+4. **Streaming** — Converting provider-specific SSE or chunked responses into a unified async stream.
 
-4. **Response parsing** — Deserializes the provider's JSON response into the shared `librefang-types` response types, normalizing differences between provider schemas.
+## Integration with the Codebase
 
-5. **Streaming** — For streaming completions, processes server-sent events (SSE) via `tokio-stream`, yielding partial results as they arrive.
-
-## Implementing a New Provider
-
-To add support for a new LLM provider:
-
-1. Create a new module within this crate (e.g., `src/newprovider.rs`).
-2. Define a configuration struct holding the provider's required settings.
-3. Implement the trait from `librefang-llm-driver`, covering:
-   - Non-streaming completion requests
-   - Streaming completion requests (if supported)
-   - Tool/function call handling
-   - Error mapping from provider-specific errors to the shared error type
-4. Add serialization types matching the provider's request/response JSON schemas.
-5. Register the module in `src/lib.rs` (or the appropriate mod declaration).
-
-### Authentication Checklist
-
-- If the provider uses static API keys: inject them as headers in the request builder.
-- If the provider uses OAuth: integrate with `librefang-runtime-oauth` for token management.
-- If the provider uses request signing: implement the signing logic using `hmac` and `sha2`, and call `zeroize::Zeroize` on key material after use.
-
-## Connection to the Wider Codebase
+To use a driver, consumer code selects the appropriate implementation, constructs it with provider-specific configuration (API key, endpoint, model), and uses it through the `librefang-llm-driver` trait:
 
 ```
-librefang-types ← librefang-llm-driver ← librefang-llm-drivers
-                                            ↕
-                                     librefang-http
-                                     librefang-runtime-oauth
+librefang-types        ← shared data structures
+librefang-llm-driver   ← trait definition (no implementations)
+librefang-llm-drivers  ← concrete drivers (this crate)
+librefang-http         ← shared HTTP transport
+librefang-runtime-oauth ← OAuth support for Google/Gemini
 ```
 
-- **Upstream**: Consumer crates depend on `librefang-llm-driver` for the trait and inject a concrete driver from this crate at runtime.
-- **Side dependencies**: HTTP communication goes through `librefang-http`, and OAuth flows go through `librefang-runtime-oauth`.
-- **Shared types**: All message, completion, and error types come from `librefang-types`, keeping drivers decoupled from application logic.
+The trait boundary means consumers remain decoupled from any single provider. Swapping from OpenAI to Anthropic is a matter of constructing a different driver struct — the calling code stays the same.
+
+## Security Considerations
+
+- **`zeroize`** ensures API keys and tokens are cleared from memory when dropped.
+- **`dashmap`** provides safe concurrent access to cached credentials without unsafe code.
+- Auth tokens managed through `librefang-runtime-oauth` follow standard OAuth2 refresh flows rather than storing long-lived credentials.

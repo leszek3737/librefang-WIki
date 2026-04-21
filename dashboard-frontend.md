@@ -2,256 +2,217 @@
 
 # Dashboard Frontend
 
-The dashboard is a single-page React application that provides the management UI for LibreFang. It covers agent lifecycle, configuration, monitoring, chat, workflows, analytics, and infrastructure control through a sidebar-driven layout served at `/dashboard`.
+## Overview
 
-## Architecture Overview
+The Dashboard Frontend is a React-based single-page application that provides a management UI for the LibreFang agent platform. It communicates with the LibreFang kernel daemon via a RESTful HTTP API and real-time streaming endpoints (SSE/WebSocket). The codebase is split across two directory roots: `dashboard/src/` (core API layer, app shell, routing) and `src/` (page components, feature libraries, and shared utilities).
+
+## Architecture
 
 ```mermaid
 graph TD
-    A[main.tsx] --> B[QueryClientProvider]
-    A --> C[RouterProvider]
-    A --> D[ToastContainer]
-    C --> E[App.tsx - Shell]
-    E --> F[Sidebar Navigation]
-    E --> G[Header Bar]
-    E --> H[Outlet - Routed Pages]
-    E --> I[AuthDialog]
-    E --> J[CommandPalette]
-    E --> K[NotificationCenter]
-    E --> L[ChunkErrorBoundary]
-    H --> M["Lazy Pages<br/>(~30 code-split chunks)"]
-    M --> N[api.ts - HTTP Layer]
-    N --> O[LibreFang REST API]
+    A[openapi/generated.ts] -->|type safety| B[dashboard/src/api.ts]
+    B -->|HTTP client| C[LibreFang Kernel API]
+    B -->|auth headers| D[Auth Store<br/>localStorage]
+    E[lib/queries/] -->|React Query hooks| B
+    F[lib/mutations/] -->|React Query hooks| B
+    G[Page Components<br/>src/pages/*] -->|call| E
+    G -->|call| F
+    G -->|use| H[lib/utilities<br/>manifest, chat, i18n]
+    I[dashboard/src/App.tsx] -->|renders| J[dashboard/src/router.tsx]
+    J -->|routes to| G
 ```
 
-## Entry Point — `main.tsx`
+## Key Layers
 
-Bootstraps the React tree with three providers:
+### Auto-Generated API Types — `openapi/generated.ts`
 
-- **`QueryClientProvider`** — TanStack Query for all server-state fetching. The `QueryClient` is configured with conservative defaults: one retry, 30-second stale time, no background refetch, no refetch on window focus.
-- **`RouterProvider`** — The TanStack Router instance from `router.tsx`.
-- **`ToastContainer`** — Global toast notification surface, rendered as a sibling to the router so it floats above all page content.
+This file is **machine-generated** by `openapi-typescript` from the kernel's OpenAPI spec. **Never edit it directly** — regenerate it when the backend API changes.
 
-Internationalization is initialized as a side-effect import (`./lib/i18n`).
+It exports three primary namespaces:
 
-## Router — `router.tsx`
+| Export | Purpose |
+|--------|---------|
+| `paths` | Maps every API route to its HTTP methods, parameters, and operation IDs |
+| `operations` | Referenced by `paths` — contains request/response shapes per operation |
+| `components["schemas"]` | Shared DTOs like `SpawnRequest`, `MessageRequest`, `BulkActionResult`, etc. |
 
-Uses TanStack Router with `basepath: "/dashboard"` and intent-based preloading (`defaultPreload: "intent"` — routes begin loading when the user hovers a nav link).
+The types are used implicitly by the hand-written API client in `dashboard/src/api.ts` to ensure compile-time correctness when calling endpoints.
 
-### Route Tree
+### API Client — `dashboard/src/api.ts`
 
-All pages are loaded via `lazyWithReload()`, which wraps React's `lazy()` with automatic recovery for stale chunks. The root route renders `App`, and the index route redirects `/` → `/overview`.
+The central HTTP client layer. Key responsibilities:
 
-| Path | Page Component | Notes |
-|------|---------------|-------|
-| `/overview` | `OverviewPage` | Dashboard home |
-| `/chat` | `ChatPage` | Accepts `?agentId=` search param |
-| `/canvas` | `CanvasPage` | Accepts `?t=` and `?wf=` search params |
-| `/agents` | `AgentsPage` | |
-| `/approvals` | `ApprovalsPage` | |
-| `/hands` | `HandsPage` | |
-| `/providers` | `ProvidersPage` | |
-| `/models` | `ModelsPage` | |
-| `/media` | `MediaPage` | |
-| `/channels` | `ChannelsPage` | |
-| `/skills` | `SkillsPage` | |
-| `/plugins` | `PluginsPage` | |
-| `/mcp-servers` | `McpServersPage` | |
-| `/workflows` | `WorkflowsPage` | |
-| `/scheduler` | `SchedulerPage` | |
-| `/goals` | `GoalsPage` | |
-| `/analytics` | `AnalyticsPage` | |
-| `/memory` | `MemoryPage` | |
-| `/logs` | `LogsPage` | |
-| `/runtime` | `RuntimePage` | |
-| `/comms` | `CommsPage` | |
-| `/terminal` | `TerminalPage` | Conditionally shown in nav |
-| `/network` | `NetworkPage` | |
-| `/a2a` | `A2APage` | |
-| `/telemetry` | `TelemetryPage` | |
-| `/sessions` | `SessionsPage` | |
-| `/settings` | `SettingsPage` | |
-| `/wizard` | `WizardPage` | |
-| `/config/general` | `ConfigPage` | `category="general"` |
-| `/config/memory` | `ConfigPage` | `category="memory"` |
-| `/config/tools` | `ConfigPage` | `category="tools"` |
-| `/config/channels` | `ConfigPage` | `category="channels"` |
-| `/config/security` | `ConfigPage` | `category="security"` |
-| `/config/network` | `ConfigPage` | `category="network"` |
-| `/config/infra` | `ConfigPage` | `category="infra"` |
+- **HTTP methods**: Exports `get()`, `post()`, `put()`, `patch()`, `del()` helpers that build authenticated requests against the kernel's base URL.
+- **Authentication**: `buildHeaders()` → `authHeader()` reads the stored credential from localStorage via `getItem()`. Supports multiple auth modes:
+  - API key (`setApiKey()` / `clearApiKey()`)
+  - Dashboard credentials (`dashboardLogin()` / `dashboardLogout()`)
+  - OAuth2 token verification (`verifyStoredAuth()`)
+- **Error handling**: `parseError()` normalizes HTTP errors into `ApiError` instances (from `lib/http/errors.ts`), which propagates to React Query's error channels.
+- **Streaming**: Separate functions handle SSE endpoints (logs, comms events) and the chat WebSocket connection.
 
-### Chunk Error Recovery
+Public surface includes typed functions for every kernel endpoint, for example:
+- `getStatus()`, `getVersionInfo()` — system info
+- `runWorkflow()`, `updateWorkflow()` — workflow management
+- `testChannel()`, `configureChannel()` — channel setup
+- `createPromptVersion()`, `createAgentSession()` — agent operations
 
-When the dashboard is rebuilt (dev HMR, version upgrade), old chunk hashes become invalid. The router handles this at two levels:
+### Data Fetching — React Query Hooks
 
-1. **`lazyWithReload`** — Wraps each `lazy()` import. On chunk failure, calls `tryAutoReload()` which sets a `sessionStorage` cooldown key and calls `window.location.reload()` once per 10 seconds.
+Located in two directories:
 
-2. **`ChunkErrorBoundary`** — The router's `defaultErrorComponent`. Catches render-time errors from stale React dispatcher state (a Vite HMR artifact). Shows a diagnostic UI with **Reload**, **Force Reload** (clears the cooldown), and optional stack trace.
+**Queries** (`lib/queries/`): Read-only data fetchers that wrap `api.ts` functions in `useQuery` hooks.
 
-Two regex patterns detect recoverable errors:
-- `CHUNK_ERROR_RE` — matches "dynamically imported module", "Loading chunk … failed"
-- `REACT_DISPATCHER_RE` — matches "reading 'useState'", "reading 'useContext'", etc.
+| Module | Purpose |
+|--------|---------|
+| `lib/queries/providers.ts` | `useProviders()` — provider list with auth status |
+| `lib/queries/workflows.ts` | `useWorkflows()`, `useWorkflowTemplates()`, `useWorkflowRuns()`, `useWorkflowRunDetail()` |
+| `lib/queries/schedules.ts` | Schedule/triggers data |
 
-## Application Shell — `App.tsx`
+**Mutations** (`lib/mutations/`): Write operations wrapped in `useMutation` hooks.
 
-The root component manages layout, authentication, navigation, and global UI concerns.
+| Module | Purpose |
+|--------|---------|
+| `lib/mutations/overview.ts` | `useQuickInit()` — first-run wizard setup |
+| `lib/mutations/providers.ts` | `useSetProviderKey()`, `useSetDefaultProvider()` |
+| `lib/mutations/workflows.ts` | `useRunWorkflow()`, `useDryRunWorkflow()`, `useUpdateWorkflow()`, `useInstantiateTemplate()` |
+| `lib/mutations/agents.ts` | `useCreatePromptVersion()`, `useCreateAgentSession()` |
+| `lib/mutations/schedules.ts` | `useCreateSchedule()` |
+| `lib/mutations/channels.ts` | `useTestChannel()` |
 
-### Authentication Flow
+Every mutation follows the same pattern: call an `api.ts` function → React Query manages loading/error/cache state → the page component reads the mutation state.
 
-```mermaid
-sequenceDiagram
-    participant App
-    participant API as api.ts
-    participant Backend
+### Page Components — `src/pages/`
 
-    App->>API: checkDashboardAuthMode()
-    API->>Backend: GET /dashboard auth mode
-    Backend-->>API: AuthMode
-    alt mode == "none"
-        App->>App: setAuthNeeded(false)
-    else mode != "none"
-        App->>API: verifyStoredAuth()
-        API->>Backend: GET (with stored credentials)
-        alt authenticated
-            App->>App: setAuthNeeded(false)
-        else not authenticated
-            App->>App: Show AuthDialog
-        end
-    end
+Each page is a self-contained React component that composes query hooks, mutation hooks, and local UI state.
+
+| Page | File | Key Features |
+|------|------|--------------|
+| **WizardPage** | `src/pages/WizardPage.tsx` | First-run setup: detects providers (`useProviders`), sets API key (`useSetProviderKey`), sets default provider (`useSetDefaultProvider`), runs quick init (`useQuickInit`) |
+| **AgentsPage** | `src/pages/AgentsPage.tsx` | Agent list, prompt version management (`PromptsExperimentsModal`), session creation |
+| **ChatPage** | `src/pages/ChatPage.tsx` | Real-time chat with agents. Uses `useChatMessages` which manages both HTTP (`sendViaHttp`) and WebSocket (`useWebSocket`) transport, message IDs via `makeMessageId` |
+| **WorkflowsPage** | `src/pages/WorkflowsPage.tsx` | Workflow CRUD, template instantiation, dry-run, execution, shortcut creation (`useCreateShortcut`) |
+| **CanvasPage** | `src/pages/CanvasPage.tsx` | Visual workflow editor, uses `truncateId` for display |
+| **ChannelsPage** | `src/pages/ChannelsPage.tsx` | Channel adapter configuration, `ChannelCard` with `getChannelIcon`, test connectivity |
+| **ProvidersPage** | `src/pages/ProvidersPage.tsx` | Provider management, test connectivity (`handleTest` → `getActionResultError`), shortcut creation |
+| **ModelsPage** | `src/pages/ModelsPage.tsx` | Model catalog, add form (`handleAdd` → `resetForm`), mobile cards use `modelKey` from `lib/hiddenModels.ts` |
+| **MediaPage** | `src/pages/MediaPage.tsx` | Media provider browsing via `providersWithCapability` |
+| **McpServersPage** | `src/pages/McpServersPage.tsx` | MCP server management, `AuthBadge` via `serverIdentityOf`, `ServerCard` via `getTransportDetail`, field updates via `updateField`, tool toggling via `toggleTools` |
+| **SkillsPage** | `src/pages/SkillsPage.tsx` | Skill marketplace, rate-limit error detection (`isRateLimitError`) |
+| **SchedulerPage** | `src/pages/SchedulerPage.tsx` | Cron job and trigger management, `openEditTrigger` |
+| **LogsPage** | `src/pages/LogsPage.tsx` | Real-time log viewer, time formatting via `formatTime` from `lib/datetime.ts` |
+| **ApprovalsPage** | `src/pages/ApprovalsPage.tsx` | Approval queue, `statusBadge` rendering, decision handling (`handleDecision` → `executeDecision`) |
+
+### App Shell — `dashboard/src/App.tsx`
+
+Entry point that orchestrates:
+
+1. **Auth bootstrap** — `checkAuth()` calls `checkDashboardAuthMode()` then `verifyStoredAuth()` to restore sessions.
+2. **Auth mode detection** — Determines whether the kernel uses API key, dashboard credentials, or OAuth.
+3. **Login flows** — `handleApiKeySubmit` (API key), `handleCredentialsSubmit` (username/password via `dashboardLogin`), `handleSubmit` (password change via `changePassword` + `clearApiKey`), `ChangePasswordModal` (username display via `getDashboardUsername`).
+4. **Logout** — Calls `dashboardLogout()`.
+5. **Unauthorized hook** — `setOnUnauthorized()` registers a callback that triggers re-authentication when a 401 is received.
+6. **Version polling** — `getVersionInfo()` and `getStatus()` on mount.
+
+### Router — `dashboard/src/router.tsx`
+
+Maps URL paths to page components. Includes `tryAutoReload` which checks localStorage for a stored auth token and attempts silent re-authentication on page load.
+
+### Shared Libraries — `src/lib/`
+
+Utility modules used across pages:
+
+| Module | Purpose |
+|--------|---------|
+| `src/lib/agentManifest.ts` | TOML serialization for agent manifests. `serializeManifestForm()` orchestrates `splitTopLevelExtras`, `writeStringScalar` (with `escapeTomlString`), `writeNumberScalar`, `jsonValueToInlineToml` (recursive), `parseScheduleField` (via `asString`). |
+| `src/lib/agentManifestMarkdown.ts` | Markdown generation from manifest data. `generateManifestMarkdown()` uses `pushList` helper. |
+| `src/lib/chat.ts` | Chat message normalization — `normalizeRole`, `asText`, `formatMeta`, `normalizeToolOutput`. |
+| `src/lib/chatPicker.ts` | Chat target selection via `groupedPicker`. |
+| `src/lib/triggerPattern.ts` | Trigger pattern formatting via `formatTriggerPattern`. |
+| `src/lib/datetime.ts` | Time formatting helpers like `formatTime`. |
+| `src/lib/string.ts` | String utilities like `truncateId`. |
+| `src/lib/hiddenModels.ts` | Model key resolution via `modelKey`. |
+| `src/lib/useCreateShortcut.ts` | Shared hook for creating dashboard shortcuts, used by `WorkflowsPage` and `ProvidersPage`. |
+| `src/lib/i18n.ts` | Internationalization bootstrap, calls `init()` from the Rust CLI i18n module. |
+
+### Component Library — `src/components/`
+
+Reusable UI components. Notable:
+
+| Component | Purpose |
+|-----------|---------|
+| `AgentManifestForm` | Dynamic form for editing agent TOML manifests. The call graph shows it receives `update`/`commit` callbacks that align with the kernel's content hashing (`sha256_hex`, `compute_entry_hash`, etc.) and usage tracking pipelines. |
+
+## Request Lifecycle
+
+A typical write operation follows this path:
+
+```
+Page component (event handler)
+  → Mutation hook (lib/mutations/*.ts)
+    → API function (dashboard/src/api.ts)
+      → HTTP method helper (post/put/patch/del)
+        → buildHeaders() → authHeader() → getItem() [reads stored token]
+        → fetch() to kernel
+        → parseError() on failure → ApiError
+      → React Query cache invalidation
+    → Page re-renders with new data
 ```
 
-**Auth modes** (`AuthMode` type from `api.ts`):
+A typical read operation:
 
-| Mode | Behavior |
-|------|----------|
-| `"none"` | No authentication required |
-| `"api_key"` | API key input only |
-| `"credentials"` | Username + password (with optional TOTP) |
-| `"hybrid"` | User chooses between API key and credentials tabs |
+```
+Page component (mount / route change)
+  → Query hook (lib/queries/*.ts)
+    → API function (dashboard/src/api.ts)
+      → get() → buildHeaders() → fetch()
+    → React Query caches response
+  → Page renders from cache
+```
 
-**`AuthDialog`** handles:
-- API key submission — stores key via `setApiKey()`, validates with `verifyStoredAuth()`
-- Credential submission — calls `dashboardLogin(username, password)`
-- TOTP 2FA — when `dashboardLogin` returns `requires_totp: true`, shows a 6-digit code input, then calls `dashboardLogin(username, password, totpCode)`
+## Authentication Flow
 
-A global 401 handler is registered via `setOnUnauthorized()`. Any API call that returns 401 triggers re-authentication by re-checking the auth mode and showing the dialog.
+The dashboard supports three authentication modes, detected at startup by `checkDashboardAuthMode()`:
 
-**`ChangePasswordModal`** provides self-service credential updates:
-- Change username (minimum 2 characters)
-- Change password (minimum 8 characters, confirmation required)
-- Both require current password verification
-- Calls `changePassword()`, then clears credentials and reloads on success
+1. **API Key** — User enters a key in the wizard. Stored via `setApiKey()`, sent as `Authorization: Bearer <key>`.
+2. **Dashboard Credentials** — Username/password login via `dashboardLogin()`. Session managed with tokens.
+3. **OAuth2** — Redirect-based flow. The kernel handles the OAuth callback (`/api/auth/callback`), and the dashboard stores the resulting token.
 
-### Sidebar Navigation
+All modes converge on `authHeader()` which reads the stored credential and attaches it to every outbound request. When a request returns 401, the `setOnUnauthorized()` callback triggers re-authentication.
 
-The sidebar is organized into six navigation groups, each defined in the `navGroups` memo:
+## Real-Time Streaming
 
-| Group | Items |
-|-------|-------|
-| **Core** | Overview, Chat, Agents, Approvals, Hands |
-| **Configure** | Providers, Models, Media, Channels, Skills, Plugins, MCP Servers |
-| **Config** | General, Memory, Tools, Channels, Security, Network, Infra, Settings |
-| **Automate** | Workflows, Scheduler, Goals |
-| **Observe** | Analytics, Memory, Logs, Runtime |
-| **Advanced** | Comms, Terminal (conditional), Network, A2A, Telemetry |
+The dashboard uses two streaming mechanisms:
 
-The Terminal nav item only appears when `terminalEnabled` is `true`, which is fetched from `getStatus()` on mount.
+- **SSE (Server-Sent Events)** — Used for log streaming (`/api/logs/stream`), inter-agent comms events (`/api/comms/events/stream`), and chat streaming (`/api/agents/{id}/message/stream`). The kernel sends heartbeat pings every 15 seconds.
+- **WebSocket** — Used by `ChatPage`'s `useChatMessages` hook via `useWebSocket` for bidirectional agent chat with lower latency than SSE.
 
-**Nav layouts** (controlled by `useUIStore.navLayout`):
-- **Grouped** — all groups visible with labels
-- **Collapsible** — groups can be collapsed/expanded via `toggleNavGroup()`
+## Agent Manifest Handling
 
-**Sidebar states**:
-- Desktop: expanded (280px) or collapsed (24px icons-only), toggled by `toggleSidebar()`
-- Mobile: slides in from left as an overlay, controlled by `isMobileMenuOpen`
+Agent configuration uses TOML manifests. The frontend provides full serialization/deserialization:
 
-### Header Bar
+1. **Parsing** — Manifest TOML is parsed into form state.
+2. **Editing** — `AgentManifestForm` provides a dynamic UI for all manifest fields including system prompt, model, provider, temperature, max_tokens, tools, skills, and custom extras.
+3. **Serialization** — `serializeManifestForm()` converts form state back to valid TOML, handling string escaping (`escapeTomlString`), nested objects (`splitTopLevelExtras`), number formatting (`writeNumberScalar`), inline JSON values (`jsonValueToInlineToml`), and schedule fields (`parseScheduleField`).
+4. **Submission** — The serialized TOML is sent to `POST /api/agents` (spawn) or `PATCH /api/agents/{id}/config` (hot-update).
 
-The top header contains:
-- Mobile menu button (hidden on `lg:` breakpoint)
-- **NotificationCenter** — notification bell component
-- Language toggle (English ↔ Chinese)
-- Theme toggle (light ↔ dark)
-- User menu dropdown with Settings, Change Password, and Logout
+## Development Guidelines
 
-### UI Store
+### Adding a New Page
 
-Global UI state lives in `useUIStore` (Zustand). Key fields consumed in `App`:
+1. Create the component in `src/pages/NewPage.tsx`.
+2. Add query hooks in `lib/queries/` if the page reads data.
+3. Add mutation hooks in `lib/mutations/` if the page writes data.
+4. Ensure the API functions exist in `dashboard/src/api.ts` with proper types from `openapi/generated.ts`.
+5. Register the route in `dashboard/src/router.tsx`.
 
-| Field | Purpose |
-|-------|---------|
-| `theme` | `"light"` or `"dark"`, toggles the `.dark` class on `<html>` |
-| `language` | `"en"` or `"zh"` |
-| `isSidebarCollapsed` | Desktop sidebar collapse state |
-| `isMobileMenuOpen` | Mobile overlay sidebar state |
-| `navLayout` | `"grouped"` or `"collapsible"` |
-| `collapsedNavGroups` | Record of group keys to collapsed state |
-| `terminalEnabled` | Whether the terminal feature is available |
+### Adding a New API Endpoint
 
-## API Layer
+1. Add/update the endpoint in the kernel's OpenAPI spec.
+2. Regenerate `openapi/generated.ts` by running the openapi-typescript generator.
+3. Add a typed function in `dashboard/src/api.ts` that calls the appropriate HTTP method helper.
+4. Create a query or mutation hook wrapping the new function.
+5. Use the hook in the target page component.
 
-All backend communication goes through `api.ts`, which provides:
+### Working with Generated Types
 
-- **`get()` / `post()` / `put()` / `patch()` / `del()`** — Generic HTTP methods that call `buildHeaders()` for auth injection and `parseError()` for error normalization
-- **`buildHeaders()`** → `authHeader()` → reads stored credentials from `localStorage`
-- **`setOnUnauthorized(callback)`** — Registers a global callback invoked on 401 responses, used by `App` to trigger re-authentication
-- **Auth functions**: `checkDashboardAuthMode`, `verifyStoredAuth`, `dashboardLogin`, `dashboardLogout`, `setApiKey`, `clearApiKey`, `getDashboardUsername`, `changePassword`
-- **Domain functions**: `listAgents`, `listProviders`, `listChannels`, `createWorkflow`, `runWorkflow`, `clawhubSearch`, `clawhubInstall`, etc.
-
-The generated OpenAPI types in `openapi/generated.ts` provide full type coverage for all API endpoints and response shapes. These types are auto-generated and should not be edited directly.
-
-## Design System — `index.css`
-
-### Theming
-
-Colors are defined as CSS custom properties with light/dark variants:
-
-- **Semantic colors**: `--brand-color`, `--success-color`, `--warning-color`, `--error-color`, `--accent-color`
-- **Layout colors**: `--bg-main`, `--bg-surface`, `--bg-surface-hover`, `--border-color`, `--text-muted`
-
-These are mapped to Tailwind utilities via `@theme` declarations: `--color-brand`, `--color-surface`, `--color-text-dim`, etc. Dark mode uses `@custom-variant dark (&:where(.dark, .dark *))` so the `.dark` class on `<html>` activates all `dark:` utilities.
-
-### Custom Breakpoints
-
-| Name | Width | Purpose |
-|------|------|---------|
-| `3xl` | 1920px | QHD — 5-column card grids |
-| `4xl` | 2560px | UHD/4K — 6-column card grids |
-
-### Animation System
-
-Spring-physics curves modeled after Apple's motion design:
-
-| Variable | Curve | Use |
-|----------|-------|-----|
-| `--apple-spring` | `cubic-bezier(0.22, 1, 0.36, 1)` | Page transitions, sidebar |
-| `--apple-ease` | `cubic-bezier(0.25, 0.1, 0.25, 1)` | Chat messages |
-| `--apple-bounce` | `cubic-bezier(0.34, 1.56, 0.64, 1)` | Modals |
-
-Applied classes:
-- `.animate-fade-in-up` — 600ms spring entrance with blur-to-sharp
-- `.animate-fade-in-scale` — 500ms bounce scale for modals
-- `.animate-message-in` — 220ms light rise for chat bubbles
-- `.stagger-children` — Cascading entrance for child elements (40ms offset per child, disabled on mobile)
-- `.card-glow` — Hover depth effect with brand-tinted shadow
-- `.animate-progress` — Progress bar fill animation
-
-All animations respect `prefers-reduced-motion: reduce` by disabling transforms, opacity transitions, and filters.
-
-## Adding a New Page
-
-1. Create the page component in `src/pages/MyPage.tsx` and export it as a named export.
-2. In `router.tsx`, add a `lazyWithReload` import:
-   ```tsx
-   const MyPage = lazyWithReload(() => import("./pages/MyPage").then(m => ({ default: m.MyPage })));
-   ```
-3. Create a route:
-   ```tsx
-   const myRoute = createRoute({
-     getParentRoute: () => rootRoute,
-     path: "/my-page",
-     component: () => <L><MyPage /></L>
-   });
-   ```
-4. Add `myRoute` to the `routeTree` array.
-5. Optionally add a nav entry in the appropriate `navGroups` group in `App.tsx`.
+The `paths` interface in `openapi/generated.ts` is the single source of truth for all API routes and their shapes. When consuming API responses in TypeScript, prefer using the operation types (e.g., `operations["list_agents"]["responses"]["200"]["content"]["application/json"]`) rather than defining separate interface duplicates.
