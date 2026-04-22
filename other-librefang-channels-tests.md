@@ -1,167 +1,140 @@
 # Other — librefang-channels-tests
 
-# librefang-channels — Bridge Integration Tests
+# librefang-channels Integration Tests
 
-## Overview
-
-The `bridge_integration_test.rs` module provides end-to-end integration tests for the `BridgeManager` dispatch pipeline in `librefang-channels`. Every test runs entirely in-process using real `tokio` channels and tasks — no external services, no network calls. The strategy is to substitute production components with focused mocks that are wired through the **real** `BridgeManager`, `AgentRouter`, and message-dispatch logic.
+Bridge dispatch pipeline tests that verify the full message lifecycle from adapter ingestion through routing, agent dispatch, and response delivery — all in-process with no external service dependencies.
 
 ## Architecture
 
+The tests wire **real production components** (`BridgeManager`, `AgentRouter`) against **mock implementations** of the two integration boundaries:
+
 ```mermaid
-graph TD
-    subgraph "Test Infrastructure"
-        TX["mpsc::Sender<br/>(inject messages)"]
-        MA["MockAdapter /<br/>MockStreamingAdapter"]
-        MH["MockHandle /<br/>MockStreamingHandle"]
+graph LR
+    subgraph Test Infrastructure
+        TX[mpsc::Sender] -->|inject messages| MA[MockAdapter]
+        MA -->|ChannelMessage stream| BM[BridgeManager]
+        BM -->|dispatch| MH[MockHandle]
+        MH -->|response| BM
+        BM -->|send / send_streaming| MA
     end
-
-    subgraph "Production Code Under Test"
-        BM["BridgeManager"]
-        AR["AgentRouter"]
-    end
-
-    TX -->|"ChannelMessage"| MA
-    MA -->|"Stream<Item=ChannelMessage>"| BM
-    BM -->|"resolve / set_user_default"| AR
-    BM -->|"send_message / send_message_streaming"| MH
-    MH -->|"Response / Delta stream"| BM
-    BM -->|"send / send_streaming"| MA
+    BM --> AR[AgentRouter]
 ```
 
-Each test follows the same pattern:
+- **`ChannelAdapter`** mock — replaces real platform adapters (Telegram, Discord, etc.)
+- **`ChannelBridgeHandle`** mock — replaces the real kernel connection
 
-1. **Create mocks** — a `ChannelAdapter` implementation and a `ChannelBridgeHandle` implementation, each tailored to the scenario.
-2. **Wire the router** — optionally pre-route users to agents via `AgentRouter::set_user_default`.
-3. **Instantiate `BridgeManager`** with the mock handle and router, then call `start_adapter`.
-4. **Inject messages** through the `mpsc::Sender` returned by the mock adapter constructor.
-5. **Sleep briefly** to let the async dispatch loop process (typically 100–300ms).
-6. **Assert** on captured outputs (sent text, streamed text, delivery metrics).
+Communication flows through real `tokio` channels and tasks, making these true integration tests rather than unit tests with mocked dependencies.
 
 ## Mock Components
 
 ### Channel Adapters
 
-All adapters implement `ChannelAdapter` and capture outbound responses for test inspection.
+| Adapter | Streaming | Behavior |
+|---------|-----------|----------|
+| `MockAdapter` | No | Echoes responses; captures sent text and interactive button labels |
+| `MockStreamingAdapter` | Yes | Implements `send_streaming`; captures streamed deltas separately from non-streaming sends |
+| `MockFailingStreamingAdapter` | Yes | `send_streaming` always returns `Err`; drains the delta channel to populate `buffered_text` before failing |
 
-| Mock | `supports_streaming` | `send_streaming` behavior | Purpose |
-|---|---|---|---|
-| `MockAdapter` | `false` (default) | Default impl (collects deltas → `send`) | Basic non-streaming channels (Discord, Slack, Matrix) |
-| `MockStreamingAdapter` | `true` | Collects deltas into `streamed` vec | Streaming-capable channels (Telegram) |
-| `MockFailingStreamingAdapter` | `true` | Drains deltas then returns `Err` | Tests fallback when transport fails mid-stream |
-
-Each adapter constructor returns `(Arc<Self>, mpsc::Sender<ChannelMessage>)`. The sender is the injection point for test messages.
+All adapters use an `mpsc::Receiver<ChannelMessage>` as their message source, allowing tests to inject arbitrary messages through a paired `mpsc::Sender`. Sent responses are captured in an `Arc<Mutex<Vec<_>>>` for post-assertion inspection.
 
 ### Kernel Handles
 
-All handles implement `ChannelBridgeHandle`.
+| Handle | Key Methods | Behavior |
+|--------|-------------|----------|
+| `MockHandle` | `send_message` | Returns `Echo: {message}`; records received messages |
+| `MockStreamingHandle` | `send_message_streaming` | Splits echo response into word-by-word deltas over `mpsc::Receiver<String>` |
+| `MockProgressHandle` | `send_message_streaming_with_sender_status` | Emits progress marker `🔧 tool_name` followed by prose; reports kernel success |
+| `MockKernelErrorHandle` | `send_message_streaming_with_sender_status` | Emits partial text + progress, then reports `Err("rate limit hit")` via status oneshot |
+| `MockKernelOkHandle` | `send_message_streaming_with_sender_status` + `record_delivery` | Emits clean text, reports `Ok(())`, logs all `record_delivery` calls for metric assertion |
 
-| Mock | Streaming support | Key behavior |
-|---|---|---|
-| `MockHandle` | `send_message` only | Echoes `"Echo: {message}"`, records received messages |
-| `MockStreamingHandle` | `send_message_streaming` | Emits echo response word-by-word as deltas |
-| `MockProgressHandle` | `send_message_streaming_with_sender_status` | Emits `🔧 tool_name` progress line + prose, returns success status |
-| `MockKernelErrorHandle` | `send_message_streaming_with_sender_status` | Emits progress deltas, then reports kernel error via status oneshot |
-| `MockKernelOkHandle` | `send_message_streaming_with_sender_status` + `record_delivery` | Emits clean text, reports success, logs all `record_delivery` calls as `(bool, Option<String>)` |
+### Message Constructors
 
-## Test Helpers
+- **`make_text_msg(channel, user_id, text)`** — builds a `ChannelMessage` with `ChannelContent::Text`
+- **`make_command_msg(channel, user_id, cmd, args)`** — builds a `ChannelMessage` with `ChannelContent::Command`
 
-### `make_text_msg`
+Both set sensible defaults for unused fields (`platform_message_id: "msg1"`, `is_group: false`, `thread_id: None`).
 
-```rust
-fn make_text_msg(channel: ChannelType, user_id: &str, text: &str) -> ChannelMessage
-```
-
-Constructs a `ChannelMessage` with `ChannelContent::Text`. Sets reasonable defaults for all other fields (`platform_message_id: "msg1"`, `display_name: "TestUser"`, `is_group: false`, empty metadata).
-
-### `make_command_msg`
-
-```rust
-fn make_command_msg(
-    channel: ChannelType,
-    user_id: &str,
-    cmd: &str,
-    args: Vec<&str>,
-) -> ChannelMessage
-```
-
-Constructs a `ChannelMessage` with `ChannelContent::Command { name, args }`. Used for testing slash-command dispatch (`/agents`, `/help`, `/agent`, `/status`).
-
-## Test Cases
+## Test Coverage
 
 ### Basic Dispatch
 
 | Test | What it verifies |
-|---|---|
-| `test_bridge_dispatch_text_message` | A text message from a pre-routed user reaches the correct agent; the echo response is delivered back through the adapter to the correct `platform_id`. |
-| `test_bridge_dispatch_no_agent_assigned` | An unrouted user receives a `"No agents available"` error message instead of a silent drop. |
-| `test_bridge_dispatch_slash_command_in_text` | Plain text starting with `/` (e.g., `"/agents"`) is detected and dispatched as a command, even when sent as `ChannelContent::Text`. |
+|------|-----------------|
+| `test_bridge_dispatch_text_message` | A text message from a pre-routed user reaches the correct agent; the echo response is delivered back to the adapter |
+| `test_bridge_dispatch_no_agent_assigned` | An unrouted user receives a "No agents available" error message instead of a silent failure |
+| `test_bridge_dispatch_slash_command_in_text` | Plain text starting with `/` (e.g., `"/agents"`) is detected and handled as a command, not forwarded to an agent |
 
 ### Command Handling
 
 | Test | Command | Expected behavior |
-|---|---|---|
-| `test_bridge_dispatch_agents_command` | `/agents` | Response lists all registered agent names (e.g., `"coder"`, `"researcher"`). |
-| `test_bridge_dispatch_help_command` | `/help` | Response mentions `/agents` and `/agent`. |
-| `test_bridge_dispatch_agent_select_command` | `/agent coder` | Confirms selection (`"Now talking to agent: coder"`), updates the router so subsequent `resolve` calls return the chosen agent. |
-| `test_bridge_dispatch_status_command` | `/status` | Reports running agent count (e.g., `"2 agent(s) running"`). |
+|------|---------|-------------------|
+| `test_bridge_dispatch_agents_command` | `/agents` | Lists all registered agents by name |
+| `test_bridge_dispatch_help_command` | `/help` | Returns help text mentioning `/agents` and `/agent` |
+| `test_bridge_dispatch_agent_select_command` | `/agent coder` | Confirms selection; updates `AgentRouter` so future messages from that user route to the selected agent |
+| `test_bridge_dispatch_status_command` | `/status` | Returns uptime info including running agent count |
 
 ### Lifecycle and Multi-Adapter
 
 | Test | What it verifies |
-|---|---|
-| `test_bridge_manager_lifecycle` | Start → send 5 messages → receive 5 echo responses → stop without hanging. Validates ordering and completeness of sequential dispatch. |
-| `test_bridge_multiple_adapters` | Two adapters (Telegram + Discord) registered on the same `BridgeManager`. Each receives messages only for its own channel, and responses route back correctly. |
+|------|-----------------|
+| `test_bridge_manager_lifecycle` | Start → send 5 sequential messages → all 5 echo responses received → clean stop without hanging |
+| `test_bridge_multiple_adapters` | Two adapters (Telegram + Discord) run concurrently on the same `BridgeManager`; messages on each adapter receive independent correct responses |
 
 ### Streaming Dispatch
 
 | Test | What it verifies |
-|---|---|
-| `test_bridge_streaming_adapter_uses_send_streaming` | When both the adapter and handle support streaming, `send_streaming` is called (not `send`). The streamed output contains the echo text. |
-| `test_bridge_non_streaming_adapter_falls_back_to_send` | When the adapter does not support streaming but the handle does, the bridge falls back to the non-streaming `send` path. |
-| `test_default_send_streaming_collects_and_sends` | The default `ChannelAdapter::send_streaming` implementation (which non-streaming adapters inherit) collects all deltas from the receiver and calls `send` with the assembled text. |
+|------|-----------------|
+| `test_bridge_streaming_adapter_uses_send_streaming` | When both adapter and handle support streaming, `send_streaming` is called (not `send`); full streamed text is reassembled |
+| `test_bridge_non_streaming_adapter_falls_back_to_send` | When the adapter doesn't support streaming, `send()` is called with the complete response even though the handle provides a streaming API |
+| `test_default_send_streaming_collects_and_sends` | The default `send_streaming` implementation on `ChannelAdapter` collects all deltas and forwards the assembled text to `send()` |
 
-### Progress Markers and Error Paths
+### Progress Markers and Error Recovery
 
-These tests exercise the V2/V3 dispatch pipeline that routes streaming-with-status through non-streaming adapters and handles failure cascades.
+| Test | What it verifies |
+|------|-----------------|
+| `test_bridge_non_streaming_adapter_sees_progress_markers` | Non-streaming adapters (Discord/Slack/Matrix) receive `🔧` progress markers in their consolidated response via the streaming-with-status pipeline |
+| `test_bridge_streaming_adapter_kernel_and_transport_both_fail` | When both `send_streaming` and the kernel status report errors, the buffered fallback delivers accumulated partial text including progress markers |
+| `test_bridge_streaming_adapter_kernel_ok_transport_fail_records_clean_success` | **Bug 1 regression test**: When kernel succeeds but transport `send_streaming` fails, `record_delivery` is called with `(success=true, err=None)` — the transport stream error must not leak into the metric's error field |
 
-| Test | Scenario | Expected outcome |
-|---|---|---|
-| `test_bridge_non_streaming_adapter_sees_progress_markers` | Non-streaming adapter + handle that emits `🔧 tool_name` progress via `send_message_streaming_with_sender_status` | Progress markers and post-tool prose appear in the consolidated `send` response. |
-| `test_bridge_streaming_adapter_kernel_and_transport_both_fail` | Streaming adapter whose `send_streaming` always errors + handle that reports kernel error | Fallback `send` delivers buffered partial text including progress markers. |
-| `test_bridge_streaming_adapter_kernel_ok_transport_fail_records_clean_success` | Failing streaming adapter + handle that reports kernel success | `record_delivery` is called with `(success=true, err=None)`. The transport-side stream error does not leak into the error field. |
+## Test Pattern
+
+Every test follows the same structure:
+
+```rust
+// 1. Set up routing
+let router = Arc::new(AgentRouter::new());
+router.set_user_default("user1".to_string(), agent_id);
+
+// 2. Create mock components
+let (adapter, tx) = MockAdapter::new("test", ChannelType::Telegram);
+let handle = Arc::new(MockHandle::new(agents));
+
+// 3. Wire through real BridgeManager
+let mut manager = BridgeManager::new(handle, router);
+manager.start_adapter(adapter).await.unwrap();
+
+// 4. Inject a message
+tx.send(make_text_msg(ChannelType::Telegram, "user1", "hello")).await.unwrap();
+
+// 5. Wait for async processing
+tokio::time::sleep(Duration::from_millis(100)).await;
+
+// 6. Assert on captured outputs
+let sent = adapter_ref.get_sent();
+assert_eq!(sent[0].1, "Echo: hello");
+
+// 7. Clean shutdown
+manager.stop().await;
+```
+
+The `tokio::time::sleep` calls allow the async dispatch loop to process messages. Tests use 100–300ms depending on the number of async steps involved (streaming tests need more time for delta propagation).
 
 ## Relationship to Production Code
 
-```
-bridge_integration_test.rs
-  ├── BridgeManager      ← librefang-channels/src/bridge.rs
-  ├── AgentRouter        ← librefang-channels/src/router.rs
-  ├── ChannelAdapter     ← librefang-channels/src/types.rs
-  ├── ChannelBridgeHandle ← librefang-channels/src/bridge.rs
-  ├── ChannelMessage     ← librefang-channels/src/types.rs
-  ├── ChannelContent     ← librefang-channels/src/types.rs
-  ├── ChannelUser        ← librefang-channels/src/types.rs
-  ├── ChannelType        ← librefang-channels/src/types.rs
-  ├── AgentId            ← librefang-types/src/agent.rs
-  └── SenderContext       ← librefang-channels/src/types.rs
-```
+These tests exercise three production modules end-to-end:
 
-The tests exercise these production call paths:
+- **`bridge::BridgeManager`** — adapter lifecycle, message dispatch, response delivery, streaming negotiation
+- **`router::AgentRouter`** — user-to-agent routing via `set_user_default` and `resolve`
+- **`types`** — `ChannelAdapter` trait, `ChannelBridgeHandle` trait, `ChannelMessage`, `ChannelContent`, `ChannelUser`
 
-- `BridgeManager::new` → `start_adapter` → internal dispatch loop → `stop`
-- `AgentRouter::set_user_default` and `AgentRouter::resolve`
-- `ChannelBridgeHandle::send_message`, `send_message_streaming`, `send_message_streaming_with_sender_status`, `record_delivery`, `find_agent_by_name`, `list_agents`
-- `ChannelAdapter::start`, `send`, `send_streaming`, `supports_streaming`, `stop`
-
-## Adding New Tests
-
-To add a new integration test:
-
-1. **Pick or create a mock**. For most cases, `MockAdapter` + `MockHandle` suffice. For streaming scenarios, use `MockStreamingAdapter` + `MockStreamingHandle`. For error/failure paths, use `MockFailingStreamingAdapter` or create a new handle that returns specific error conditions.
-
-2. **Set up routing**. If the test requires a user to be routed to an agent, call `router.set_user_default(user_id, agent_id)` before creating the `BridgeManager`.
-
-3. **Inject and assert**. Send messages via the `mpsc::Sender`, sleep for 100–300ms, then inspect the adapter's `get_sent()` / `get_streamed()` or the handle's `received` / `deliveries()`.
-
-4. **Clean up**. Always call `manager.stop().await` at the end of the test to tear down spawned tasks.
+No production code from this test module is called by other modules — it is purely a verification layer.

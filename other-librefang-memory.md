@@ -4,65 +4,75 @@
 
 Memory substrate for the LibreFang Agent OS.
 
-## Overview
+## Purpose
 
-`librefang-memory` provides the persistent storage and retrieval layer for the LibreFang Agent OS. It serves as the substrate upon which agents store state, conversation history, task results, and any data that must survive across sessions. The module abstracts storage operations behind async interfaces, allowing the rest of the system to interact with memory without coupling to specific storage backends.
+`librefang-memory` provides the persistence and retrieval layer that underpins the agent's ability to store, query, and recall information across sessions. It abstracts the details of durable storage behind a substrate that the rest of the agent OS can rely on for any state that needs to outlive a single request or process lifecycle.
 
-## Architecture
+## Role in the Architecture
 
-The crate relies on **SQLite** (`rusqlite`) as its primary storage engine, chosen for its reliability, zero-configuration deployment, and suitability for single-node agent runtimes. Data is serialized using either JSON (`serde_json`) or MessagePack (`rmp-serde`), depending on the context — JSON for human-readable debugging and interchange, MessagePack for compact binary storage of large structures.
+This crate sits below the agent logic and above the raw storage engine. Other modules in LibreFang consume the memory substrate when they need to persist conversation history, task state, configuration snapshots, or any derived data that should survive restarts.
 
-```mermaid
-graph TD
-    A[Agent OS Components] --> B[librefang-memory]
-    B --> C[SQLite Storage]
-    B --> D[Serialization Layer]
-    D --> E[serde_json]
-    D --> F[rmp-serde / MessagePack]
-    B --> G[librefang-types]
-    B --> H[sha2 / Integrity Hashing]
+```
+┌─────────────────────────┐
+│   Agent Logic / Core    │
+├─────────────────────────┤
+│   librefang-memory      │  ← this crate
+├─────────────────────────┤
+│   librefang-types       │
+├─────────────────────────┤
+│   SQLite (rusqlite)     │
+└─────────────────────────┘
 ```
 
-## Dependencies and Their Roles
+## Key Dependencies and What They Enable
 
-| Dependency | Purpose |
+| Dependency | Role in this crate |
 |---|---|
-| `librefang-types` | Shared type definitions used across all LibreFang crates. Memory entries and metadata structures are defined here. |
-| `rusqlite` | Embedded SQLite database engine for persistent, queryable storage. |
-| `serde`, `serde_json`, `rmp-serde` | Serialization framework with JSON and MessagePack backends for flexible data encoding. |
-| `tokio` | Async runtime. All storage operations are non-blocking. |
-| `async-trait` | Enables async method definitions in traits, used for storage backend abstraction. |
-| `sha2` | Cryptographic hashing for data integrity verification and content-addressed storage keys. |
-| `chrono` | Timestamp management for memory entries — creation, access, and expiration tracking. |
-| `uuid` | Unique identifier generation for memory records and sessions. |
-| `reqwest` | HTTP client, likely used for memory synchronization or remote storage backends. |
-| `tracing` | Structured logging and instrumentation of storage operations. |
-| `thiserror` | Ergonomic error type definitions for storage failures. |
+| `rusqlite` | Primary storage backend. SQLite provides an embedded, transactional database without external service dependencies, making it suitable for single-node agent deployments. |
+| `serde` / `serde_json` / `rmp-serde` | Serialization of structured memory entries. JSON supports human-readable inspection and debugging; MessagePack (`rmp-serde`) provides compact binary encoding for larger or more performance-sensitive payloads. |
+| `sha2` | Content-addressable hashing. Likely used to fingerprint memory entries for deduplication or integrity verification. |
+| `uuid` | Unique identification of memory records, ensuring globally unique references even across distributed instances. |
+| `chrono` | Timestamping of memory entries for temporal queries and ordering. |
+| `tokio` / `async-trait` | Async runtime integration. The memory substrate exposes async interfaces so that I/O-bound storage operations do not block the agent's task scheduler. |
+| `reqwest` | HTTP client, likely used for remote memory backends or synchronization with external services. |
+| `tracing` | Structured logging and diagnostics for storage operations. |
+| `thiserror` | Ergonomic error type definitions for substrate-specific failures. |
 
-## Key Concepts
+## Design Expectations
 
-### Memory as a Substrate
+### Storage Model
 
-Rather than exposing a simple key-value interface, this module is designed as a *substrate* — a low-level layer that higher-level abstractions (conversation managers, task planners, knowledge graphs) build upon. This means the module prioritizes flexibility and correctness over opinionated data models.
+The substrate is built on SQLite via `rusqlite`, indicating a local, file-based persistence model. This choice avoids the operational overhead of running a separate database server while still providing ACID guarantees for memory records.
 
-### Async Storage Interface
+### Serialization Strategy
 
-All operations are async via `tokio`, ensuring that disk I/O never blocks the agent's event loop. The `async-trait` dependency indicates that storage backends are defined as traits with async methods, allowing for swappable implementations (local SQLite, remote services, or in-memory mocks for testing).
+The presence of both `serde_json` and `rmp-serde` suggests that the module supports multiple encoding formats. A typical pattern would be:
 
-### Content Integrity
+- **JSON** for entries that benefit from human readability and tooling compatibility (configuration, metadata).
+- **MessagePack** for high-volume or binary-heavy data where storage size and serialization speed matter.
 
-The presence of `sha2` suggests that stored data is content-addressed or integrity-checked. This prevents silent data corruption and enables deduplication — identical content maps to the same hash regardless of how many times it is stored.
+### Content Addressing
 
-### Serialization Flexibility
+The `sha2` dependency points to content-addressable storage patterns. Memory entries are likely hashed so that identical content maps to the same identifier, enabling deduplication and integrity checks on retrieval.
 
-Supporting both JSON and MessagePack allows the module to balance readability against storage efficiency. JSON is useful during development and for entries that may be inspected directly. MessagePack reduces storage footprint for high-volume binary data such as embeddings or large structured records.
+### Async Interface
 
-## Relationship to Other Crates
+`async-trait` combined with `tokio` indicates that the substrate defines async trait bounds for its storage operations. This allows consumers to `await` reads and writes without blocking, and makes it possible to swap backends (local SQLite vs. remote HTTP) behind a common interface.
 
-- **`librefang-types`**: Defines the data structures that `librefang-memory` persists. The memory crate depends on these types but does not define them.
-- **Agent modules**: Consume `librefang-memory` to store and retrieve state. They never interact with SQLite directly.
-- **Testing crates**: Use `tempfile` (listed in dev-dependencies) to create ephemeral database files for isolated test runs.
+## Relationship to `librefang-types`
+
+This crate depends on `librefang-types` for shared data structures. Memory entries, error types, and configuration shapes are defined in the types crate, keeping this module focused on storage mechanics rather than domain modeling.
 
 ## Testing
 
-Tests use `tempfile` to create temporary directories for SQLite databases, ensuring test isolation and no side effects on the host filesystem. The `tokio-test` dependency enables synchronous-style tests for async storage operations.
+Dev-dependencies include `tokio-test` for async test harnessing and `tempfile` for creating ephemeral SQLite databases during tests. This allows tests to spin up a full substrate backed by a temporary file, exercise it, and clean up without side effects.
+
+## Integration Points
+
+Other LibreFang modules import `librefang-memory` when they need to:
+
+- **Persist state** that must survive process restarts.
+- **Recall prior context** to maintain continuity across agent interactions.
+- **Query historical data** for reporting, debugging, or decision-making.
+
+The substrate hides whether data lives locally in SQLite or is fetched over HTTP via `reqwest`, presenting a uniform async interface to consumers.

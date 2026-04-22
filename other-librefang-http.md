@@ -2,56 +2,62 @@
 
 # librefang-http
 
-Shared HTTP client builder providing consistent TLS configuration and proxy support across the LibreFang workspace.
+Shared HTTP client builder providing consistent TLS configuration and proxy support across the LibreFang project.
 
 ## Purpose
 
-This crate centralizes the construction of `reqwest::Client` instances so that every component in LibreFang——shares identical TLS and proxy behaviour. Rather than each binary configuring its own HTTP stack, they delegate to this library to produce a pre-configured client.
+This crate centralizes HTTP client construction so that every component in LibreFang makes outbound requests with the same TLS stack, certificate validation strategy, and proxy behavior. Rather than each crate independently configuring a `reqwest::Client`, they call into this library to obtain a pre-configured client builder or fully-built client.
 
-## Dependencies
+## Why This Exists
 
-| Crate | Role |
+Repeatedly configuring `reqwest` with rustls, certificate stores, and proxy settings across multiple binaries and libraries leads to drift and bugs. This crate encodes the project's HTTP policies in one place:
+
+- **TLS via rustls** — avoids an OpenSSL dependency and keeps the build statically linkable.
+- **Certificate fallback chain** — loads native system certs first (`rustls-native-certs`); if that fails or produces an empty set, falls back to Mozilla's `webpki-roots` bundle so requests work on minimal containers and CI hosts.
+- **Proxy awareness** — respects environment proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) through reqwest's built-in proxy support.
+- **Consistent tracing** — integrates with the project-wide `tracing` subscriber so HTTP-level errors and connection events appear in structured logs.
+
+## Dependencies and Their Roles
+
+| Dependency | Role |
 |---|---|
-| `reqwest` | Underlying HTTP client |
-| `rustls` | TLS backend (avoids native OpenSSL linkage) |
-| `webpki-roots` | Mozilla CA certificate bundle |
-| `rustls-native-certs` | System certificate store loader |
-| `librefang-types` | Shared type definitions across the workspace |
-| `tracing` | Diagnostic logging |
+| `librefang-types` | Shared types used across LibreFang (config structs, error types, etc.) that influence client configuration. |
+| `reqwest` | Underlying HTTP client. This crate wraps its builder API. |
+| `rustls` | TLS implementation. Used to construct a custom `rustls::ClientConfig` with the project's certificate strategy. |
+| `webpki-roots` | Mozilla's root certificate store. Serves as the fallback when native certs are unavailable. |
+| `rustls-native-certs` | Loads certificates from the OS trust store. Preferred source of root certs. |
+| `tracing` | Structured logging for certificate loading failures, proxy detection, and TLS handshake issues. |
 
-## TLS Certificate Resolution
-
-The crate implements a two-tier certificate loading strategy:
-
-1. **Native certificates first** — loads certificates from the operating system's trust store via `rustls-native-certs`.
-2. **WebPKI roots as fallback** — if native certificate loading fails or yields no results, falls back to Mozilla's `webpki-roots` bundle.
-
-This ensures the client works both in environments with managed PKI (corporate proxies, custom CAs installed system-wide) and in minimal containers where no system cert store exists.
+## How It Fits into LibreFang
 
 ```mermaid
-flowchart TD
-    A[Build reqwest Client] --> B[Load native system certs]
-    B -->|Found| C[Use native certs as root store]
-    B -->|None or error| D[Fallback to webpki-roots]
-    C --> E[Configure rustls TLS on reqwest]
-    D --> E
+graph TD
+    A[librefang-http] --> B[reqwest::Client]
+    A --> C[rustls TLS config]
+    A --> D[librefang-types]
+    E[CLI binary] --> A
+    F[Other LibreFang crates] --> A
 ```
 
-## Proxy Support
+Any crate or binary that needs to make outbound HTTP calls depends on `librefang-http`, calls its builder function, and receives a `reqwest::Client` (or `reqwest::ClientBuilder`) ready for use. The caller does not need to know about TLS internals or certificate paths.
 
-The builder configures `reqwest` to respect standard proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) automatically. This is critical for deployments behind corporate firewalls or when routing traffic through inspection proxies.
+## Integration Points with `librefang-types`
 
-## Integration with Other Crates
+This crate reads shared configuration types from `librefang-types` to determine:
 
-```mermaid
-graph LR
-    A[librefang-types] --> B[librefang-http]
-    B --> C[librefang-cli]
-    B --> D[other consumers]
-```
+- Whether to enforce certificate validation or accept invalid certs (e.g., for testing or air-gapped environments).
+- Proxy configuration if explicitly provided rather than inferred from environment variables.
+- Timeout values and connection pool settings.
 
-`librefang-http` consumes types from `librefang-types` and exposes a client builder that downstream crates call at startup. Because it has no incoming or outgoing internal call edges, it functions as a leaf utility——dependents call into it, but it does not call back into the rest of the workspace.
+See `librefang-types` documentation for the specific config structs involved.
 
-## Usage Pattern
+## Building a Client
 
-Consumers depend on this crate in their `Cargo.toml` and use the builder to obtain a ready-made `reqwest::Client` rather than constructing one directly. All TLS configuration, certificate loading, and proxy setup is handled internally, keeping downstream code focused on request logic rather than transport concerns.
+The typical usage pattern is:
+
+1. Load configuration via `librefang-types`.
+2. Pass relevant config into this crate's builder function.
+3. Receive a configured `reqwest::Client`.
+4. Use that client for all outbound requests.
+
+All logging during client construction (cert loading, proxy detection, TLS warnings) is emitted through `tracing` at appropriate levels (`debug` for routine operations, `warn` for fallback behavior, `error` for failures).

@@ -2,69 +2,60 @@
 
 # librefang-runtime-wasm
 
-WASM skill sandbox for the LibreFang runtime. This crate provides a WebAssembly-based execution environment that isolates and runs user-defined "skills" — plugin-like game logic — within sandboxed WASM instances.
+WASM skill sandbox for the LibreFang runtime. This module provides a secure, sandboxed execution environment for game skills compiled to WebAssembly, using [wasmtime](https://wasmtime.dev/) as the runtime engine.
 
 ## Purpose
 
-Skills in LibreFang are authored as WebAssembly modules and executed in a controlled sandbox. This crate owns the lifecycle of those modules: loading WASM binaries, instantiating them via the [Wasmtime](https://wasmtime.dev/) runtime, and mediating all communication between guest code and the host system.
+LibreFang skills are user-defined behaviors that execute within the game world. Rather than running them as native code with full system access, this module compiles and instantiates them as WASM modules, providing:
 
-By compiling skills to WASM, the system gains:
-
-- **Memory safety** — guest code cannot corrupt host memory
-- **Resource limits** — CPU and memory budgets are enforced by the runtime
-- **Portability** — skills can be authored in any language that targets WASM
-
-## Dependencies
-
-The crate sits between the kernel layer and the broader LibreFang ecosystem:
-
-| Dependency | Role |
-|---|---|
-| `wasmtime` | WASM compilation, instantiation, and execution |
-| `librefang-types` | Shared domain types passed across the host/guest boundary |
-| `librefang-kernel-handle` | Handle protocol for communicating with the game kernel |
-| `librefang-http` | HTTP utilities, likely for fetching remote WASM modules or exposing skill APIs |
-| `tokio` | Async runtime backing all WASM invocation |
-| `serde` / `serde_json` | Serialization of data exchanged with WASM guests |
-| `reqwest` | HTTP client for external requests made on behalf of skill modules |
+- **Memory isolation** — each skill operates within its own WASM linear memory
+- **Capability control** — skills can only call host functions explicitly exposed by the runtime
+- **Deterministic execution** — WASM provides a deterministic computation model suitable for game logic
+- **Language agnosticism** — skills can be authored in any language that compiles to WASM (Rust, C, AssemblyScript, etc.)
 
 ## Architecture
 
+The runtime bridges the game kernel and guest skill code. Skills are compiled to `.wasm` files and loaded by this module, which mediates all interaction between the guest and the host system.
+
 ```mermaid
 graph TD
-    A[Kernel] -->|dispatch skill invocation| B[librefang-runtime-wasm]
-    B -->|load & instantiate| C[Wasmtime Engine]
-    C -->|execute| D[WASM Skill Module]
-    D -->|host calls| B
-    B -->|kernel protocol| E[librefang-kernel-handle]
-    B -->|shared types| F[librefang-types]
-    B -->|HTTP fetch/proxy| G[librefang-http]
+    A[.wasm Skill Module] -->|loaded by| B[librefang-runtime-wasm]
+    B -->|exposes host functions| A
+    B -->|delegates via| C[librefang-kernel-handle]
+    B -->|HTTP through| D[librefang-http]
+    C -->|uses types from| E[librefang-types]
+    B -->|uses types from| E
 ```
 
-## Key Concepts
+## Key Dependencies
 
-### Skill Lifecycle
+| Dependency | Role |
+|---|---|
+| `wasmtime` | Compiles and executes WASM modules. Provides the store, linker, and instance machinery. |
+| `librefang-kernel-handle` | The host-side interface through which skills interact with the game kernel. Host functions exposed to WASM guests delegate to this handle. |
+| `librefang-http` | Enables skills to make outbound HTTP requests (e.g., calling external services or APIs). |
+| `librefang-types` | Shared type definitions for game state, skill payloads, and inter-module communication. |
+| `tokio` | All WASM instantiation and host function calls run on the Tokio async runtime. |
+| `serde` / `serde_json` | Serializes and deserializes data passed between host and guest across the WASM boundary. |
 
-1. **Loading** — A WASM binary (the compiled skill) is fetched or read from storage. `reqwest` and `librefang-http` may be involved for remote modules.
-2. **Compilation** — The binary is compiled through the Wasmtime engine.
-3. **Instantiation** — A module instance is created with configured imports (host functions the skill can call) and resource limits.
-4. **Invocation** — The host calls an exported function on the instance (e.g., a skill entry point), passing serialized input via `serde_json`.
-5. **Teardown** — The instance is dropped, releasing its linear memory and any allocated resources.
+## Host-Guest Communication Pattern
 
-### Host-Guest Boundary
+Data crosses the WASM boundary through a combination of host functions and shared memory:
 
-All data crossing the WASM boundary is serialized to JSON or passed as primitive types. The crate defines host functions that guest modules can import — these are the only way a skill can interact with the outside game state. Typical host functions include:
+1. **Host functions** — The runtime registers callable functions with the wasmtime `Linker`. Guest code invokes these to request kernel operations or HTTP calls. Arguments and return values are serialized to JSON and passed as pointers into linear memory.
 
-- Reading game state through the kernel handle
-- Sending messages or events
-- Making bounded HTTP requests via `reqwest`
+2. **Linear memory** — For larger payloads, the host writes data into the guest's exported memory, and the guest reads it. This avoids copying overhead for substantial game state snapshots.
 
-### Sandboxing
+## Error Handling
 
-Wasmtime enforces isolation at the instruction level. Each skill instance operates in its own linear memory with a configured ceiling. The host controls exactly which capabilities are exposed through the import table — a skill cannot access the filesystem, network, or kernel except through explicitly provided host functions.
+The module uses `anyhow` for general runtime errors (WASM compilation failures, instantiation errors) and `thiserror` for typed error variants when surfacing specific failure modes to callers. All errors are instrumented through `tracing` spans for observability.
 
 ## Integration Points
 
-This crate is consumed by higher orchestration layers (likely the main server or a skill manager) that decide *when* to instantiate and invoke skills. It exposes the runtime machinery while remaining agnostic to scheduling or routing decisions.
+This module sits between the kernel and the skill layer. Other parts of LibreFang should not instantiate skills directly — they route through the kernel, which delegates to this runtime module. The module has no direct incoming or outgoing module calls at the code level because it is consumed as a library by the kernel orchestration layer, not invoked through a shared call graph.
 
-The `librefang-kernel-handle` dependency suggests that skill invocations may need to query or mutate kernel state, with the handle providing the typed protocol for those operations.
+## Future Considerations
+
+- **WASI support** — If skills need filesystem or clock access, WASI capabilities can be layered through wasmtime's existing WASI integration.
+- **Fuel metering** — wasmtime supports fuel-based execution limits to prevent runaway skill computation.
+- **Caching** — Compiled WASM modules can be cached to avoid recompilation on every skill load.

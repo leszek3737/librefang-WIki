@@ -1,138 +1,146 @@
 # Other
 
-# Other — LibreFang Agent OS
+# Other — Supporting Crates & Infrastructure
 
-This module group constitutes the **LibreFang Agent OS** — a full-stack platform for building, running, and managing autonomous AI agents. The sub-modules span from foundational type definitions through to desktop, CLI, and web interfaces.
+This module group contains the crates that form the LibreFang Agent OS — a platform for running, managing, and communicating with autonomous AI agents. Everything from core type definitions to the desktop application lives here.
 
 ## Architecture
+
+The crates form a layered system with clear dependency flow:
 
 ```mermaid
 graph TD
     subgraph "User-Facing"
         CLI[librefang-cli]
-        DSK[librefang-desktop]
+        DESK[librefang-desktop]
         DASH[librefang-api-dashboard]
     end
 
     subgraph "API Layer"
         API[librefang-api]
-        WIRE[librefang-wire]
-        CH[librefang-channels]
+        APILOGIN[librefang-api-src]
+        APILOCALE[librefang-api-static]
+        APITEST[librefang-api-tests]
     end
 
-    subgraph "Kernel & Runtime"
-        K[librefang-kernel]
+    subgraph "Core"
+        KERNEL[librefang-kernel]
+        KHANDLE[librefang-kernel-handle]
+        KROUTE[librefang-kernel-router]
+        KMETER[librefang-kernel-metering]
+    end
+
+    subgraph "Runtime"
         RT[librefang-runtime]
-        LLM[librefang-llm-drivers]
-        WASM[librefang-runtime-wasm]
-        MCP[librefang-runtime-mcp]
+        RTWASM[librefang-runtime-wasm]
+        RTMCP[librefang-runtime-mcp]
+        RTOAUTH[librefang-runtime-oauth]
+    end
+
+    subgraph "LLM"
+        LLMD[librefang-llm-driver]
+        LLMDR[librefang-llm-drivers]
+    end
+
+    subgraph "Channels & Networking"
+        CH[librefang-channels]
+        WIRE[librefang-wire]
+    end
+
+    subgraph "Storage & Extensions"
+        MEM[librefang-memory]
+        EXT[librefang-extensions]
+        HANDS[librefang-hands]
+        MIG[librefang-migrate]
     end
 
     subgraph "Foundation"
-        T[librefang-types]
-        MEM[librefang-memory]
-        SK[librefang-skills]
-        H[librefang-hands]
+        TYPES[librefang-types]
         HTTP[librefang-http]
-        TEL[librefang-telemetry]
+        TELE[librefang-telemetry]
+        TEST[librefang-testing]
     end
 
+    CLI --> KERNEL
     CLI --> API
-    CLI --> K
-    DSK --> API
-    DSK --> K
+    DESK --> KERNEL
+    DESK --> API
     DASH --> API
 
-    API --> K
+    API --> KERNEL
     API --> RT
     API --> MEM
     API --> CH
 
-    K --> RT
-    K --> H
-    K --> MEM
-    K --> SK
+    KERNEL --> KHANDLE
+    KERNEL --> KROUTE
+    KERNEL --> KMETER
+    KERNEL --> MEM
+    KERNEL --> RT
 
-    RT --> LLM
-    RT --> WASM
-    RT --> MCP
-    RT --> MEM
+    RT --> RTWASM
+    RT --> RTMCP
+    RT --> RTOAUTH
+    RT --> LLMD
 
-    LLM --> T
-    CH --> T
-    WIRE --> T
-    HTTP --> T
+    LLMDR --> LLMD
+    LLMDR --> HTTP
+    CH --> HTTP
+    WIRE --> HTTP
+
+    EXT --> TYPES
+    HANDS --> TYPES
+    TEST --> TYPES
+
+    style TYPES fill:#e8f5e9,stroke:#388e3c
+    style KERNEL fill:#e3f2fd,stroke:#1976d2
+    style API fill:#fce4ec,stroke:#c62828
 ```
 
-## Module Groups
+## Key Layers
 
-### Foundation
+### Foundation — [librefang-types](librefang-types.md), [librefang-http](librefang-http.md), [librefang-telemetry](librefang-telemetry.md), [librefang-testing](librefang-testing.md)
 
-| Module | Role |
-|--------|------|
-| [librefang-types](Other%20-%20librefang-types.md) | Canonical data models, error types, traits — the single source of truth every other crate depends on |
-| [librefang-http](Other%20-%20librefang-http.md) | Shared `reqwest::Client` builder with uniform TLS/proxy configuration |
-| [librefang-telemetry](Other%20-%20librefang-telemetry.md) | Centralized `metrics` facade for OpenTelemetry/Prometheus instrumentation |
+[librefang-types](librefang-types.md) is the bedrock: pure data definitions with no I/O or logic, consumed by every other crate. [librefang-http](librefang-http.md) centralizes TLS and proxy configuration so all outbound HTTP calls behave consistently. [librefang-telemetry](librefang-telemetry.md) provides shared metric names and labels. [librefang-testing](librefang-testing.md) supplies mock kernels and LLM drivers used across integration test suites.
 
-### Kernel & Orchestration
+### Core — [librefang-kernel](librefang-kernel.md)
 
-The **kernel** is the central hub. It does not implement subsystem logic — it wires everything together:
+The central orchestrator. It wires together subsystems without implementing domain logic itself. The kernel depends on three specialized sub-crates: [librefang-kernel-handle](librefang-kernel-handle.md) defines the `KernelHandle` trait for in-process callers, [librefang-kernel-router](librefang-kernel-router.md) resolves which Hand and template apply to incoming input, and [librefang-kernel-metering](librefang-kernel-metering.md) enforces resource quotas during execution.
 
-- [librefang-kernel](Other%20-%20librefang-kernel.md) — top-level orchestration: agent lifecycles, tool dispatch, skill evolution, approval workflows, auto-reply
-- [librefang-kernel-handle](Other%20-%20librefang-kernel-handle.md) — the `KernelHandle` trait abstracting in-process kernel access
-- [librefang-kernel-metering](Other%20-%20librefang-kernel-metering.md) — cost accounting and quota enforcement
-- [librefang-kernel-router](Other%20-%20librefang-kernel-router.md) — resolves incoming requests to the correct hand and template
+### Runtime — [librefang-runtime](librefang-runtime.md)
 
-### Agent Runtime
+Coordinates the agent lifecycle: LLM invocation, skill execution, memory persistence, and channel communication. It re-exports three sibling crates — [librefang-runtime-wasm](librefang-runtime-wasm.md) for sandboxed WASM skill execution via wasmtime, [librefang-runtime-mcp](librefang-runtime-mcp.md) for MCP tool discovery and invocation, and [librefang-runtime-oauth](librefang-runtime-oauth.md) for OAuth 2.0 token flows with providers like OpenAI and GitHub Copilot.
 
-The **runtime** manages a single agent's execution loop — LLM calls, memory, tool invocation, and skill execution:
+### LLM — [librefang-llm-driver](librefang-llm-driver.md) → [librefang-llm-drivers](librefang-llm-drivers.md)
 
-- [librefang-runtime](Other%20-%20librefang-runtime.md) — coordinates the agent loop by integrating sibling crates
-- [librefang-llm-driver](Other%20-%20librefang-llm-driver.md) / [librefang-llm-drivers](Other%20-%20librefang-llm-drivers.md) — abstract LLM trait and concrete provider implementations (Anthropic, OpenAI, Gemini, etc.)
-- [librefang-runtime-wasm](Other%20-%20librefang-runtime-wasm.md) — Wasmtime-based sandbox for user-authored skills
-- [librefang-runtime-mcp](Other%20-%20librefang-runtime-mcp.md) — Model Context Protocol client for tool discovery
-- [librefang-runtime-oauth](Other%20-%20librefang-runtime-oauth.md) — OAuth 2.0 PKCE flows for third-party service auth
+A trait/provider split. [librefang-llm-driver](librefang-llm-driver.md) defines the `LlmDriver` contract; [librefang-llm-drivers](librefang-llm-drivers.md) implements it for Anthropic, OpenAI, Gemini, and others, handling wire protocols and SSE streaming.
 
-### Capabilities
+### Channels & Networking — [librefang-channels](librefang-channels.md), [librefang-wire](librefang-wire.md)
 
-| Module | Role |
-|--------|------|
-| [librefang-hands](Other%20-%20librefang-hands.md) | Curated capability packages — self-contained handler units loaded from TOML/JSON config |
-| [librefang-skills](Other%20-%20librefang-skills.md) | Skill lifecycle: filesystem loader, remote marketplace, version resolution, in-memory registry |
-| [librefang-memory](Other%20-%20librefang-memory.md) | SQLite-backed persistent storage for agent state, conversation history, and session context |
-| [librefang-extensions](Other%20-%20librefang-extensions.md) | MCP server bootstrap, AES-256-GCM credential vault, OAuth2 integrations |
+[librefang-channels](librefang-channels.md) provides a unified async interface over 40+ messaging platforms, each selectable as a compile-time feature. [librefang-wire](librefang-wire.md) handles agent-to-agent networking over the LibreFang Protocol (OFP) with HMAC authentication and session management.
 
-### Networking & Messaging
+### API & Dashboard — [librefang-api](librefang-api.md), [librefang-api-dashboard](librefang-api-dashboard.md)
 
-- [librefang-wire](Other%20-%20librefang-wire.md) — agent-to-agent authenticated transport over async TCP (LibreFang Protocol framing)
-- [librefang-channels](Other%20-%20librefang-channels.md) — pluggable bridge to 40+ messaging/notification platforms through a unified `Channel` trait
+[librefang-api](librefang-api.md) is an Axum-based HTTP/WebSocket server exposing the daemon's capabilities. It embeds [librefang-api-dashboard](librefang-api-dashboard.md), a React 19 SPA using TanStack Router and Query for agent management. Supporting pieces include the self-contained [login page](librefang-api-src.md) with TOTP support, and [static locale data](librefang-api-static.md) for i18n.
 
-### User Interfaces
+### User Interfaces — [librefang-cli](librefang-cli.md), [librefang-desktop](librefang-desktop.md)
 
-**Web:** [librefang-api](Other%20-%20librefang-api.md) is the HTTP/WebSocket server that composes all subsystems into a network-facing service. It ships an embedded [dashboard](Other%20-%20librefang-api-dashboard.md) (React 19 + TanStack), a self-contained [login page](Other%20-%20librefang-api-src.md), and [i18n locale files](Other%20-%20librefang-api-static.md).
+Two entry points for human users. [librefang-cli](librefang-cli.md) produces the `librefang` binary — the primary command-line tool, backed by [Fluent-based locale files](librefang-cli-locales.md) and [TOML config templates](librefang-cli-templates.md). [librefang-desktop](librefang-desktop.md) is a Tauri 2.0 native app bundling the API server with a system tray, auto-updater, and platform installers.
 
-**CLI:** [librefang-cli](Other%20-%20librefang-cli.md) produces the `librefang` binary — a `clap`-based CLI with a TUI layer ([screens](Other%20-%20librefang-cli-src.md)) and [Fluent locale catalogs](Other%20-%20librefang-cli-locales.md).
+### Storage & Capabilities — [librefang-memory](librefang-memory.md), [librefang-hands](librefang-hands.md), [librefang-extensions](librefang-extensions.md)
 
-**Desktop:** [librefang-desktop](Other%20-%20librefang-desktop.md) wraps everything in a Tauri 2.0 shell with system tray, auto-updates, and capability-based security ([capabilities](Other%20-%20librefang-desktop-capabilities.md), [generated ACLs](Other%20-%20librefang-desktop-gen.md)).
+[librefang-memory](librefang-memory.md) provides the persistence substrate for conversation history and state. [librefang-hands](librefang-hands.md) defines composable capability packages that can be assigned to agents. [librefang-extensions](librefang-extensions.md) adds MCP server setup, an encrypted credential vault, and OAuth2 PKCE flows.
 
-### Testing & Migration
+### Migration — [librefang-migrate](librefang-migrate.md)
 
-- [librefang-testing](Other%20-%20librefang-testing.md) — shared mock kernel, mock LLM driver, and route-level test helpers
-- [librefang-migrate](Other%20-%20librefang-migrate.md) — imports agent configurations from third-party frameworks
+Converts agent definitions and configurations from other frameworks (JSON, YAML, TOML) into LibreFang-native types.
 
-Each major crate has a companion test module (e.g. [kernel tests](Other%20-%20librefang-kernel-tests.md), [API tests](Other%20-%20librefang-api-tests.md), [memory tests](Other%20-%20librefang-memory-tests.md), [channels tests](Other%20-%20librefang-channels-tests.md), [runtime tests](Other%20-%20librefang-runtime-tests.md), [types tests](Other%20-%20librefang-types-tests.md)) exercising real infrastructure without mocks where possible.
+## Key Cross-Module Workflows
 
-### AI Agent Directives
+**Agent message cycle:** A message arrives via [librefang-channels](librefang-channels.md) → [librefang-kernel](librefang-kernel.md) routes it through [librefang-kernel-router](librefang-kernel-router.md) → [librefang-runtime](librefang-runtime.md) invokes an LLM via [librefang-llm-drivers](librefang-llm-drivers.md), possibly executing WASM skills through [librefang-runtime-wasm](librefang-runtime-wasm.md) or MCP tools through [librefang-runtime-mcp](librefang-runtime-mcp.md) → results are persisted to [librefang-memory](librefang-memory.md) and sent back through channels.
 
-[AGENTS.md](Other%20-%20AGENTS.md) and [CLAUDE.md](Other%20-%20CLAUDE.md) are policy files consumed by AI coding assistants. They enforce mandatory pre-edit impact analysis against GitNexus's static analysis index to prevent blind edits from cascading through the call graph.
+**Dashboard control flow:** The React SPA in [librefang-api-dashboard](librefang-api-dashboard.md) calls [librefang-api](librefang-api.md) endpoints → the API delegates to [librefang-kernel](librefang-kernel.md) → the kernel orchestrates the appropriate subsystems → telemetry flows to [librefang-telemetry](librefang-telemetry.md).
 
-## Key Cross-Cutting Workflow
+**Cross-session isolation:** [librefang-memory](librefang-memory.md) tags every `CanonicalEntry` with its originating `SessionId`, preventing data leaks between concurrent chats — a behavior guarded by dedicated [memory integration tests](librefang-memory-tests.md).
 
-A typical request flows through the system like this:
-
-1. A user action hits **librefang-api** (HTTP) or **librefang-cli** (TUI)
-2. The request is routed to **librefang-kernel**, which resolves the target agent and hand via **librefang-kernel-router**
-3. **librefang-kernel** delegates execution to **librefang-runtime**, which runs the agent loop
-4. The runtime calls a concrete **librefang-llm-driver** for inference, loads context from **librefang-memory**, and optionally executes sandboxed skills via **librefang-runtime-wasm** or external tools via **librefang-runtime-mcp**
-5. Results are persisted to **librefang-memory**, dispatched outbound through **librefang-channels** or **librefang-wire**, and metered by **librefang-kernel-metering**
-6. **librefang-telemetry** records metrics at every layer
+**Type safety across language boundaries:** [librefang-types](librefang-types.md) defines the canonical schema; [round-trip tests](librefang-types-tests.md) verify that TOML emitted by the TypeScript dashboard deserializes correctly in Rust, catching schema drift before production.

@@ -2,155 +2,141 @@
 
 # librefang-api
 
-The HTTP/WebSocket API server for LibreFang Agent OS. This crate is the top-level aggregation point that wires together the kernel, runtime, memory, channels, skills, extensions, and telemetry subsystems into a unified network-facing service.
+The HTTP/WebSocket API server for the LibreFang Agent OS daemon. This crate exposes the daemon's capabilities — agent management, channel orchestration, skill execution, memory, extensions, and telemetry — through a RESTful HTTP API and WebSocket endpoints. It also embeds and serves the React-based dashboard UI.
 
-## Role in the System
-
-`librefang-api` sits at the outermost layer of the LibreFang architecture. It does not implement domain logic itself — instead it composes the other crates into a deployable server that exposes REST endpoints, WebSocket streams, and a embedded web dashboard.
+## Architecture
 
 ```mermaid
 graph TD
-    API[librefang-api] --> K[librefang-kernel]
-    API --> RT[librefang-runtime]
-    API --> MEM[librefang-memory]
-    API --> CH[librefang-channels]
-    API --> WIRE[librefang-wire]
-    API --> SK[librefang-skills]
-    API --> HANDS[librefang-hands]
-    API --> EXT[librefang-extensions]
-    API --> MIG[librefang-migrate]
-    API --> TEL[librefang-telemetry]
-    API --> TY[librefang-types]
+    Client[HTTP / WS Clients] --> API[librefang-api<br>Axum + Tower]
+    Dashboard[React Dashboard] --> API
+    API --> Kernel[librefang-kernel]
+    API --> Runtime[librefang-runtime]
+    API --> Memory[librefang-memory]
+    API --> Channels[librefang-channels]
+    API --> Skills[librefang-skills]
+    API --> Hands[librefang-hands]
+    API --> Extensions[librefang-extensions]
+    API --> Wire[librefang-wire]
+    API --> Migrate[librefang-migrate]
+    API --> Telemetry[librefang-telemetry]
+    API --> Types[librefang-types]
 ```
 
-### What each dependency provides
-
-| Crate | Role in the API server |
-|---|---|
-| `librefang-types` | Shared domain types, request/response structs |
-| `librefang-kernel` | Core agent lifecycle and orchestration |
-| `librefang-runtime` | Task execution runtime |
-| `librefang-memory` | Conversation and state persistence |
-| `librefang-channels` | Messaging channel integrations (Telegram, Discord, Slack, etc.) |
-| `librefang-wire` | Wire protocol definitions |
-| `librefang-skills` | Skill registration and execution |
-| `librefang-hands` | Tool/hand interfaces |
-| `librefang-extensions` | Extension loading, including vault access |
-| `librefang-migrate` | Database schema migrations |
-| `librefang-telemetry` | Observability primitives |
+The API layer is a thin HTTP/WS façade over the `librefang-kernel` core. It does not implement business logic itself — it translates HTTP requests into kernel operations and serializes responses.
 
 ## Feature Flags
 
-Features control two orthogonal dimensions: **channel availability** and **telemetry**.
+Feature flags control which channel backends and telemetry integrations are compiled in. All flags are additive.
 
-### Build Variants
+### Presets
 
-| Feature set | Description |
+| Feature | Description |
 |---|---|
-| `default` (`all-channels` + `telemetry`) | Full production build with every channel and OpenTelemetry/Prometheus |
-| `mini` | 12 core channels only, no telemetry — smaller binary and faster compile |
+| `default` | Enables `all-channels` + `telemetry` |
+| `all-channels` | Every channel backend (~40 platforms) |
+| `mini` | 12 core channels: Telegram, Discord, Slack, Matrix, Email, Webhook, WhatsApp, Signal, Teams, Mattermost, IRC, Google Chat |
+| `telemetry` | OpenTelemetry tracing export + Prometheus metrics endpoint |
 
-### Channels
+### Individual Channel Flags
 
-Every channel is individually gateable. The `all-channels` feature activates all of them at once. To build a minimal server with only the channels you need:
+Each channel is toggled by a `channel-<name>` feature. These are forwarded directly to `librefang-channels`, so the API crate itself remains channel-agnostic — it simply ensures the selected backends are compiled into the final binary.
 
-```toml
-[dependencies]
-librefang-api = { path = "../librefang-api", default-features = false, features = [
-    "channel-telegram",
-    "channel-discord",
-    "telemetry",
-] }
-```
+Available channels: `telegram`, `discord`, `slack`, `matrix`, `email`, `voice`, `webhook`, `whatsapp`, `signal`, `teams`, `mattermost`, `irc`, `google-chat`, `twitch`, `rocketchat`, `zulip`, `xmpp`, `bluesky`, `feishu`, `line`, `mastodon`, `messenger`, `reddit`, `revolt`, `viber`, `flock`, `guilded`, `keybase`, `nextcloud`, `nostr`, `pumble`, `threema`, `twist`, `webex`, `dingtalk`, `discourse`, `gitter`, `gotify`, `linkedin`, `mumble`, `ntfy`, `qq`, `wechat`, `wecom`.
 
-Available channel features: `channel-telegram`, `channel-discord`, `channel-slack`, `channel-matrix`, `channel-email`, `channel-webhook`, `channel-whatsapp`, `channel-signal`, `channel-teams`, `channel-mattermost`, `channel-irc`, `channel-google-chat`, `channel-twitch`, `channel-rocketchat`, `channel-zulip`, `channel-xmpp`, `channel-bluesky`, `channel-feishu`, `channel-line`, `channel-mastodon`, `channel-messenger`, `channel-reddit`, `channel-revolt`, `channel-viber`, `channel-flock`, `channel-guilded`, `channel-keybase`, `channel-nextcloud`, `channel-nostr`, `channel-pumble`, `channel-threema`, `channel-twist`, `channel-webex`, `channel-dingtalk`, `channel-discourse`, `channel-gitter`, `channel-gotify`, `channel-linkedin`, `channel-mumble`, `channel-ntfy`, `channel-qq`, `channel-voice`, `channel-wechat`, `channel-wecom`.
+### Telemetry Feature
 
-Each `channel-*` feature is forwarded directly to `librefang-channels` — the API crate does not re-implement any channel logic.
-
-### Telemetry
-
-The `telemetry` feature pulls in OpenTelemetry tracing export and Prometheus metrics collection:
-
-- `opentelemetry` / `opentelemetry_sdk` / `opentelemetry-otlp` — OTLP trace export
+When enabled, pulls in:
+- `opentelemetry` / `opentelemetry_sdk` / `opentelemetry-otlp` — distributed tracing export via OTLP
 - `tracing-opentelemetry` — bridges `tracing` spans to OpenTelemetry
-- `metrics` / `metrics-exporter-prometheus` — Prometheus scrape endpoint
+- `metrics` / `metrics-exporter-prometheus` — Prometheus-compatible metrics endpoint
+
+## Key Dependencies and Their Roles
+
+| Crate | Role in the API |
+|---|---|
+| `axum` + `tower` + `tower-http` | HTTP framework, middleware stack (CORS, compression, tracing, rate limiting) |
+| `governor` | Request rate limiting middleware |
+| `jsonwebtoken` | JWT issuance and validation for API authentication |
+| `argon2` | Password hashing for user credential storage |
+| `hmac` + `sha2` | HMAC-SHA256 for webhook signature verification and token integrity |
+| `subtle` | Constant-time comparison for security-sensitive equality checks |
+| `utoipa` | OpenAPI 3.x spec generation with Axum integration |
+| `include_dir` | Embeds the compiled React dashboard into the binary |
+| `dashmap` | Concurrent hash maps for in-memory request/session state |
+| `tokio-stream` + `futures` | Async stream utilities for WebSocket and SSE endpoints |
+| `flate2` + `tar` + `zip` | Archive handling for extension packaging/upload |
+| `reqwest` | Outbound HTTP client (health checks, extension downloads, OAuth flows) |
+| `portable-pty` | PTY allocation for interactive terminal WebSocket sessions |
+| `toml` + `toml_edit` | Configuration file reading and programmatic editing |
+| `socket2` | Low-level socket configuration for the HTTP listener |
 
 ## Build Script (`build.rs`)
 
-The build script performs three tasks before compilation:
+The build script performs three tasks:
 
-### 1. Dashboard asset placeholder
+1. **Ensures the static dashboard directory exists.** The path `static/react/` is gitignored because it contains build artifacts from the dashboard's `npm run build`. If the directory is missing (fresh clone, CI without dashboard build), it creates an empty placeholder so `include_dir!` compiles without error. At runtime, if the embedded directory is empty, assets are served from `~/.librefang/dashboard/` instead.
 
-Creates `static/react/` if it doesn't exist. This directory is the target for the React dashboard build output. It's gitignored because the actual assets are either:
+2. **Captures build metadata** and injects it as compile-time environment variables:
 
-- Built locally via `npm run build` in the dashboard subcrate, or
-- Downloaded from release assets at runtime into `~/.librefang/dashboard/`
+   | Variable | Source | Example |
+   |---|---|---|
+   | `GIT_SHA` | `git rev-parse --short HEAD` | `a3f7c2d` |
+   | `BUILD_DATE` | `date -u +%Y-%m-%d` | `2025-01-15` |
+   | `RUSTC_VERSION` | `rustc --version` | `rustc 1.82.0` |
 
-When the directory is empty, `include_dir!` (from the `include_dir` crate) embeds nothing, and the runtime fallback path serves assets instead.
+   These are available throughout the crate via `env!("GIT_SHA")`, etc., and are typically exposed through a `/api/version` or `/health` endpoint.
 
-### 2. Build metadata injection
+3. **Graceful fallback.** If `git`, `date`, or `rustc` aren't available (e.g., cross-compilation environments), the value defaults to `"unknown"`.
 
-Three environment variables are set at compile time via `cargo:rustc-env`:
+### Build-Time Constants Reference
 
-| Variable | Source | Example value |
-|---|---|---|
-| `GIT_SHA` | `git rev-parse --short HEAD` | `a1b2c3d` |
-| `BUILD_DATE` | `date -u +%Y-%m-%d` | `2025-01-15` |
-| `RUSTC_VERSION` | `rustc --version` | `rustc 1.82.0` |
-
-All three fall back to `"unknown"` if the command fails (e.g., building from a tarball without git). These are accessible at runtime via `env!()` macros:
-
-```rust
-let version = env!("GIT_SHA");
-let built = env!("BUILD_DATE");
-let compiler = env!("RUSTC_VERSION");
+```rust,ignore
+// Available anywhere in librefang-api after compilation
+env!("GIT_SHA")       // e.g., "a3f7c2d"
+env!("BUILD_DATE")    // e.g., "2025-01-15"
+env!("RUSTC_VERSION") // e.g., "rustc 1.82.0 (..."
 ```
 
-### 3. Unix-specific dependency
+## Dashboard Embedding Strategy
 
-On Unix targets, `rustix` (with `process` features) is included. This is likely used for process management capabilities such as signal handling, privilege manipulation, or process forking in the API server runtime.
+The dashboard is a React application compiled to static files. The embedding uses `include_dir!` from the `include_dir` crate:
 
-## Key External Dependencies
+- **At compile time:** `static/react/` is embedded into the binary. If the directory is empty (no dashboard build), nothing is embedded.
+- **At runtime:** The server falls back to serving files from `~/.librefang/dashboard/`, allowing dashboard updates without recompiling the daemon.
 
-### HTTP framework
+This two-tier approach means:
+- Release binaries ship with the dashboard baked in.
+- Development builds can skip the dashboard npm build step.
+- Operators can override the embedded dashboard by placing files in the runtime directory.
 
-- **`axum`** + **`tower`** + **`tower-http`** — The HTTP server stack. `tower-http` provides middleware for CORS, compression, tracing, and static file serving.
-- **`utoipa`** (with `axum_extras`) — OpenAPI spec generation from handler signatures.
+## Authentication Model
 
-### Authentication & security
+Based on the dependency set (`jsonwebtoken`, `argon2`, `hmac`/`sha2`, `subtle`):
 
-- **`jsonwebtoken`** — JWT token creation and validation.
-- **`argon2`** — Password hashing for local authentication.
-- **`hmac`** + **`sha2`** — HMAC-SHA256 for webhook signature verification and token signing.
-- **`subtle`** — Constant-time comparison for timing-safe auth checks.
-- **`governor`** — Rate limiting middleware.
+- **Password authentication** uses Argon2 hashing for stored credentials.
+- **JWT tokens** are issued after authentication and validated on subsequent requests.
+- **Webhook verification** uses HMAC-SHA256 signatures.
+- **Constant-time comparison** (`subtle`) prevents timing attacks on token/signature checks.
 
-### Terminal emulation
+## Platform-Specific Dependencies
 
-- **`portable-pty`** — PTY allocation for terminal/Shell WebSocket streams. Enables interactive shell sessions through the API.
+On Unix targets, the crate depends on `rustix` with the `process` feature, used for low-level process management operations (likely for PTY handling and process supervision beyond what `portable-pty` provides).
 
-### Data handling
+## Relationship to Other Crates
 
-- **`serde`** / **`serde_json`** / **`toml`** / **`toml_edit`** — Serialization and configuration file manipulation.
-- **`flate2`** + **`tar`** + **`zip`** — Archive handling for extension packaging and backup import/export.
-
-### Async runtime
-
-- **`tokio`** — The async runtime driving the entire server.
-- **`tokio-stream`** + **`futures`** — Stream utilities for WebSocket and event pipelines.
-- **`dashmap`** — Concurrent hashmap for in-memory state (e.g., active sessions, connection registries).
-
-## Development
-
-```bash
-# Full build (all channels + telemetry)
-cargo build -p librefang-api
-
-# Minimal build (12 core channels, no telemetry)
-cargo build -p librefang-api --no-default-features --features mini
-
-# Single channel
-cargo build -p librefang-api --no-default-features --features channel-telegram,telemetry
+```
+librefang-types       ← Shared type definitions (request/response DTOs, error types)
+librefang-kernel      ← Core agent orchestration logic
+librefang-runtime     ← Process lifecycle and registry management
+librefang-memory      ← Agent memory and context storage
+librefang-channels    ← Channel backend implementations (feature-gated)
+librefang-wire        ← Protocol/message serialization
+librefang-skills      ← Skill registry and execution
+librefang-hands       ← Tool/hand capabilities for agents
+librefang-extensions  ← Extension loading and vault management
+librefang-migrate     ← Database schema migrations
+librefang-telemetry   ← Shared telemetry primitives
 ```
 
-Tests use `tokio-test`, `tempfile`, and `http-body-util` for async handler testing with temporary filesystem fixtures.
+The API crate is the top-level integration point — it pulls in every other workspace crate to present a unified HTTP interface. It does not define new domain concepts; it maps HTTP semantics onto the existing kernel operations.

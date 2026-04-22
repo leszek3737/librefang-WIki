@@ -2,141 +2,100 @@
 
 # librefang-runtime
 
-The core agent execution environment for LibreFang. This crate orchestrates the full lifecycle of an AI agent — from loading a configuration and connecting to an LLM provider, through managing conversation memory and executing tools, to running sandboxed WASM skills and communicating over MCP channels.
+Agent runtime and execution environment for LibreFang. This crate is the orchestration layer that ties together LLM drivers, skill execution, memory, communication channels, and sandboxing into a coherent agent lifecycle.
+
+## Purpose
+
+LibreFang agents need a coordinated environment to: receive instructions, invoke LLMs, execute skills (including untrusted WASM code), persist conversation memory, communicate over channels, and do all of this safely under sandboxing. `librefang-runtime` is that coordination layer.
+
+It does not implement most subsystems itself. Instead it re-exports and orchestrates the following sibling crates:
+
+| Dependency | Role |
+|---|---|
+| `librefang-runtime-wasm` | WASM-based skill execution engine |
+| `librefang-runtime-mcp` | Model Context Protocol client/server |
+| `librefang-runtime-oauth` | OAuth flow handling for external services |
+| `librefang-llm-driver` | LLM driver trait abstraction |
+| `librefang-llm-drivers` | Concrete LLM driver implementations |
+| `librefang-skills` | Skill definitions and registry |
+| `librefang-memory` | Conversation and agent memory persistence |
+| `librefang-channels` | Inter-agent and external communication |
+| `librefang-http` | HTTP request/response utilities |
+| `librefang-kernel-handle` | Low-level kernel interface |
+| `librefang-types` | Shared type definitions |
 
 ## Architecture
 
-`librefang-runtime` is the integration point that pulls together domain-specific subsystems into a coherent agent loop. It does not implement low-level details itself; instead it coordinates the following sibling crates:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    librefang-runtime                         │
-│                  (agent orchestration)                       │
-│                                                              │
-│  ┌──────────┐ ┌───────────┐ ┌────────────┐ ┌─────────────┐ │
-│  │ LLM      │ │ Skill     │ │ Memory     │ │ Channel     │ │
-│  │ Drivers  │ │ Execution │ │ Management │ │ I/O         │ │
-│  └────┬─────┘ └─────┬─────┘ └─────┬──────┘ └──────┬──────┘ │
-│       │             │             │                │        │
-│  ┌────┴─────┐ ┌─────┴──────┐ ┌───┴──────┐ ┌──────┴──────┐ │
-│  │ -llm-    │ │ -runtime-  │ │ -memory  │ │ -channels   │ │
-│  │ driver   │ │ wasm       │ │          │ │              │ │
-│  │ -llm-    │ │ -skills    │ │          │ │              │ │
-│  │ drivers  │ │ -kernel-   │ │          │ │              │ │
-│  │          │ │  handle    │ │          │ │              │ │
-│  └──────────┘ └────────────┘ └──────────┘ └─────────────┘ │
-│                                                              │
-│  ┌──────────────────┐ ┌────────────────────────────────┐    │
-│  │ -runtime-mcp     │ │ -runtime-oauth                 │    │
-│  │ (Model Context   │ │ (OAuth token management)       │    │
-│  │  Protocol)       │ │                                 │    │
-│  └──────────────────┘ └────────────────────────────────┘    │
-│                                                              │
-│  ┌──────────────────┐ ┌────────────────────────────────┐    │
-│  │ -types           │ │ -http                           │    │
-│  │ (shared types)   │ │ (HTTP primitives)               │    │
-│  └──────────────────┘ └────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    A[Agent Entry Point] --> R[Runtime Orchestrator]
+    R --> LLM[LLM Drivers]
+    R --> SK[Skill Execution]
+    R --> MEM[Memory Store]
+    R --> CH[Channels]
+    SK --> WASM[WASM Sandbox]
+    SK --> MCP[MCP Protocol]
+    R --> OAUTH[OAuth Provider]
+    WASM --> LANDLOCK["Landlock / seccomp"]
 ```
 
-### Dependency roles
+## Key Subsystems
 
-| Crate | Role in the runtime |
-|---|---|
-| `librefang-types` | Shared domain types — agent IDs, message structs, configuration shapes — used across all crates. |
-| `librefang-http` | Low-level HTTP primitives for outbound requests to LLM APIs and other services. |
-| `librefang-kernel-handle` | Kernel-level interfaces used during sandboxed execution and process management. |
-| `librefang-runtime-mcp` | Model Context Protocol client/server implementation for tool discovery and invocation. |
-| `librefang-runtime-oauth` | OAuth 2.0 flows for authenticating with LLM providers and third-party APIs. |
-| `librefang-llm-driver` | Trait-level abstraction for LLM backends (streaming, chat completions, embeddings). |
-| `librefang-llm-drivers` | Concrete driver implementations (OpenAI, Anthropic, local models, etc.). |
-| `librefang-runtime-wasm` | WASM-based sandboxed execution engine for running untrusted skill code via Wasmtime. |
-| `librefang-channels` | Async message-passing channels between agent components and external systems. |
-| `librefang-memory` | Conversation and working-memory persistence (backed by SQLite via `rusqlite`). |
-| `librefang-skills` | Skill registry and execution — tools, functions, and capabilities an agent can invoke. |
+### LLM Integration
 
-## Sandbox features
+Uses `librefang-llm-driver` for the trait abstraction and `librefang-llm-drivers` for concrete implementations. The runtime manages driver selection, request construction, streaming response handling (`tokio-stream`, `futures`), and retry/error logic.
 
-The runtime supports two optional Linux sandboxing mechanisms to constrain untrusted code execution:
+### Skill Execution
 
-### Landlock (`landlock-sandbox` feature)
+Skills from `librefang-skills` are dispatched through the runtime. Skills that require sandboxed execution are routed to `librefang-runtime-wasm`, which uses **Wasmtime** as the WASM engine.
 
-Enables the `landlock` crate for file-system access control. When active, WASM skill execution and subprocess spawning can be restricted to specific directory trees, preventing arbitrary file access.
+### Sandboxing
+
+Two Linux-native sandboxing mechanisms are available behind feature flags:
+
+- **`landlock-sandbox`** — Enables [`landlock`](https://docs.rs/landlock) filesystem and capability restrictions. Requires Linux 5.13+.
+- **`seccomp-sandbox`** — Enables [`seccompiler`](https://docs.rs/seccompiler) BPF syscall filtering.
+
+Both are optional and compile only when explicitly enabled. The WASM runtime (Wasmtime) provides its own isolation regardless of these flags.
+
+### Memory
+
+Conversation history and agent state are persisted via `librefang-memory`, backed by **SQLite** (`rusqlite`) and cached in-memory with **DashMap** for concurrent access.
+
+### Communication
+
+`librefang-channels` handles message routing between agents and external systems. The runtime also depends on `tokio-tungstenite` and `rustls` for WebSocket-based communication with TLS.
+
+### Cryptography and Identity
+
+Agent identity and request signing use **Ed25519** (`ed25519-dalek`). HMAC-SHA256 (`hmac` + `sha2`) is available for token derivation and integrity checks. Secrets are zeroized on drop via the `zeroize` crate.
+
+### Package Management
+
+The runtime can fetch and extract skill packages over HTTP, with `flate2` and `tar` for decompression and archive handling.
+
+## Feature Flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `landlock-sandbox` | off | Linux Landlock filesystem sandboxing |
+| `seccomp-sandbox` | off | seccomp BPF syscall filtering |
+| `wasm-hooks` | off | Enable WASM hook callbacks during skill execution |
+
+## Platform Notes
+
+- On Unix targets, `libc` is linked for low-level system calls (process isolation, signal handling).
+- TLS roots are resolved via `webpki-roots` (bundled) and `rustls-native-certs` (system certificate store), ensuring broad compatibility in containerized and bare-metal deployments.
+- `landlock-sandbox` and `seccomp-sandbox` are Linux-only. They are no-ops (but still compile) on other platforms.
+
+## Adding the Dependency
 
 ```toml
-# Cargo.toml
+[dependencies]
+librefang-runtime = { path = "../librefang-runtime" }
+
+# Optional sandboxing
 [features]
-landlock-sandbox = ["dep:landlock"]
+default = []
+sandboxed = ["librefang-runtime/landlock-sandbox", "librefang-runtime/seccomp-sandbox"]
 ```
-
-Requires Linux kernel ≥ 5.13.
-
-### Seccomp (`seccomp-sandbox` feature)
-
-Enables the `seccompiler` crate to install BPF syscall filters. This provides a hard boundary on which system calls sandboxed code can make.
-
-```toml
-# Cargo.toml
-[features]
-seccomp-sandbox = ["dep:seccompiler"]
-```
-
-Both features can be combined for defense in depth. On non-Linux platforms these features compile but are no-ops.
-
-### WASM hooks (`wasm-hooks` feature)
-
-An additional feature flag that extends the WASM runtime with host-side hook callbacks. Enable this when skills need to react to lifecycle events (initialization, pre/post-execution, teardown) within the Wasmtime environment.
-
-## Key subsystems
-
-### Agent execution loop
-
-The runtime drives a repeating cycle:
-
-1. **Receive input** — from a channel, WebSocket (`tokio-tungstenite`), or HTTP endpoint.
-2. **Load context** — conversation history and working memory from `librefang-memory`.
-3. **Call the LLM** — via `librefang-llm-driver` / `librefang-llm-drivers`, supporting streaming responses.
-4. **Process tool calls** — if the LLM requests tool use, dispatch through `librefang-skills` or `librefang-runtime-mcp`.
-5. **Execute skills** — optionally sandboxed via `librefang-runtime-wasm` (Wasmtime).
-6. **Persist state** — store updated memory, conversation turns, and skill results.
-7. **Emit output** — back through the originating channel.
-
-### Memory and persistence
-
-`rusqlite` provides local SQLite storage for conversation history, agent configuration, and session state. The `librefang-memory` crate exposes the interface; the runtime manages lifecycle (opening connections, running migrations).
-
-### Cryptography and identity
-
-- `ed25519-dalek` — Ed25519 signing/verification for agent identity and message authentication.
-- `sha2` / `hmac` — HMAC-based integrity checks and hashing.
-- `zeroize` — secure memory cleanup for sensitive key material.
-
-### Concurrency model
-
-The runtime is fully async, built on `tokio`. Shared state uses `dashmap` for lock-free concurrent access to registries (active agents, skill caches, session maps). Stream handling uses `tokio-stream` and `futures` utilities.
-
-### Package management
-
-`flate2` and `tar` handle unpacking skill packages and WASM modules distributed as `.tar.gz` archives. `ureq` (blocking HTTP) is used for simple fetch-and-verify operations during package download where an async HTTP client is unnecessary.
-
-## Building
-
-```bash
-# Standard build (no sandboxing)
-cargo build -p librefang-runtime
-
-# With Landlock sandboxing (Linux only)
-cargo build -p librefang-runtime --features landlock-sandbox
-
-# With both sandboxing mechanisms
-cargo build -p librefang-runtime --features "landlock-sandbox,seccomp-sandbox"
-
-# With WASM lifecycle hooks
-cargo build -p librefang-runtime --features wasm-hooks
-```
-
-## Platform notes
-
-- **Unix-specific**: The `libc` dependency (gated behind `cfg(unix)`) is used for POSIX process management — UID/GID switching, `chroot`, signal handling — when running sandboxed subprocesses.
-- **Non-Linux**: The `landlock-sandbox` and `seccomp-sandbox` features depend on Linux-specific syscalls. They compile on other platforms but provide no runtime isolation.
-- **TLS**: `rustls` with `webpki-roots` and `rustls-native-certs` provides TLS for outbound connections without depending on OpenSSL.

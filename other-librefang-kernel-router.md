@@ -2,81 +2,95 @@
 
 # librefang-kernel-router
 
-Hand and template routing engine for the LibreFang kernel. This module is responsible for resolving incoming requests to the appropriate **hand** (handler) and **template** based on configurable routing rules.
+Hand and template routing engine for the LibreFang kernel.
 
-## Overview
+## Purpose
 
-LibreFang processes requests through named *hands*—discrete handler units that encapsulate specific behavior. The router determines which hand (and which template variant) should handle a given input by evaluating a routing table of pattern-matching rules.
-
-The routing table is loaded from TOML configuration files discovered on the local filesystem. Rules are expressed as regex patterns matched against request identifiers, with priority and fallback semantics governing conflict resolution.
-
-## Dependencies
-
-| Crate | Purpose |
-|---|---|
-| `librefang-types` | Shared type definitions (request identifiers, route entries, errors) |
-| `librefang-hands` | Hand registry and hand trait definitions |
-| `serde` / `serde_json` | Deserialization of routing tables and serialization of route resolution results |
-| `regex-lite` | Pattern matching for route rule evaluation |
-| `toml` | Parsing of routing configuration files |
-| `dirs` | Resolving platform-specific config directory paths |
-| `tracing` | Structured logging of route resolution decisions |
-
-### Dev Dependencies
-
-- **`tempfile`** — Creates isolated temporary directories for config-loading tests.
-- **`librefang-runtime`** — Provides the runtime context needed for integration tests that exercise full route resolution.
+This module is responsible for **routing** — resolving which **Hand** definition and which **template** apply to a given input. It acts as the decision layer between receiving raw input and dispatching it to the appropriate processing logic. Think of it as the kernel's traffic director: given a piece of content, it determines where that content should go.
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    A[Routing Config TOML] -->|Parsed| B[Route Table]
-    B --> C{Incoming Request}
-    C -->|Match against patterns| D[Resolved Hand + Template]
-    D --> E[librefang-hands]
-    F[librefang-types] --> B
-    F --> C
+The routing engine depends on several sibling crates, each serving a distinct role in the pipeline:
+
+```
+┌──────────────────────────┐
+│   librefang-kernel-router│
+│                          │
+│  ┌────────────────────┐  │
+│  │  Route Definitions │◄─────── toml (config files)
+│  └───────┬────────────┘  │
+│          │               │
+│          ▼               │
+│  ┌────────────────────┐  │
+│  │  Pattern Matching  │◄─────── regex-lite
+│  └───────┬────────────┘  │
+│          │               │
+│          ▼               │
+│  ┌────────────────────┐  │
+│  │    Route Result    │──────► librefang-hands
+│  └────────────────────┘  │     librefang-types
+└──────────────────────────┘
 ```
 
-### Route Table
+### Key dependencies and what they imply
 
-The routing table is a declarative mapping loaded from TOML. Each entry associates a regex pattern with a target hand name and an optional template name. On startup, the router reads configuration from a platform-appropriate directory (resolved via `dirs`) and compiles the patterns into matchers.
+| Dependency | Role in this module |
+|---|---|
+| `librefang-types` | Shared type definitions used in route matching results — likely route IDs, match metadata, or resolved targets |
+| `librefang-hands` | The target of routing decisions. Routes resolve to a specific Hand that will handle the input |
+| `regex-lite` | Lightweight regex engine used for pattern-based route matching. Route rules likely use regex patterns to test against incoming content |
+| `toml` | Route definitions are loaded from TOML configuration files, allowing declarative route setup |
+| `dirs` | Standard platform directories — used to locate configuration files (e.g., user-level or system-level route definitions) |
+| `serde` / `serde_json` | Deserialization of route configuration and serialization of match results |
+| `tracing` | Structured logging of routing decisions for debugging and observability |
 
-### Resolution Strategy
+## How routing works
 
-When resolving a request, the router evaluates rules in a defined order. The first pattern that matches the request identifier determines the target hand and template. If no rule matches, a fallback or error result is returned depending on configuration.
+Based on the dependency profile, the routing flow follows this pattern:
 
-The `tracing` crate is used to emit diagnostic events during resolution, aiding debugging of misconfigured or ambiguous routes.
+1. **Load route definitions** — TOML configuration files are discovered (via `dirs`) and deserialized (via `toml` + `serde`) into internal route rule structures.
 
-## Integration with the Kernel
+2. **Evaluate patterns** — When input arrives, each route's pattern (expressed as a regex via `regex-lite`) is tested against the input. Routes are evaluated in a defined order, likely respecting priority or specificity.
 
-This module sits between the raw request layer and the hand execution layer:
+3. **Resolve to a Hand** — A successful match produces a result referencing a Hand from `librefang-hands`, along with any captured groups or metadata typed via `librefang-types`.
 
-1. **Input** — A request identifier (typed via `librefang-types`).
-2. **Processing** — The router matches the identifier against its compiled route table using `regex-lite`.
-3. **Output** — A resolved hand name and template name, which the kernel then dispatches to the appropriate handler from `librefang-hands`.
+4. **Emit tracing events** — Routing decisions are instrumented with `tracing` spans, making it possible to trace why a particular route was selected or why no route matched.
 
 ## Configuration
 
-Routing rules are defined in TOML files located in the LibreFang configuration directory. The `dirs` crate resolves the platform-specific config path (e.g., `~/.config/librefang/` on Linux).
+Route definitions are expected to live in TOML files. The use of `dirs` suggests the router looks in standard configuration locations:
 
-Example structure of a routing configuration:
+- A user-level config directory (e.g., `~/.config/librefang/`)
+- Potentially a system-level fallback
 
-```toml
-[[route]]
-pattern = "^greeting\\..*"
-hand = "greeting-hand"
-template = "default"
+Route entries likely include:
 
-[[route]]
-pattern = "^farewell\\..*"
-hand = "farewell-hand"
-template = "default"
-```
-
-Rules are evaluated in file order. More specific patterns should be listed before broader catch-all patterns.
+- A **pattern** field containing a regex expression
+- A **target** field referencing a Hand identifier
+- Optional **priority** or **order** for disambiguation when multiple routes match
 
 ## Testing
 
-Unit tests use `tempfile` to create isolated config directories, ensuring tests don't depend on the host system's LibreFang configuration. Integration tests pull in `librefang-runtime` to exercise the full resolution pipeline from config loading through hand dispatch.
+The dev-dependency on `tempfile` and `librefang-runtime` indicates that tests:
+
+- Create temporary directories and TOML files to test configuration loading in isolation
+- May use `librefang-runtime` to exercise the router within a realistic execution context, verifying end-to-end routing behavior
+
+## Relationship to the kernel
+
+This module is one component of the LibreFang kernel. It sits between input ingestion and hand execution:
+
+```
+Input → [router resolves Hand] → [Hand processes input] → Output
+```
+
+The router itself is stateless with respect to input — it makes a routing decision per request based on the current configuration. Configuration changes (loaded from TOML) would affect subsequent routing decisions.
+
+## Integration points
+
+When consuming this module from elsewhere in the kernel:
+
+- Initialize the router by providing a configuration path or relying on default discovery via `dirs`
+- Call into the router with the relevant input or content to match against
+- Receive a resolved reference to a Hand (from `librefang-hands`) to dispatch to
+- Handle the case where no route matches, which should be logged via `tracing`
