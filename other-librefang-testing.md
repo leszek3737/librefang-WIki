@@ -2,87 +2,102 @@
 
 # librefang-testing
 
-Test infrastructure crate providing mock implementations and test utilities for the Librefang workspace. This module consolidates shared test fixtures so that integration and unit tests across crates can rely on consistent, reusable mocks rather than each crate rolling its own.
+Test infrastructure for the Librefang workspace: mock kernel, mock LLM driver, and API route test utilities.
 
-## Purpose
+This crate is a **dev-only dependency** — it never ships in production builds. It provides reusable fakes, mocks, and harnesses so that other workspace crates can write integration and unit tests without needing real hardware, a live LLM backend, or a running HTTP server.
 
-Testing higher-level crates (API routes, skills, hands, extensions) requires substituting real infrastructure—kernel instances, LLM backends, persistent storage—with controllable stand-ins. `librefang-testing` provides:
+## Role in the Workspace
 
-- **Mock kernel** — a lightweight kernel implementation that satisfies the kernel trait without requiring real hardware or system resources.
-- **Mock LLM driver** — a deterministic stand-in for the LLM backend, allowing tests to assert on prompts and control responses.
-- **API route test utilities** — helpers for constructing Axum test applications, issuing requests, and inspecting responses without binding to a real network port.
-
-## Workspace Role
+`librefang-testing` sits downstream of nearly every other Librefang crate. It imports the kernel, runtime, memory, API, wire protocol, channels, skills, hands, and extensions modules so that test helpers can construct fully-wired (but fake) subsystems.
 
 ```mermaid
 graph TD
-    TT[librefang-testing]
-    TT --> LT[librefang-types]
-    TT --> LK[librefang-kernel]
-    TT --> LR[librefang-runtime]
-    TT --> LM[librefang-memory]
-    TT --> LA[librefang-api]
-    TT --> LW[librefang-wire]
-    TT --> LC[librefang-channels]
-    TT --> LS[librefang-skills]
-    TT --> LH[librefang-hands]
-    TT --> LE[librefang-extensions]
-    style TT fill:#f9f,stroke:#333,stroke-width:2px
+    T[librefang-testing] --> K[librefang-kernel]
+    T --> RT[librefang-runtime]
+    T --> M[librefang-memory]
+    T --> A[librefang-api]
+    T --> W[librefang-wire]
+    T --> C[librefang-channels]
+    T --> S[librefang-skills]
+    T --> H[librefang-hands]
+    T --> E[librefang-extensions]
+    T --> TY[librefang-types]
+    A --> |"telemetry feature"| T
 ```
 
-This crate sits at the top of the dependency graph as a test-only consumer. It is not published or included in production builds. Other crates reference it from their `[dev-dependencies]` to access mock infrastructure during testing.
+By pulling in `librefang-api` with only the `telemetry` feature enabled (and `default-features = false`), the crate avoids pulling in real server infrastructure while still gaining access to telemetry types needed for assertions.
 
-## Key Dependencies and Their Role
+## Key Capabilities
 
-| Dependency | Reason for inclusion |
-|---|---|
-| `librefang-kernel` | Implements the mock kernel against the real kernel trait |
-| `librefang-runtime` | Provides runtime primitives the mock kernel needs to operate |
-| `librefang-memory` | Supplies memory subsystem mocks or in-memory backends |
-| `librefang-api` (feature `telemetry`) | Builds test Axum routers with telemetry wiring enabled |
-| `librefang-wire` | Constructs wire-format test payloads |
-| `librefang-channels` | Creates mock channel endpoints for skill/hand communication |
-| `librefang-skills` | Enables skill-layer integration tests |
-| `librefang-hands` | Enables hand-layer integration tests |
-| `librefang-extensions` | Enables extension integration tests |
-| `axum` + `tower` | Assembles test HTTP applications and service layers |
-| `http-body-util` | Reads and decodes response bodies in route tests |
-| `dashmap` | Tracks mock state (e.g., recorded calls, configured responses) across concurrent test tasks |
-| `tempfile` | Creates isolated temporary directories for tests that touch the filesystem |
-| `uuid` | Generates deterministic or random UUIDs for test entities |
+### Mock Kernel
 
-## Usage Pattern
+Provides a fake implementation of the kernel interface. Tests can instantiate the mock, optionally pre-program responses or record calls, and assert that the system under test interacts with the kernel as expected.
 
-Add to your crate's `[dev-dependencies]`:
+### Mock LLM Driver
+
+Provides a deterministic stand-in for the LLM backend. This allows tests of skills, extensions, and agent logic to run without network calls, with full control over what "completions" the mock returns.
+
+### API Route Test Utilities
+
+Wraps `librefang-api` routes in an in-process `axum` router backed by `tower::ServiceExt`. Tests send requests through the full HTTP stack (serialization, middleware, routing, handlers) without opening a real listener. The `http-body-util` dependency is used for reading response bodies in these tests.
+
+## Usage
+
+Add `librefang-testing` as a **dev-dependency** in the crate you are testing:
 
 ```toml
 [dev-dependencies]
 librefang-testing = { path = "../librefang-testing" }
 ```
 
-Then use the mock types in tests:
+### Typical API Route Test Pattern
 
 ```rust
-use librefang_testing::mock_kernel::MockKernel;
-use librefang_testing::mock_llm::MockLlmDriver;
-use librefang_testing::api_test_helpers::TestApp;
+use librefang_testing::TestRouter;
+
+#[tokio::test]
+async fn test_my_route() {
+    let app = TestRouter::new(/* mock kernel, mock llm, etc. */);
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/some/endpoint")
+                .header("content-type", "application/json")
+                .body(r#"{"key": "value"}"#.into())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+}
 ```
 
-### API Route Testing
+## Dependencies — Why They Exist
 
-The `api_test_helpers` module typically provides a builder or constructor that wires up an Axum `Router` with mock service layers, returning a type that can handle requests via `tower::ServiceExt::oneshot` or `axum::test` helpers. This allows tests to exercise route handlers end-to-end without network I/O.
+| Dependency | Reason |
+|---|---|
+| `librefang-types` | Shared domain types used in test assertions and fixture construction |
+| `librefang-kernel` | Traits to mock |
+| `librefang-runtime` | Runtime context fakes |
+| `librefang-memory` | In-memory state setups for tests |
+| `librefang-api` (telemetry only) | Route handlers and telemetry types for route-level tests |
+| `librefang-wire` | Wire-format types for serialization/deserialization tests |
+| `librefang-channels` | Channel fakes for testing async message flows |
+| `librefang-skills` | Skill types for integration fixtures |
+| `librefang-hands` | Hand/action types for integration fixtures |
+| `librefang-extensions` | Extension types for integration fixtures |
+| `axum`, `tower` | In-process HTTP test harness |
+| `dashmap` | Concurrent state inside mocks |
+| `tempfile` | Temporary directories for tests that touch the filesystem |
+| `uuid` | Generating deterministic or random IDs in fixtures |
+| `async-trait` | Implementing async mock traits |
+| `http-body-util` | Reading response bodies in route tests |
 
-### Mock Kernel
+## Guidelines for Extending
 
-The mock kernel implements the same trait as `librefang-kernel`'s real type, but backed by in-memory state. This lets tests of skills, hands, and extensions run against a kernel that behaves predictably and records interactions for later assertion.
-
-### Mock LLM Driver
-
-The mock LLM driver accepts configuration for what responses to return and optionally records the prompts it receives. Tests configure expected responses before running a scenario, then assert that the correct prompts were sent.
-
-## Design Notes
-
-- **No production dependency.** This crate must never appear in a non-test `[dependencies]` section. Its mocks are not optimized for performance or correctness in production scenarios.
-- **Deterministic by default.** Mocks return predictable values. Tests requiring randomness should explicitly configure it rather than relying on mock internals.
-- **Isolation via `tempfile`.** Any test that creates files or directories should use the provided temp-directory helpers to avoid polluting the build tree and to ensure cleanup on test completion regardless of outcome.
-- **Concurrency safety.** Because tokio tests run concurrently within a single process, mock state backed by `DashMap` avoids data races without requiring per-test mutex overhead.
+- **Keep mocks minimal.** Only implement the surface area that tests actually exercise. Over-mocking couples tests to implementation details.
+- **Prefer determinism.** Mocks should return predictable data by default. If randomness is needed, accept a seed or value explicitly rather than using global RNG.
+- **Don't add real I/O.** This crate should never depend on network, disk (beyond `tempfile`), or external services. Tests using this crate must remain fast and hermetic.

@@ -1,191 +1,217 @@
 # Other — librefang-kernel-src
 
-# Kernel Test Suite (`librefang-kernel/src/kernel/tests.rs`)
+# librefang-kernel-src
 
-## Purpose
+The core security and governance layer of LibreFang. This module contains two primary subsystems — **approval management** (gating dangerous tool executions behind human decisions) and **RBAC authentication** (mapping platform identities to roles and enforcing permissions) — along with kernel-level integration tests.
 
-Integration and regression test suite for the LibreFang kernel. Tests exercise the kernel's public and internal APIs against real filesystem state, in-process agent registries, and mock channel adapters — covering capability enforcement, notification routing, skill lifecycle, provider switching, and LLM response parsing.
-
-## Test Infrastructure
-
-### `RecordingChannelAdapter`
-
-A mock `ChannelAdapter` that captures outbound messages into a `Arc<Mutex<Vec<String>>>` instead of delivering them. Used by notification routing tests to assert exactly which recipients received messages.
-
-```rust
-let adapter = Arc::new(RecordingChannelAdapter::new("test"));
-let sent = adapter.sent.clone();  // inspect after the call under test
-kernel.channel_adapters.insert("test".to_string(), adapter);
-```
-
-`start()` returns an empty stream; `send()` records `"{platform_id}:{text}"` for each `ChannelContent::Text`.
-
-### `EnvVarGuard` / `set_test_env`
-
-RAII guard that removes an environment variable when dropped. Prevents test cross-contamination when testing env-var-backed config like API key rotation profiles.
-
-```rust
-let _guard = set_test_env("LIBREFANG_TEST_ROTATION_PRIMARY_KEY_A", "key-1");
-// env var is cleaned up when _guard goes out of scope
-```
-
-### `install_test_skill`
-
-Writes a minimal valid `skill.toml` + `prompt_context.md` into a directory so the skill registry accepts it at load time.
-
-```rust
-install_test_skill(&skills_parent, "my-skill", &["tag-a", "tag-b"]);
-```
-
-### `make_trace`
-
-Creates a `DecisionTrace` with minimal defaults for trace summarization tests.
-
----
-
-## Coverage Areas
-
-### Agent Spawning and Lineage
-
-The kernel enforces a **capability subset rule**: a child agent's declared capabilities must not exceed its parent's. This prevents a restricted agent from escalating privileges by spawning a child with broader access.
-
-| Test | Behavior verified |
-|------|-------------------|
-| `test_spawn_child_exceeding_parent_is_rejected` | Parent with only `file_read` cannot spawn a child requesting `*`, `shell:*`, `network:*` — returns `"Privilege escalation denied"` |
-| `test_spawn_child_with_subset_capabilities_is_allowed` | Parent with `file_read` + `file_write` can spawn a child requesting only `file_read` |
-| `test_spawn_with_unknown_parent_fails_closed` | Passing a stale `AgentId` as parent fails with `"not registered"` instead of silently treating it as a top-level spawn |
-
-When an agent declares `shell_exec` in `capabilities.tools` without an explicit `exec_policy`, the kernel **auto-promotes** the policy to `Full` (test: `test_shell_exec_available_when_declared_in_tools_without_explicit_exec_policy`).
-
-### API Key Rotation
-
-`collect_rotation_key_specs` resolves profiles into `RotationKeySpec` entries, handling:
-
-- **Deduplication**: If a profile references the same env var as the primary key, it gets `use_primary_driver: true` instead of appearing twice
-- **Missing env vars**: Profiles whose env var is unset are silently skipped
-- **Ordering**: Primary key is prepended when no profile shares its value
-
-### Provider Switching
-
-`set_agent_model` must clear per-agent `api_key_env` and `base_url` overrides when the provider changes — otherwise the agent routes requests to the old endpoint with stale credentials (regression for issue #2380). Same-provider model swaps preserve existing overrides.
-
-The flow tested: spawn agent with provider A + overrides → call `set_agent_model` with provider B → verify `api_key_env` and `base_url` are `None`.
-
-### Tool Availability and Filtering
+## Architecture Overview
 
 ```mermaid
-flowchart TD
-    A[Agent manifest] --> B{tools_disabled?}
-    B -->|yes| C[Return empty]
-    B -->|no| D{Explicit tools declared?}
-    D -->|yes| E[Filter by declared tools with glob matching]
-    D -->|no| F{ToolProfile set?}
-    F -->|yes| G[Expand profile to tool list]
-    F -->|no| H[All builtin tools available]
-    E --> I[Merge with default-available tools]
-    G --> I
-    H --> I
-    I --> J[Return merged set]
+graph TD
+    subgraph "External callers"
+        API["API routes<br/>(system.rs, terminal.rs)"]
+        CB["Channel bridge<br/>(channel_bridge.rs)"]
+        DASH["Dashboard API<br/>(librefang-api/server.rs)"]
+    end
+
+    subgraph "librefang-kernel-src"
+        AM["ApprovalManager<br/>(approval.rs)"]
+        AU["AuthManager<br/>(auth.rs)"]
+    end
+
+    subgraph "Storage"
+        DASHDB[("SQLite audit DB")]
+        INMEM[("In-memory<br/>DashMap + VecDeque")]
+    end
+
+    AM --> DASHDB : "audit_log_write<br/>persist_totp_lockout_*"
+    AM --> INMEM : "pending / recent"
+    API --> AM : "resolve, submit_request,<br/>list_pending, query_audit"
+    CB --> AM : "verify_totp_code,<br/>verify_recovery_code"
+    DASH --> AU : "from_str_role"
+    DASH --> AM : "verify_totp_code_with_issuer"
+    API --> AU : "authorize"
 ```
-
-Key behaviors:
-
-- **Glob patterns**: `file_*` in `capabilities.tools` matches `file_read`, `file_write`, `file_list` but not `web_fetch` (`test_available_tools_glob_pattern_matches_mcp_tools`)
-- **Tool profiles vs explicit tools**: When both are present, explicit tools win and the profile is not expanded (`test_manifest_to_capabilities_profile_overridden_by_explicit_tools`)
-- **Disabled tools**: `tools_disabled: true` suppresses all tools including skill and MCP tools
-- **Skill evolution tools**: `skill_evolve_*`, `skill_read_file`, `skill_evolve_write_file`, `skill_evolve_remove_file` are always available regardless of the agent's declared capabilities — every agent can self-evolve skills
-
-### Notification Routing
-
-Escalated approval notifications use this precedence order:
-
-1. **Per-request `route_to`** on the `ApprovalRequest` — highest priority
-2. Routing rules matching the tool pattern
-3. Agent notification rules
-4. Global `approval_channels`
-
-Test `test_notify_escalated_approval_prefers_request_route_to` sets up all four layers and verifies only the explicit per-request target receives the notification.
-
-### Skill Lifecycle and Configuration
-
-Four interrelated properties tested:
-
-| Property | Test |
-|----------|------|
-| `skills.disabled` list filters skills at boot | `test_skills_config_disabled_list_filters_at_boot` |
-| `skills.extra_dirs` loaded as overlay; local install wins on collision | `test_skills_config_extra_dirs_loaded_as_overlay` |
-| `reload_skills()` re-applies disabled list and extra_dirs | `test_reload_skills_preserves_disabled_and_extra_dirs` |
-| Stable mode freezes registry; reload becomes no-op | `test_stable_mode_freezes_registry_and_skips_review_gate` |
-
-### Hand Activation
-
-Hands are pre-configured agent instances. Tests verify:
-
-- Activation does not inject runtime `tool_allowlist` or `tool_blocklist` entries — skill/MCP tools remain visible
-- Deactivation followed by reactivation produces an identical runtime profile (capabilities, allowlist, blocklist, MCP servers)
-
-### JSON Extraction from LLM Responses
-
-`extract_json_from_llm_response` handles multiple formats the LLM might return:
-
-- JSON inside ` ```json ``` ` code blocks (including multiple blocks — first valid one wins)
-- Bare `{...}` objects embedded in surrounding text
-- JSON with nested braces inside string values
-- Malformed JSON → returns `None`
-- No JSON present → returns `None`
-
-### Reviewer Block Sanitization
-
-`sanitize_reviewer_block` and `sanitize_reviewer_line` clean text before it enters the review envelope:
-
-- Strips triple backticks (prevents a compromised prior response from forging a JSON block the reviewer mistakes for its own)
-- Strips `<data>`/`</data>` envelope markers (prevents escaping the envelope)
-- Removes control characters (`\x00`, `\x07`) while preserving `\n` and `\t`
-- Truncates by **character count** (not bytes) to avoid panicking on UTF-8 boundaries
-
-### Transient vs Permanent Error Classification
-
-`is_transient_review_error` determines whether a background skill review error is worth retrying:
-
-- **Transient** (retryable): timeouts, connection failures, 429 rate limits
-- **Permanent** (do not retry): parse failures, missing required fields, security blocks
-
-### Trace Summarization
-
-`summarize_traces_for_review` produces a bounded summary of tool decision traces:
-
-- Short traces (≤ ~20 entries): includes all entries verbatim
-- Long traces: keeps head and tail, inserts `"omitted"` marker for the middle — ensures the summary is always smaller than the raw trace log
-
-### Miscellaneous Utilities
-
-| Function | Test | Behavior |
-|----------|------|----------|
-| `should_reuse_cached_route` | `test_should_reuse_cached_route_for_brief_follow_up` | Short messages and CJK text reuse the cached route; long messages and acknowledgments like "thanks" do not |
-| `assistant_route_key` | `test_assistant_route_key_scopes_sender_and_thread` | Combines agent ID + channel + user ID + thread ID into a unique cache key |
-| `evaluate_condition` | `test_evaluate_condition_*` | Supports `agent.tags contains 'X'` syntax; unknown formats return `false` (strict deny) |
-| `peer_scoped_key` | `test_peer_scoped_key` | Prepends `peer:{id}:` when a peer ID is provided; leaves key unchanged otherwise |
-| `apply_thinking_override` | `test_apply_thinking_override_*` | `None` preserves manifest; `Some(false)` clears thinking; `Some(true)` inserts defaults or preserves existing budget |
-
-### Kernel Boot Defaults
-
-A fresh kernel boot with default config auto-spawns an `assistant` agent (verified in `test_boot_spawns_assistant_as_default_agent`). The approval sweep task is idempotent — calling `spawn_approval_sweep_task` twice does not launch a second task.
-
-### Ephemeral Messaging
-
-`send_message_ephemeral` sends a one-off message to an agent **without modifying its session history**. Tests confirm:
-
-- Unknown agent IDs return an error
-- The agent's session message count is unchanged after the call (even if the LLM call itself fails due to no provider)
 
 ---
 
-## Patterns and Conventions
+## ApprovalManager (`approval.rs`)
 
-**Filesystem isolation**: Every test that boots a kernel creates a unique temp directory via `tempfile::tempdir()`. No test relies on shared state or the user's real `~/.librefang`.
+Gates dangerous tool invocations (shell execution, file writes, etc.) behind human-in-the-loop approval decisions. Supports both blocking and non-blocking (deferred) execution paths, TOTP second-factor authentication, escalation chains, and persistent audit logging.
 
-**Graceful skipping**: Tests involving optional hands (e.g., `apitester`) catch `"unsatisfied requirements"` errors and return early rather than failing in CI environments lacking the hand's dependencies.
+### Construction
 
-**Shutdown discipline**: Every test that boots a kernel calls `kernel.shutdown()` before the test function returns. Tests using `Arc<Kernel>` also await a short sleep after shutdown to let async tasks drain.
+```rust
+// In-memory only (no audit DB)
+let mgr = ApprovalManager::new(policy);
 
-**Regression-focused naming**: Several tests are explicitly labeled as regression guards (e.g., `test_spawn_child_exceeding_parent_is_rejected`, `test_set_agent_model_clears_overrides_when_provider_changes`) with doc comments explaining the original bug they prevent.
+// With SQLite audit logging and TOTP lockout persistence
+let mgr = ApprovalManager::new_with_db(policy, conn);
+```
+
+`new_with_db` loads persisted TOTP lockout state from the `totp_lockout` table, discarding entries whose lockout window has already expired so a daemon restart does not extend the original 5-minute window.
+
+### Two Execution Paths
+
+**Blocking path** — `request_approval(req)` — the calling agent coroutine suspends until a human resolves the request, it times out, or the per-agent pending limit is hit. Internally uses a `tokio::sync::oneshot` channel to deliver the decision back to the waiting future.
+
+**Deferred (non-blocking) path** — `submit_request(req, deferred)` — returns the request UUID immediately. The `DeferredToolExecution` payload is stored alongside the pending request and returned atomically on `resolve()`. The kernel's periodic sweep (`expire_pending_requests`) handles timeouts for deferred requests.
+
+Both paths enforce a per-agent limit of `MAX_PENDING_PER_AGENT` (5) and reject overflow immediately.
+
+### Policy Resolution: `requires_approval` vs `requires_approval_with_context`
+
+`requires_approval(tool_name)` checks only the static `require_approval` list, supporting glob patterns (`file_*`, `*_exec`, `*`).
+
+`requires_approval_with_context(tool_name, sender_id, channel)` applies a layered override chain:
+
+1. **Trusted sender bypass** — if `sender_id` appears in `policy.trusted_senders`, returns `false` (no approval needed) regardless of tool or channel.
+2. **Channel-specific rules** — if a `channel_rules` entry matches the channel, its `allowed_tools` / `denied_tools` list takes precedence. An explicit allow bypasses approval; an explicit deny forces it.
+3. **Default list** — falls back to glob-matching against `require_approval`.
+
+`is_tool_denied_with_context` performs the same checks but returns a boolean for the deny-only case (trusted senders bypass channel deny rules).
+
+### Escalation and Timeout
+
+The timeout behavior depends on `policy.timeout_fallback`:
+
+| `TimeoutFallback` variant | Behavior on timeout |
+|---|---|
+| `TimedOut` (default) | Resolves as `ApprovalDecision::TimedOut` |
+| `Skip` | Resolves as `ApprovalDecision::Skipped` |
+| `Escalate { extra_timeout_secs }` | Bumps `escalation_count`, re-inserts with extended timeout. After `MAX_ESCALATIONS` (3) rounds, falls through to `TimedOut`. |
+
+The effective timeout for escalation is `request.timeout_secs + (extra_timeout_secs × escalation_count)`, giving each round more time for the human to respond.
+
+`expire_pending_requests` is called periodically by the kernel. It returns escalated requests (still pending) and expired requests (with their deferred payloads) separately so the kernel can re-notify for escalations and execute fallback decisions for expirations.
+
+### Resolution: `resolve` and Batch Operations
+
+`resolve(request_id, decision, decided_by, totp_verified, user_id)` is the core resolution method:
+
+- Returns `(ApprovalResponse, Option<DeferredToolExecution>)` — the deferred payload is `Some` for the non-blocking path.
+- If the request was already resolved, returns an error containing who resolved it (e.g., `"Already denied by admin"`).
+- On success, records to the in-memory `recent` deque (capped at `MAX_RECENT_APPROVALS` = 100) and writes to the SQLite `approval_audit` table if configured.
+
+Batch operations:
+
+- **`resolve_batch`** — resolves multiple IDs with the same decision. Does not support TOTP.
+- **`resolve_all_for_session`** — resolves every pending request matching a `session_id`. Mirrors Hermes-Agent's `resolve_gateway_approval(session_key, choice, resolve_all=True)`. TOTP-required requests are silently skipped (returned count excludes them).
+
+### Session-Scoped Queries
+
+| Method | Purpose |
+|---|---|
+| `list_pending_for_session(session_id)` | All pending `ApprovalRequest`s for a session |
+| `has_pending_for_session(session_id)` | Quick boolean check for blocking state |
+| `resolve_all_for_session(session_id, decision, decided_by)` | Atomically resolve all pending for a session |
+
+These enable dashboard and channel UIs to scope approval views and actions to a single conversation.
+
+### TOTP Second-Factor Authentication
+
+When `policy.second_factor` is `SecondFactor::Totp`, approval of TOTP-gated tools requires a verified code.
+
+**Per-tool gating** — `policy.totp_tools` optionally scopes TOTP to specific tools. When empty, all tools require TOTP. `policy.tool_requires_totp(tool_name)` encodes this logic.
+
+**Grace period** — after a successful TOTP verification, the user enters a grace window (`totp_grace_period_secs`). Subsequent approvals by the same `user_id` skip TOTP until the window expires. Set to 0 to always require TOTP.
+
+**Lockout** — after `TOTP_MAX_FAILURES` (5) consecutive failures, the user is locked out for `TOTP_LOCKOUT_SECS` (300 seconds). Lockout state is persisted to SQLite (`totp_lockout` table) so it survives daemon restarts.
+
+**Resolution gate** — `resolve()` checks `totp_verified` when the decision is `Approved` and the tool requires TOTP. If the user is not within grace and `totp_verified` is false, resolution is rejected with a TOTP-required error. Denial never requires TOTP.
+
+**Static TOTP utilities** (no state, can be called without an `ApprovalManager` instance):
+
+| Method | Description |
+|---|---|
+| `verify_totp_code(secret, code)` | Verify a 6-digit code against a base32 secret (SHA-1, 30s step, ±1 window) |
+| `verify_totp_code_with_issuer(secret, code, issuer)` | Same, with custom issuer label |
+| `generate_totp_secret(issuer, account)` | Returns `(base32_secret, otpauth_uri, qr_base64_png)` |
+| `generate_recovery_codes()` | 8 codes in `DDDD-DDDD` format |
+| `verify_recovery_code(stored_json, code)` | Consumes a matching code, returns updated JSON |
+| `is_recovery_code_format(code)` | Validates `DDDD-DDDD` format |
+
+### Audit Logging
+
+When constructed with `new_with_db`, every resolution is written to the `approval_audit` table via `push_recent → audit_log_write`. The `query_audit` and `audit_count` methods support paginated queries with optional `agent_id` and `tool_name` filters.
+
+### Risk Classification
+
+`classify_risk(tool_name)` is a static mapping:
+
+| Tool | Risk Level |
+|---|---|
+| `shell_exec` | Critical |
+| `file_write`, `file_delete`, `apply_patch` | High |
+| `web_fetch`, `browser_navigate` | Medium |
+| Everything else | Low |
+
+### Policy Hot-Reload
+
+`update_policy(policy)` replaces the active policy behind an `RwLock`. The new policy takes effect immediately for subsequent checks. `policy()` returns a clone of the current policy.
+
+### Key Constants
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `MAX_PENDING_PER_AGENT` | 5 | Back-pressure limit per agent |
+| `MAX_RECENT_APPROVALS` | 100 | In-memory history ring buffer |
+| `MAX_ESCALATIONS` | 3 | Escalation rounds before forced timeout |
+| `TOTP_MAX_FAILURES` | 5 | Consecutive failures before lockout |
+| `TOTP_LOCKOUT_SECS` | 300 | Lockout duration in seconds |
+
+---
+
+## AuthManager (`auth.rs`)
+
+Maps platform user identities (Telegram ID, Discord ID, etc.) to LibreFang users with hierarchical roles, then enforces RBAC permission checks.
+
+### Role Hierarchy
+
+```
+Owner (3) > Admin (2) > User (1) > Viewer (0)
+```
+
+Roles implement `Ord` — any role at or above the required level is authorized.
+
+### Channel Binding
+
+Users are registered with `channel_bindings`: a map of `channel_type → platform_id`. During construction, `AuthManager` builds a reverse index (`"telegram:123456" → UserId`) so that incoming channel messages can be mapped to LibreFang identities via `identify(channel_type, platform_id)`.
+
+A single user can bind to multiple channels (e.g., Telegram and Discord), and `identify` returns the same `UserId` for all of them.
+
+### Authorization Model
+
+Each `Action` declares a minimum `UserRole`:
+
+| Action | Minimum Role |
+|---|---|
+| `ChatWithAgent` | User |
+| `ViewConfig` | User |
+| `SpawnAgent` | Admin |
+| `KillAgent` | Admin |
+| `InstallSkill` | Admin |
+| `ViewUsage` | Admin |
+| `ModifyConfig` | Owner |
+| `ManageUsers` | Owner |
+
+`authorize(user_id, action)` looks up the user's role and compares it against the action's requirement. Returns `Ok(())` on success or `LibreFangError::AuthDenied` with a descriptive message on failure.
+
+### Integration Points
+
+- **Terminal routes** (`src/routes/terminal.rs`) — `authorize_terminal_request` calls `AuthManager::authorize` before allowing WebSocket connections, window creation, and deletes.
+- **Dashboard API** (`librefang-api/src/server.rs`) — `configured_user_api_keys` uses `UserRole::from_str_role` to map API key configurations to roles.
+- **System routes** (`src/routes/system.rs`) — the approval router reads `policy()` from `ApprovalManager` before processing approval requests.
+
+---
+
+## Kernel Integration Tests (`kernel/tests.rs`)
+
+Integration tests exercising the full kernel boot sequence with temporary directories. Key test scenarios:
+
+- **API key rotation** — `collect_rotation_key_specs` deduplicates profiles sharing the primary key, skips profiles with missing environment variables, and prepends the distinct primary driver key.
+- **Escalation notification routing** — `notify_escalated_approval` prefers per-request `route_to` targets over policy-level routing rules, agent notification rules, and global approval channels.
+- **Agent registry** — name resolution, tag-based filtering, and manifest-to-capability mapping including profile-based tool expansion.
+- **Default model override** — verifies that `spawn_agent_inner` applies local default model configuration to newly spawned agents.
+
+The `RecordingChannelAdapter` test double captures sent messages for assertion without requiring a live channel connection.

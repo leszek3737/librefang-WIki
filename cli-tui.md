@@ -2,211 +2,239 @@
 
 # CLI & TUI Module
 
-The `librefang-cli` crate is the primary user-facing interface for LibreFang. It provides a comprehensive command-line interface with 40+ subcommands, an interactive launcher menu, a full-screen terminal UI (TUI), and internationalization support. When no subcommand is given in a TTY, it opens a Ratatui-based interactive launcher instead of printing help text.
+## Overview
 
-## Architecture Overview
+The `librefang-cli` crate is the primary user-facing interface for LibreFang. It provides a comprehensive command-line tool (`librefang`) and an interactive terminal dashboard (TUI) built with ratatui. The binary serves as both a daemon client and, when no daemon is running, can boot an in-process kernel for single-shot commands.
+
+## Architecture
 
 ```mermaid
 graph TD
-    Entry[main.rs] -->|no subcommand + TTY| Launcher[launcher.rs]
-    Entry -->|subcommand| Dispatch[Command Dispatch]
-    Dispatch --> DaemonClient[HTTP Client → Daemon]
-    Dispatch --> InProcess[In-Process Kernel]
-    Launcher --> DesktopInstall[desktop_install.rs]
-    Launcher --> FindDaemon[find_daemon]
-    
-    subgraph Support
-        I18N[i18n.rs]
-        HTTP[http_client.rs]
-        UI[ui.rs]
-        Progress[progress.rs]
-        Table[table.rs]
-        Bundled[bundled_agents.rs]
-    end
-    
-    Dispatch --> Support
-    Launcher --> Support
-    InProcess --> Kernel[librefang-kernel]
-    DaemonClient --> API[librefang-api]
+    A["main()"] --> B{Is TUI mode?}
+    B -->|Yes| C["File-based tracing<br/>No Ctrl+C handler"]
+    B -->|No| D["Stderr tracing<br/>Ctrl+C handler installed"]
+    C --> E["tui::run() or launcher::run()"]
+    D --> F["Command dispatch"]
+    F --> G{Daemon running?}
+    G -->|Yes| H["HTTP calls via daemon_client()"]
+    G -->|No| I["In-process kernel boot"]
+    E --> J["ratatui fullscreen app"]
+    H --> K["Daemon JSON API"]
+    I --> L["LibreFangKernel"]
 ```
 
-## Entry Point and Lifecycle
+## Startup Sequence
 
-`main.rs` is the crate root. It defines the CLI structure via `clap::Parser` with the `Cli` struct and the `Commands` enum containing every subcommand. The lifecycle is:
+The `main()` function follows a strict initialization order:
 
-1. **Allocator setup** — Jemalloc on non-MSVC targets
-2. **Signal handling** — `install_ctrlc_handler()` uses `SetConsoleCtrlHandler` on Windows (workaround for broken `read_line` interruption) and relies on default SIGINT on Unix
-3. **Environment loading** — `load_dotenv` reads `~/.librefang/.env` and loads the credential vault
-4. **i18n init** — Initializes the Fluent-based translation layer
-5. **Command dispatch** — If a subcommand is provided, it routes to the appropriate handler. If no subcommand and stdin is a TTY, the interactive launcher opens
+1. **TLS provider** — `rustls::crypto::aws_lc_rs::default_provider()` is installed before any async/TLS operations
+2. **Environment** — `dotenv::load_dotenv()` loads `~/.librefang/.env` into the process environment (system env takes priority)
+3. **i18n** — Reads `language` from `config.toml` and calls `i18n::init()`
+4. **Argument parsing** — `Cli::parse()` via clap
+5. **Mode detection** — Determines whether this is a TUI invocation (`Tui`, `Chat`, `Agent::Chat`, or bare invocation in a terminal)
+6. **Tracing setup** — TUI modes route logs to `<log_dir>/tui.log` to avoid corrupting the terminal; CLI modes trace to stderr with filtered library noise
+7. **Signal handling** — CLI modes install a Ctrl+C handler; TUI modes skip it (ratatui needs to restore terminal state)
+8. **Command dispatch** — The `Commands` enum is matched to `cmd_*` handler functions
 
-The daemon detection pattern is central: `find_daemon()` and `find_daemon_in_home()` check for a running daemon via `read_daemon_info`. Commands that need the daemon (status, chat, agent list, etc.) get a base URL and create an HTTP client. Commands like `start` or `init` work independently.
+### Mode Detection
 
-### Two Execution Modes
+TUI mode is activated when:
+- No subcommand is given and stdout is a terminal (launches the interactive picker)
+- `librefang tui` is invoked
+- `librefang chat` or `librefang agent chat` is invoked (interactive chat is a TUI experience)
 
-- **Daemon mode** — CLI acts as a thin HTTP client to the running daemon at `http://127.0.0.1:4545`
-- **Single-shot mode** — When no daemon is running, commands like `chat` or `agent spawn` boot an in-process kernel (`LibreFangKernel`)
+When stdout is piped and no subcommand is given, the CLI falls back to printing help text.
 
-## Interactive Launcher (`launcher.rs`)
+## CLI Definition
 
-When `librefang` is run with no subcommand in a terminal, the launcher presents a Ratatui-based full-screen menu. It is not the full TUI dashboard — it is a lightweight one-shot picker.
+The command structure is defined using `clap` derive macros:
 
-### Menu Variants
+- **`Cli`** — top-level struct with `--config` (global) and an optional `Commands` subcommand
+- **`Commands`** — a flat enum of ~35 top-level commands, many with their own subcommand enums
 
-The launcher shows different menus based on user state:
+### Command Categories
 
-- **First-run menu** — "Get started" is the first and visually prominent option; includes migration hints for OpenClaw/OpenFang users
-- **Returning user menu** — Action-first ordering (Chat, Dashboard, TUI), with Settings at the bottom
+| Category | Commands | Notes |
+|---|---|---|
+| Lifecycle | `init`, `start`, `stop`, `restart`, `gateway *` | Daemon management |
+| Agent ops | `agent *`, `spawn`, `agents`, `kill` | Create, list, chat, kill agents |
+| Chat | `chat`, `message` | Interactive or one-shot messaging |
+| Configuration | `config *`, `vault *` | Show/edit/set config and credentials |
+| Models | `models *` | List providers, aliases, set default model |
+| Channels | `channel *` | Setup/test/enable messaging integrations |
+| Hands | `hand *` | Autonomous execution modules |
+| Skills | `skill *` | Install, search, create, evolve skills |
+| MCP | `mcp *` | Model Context Protocol server management |
+| Scheduling | `cron *` | Cron-style recurring agent jobs |
+| Security | `security *` | Audit trail, integrity verification |
+| Monitoring | `status`, `health`, `doctor`, `logs` | System diagnostics |
+| Triggers | `trigger *` | Event-driven agent invocation |
+| Workflows | `workflow *` | Multi-step agent chains |
+| System | `system *`, `service *` | Info, version, boot service |
+| Other | `tui`, `dashboard`, `completion`, `update`, `migrate`, `uninstall`, `reset`, `hash-password`, `qr`, `webhooks *`, `devices *`, `memory *`, `sessions`, `approvals *` | Misc utilities |
 
-State detection:
-- `is_first_run()` checks for `~/.librefang/config.toml`
-- `has_openclaw()` / `has_openfang()` check for legacy directories
-- `detect_provider()` scans environment variables for known API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY, etc.)
+## Daemon Communication
 
-### LauncherChoice Enum
+When a command needs runtime data (listing agents, sending messages, etc.), the CLI communicates with the background daemon over HTTP.
 
-Each menu item maps to a `LauncherChoice` variant: `GetStarted`, `Chat`, `Dashboard`, `DesktopApp`, `TerminalUI`, `ShowHelp`, `Quit`. The `run()` function returns the user's selection to `main.rs`, which dispatches accordingly.
+### Daemon Discovery
 
-### Background Daemon Detection
+`find_daemon()` → `find_daemon_in_home()` reads daemon info from `~/.librefang/daemon.json` using `librefang_api::server::read_daemon_info()`. It normalizes `0.0.0.0` to `127.0.0.1` (avoids macOS connect hangs), then probes `http://{addr}/api/health` with a 1-second connect timeout and 2-second total timeout.
 
-On launch, a background thread calls `find_daemon()` and queries `/api/agents` for the agent count. The main loop polls for the result (50ms intervals) and updates the status indicator with a spinner while detecting, then shows daemon URL and agent count (or "No daemon running").
+### HTTP Client
 
-### Screens
+`daemon_client()` builds a `reqwest::blocking::Client` with:
+- 120-second timeout for long-running agent operations
+- Automatic `Authorization: Bearer <key>` header when `api_key` is configured in `config.toml`
+- Custom client builder from `http_client::client_builder()` for TLS/connection pooling
 
-The launcher has two screens:
-- **Menu** — Primary menu with status indicators, navigation hints, and optional migration prompts
-- **Help** — Full `--help` output rendered as a scrollable view with scrollbar (vim-like keybindings: j/k, g/G, PgUp/PgDn)
+### JSON Response Handling
 
-### Rendering
+`daemon_json()` wraps `reqwest` responses with user-friendly error messages:
+- Server errors → `error-daemon-returned` / `error-daemon-returned-fix`
+- Timeouts → `error-request-timeout` / `error-request-timeout-fix`
+- Connection refused → `error-connect-refused` / `error-connect-refused-fix`
+- Other errors → generic `error-daemon-comm`
 
-Content is constrained to a readable width (max 80 columns) with a left margin. Vertical centering places content in the upper-third of the terminal. A custom panic hook ensures the terminal is restored on panic.
+All error messages use the i18n system.
 
-## Desktop App Management (`desktop_install.rs`)
+## Initialization Flows
 
-Handles discovering, downloading, and installing the LibreFang desktop application from GitHub releases (`librefang/librefang`).
+### `cmd_init(quick)`
 
-### Discovery: `find_desktop_binary()`
+The init command has three paths:
 
-Search order:
-1. Sibling of the current CLI executable
-2. PATH lookup (`which_lookup`)
-3. Platform-specific locations:
-   - macOS: `/Applications/LibreFang.app/Contents/MacOS/LibreFang`
-   - Windows: `%LOCALAPPDATA%\LibreFang\LibreFang.exe`
-   - Linux: `~/.local/bin/librefang-desktop` or `~/Applications/LibreFang.AppImage`
+1. **Upgrade path** — If `config.toml` already exists and not in `--quick` mode, redirects to `cmd_init_upgrade()` to preserve user settings (addresses issue #1862 where the wizard would silently overwrite channels/keys)
 
-### Installation Flow: `prompt_and_install()` → `download_and_install()`
+2. **Quick mode** (`--quick` or non-terminal stdin) — Calls `detect_best_provider()`, writes default config, prints next steps
 
-1. Prompt the user for confirmation
-2. Detect platform asset suffix (e.g., `_aarch64.dmg`, `_x64-setup.exe`, `_amd64.AppImage`)
-3. Query GitHub Releases API for the latest release
-4. Find the matching asset by filename suffix
-5. Download to a temp directory
-6. Platform-specific install:
-   - **macOS** (`install_macos_dmg`): Mounts DMG via `hdiutil`, copies `.app` bundle to `/Applications`, clears quarantine xattr
-   - **Windows** (`install_windows`): Runs NSIS installer with `/S` silent flag
-   - **Linux** (`install_linux_appimage`): Copies AppImage to `~/.local/bin/`, sets executable permissions
+3. **Interactive wizard** — Delegates to `tui::screens::init_wizard::run()`, a ratatui-based 5-step onboarding screen
 
-### Launching: `launch()`
+All paths ensure:
+- `~/.librefang/` directory exists with restricted permissions (0700 on Unix)
+- `~/.librefang/data/` directory exists
+- Registry content is synced via `librefang_runtime::registry_sync::sync_registry()`
+- Credential vault is initialized via `init_vault_if_missing()`
+- Git repo is initialized via `init_git_if_missing()` for config version control
 
-On macOS, detects `.app` bundles and uses `open -a`. Otherwise, spawns the binary detached (null stdio).
+### `cmd_init_upgrade()`
 
-## Internationalization (`i18n.rs`)
+Upgrade flow:
+1. Validates that `config.toml` exists
+2. Backs up config to `backups/config-YYYYMMDD-HHMMSS.toml` (prunes to last 3)
+3. Syncs registry (TTL=0 to force refresh)
+4. Finds top-level keys in the default template that are missing from the user's config
+5. Appends missing scalar keys before the first `[table]` header and missing table sections at the end — preserving existing comments and formatting
+6. Warns about legacy `~/.openclaw` installations
+7. Warns about incomplete `require_approval` lists missing `file_write`/`file_delete` (#1861)
 
-Fluent-based i18n with English and Simplified Chinese locales bundled at compile time via `include_str!`.
+### Provider Detection
 
-### Thread-Local State
+`detect_best_provider()` probes for API keys in environment variables and vault to auto-select the best available LLM provider and model for initialization.
 
-A thread-local `RefCell<Option<I18n>>` stores the active translation bundle. Initialize with `init(language)` before calling translation functions.
+## TUI System
 
-### API
+The TUI module (`tui/`) provides a full-screen ratatui interface:
 
-- `init(language: &str)` — Load the bundle for the given language; falls back to `DEFAULT_LANGUAGE` ("en") on failure
-- `t(key: &str) -> String` — Translate a key with no arguments
-- `t_args(key: &str, args: &[(&str, &str)]) -> String` — Translate with Fluent arguments
+- **`tui::run()`** — Main entry point; sets up the ratatui terminal, event loop, and rendering
+- **`launcher::run()`** — When `librefang` is invoked without arguments in a terminal, presents an interactive menu (`GetStarted`, `Chat`, `Dashboard`, `DesktopApp`, `TerminalUI`, `ShowHelp`, `Quit`)
+- **`tui::screens::init_wizard`** — 5-step onboarding wizard returning `InitResult { provider, model, daemon_started, launch }`
+- **Tab system** — `handle_key()` → `switch_tab()` → `on_tab_enter()` → `refresh_agents()` → `load_daemon_agents()`
 
-Missing keys render as `[key_name]`. The `SUPPORTED_LANGUAGES` constant lists valid options: `["en", "zh-CN"]`.
+## MCP Server
 
-## HTTP Client (`http_client.rs`)
+`librefang mcp` (without subcommand) starts a stdio-based MCP server that exposes LibreFang to MCP-compatible clients (Claude Code, Cursor). The server:
+- Reads JSON-RPC messages from stdin
+- Dispatches to `handle_message()`
+- Sends JSON-RPC responses via `send_message()`
 
-Thin wrapper around `reqwest::blocking` that applies the TLS configuration from `librefang_runtime::http_client::tls_config()`, which bundles CA roots for environments where system roots are unavailable.
+## Internal Modules
 
-- `client_builder()` — Returns a `ClientBuilder` with preconfigured TLS
-- `new_client()` — Builds the client (panics on failure, which should never happen with bundled roots)
+| Module | Purpose |
+|---|---|
+| `desktop_install` | Desktop app installation helpers |
+| `http_client` | Shared reqwest client builder |
+| `i18n` | Internationalization (loads translations by language code) |
+| `launcher` | No-argument interactive menu |
+| `mcp` | MCP stdio server and catalog management |
+| `progress` | Terminal progress indicators with OSC support |
+| `table` | Styled table formatting (used across multiple commands) |
+| `templates` | Agent template loading from filesystem |
+| `tui` | Full ratatui terminal dashboard |
+| `ui` | CLI output helpers: `banner()`, `success()`, `error()`, `error_with_fix()`, `hint()`, `kv()`, `next_steps()` |
 
-## Bundled Agents (`bundled_agents.rs`)
+## Tracing Configuration
 
-A backwards-compatibility shim that delegates to `librefang_runtime::registry_sync::sync_registry()` with default parameters. Called during `init` to populate the local agent registry.
+### CLI Mode (`init_tracing_stderr`)
 
-## Supporting Modules
+- Uses `tracing_subscriber` with compact format (no timestamps, no target)
+- Filters library crates to `warn` level by default to avoid noise during one-shot commands
+- Supports OpenTelemetry reload layer when the `telemetry` feature is enabled
+- Users can override with `RUST_LOG` environment variable to see full detail
 
-### `ui.rs`
+### TUI Mode (`init_tracing_file`)
 
-Console output helpers (`success`, `error`, `hint`, `step`, `kv`) for colored, structured terminal output used throughout command handlers.
+- Writes to `<log_dir>/tui.log` (or `<home>/logs/tui.log`)
+- Falls back to suppressing all output if log file creation fails
+- Uses `with_ansi(false)` for clean file output
 
-### `progress.rs`
+### Log Level and Directory
 
-Terminal progress reporting using OSC progress sequences and spinners. Key functions:
-- `tick()` — Advance spinner
-- `finish()` / `finish_with_message()` — Complete and clear the progress indicator
+Both are read from `config.toml` without full deserialization:
+- `load_log_level_from_config()` — reads `log_level` field, defaults to `"info"`
+- `load_log_dir_from_config()` — reads `log_dir` field for custom log locations
 
-### `table.rs`
+## Signal Handling
 
-Simple table renderer for CLI output. Used by agent lists, model listings, channel status, and other tabular data. Provides `basic_table`, `center_alignment`, and fills missing cells.
+`install_ctrlc_handler()` is called only in CLI mode:
 
-### `templates.rs`
+- **Windows** — Uses `SetConsoleCtrlHandler` Win32 API directly. First Ctrl+C prints "Interrupted." and exits cleanly; second press calls `process::exit(130)` for a hard exit. This works around MINGW's unreliable default handler that doesn't interrupt blocking `read_line` calls.
+- **Unix** — The default SIGINT handler already works correctly (interrupts `read_line` and terminates). The `CTRLC_PRESSED` flag exists but is not actively used on Unix.
 
-Agent template loading. `load_all_templates()` discovers and parses agent manifest templates from the registry and local filesystem.
+## Global Allocator
 
-### `mcp.rs`
+On non-MSVC targets, `tikv_jemallocator::Jemalloc` is set as the global allocator for improved performance in allocation-heavy CLI operations.
 
-MCP (Model Context Protocol) stdio server implementation. `handle_message()` dispatches MCP requests, `list_agents()` provides agent discovery, `write_message()` handles response serialization.
+## Configuration Loading
 
-## Subcommand Structure
+The CLI reads `config.toml` lazily at two granularities:
 
-The `Commands` enum defines 40+ top-level commands. Commands marked with [*] have subcommands:
+1. **Lightweight reads** — `load_log_level_from_config()`, `load_language_from_config()`, `load_update_channel_from_config()`, `load_log_dir_from_config()` parse the TOML without full struct deserialization
+2. **Full config** — `daemon_config_context()` calls `librefang_kernel::config::load_config()` to get the complete `DaemonConfigContext` (home directory, API key, log directory)
 
-| Command | Description | Subcommands |
-|---------|-------------|-------------|
-| `init` | Create `~/.librefang/` and default config | — |
-| `start` / `stop` / `restart` | Daemon lifecycle | — |
-| `chat` | Interactive chat with an agent | — |
-| `agent` | Agent management | `new`, `spawn`, `list`, `chat`, `kill`, `set` |
-| `models` | Model browsing | `list`, `aliases`, `providers`, `set` |
-| `skill` | Skill management | `install`, `list`, `remove`, `search`, `test`, `publish`, `create`, `evolve` |
-| `channel` | Channel integrations | `list`, `setup`, `test`, `enable`, `disable` |
-| `hand` | Hand management | `list`, `active`, `status`, `install`, `activate`, `deactivate`, `info`, `check-deps`, `install-deps`, `pause`, `resume`, `settings`, `set`, `reload`, `chat` |
-| `config` | Configuration | `show`, `edit`, `get`, `set`, `unset`, `set-key`, `delete-key`, `test-key` |
-| `trigger` | Event triggers | `list`, `get`, `create`, `update`, `enable`, `disable`, `delete` |
-| `workflow` | Workflow management | `list`, `create`, `run` |
-| `mcp` | MCP servers | `list`, `catalog`, `add`, `remove` |
-| `security` | Security tools | `status`, `audit`, `verify`, `audit-reset` |
-| `memory` | Agent KV store | `list`, `get`, `set`, `delete` |
-| `cron` | Scheduled jobs | `list`, `create`, `delete`, `enable`, `disable` |
-| `gateway` | Low-level daemon control | `start`, `stop`, `restart`, `status` |
-| `vault` | Credential vault | `init`, `set`, `list`, `remove` |
-| `devices` | Device pairing | `list`, `pair`, `remove` |
-| `webhooks` | Webhook management | `list`, `create`, `delete`, `test` |
-| `service` | Boot service (systemd/launchd) | `install`, `uninstall`, `status` |
+The `--config` global flag overrides the default `~/.librefang/config.toml` path.
 
-Key aliases: `spawn` → `agent spawn`, `agents` → `agent list`, `kill` → `agent kill`, `tui` → full TUI dashboard, `dashboard` → open web UI in browser.
+## File Permissions
 
-## Connections to Other Crates
+On Unix, sensitive files are restricted to owner-only:
+- `restrict_file_permissions()` — sets mode 0600 (config, vault, backups)
+- `restrict_dir_permissions()` — sets mode 0700 (`~/.librefang/`)
 
-| Crate | Usage |
-|-------|-------|
-| `librefang-kernel` | In-process kernel for single-shot mode; config loading via `load_config` |
-| `librefang-api` | `read_daemon_info` for daemon discovery; server types |
-| `librefang-runtime` | Registry sync, TLS config, model catalog, provider detection |
-| `librefang-types` | Shared types (`AgentId`, `AgentManifest`), i18n defaults |
-| `librefang-extensions` | `dotenv` loading, vault operations |
-| `librefang-hands` | Hand discovery and default provider |
-| `librefang-migrate` | Migration from OpenClaw/OpenFang (uses `table` module) |
+These are no-ops on non-Unix platforms.
 
 ## Adding a New Command
 
-1. Add a variant to the `Commands` enum in `main.rs` with `#[command(...)]` attributes and documentation
-2. Create a handler function (e.g., `cmd_my_feature`)
-3. Add a match arm in the `main()` dispatch block
-4. If the command needs daemon access, use `find_daemon()` → `daemon_client_with_api_key()` to get an HTTP client
-5. Use `ui::` helpers for output, `table::basic_table` for tabular data, and `progress::` for long operations
+To add a new top-level command:
+
+1. Add a variant to the `Commands` enum with `#[derive(Subcommand)]` attributes and doc comments
+2. If it has subcommands, create a separate `FooCommands` enum
+3. Add the `match` arm in `main()`'s command dispatch
+4. Implement a `cmd_foo()` handler function
+5. If the command talks to the daemon, use `daemon_client()` and `daemon_json()`
+6. Use `ui::*` helpers for consistent output formatting
+7. Use `i18n::t()` / `i18n::t_args()` for all user-facing strings
+
+## Key Dependencies
+
+- `clap` / `clap_complete` — argument parsing and shell completion generation
+- `ratatui` — terminal UI framework (used by `tui` module)
+- `reqwest` (blocking) — HTTP client for daemon communication
+- `tracing_subscriber` — structured logging
+- `colored` — terminal color output
+- `tikv_jemallocator` — system allocator (non-MSVC)
+- `dirs` — cross-platform home directory resolution
+- `librefang_kernel` — in-process kernel for single-shot mode
+- `librefang_api` — daemon info reading
+- `librefang_extensions` — dotenv loading, credential vault
+- `librefang_runtime` — registry sync, model catalog
+- `librefang_types` — shared types (AgentId, AgentManifest, config types)

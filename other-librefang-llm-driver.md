@@ -2,52 +2,58 @@
 
 # librefang-llm-driver
 
-Abstraction layer for LLM (Large Language Model) integrations in LibreFang. This crate defines the core `LlmDriver` trait and shared types that concrete LLM implementations must satisfy.
+LLM driver trait and shared types for LibreFang.
 
 ## Purpose
 
-LibreFang needs to interact with language models for various tasks. Rather than coupling the codebase to a single LLM provider, this module provides a trait-based abstraction. Any LLM backend—OpenAI, local models, custom endpoints—can be integrated by implementing the driver trait defined here.
+This crate defines the abstraction layer through which the rest of the LibreFang codebase communicates with large language model backends. It provides a common trait that concrete LLM integrations must implement, along with the shared types used in request/response flows. By isolating the driver contract here, higher-level modules remain decoupled from any specific LLM provider.
 
-This crate **does not** contain any LLM implementations itself. It solely defines the contract.
+## Role in the Architecture
 
-## Architecture
+`librefang-llm-driver` sits between the application logic and concrete LLM implementations. It has no knowledge of specific providers — it only defines *what* a driver must do, not *how*.
 
 ```mermaid
 graph TD
-    A[librefang-types] --> B[librefang-llm-driver]
-    B --> C[Concrete LLM Driver A]
-    B --> D[Concrete LLM Driver B]
-    C --> E[Application Code]
-    D --> E
+    A[Application Logic] -->|depends on| B[librefang-llm-driver]
+    B -->|trait bound| C[Concrete LLM Driver A]
+    B -->|trait bound| D[Concrete LLM Driver B]
+    C -->|HTTP/gRPC| E[LLM Provider API]
+    D -->|HTTP/gRPC| F[LLM Provider API]
+    B -->|uses types from| G[librefang-types]
 ```
 
-The application depends on the trait from this crate and injects a concrete driver at runtime.
+## Dependencies and What They Signal
 
-## Key Dependencies
-
-| Dependency | Role |
+| Dependency | Purpose in this crate |
 |---|---|
-| `librefang-types` | Shared domain types used across LibreFang crates |
-| `async-trait` | Enables async methods in trait definitions |
-| `serde` / `serde_json` | Serialization of request/response types |
-| `thiserror` | Ergonomic error type definitions |
-| `tokio` | Async runtime primitives |
+| `librefang-types` | Shared domain types (messages, conversation context, configuration) that cross module boundaries |
+| `async-trait` | Enables async methods in trait definitions — LLM calls are inherently I/O-bound and must be non-blocking |
+| `serde` / `serde_json` | Serialization of request/response types for transport and configuration parsing |
+| `thiserror` | Ergonomic, typed error definitions for driver-level failures |
+| `tokio` | Async runtime primitives used by driver implementations |
 
-## Implementing a New LLM Driver
+## What This Crate Provides
 
-To add support for a new LLM provider:
+### Driver Trait
 
-1. Create a new crate (or module) that depends on `librefang-llm-driver`.
-2. Implement the `LlmDriver` trait for a struct representing your provider's client.
-3. Ensure your implementation handles serialization, error mapping, and any provider-specific authentication or configuration.
+The core export is an async trait that concrete LLM backends implement. Any new provider is integrated by implementing this trait and wiring it into the application at startup.
 
-All request and response types should derive `Serialize` and `Deserialize` where applicable, as this crate relies on `serde` for structured data interchange.
+### Request and Response Types
 
-## Error Handling
+Shared structures representing prompts, chat histories, completion parameters, and model responses. These types are what the application logic constructs and consumes, keeping it agnostic to provider-specific wire formats.
 
-Error types in this crate use `thiserror`, providing structured, ergonomic error variants. Implementations should map provider-specific errors into the error types defined here to maintain a uniform interface for consumers.
+### Error Types
 
-## Relationship to Other Crates
+A unified error enum covering common failure modes — network errors, rate limiting, invalid responses, authentication failures, and context-length violations. Drivers translate provider-specific errors into these common types so that callers handle a single error surface.
 
-- **Depends on** `librefang-types` — reuses shared domain types rather than redefining them.
-- **Consumed by** concrete LLM driver implementations and application-level code that needs a generic LLM interface.
+## Contributing a New LLM Driver
+
+1. Create a new crate (or module) for the provider.
+2. Depend on `librefang-llm-driver` and `librefang-types`.
+3. Implement the driver trait against the provider's API.
+4. Map all provider-specific error cases into the shared error types defined here.
+5. Register the driver in the application's startup/configuration logic.
+
+## Relationship to `librefang-types`
+
+Types defined in `librefang-types` represent domain concepts that are meaningful across the entire codebase. This crate reuses those types in its trait signatures rather than defining its own parallel versions, ensuring consistency and avoiding mapping layers.

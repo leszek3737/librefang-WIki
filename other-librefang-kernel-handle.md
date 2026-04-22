@@ -2,76 +2,74 @@
 
 # librefang-kernel-handle
 
-Defines the `KernelHandle` trait — the primary interface for in-process callers to interact with the LibreFang kernel.
-
 ## Purpose
 
-This crate provides a standardized abstraction for components that need to call into the LibreFang kernel from within the same process. Rather than coupling callers directly to kernel internals, the `KernelHandle` trait offers a stable, async-aware contract that decouples the caller from the kernel's implementation details.
+This crate defines the **`KernelHandle`** trait — the primary interface that in-process callers use to interact with the LibreFang kernel. It serves as the contract between consumer code (plugins, services, or internal subsystems) and the kernel's core operations.
 
-This is a foundational crate: it contains the trait definition and supporting types, with no concrete kernel implementation. Downstream crates provide the actual `KernelHandle` implementations.
+Rather than exposing kernel internals directly, the `KernelHandle` trait provides an abstracted, async-capable boundary. Any in-process component that needs to invoke kernel functionality does so through this trait, keeping the coupling loose and testable.
 
-## When to Use This Crate
+## Role in the Architecture
 
-Import `librefang-kernel-handle` when you are:
-
-- **Implementing a kernel** — you will provide a concrete type that satisfies the `KernelHandle` trait.
-- **Writing an in-process caller** — such as a plugin, FFI boundary shim, or embedded runtime — that needs to invoke kernel operations without going through IPC or a network boundary.
-
-## Dependencies and What They Signal
-
-| Dependency | Role in This Crate |
-|---|---|
-| `librefang-types` | Shared domain types passed between caller and kernel (messages, error types, etc.) |
-| `async-trait` | The `KernelHandle` trait uses async methods; `async-trait` provides the proc-macro support |
-| `serde` / `serde_json` | Trait methods likely accept or return serializable payloads |
-| `tokio` | Async runtime backing the trait's futures |
-| `tracing` | Instrumentation spans on kernel interactions for observability |
-| `uuid` | Correlation or request identifiers for tracing kernel calls |
-
-## Architecture
-
-```mermaid
-graph TD
-    A[In-Process Caller] -->|depends on trait| B[librefang-kernel-handle]
-    C[Kernel Implementation] -->|implements trait| B
-    B -->|uses types from| D[librefang-types]
-    A -->|calls through| B
-    A -.->|at runtime dispatches to| C
+```
+┌──────────────────────────────┐
+│   In-process callers         │
+│   (plugins, services, etc.)  │
+│                              │
+│         KernelHandle trait   │
+│              ▲               │
+│              │               │
+│   ┌──────────┴──────────┐    │
+│   │  Concrete kernel     │    │
+│   │  implementation      │    │
+│   └─────────────────────┘    │
+└──────────────────────────────┘
 ```
 
-The caller depends only on the trait crate, never on the kernel implementation directly. This allows swapping kernel backends (e.g., a real kernel vs. a test double) without modifying caller code.
+The trait lives in its own crate so that consumers depend only on this lightweight interface — not on the full kernel implementation. This separation means:
 
-## Relationship to the Wider Codebase
+- **Consumers** add `librefang-kernel-handle` as a dependency and program against the trait.
+- **The kernel** provides a concrete implementation of `KernelHandle`.
+- **Tests** can substitute a mock or stub implementation without pulling in kernel internals.
 
-- **`librefang-types`** — The shared vocabulary. Any struct or enum that crosses the `KernelHandle` boundary is defined there, not here.
-- **Kernel implementation crates** — Live elsewhere in the workspace and provide `impl KernelHandle for …`.
-- **Caller crates** — Accept a `dyn KernelHandle` (or generic `H: KernelHandle`) and invoke methods through it.
+## Dependencies and What They Indicate
 
-Because this crate has no outgoing or incoming internal calls, it is purely definitional. It introduces no side effects, no global state, and no build-time code generation beyond the `async-trait` macro expansion.
+| Dependency | Reason |
+|---|---|
+| `librefang-types` | Shared domain types used in trait method signatures and return values. |
+| `async-trait` | The `KernelHandle` trait is async — methods return futures that callers `.await`. |
+| `serde` / `serde_json` | Some trait methods accept or return serialized data, likely for message-passing or persistence boundaries. |
+| `tokio` | Async runtime primitives (channels, spawning) used within the trait's support code or default method bodies. |
+| `tracing` | Instrumentation spans for observability across kernel calls. |
+| `uuid` | Operations are identified or keyed by UUID — sessions, requests, or entity references. |
 
 ## Usage Pattern
 
-A typical caller takes the handle as a dependency:
+A typical consumer receives a `KernelHandle` implementation (often via dependency injection or construction at startup) and calls trait methods:
 
 ```rust
 use librefang_kernel_handle::KernelHandle;
 
-async fn do_work<H: KernelHandle>(kernel: &H) {
-    // Call through the trait — actual dispatch is transparent
+async fn do_work(kernel: &dyn KernelHandle) {
+    // Call methods defined on the trait — the concrete kernel
+    // handles dispatch, validation, and side effects.
 }
 ```
 
-A typical kernel implementation:
+Because the trait is defined with `async-trait`, every method returns a `Pin<Box<dyn Future>>` that the caller simply awaits. Implementors provide the concrete async logic.
 
-```rust
-use librefang_kernel_handle::KernelHandle;
+## Connection to the Rest of the Codebase
 
-struct MyKernel { /* ... */ }
+- **`librefang-types`**: The shared vocabulary. Every struct, enum, or newtype that crosses the `KernelHandle` boundary is defined there, ensuring both the kernel and its consumers agree on the data shapes.
+- **Kernel implementation crate**: Provides the concrete struct that `impl KernelHandle`. That crate depends on `librefang-kernel-handle` (for the trait) plus all the subsystem crates needed to actually fulfill requests.
+- **Consumer crates**: Any in-process component that needs kernel access depends on `librefang-kernel-handle` and accepts `dyn KernelHandle` (or a generic parameter constrained by it).
 
-#[async_trait]
-impl KernelHandle for MyKernel {
-    // concrete method bodies
-}
-```
+## Implementing `KernelHandle`
 
-Testing is straightforward: substitute a mock or stub implementation of `KernelHandle` without modifying the code under test.
+When adding a new method to the trait:
+
+1. **Define it in this crate** with an async signature via `async-trait`.
+2. **Update the kernel implementation** to provide the concrete logic.
+3. **Update tests and mocks** to cover the new method.
+4. **Keep `librefang-types` in sync** — any new parameter or return type belongs there, not here.
+
+This crate should never contain business logic. Its sole responsibility is the trait definition and any supporting types that are *specific* to the handle abstraction itself (e.g., error types wrapping kernel-level errors for consumption by callers).

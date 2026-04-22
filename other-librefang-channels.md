@@ -4,61 +4,49 @@
 
 Channel Bridge Layer — pluggable messaging integrations for LibreFang.
 
-## Overview
+## Purpose
 
-`librefang-channels` provides a unified abstraction over 40+ messaging platforms, enabling LibreFang to send, receive, and synchronize messages across disparate communication services. Each channel is a compile-time selectable feature, allowing deployments to include only the integrations they need and keep binary size and dependency count minimal.
+`librefang-channels` provides a unified abstraction over dozens of messaging platforms and notification services. It translates LibreFang's internal message types into protocol-specific formats and handles the transmission, allowing the rest of the system to dispatch alerts and messages without knowing which platform will receive them.
 
 ## Architecture
 
-All channels implement a common async interface (defined in `librefang-types`), which the core dispatch layer uses to route outbound messages and accept inbound ones. The crate handles protocol-specific concerns — HTTP webhook verification, WebSocket lifecycle management, encryption/decryption, signature validation, and message format translation — behind that uniform interface.
+The crate is built around a channel-trait pattern. Each supported platform implements a common async interface, and features are used to compile in only the integrations you need.
 
-```mermaid
-graph TD
-    Core["LibreFang Core Dispatch"] -->|"outbound message"| CB["Channel Bridge"]
-    CB -->|"normalized Message"| T["Telegram"]
-    CB -->|"normalized Message"| D["Discord"]
-    CB -->|"normalized Message"| S["Slack"]
-    CB -->|"normalized Message"| E["Email (SMTP/IMAP)"]
-    CB -->|"normalized Message"| W["Webhook"]
-    CB -->|"normalized Message"| O["... 35+ more channels"]
-    T -->|"inbound event"| CB
-    D -->|"inbound event"| CB
-    S -->|"inbound event"| CB
-    E -->|"inbound event"| CB
-    CB -->|"normalized Event"| Core
+```
+┌──────────────────────────────┐
+│       librefang-types        │
+│   (shared message types)     │
+└──────────┬───────────────────┘
+           │
+           ▼
+┌──────────────────────────────┐
+│    librefang-channels        │
+│                              │
+│  ┌──────────┐  ┌──────────┐  │
+│  │ Telegram │  │ Discord  │  │
+│  └──────────┘  └──────────┘  │
+│  ┌──────────┐  ┌──────────┐  │
+│  │  Slack   │  │  Matrix  │  │
+│  └──────────┘  └──────────┘  │
+│         ...43 total...       │
+└──────────────────────────────┘
 ```
 
-## Feature Flags
+The module depends on `librefang-types` for the shared message structures that flow through the system.
 
-Every channel is individually gated behind a Cargo feature. Two meta-features control bulk inclusion:
+## Supported Channels
 
-| Feature | Behavior |
-|---|---|
-| `default` | Enables all channels **except** `channel-mqtt`. Covers the 44 most common integrations. |
-| `all-channels` | Enables every channel including `channel-mqtt`. |
+All 43 channels and their feature flags:
 
-To build with only specific channels, disable default features and list the ones you need:
-
-```toml
-[dependencies]
-librefang-channels = { path = "../librefang-channels", default-features = false, features = [
-    "channel-telegram",
-    "channel-discord",
-    "channel-email",
-] }
-```
-
-### Available Channels
-
-| Feature | Platform | Extra Dependencies |
+| Feature Flag | Platform | Extra Dependencies |
 |---|---|---|
 | `channel-telegram` | Telegram Bot API | — |
-| `channel-discord` | Discord | — |
-| `channel-slack` | Slack | — |
-| `channel-matrix` | Matrix | — |
-| `channel-email` | Email (SMTP + IMAP) | `lettre`, `imap`, `rustls-connector`, `mailparse` |
-| `channel-webhook` | Generic webhooks | — |
-| `channel-whatsapp` | WhatsApp Business | — |
+| `channel-discord` | Discord Webhooks / Bot | — |
+| `channel-slack` | Slack Webhooks / API | — |
+| `channel-matrix` | Matrix (Element) | — |
+| `channel-email` | Email (SMTP/IMAP) | `lettre`, `imap`, `rustls-connector`, `mailparse` |
+| `channel-webhook` | Generic Webhooks | — |
+| `channel-whatsapp` | WhatsApp Business API | — |
 | `channel-signal` | Signal | — |
 | `channel-teams` | Microsoft Teams | — |
 | `channel-mattermost` | Mattermost | — |
@@ -67,16 +55,16 @@ librefang-channels = { path = "../librefang-channels", default-features = false,
 | `channel-twitch` | Twitch | — |
 | `channel-rocketchat` | Rocket.Chat | — |
 | `channel-zulip` | Zulip | — |
-| `channel-xmpp` | XMPP | — |
+| `channel-xmpp` | XMPP (Jabber) | — |
 | `channel-bluesky` | Bluesky (AT Protocol) | — |
-| `channel-feishu` | Feishu / Lark | `aes`, `cbc` |
+| `channel-feishu` | Feishu (Lark) | `aes`, `cbc` |
 | `channel-line` | LINE | — |
 | `channel-mastodon` | Mastodon | — |
 | `channel-messenger` | Facebook Messenger | — |
 | `channel-reddit` | Reddit | — |
 | `channel-revolt` | Revolt | — |
 | `channel-viber` | Viber | — |
-| `channel-voice` | Voice / telephony | — |
+| `channel-voice` | Voice / TTS calls | — |
 | `channel-flock` | Flock | — |
 | `channel-guilded` | Guilded | — |
 | `channel-keybase` | Keybase | — |
@@ -95,65 +83,105 @@ librefang-channels = { path = "../librefang-channels", default-features = false,
 | `channel-ntfy` | ntfy.sh | — |
 | `channel-qq` | QQ | — |
 | `channel-wechat` | WeChat | — |
-| `channel-wecom` | WeCom (Enterprise WeChat) | `aes`, `cbc`, `roxmltree` |
+| `channel-wecom` | WeCom (WeChat Work) | `aes`, `cbc`, `roxmltree` |
 | `channel-mqtt` | MQTT | `rumqttc` |
 
-## Shared Infrastructure
+**Note:** `channel-mqtt` is available under the `all-channels` feature but is **not** included in the `default` feature set.
 
-While each channel handles its own protocol specifics, several cross-cutting capabilities are shared across the crate:
+## Feature Flags
 
-### HTTP Transport
+### Default Behavior
 
-`reqwest` provides the HTTP client for REST-based channels. `axum` is included for channels that receive inbound events via webhook — it spins up lightweight HTTP listeners to accept platform callbacks.
+By default, all channels except `channel-mqtt` are enabled. This means a bare dependency:
 
-### WebSocket Transport
-
-`tokio-tungstenite` supports channels requiring persistent real-time connections (e.g., Discord gateway, IRC, some Matrix transports).
-
-### Cryptographic Verification
-
-Channels that validate webhook signatures or decrypt payloads share these crates:
-
-- **`hmac` + `sha2` / `sha1`** — HMAC-based signature verification (Slack, WhatsApp, Viber, generic webhooks, etc.)
-- **`aes` + `cbc`** — AES-CBC decryption for platforms that encrypt callback payloads (Feishu, WeCom)
-- **`k256`** — Elliptic curve operations for Nostr event signing/verification
-- **`rsa`** — RSA signature validation for Google Chat service account authentication
-
-### Media Handling
-
-The `image` crate (with JPEG, PNG, and WebP support) handles avatar and attachment processing — resizing, format conversion, and thumbnail generation for platforms with media constraints.
-
-### Concurrency
-
-`dashmap` provides lock-free concurrent maps for tracking active connections, rate limiters, and per-channel state. `tokio-stream` and `futures` manage async event pipelines.
-
-## Relationship to Other Crates
-
-```
-librefang-types  ← defines the Channel trait, Message, Event, and shared types
-        ↑
-librefang-channels ← implements Channel for each platform (this crate)
-        ↑
-librefang-core    ← dispatches messages through the Channel interface
+```toml
+[dependencies]
+librefang-channels = { path = "../librefang-channels" }
 ```
 
-`librefang-channels` depends on `librefang-types` for trait definitions and shared data structures. It does not depend on the core crate — direction is strictly outward. The core engine calls into channels; channels never call back into core directly. Inbound events are returned through the trait interface for the core to process.
+compiles with 42 channels. If you only need a subset, disable default features and select explicitly:
 
-## Benchmarks
-
-The crate ships a Criterion benchmark suite (`benches/dispatch`) for measuring channel dispatch throughput. Run with:
-
-```sh
-cargo bench -p librefang-channels --bench dispatch
+```toml
+[dependencies]
+librefang-channels = { path = "../librefang-channels", default-features = false, features = [
+    "channel-telegram",
+    "channel-discord",
+    "channel-slack",
+] }
 ```
+
+### `all-channels`
+
+The `all-channels` feature enables every channel including `channel-mqtt`. Use this when you want a complete build without listing each feature individually:
+
+```toml
+[dependencies]
+librefang-channels = { path = "../librefang-channels", default-features = false, features = ["all-channels"] }
+```
+
+### Channel-Specific Dependencies
+
+Six channels pull in additional crates when enabled. These are expressed as optional dependencies so they are only compiled when the corresponding feature is active:
+
+- **Email** — `lettre` (SMTP), `imap`, `rustls-connector`, `mailparse`
+- **Google Chat** — `rsa` (for service account JWT signing)
+- **Feishu** — `aes`, `cbc` (for encryption of event verification)
+- **WeCom** — `aes`, `cbc`, `roxmltree` (for message encryption and XML parsing)
+- **Nostr** — `k256` (for secp256k1 key handling)
+- **MQTT** — `rumqttc` (MQTT v5 client)
+
+## Core Dependencies
+
+The crate relies on these shared workspace dependencies:
+
+| Crate | Role |
+|---|---|
+| `tokio` | Async runtime |
+| `reqwest` | HTTP client for REST-based channels |
+| `tokio-tungstenite` | WebSocket client for real-time channels |
+| `axum` | HTTP server for webhook receiver endpoints |
+| `serde` / `serde_json` | Serialization for API payloads |
+| `dashmap` | Concurrent channel state maps |
+| `async-trait` | Async trait definitions for channel interface |
+| `hmac` / `sha2` / `sha1` | Signature verification for webhook authenticity |
+| `tracing` | Structured logging |
+| `image` | Image processing (JPEG, PNG, WebP) |
+| `url` | URL parsing and construction |
+
+## Benchmarking
+
+A Criterion benchmark suite is configured under `benches/dispatch`. Run it with:
+
+```bash
+cargo bench -p librefang-channels
+```
+
+This measures message dispatch throughput across the channel abstraction layer.
 
 ## Adding a New Channel
 
-1. Add a new feature flag in `Cargo.toml`:
+To add a new messaging integration:
+
+1. **Add the feature flag** in `[features]`:
    ```toml
-   channel-newplatform = ["dep:some-crate"]
+   channel-myplatform = []
    ```
-2. Add the feature to both the `default` and `all-channels` lists.
-3. Declare any optional dependencies the channel requires.
-4. Implement the channel trait (from `librefang-types`) in a new module within the crate, gated by `#[cfg(feature = "channel-newplatform")]`.
-5. Register the channel in the factory/registry so the core can discover it at runtime.
+   If the platform needs extra crates:
+   ```toml
+   channel-myplatform = ["dep:some-crate"]
+   ```
+
+2. **Add the feature to both lists** — append it to `default` and `all-channels`.
+
+3. **Add the optional dependency** (if any) under `[dependencies]`:
+   ```toml
+   some-crate = { workspace = true, optional = true }
+   ```
+
+4. **Implement the channel trait** in a new module under `src/`, gated by `#[cfg(feature = "channel-myplatform")]`.
+
+5. **Register the channel** in the dispatch/registry logic so it can be looked up at runtime.
+
+## Relationship to Other Modules
+
+This crate sits between `librefang-types` (which defines the canonical message format) and the outside world. The core LibreFang engine or API layer calls into this module to send messages; it does not call back into other modules. This unidirectional dependency keeps the channel layer self-contained and testable in isolation.

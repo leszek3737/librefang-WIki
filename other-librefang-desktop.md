@@ -2,127 +2,129 @@
 
 # librefang-desktop
 
-Native desktop application for the LibreFang Agent OS, built on **Tauri 2.0**. This crate produces the `librefang-desktop` binary — a self-contained desktop client that bundles a local HTTP server with a native window shell, system tray, auto-updater, and platform installer.
+Native desktop application for LibreFang Agent OS, built on Tauri 2.0. Provides a system-tray–resident agent host with a local web UI, auto-update support, and deep integration with the LibreFang core libraries.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[librefang-desktop<br/>Tauri 2.0 Binary] --> B[librefang-kernel]
-    A --> C[librefang-api]
-    A --> D[librefang-types]
-    A --> E[librefang-extensions]
-    C --> F[reqwest / axum / tokio]
-    A --> G[Tauri Plugins]
-    G --> G1[updater]
-    G --> G2[autostart]
-    G --> G3[notification]
-    G --> G4[single-instance]
-    G --> G5[shell]
-    G --> G6[dialog]
-    G --> G7[global-shortcut]
+    subgraph "librefang-desktop (Tauri 2.0)"
+        A[main.rs] --> B[Tauri Runtime]
+        B --> C[System Tray]
+        B --> D[WebView Windows]
+        B --> E[Tauri Plugins]
+    end
+
+    subgraph "Core Libraries"
+        F[librefang-kernel]
+        G[librefang-api]
+        H[librefang-types]
+        I[librefang-extensions]
+    end
+
+    A --> F
+    A --> G
+    A --> H
+    A --> I
+    G -->|axum server| J[Local HTTP/WS]
+    D -->|loads| J
 ```
 
-The desktop app sits at the top of the dependency tree. It imports the core crates but does not export anything consumed by other workspace members — it is a pure **leaf node** in the module graph.
+The application starts a Tauri runtime with **no initial windows** (see `app.windows: []` in `tauri.conf.json`). Windows are created programmatically—typically pointing to a local axum HTTP server provided by `librefang-api`. This lets the desktop shell share the same frontend served to remote clients.
 
-## Key Dependencies
+## Key Components
 
-### Internal crates
-
-| Crate | Role |
-|---|---|
-| `librefang-kernel` | Core agent runtime and orchestration |
-| `librefang-api` | HTTP API layer (axum-based). Feature flags propagate through |
-| `librefang-types` | Shared type definitions |
-| `librefang-extensions` | Extension system for agents |
-
-### Tauri plugins
+### Tauri Plugins
 
 | Plugin | Purpose |
-|---|---|
-| `tauri-plugin-notification` | Native OS notifications |
-| `tauri-plugin-shell` | Open external URLs and spawn processes |
-| `tauri-plugin-single-instance` | Prevent duplicate app instances |
-| `tauri-plugin-dialog` | Native file/message dialogs |
+|--------|---------|
+| `tauri-plugin-notification` | Native OS notifications for agent events |
+| `tauri-plugin-shell` | Execute shell commands from the frontend |
+| `tauri-plugin-single-instance` | Prevent multiple app instances from running simultaneously |
+| `tauri-plugin-dialog` | Native file open/save dialogs |
 | `tauri-plugin-global-shortcut` | System-wide keyboard shortcuts |
-| `tauri-plugin-autostart` | Launch at login / system boot |
-| `tauri-plugin-updater` | In-app updates signed with minisign |
+| `tauri-plugin-autostart` | Launch on system startup |
+| `tauri-plugin-updater` | Signed auto-updates from GitHub Releases |
 
-### Notable external crates
+### Core Library Integration
 
-- **clap** — CLI argument parsing (the binary accepts runtime flags)
-- **dirs** — Platform-standard directory paths for config/cache/data
-- **toml** — TOML configuration file parsing
-- **open** — Open URLs in the user's default browser
-- **axum** / **tokio** — Embedded HTTP server for local API
-- **tracing** / **tracing-subscriber** — Structured logging
+- **`librefang-kernel`** — Agent orchestration engine, loaded as the primary runtime dependency.
+- **`librefang-api`** — Provides the axum-based HTTP/WebSocket server. The desktop app runs this locally so the Tauri WebView can connect to `http://127.0.0.1:*` or `ws://127.0.0.1:*`.
+- **`librefang-types`** — Shared data structures used across all crates.
+- **`librefang-extensions`** — Plugin/extension system for agents.
+
+Additional runtime dependencies include `clap` for CLI argument parsing, `dirs` for platform-specific paths, `reqwest` for outbound HTTP, `tokio` for async runtime, and `open` to launch external URLs in the default browser.
 
 ## Feature Flags
 
-Features primarily control which communication channels `librefang-api` includes. They forward directly into the `librefang-api` crate.
+Features are defined in `Cargo.toml` and control which channel backends are compiled:
 
 | Feature | Effect |
-|---|---|
+|---------|--------|
 | `default` | Standard channel set via `librefang-api/default` |
-| `all-channels` | Enables every supported channel |
-| `mini` | Minimal channel subset for lighter builds |
-| `custom-protocol` | Tauri production flag; switches asset loading from `dev-server` to `custom-protocol`. Enabled automatically in release bundles. |
+| `all-channels` | Enables every available messaging channel |
+| `mini` | Minimal build with reduced channel support |
+| `custom-protocol` | Production-only; tells Tauri to use `tauri://` protocol instead of `dev://` |
 
-## Build System
+For production builds, always enable `custom-protocol`:
 
-### `build.rs`
+```bash
+cargo build --features custom-protocol
+```
 
-The build script delegates entirely to `tauri_build::build()`, which generates the embeddable assets and protocol handlers Tauri needs at compile time.
+## Configuration (`tauri.conf.json`)
 
-### Bundle configuration (`tauri.conf.json`)
+### Application Identity
 
-| Field | Value |
-|---|---|
-| **Product name** | `LibreFang` |
-| **Identifier** | `ai.librefang.desktop` |
-| **Bundle targets** | All (`.deb`, `.AppImage`, `.dmg`, `.msi`, etc.) |
-| **Category** | Productivity |
-| **Minimum macOS** | 12.0 |
-| **Windows WebView** | Download bootstrapper |
+- **Product name:** `LibreFang`
+- **Identifier:** `ai.librefang.desktop`
+- **Version:** `26.4.32222`
 
-The app declares **no windows** in the config (`"windows": []`). Windows are created programmatically at runtime — this is typical for system-tray–driven apps that may show/hide a main window based on user interaction.
+### Content Security Policy
 
-## Content Security Policy
+The CSP is permissive toward `127.0.0.1` on any port, allowing the WebView to communicate with the local axum server over HTTP and WebSocket. External connections are restricted to Google Fonts. Key directives:
 
-The CSP is configured to allow:
+- `default-src 'self' http://127.0.0.1:* ws://127.0.0.1:*`
+- `connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*`
+- `object-src 'none'` — blocks plugin content entirely
+- `script-src` allows `'unsafe-inline' 'unsafe-eval'` for framework compatibility
 
-- Connections to `http://127.0.0.1:*` and `ws://127.0.0.1:*` — communication with the embedded local API server
-- Google Fonts loading over HTTPS
-- Inline styles and eval'd scripts (required for the webview UI framework)
-- Image and media sources from `self`, `data:`, `blob:`, and localhost
-- `object-src 'none'` — blocks plugin content
+### Auto-Updater
 
-All other sources are restricted to `'self'`.
+Updates are fetched from GitHub Releases using a public key for signature verification:
 
-## Auto-Updater
+```
+endpoint: https://github.com/librefang/librefang/releases/latest/download/latest.json
+```
 
-The updater is configured with:
+On Windows, the install mode is `passive` (shows a progress bar but requires no user interaction).
 
-- **Public key**: Minisign ed25519 key for signature verification
-- **Endpoint**: `https://github.com/librefang/librefang/releases/latest/download/latest.json`
-- **Windows install mode**: `passive` (shows progress, requires no user interaction)
+### Bundle Targets
 
-Updates are checked and applied through the `tauri-plugin-updater` integration. The release signing key is embedded in `tauri.conf.json` under `plugins.updater.pubkey`.
+The bundler is configured to produce **all target formats**:
+
+| Platform | Format | Notes |
+|----------|--------|-------|
+| Linux | `.deb`, `.AppImage` | No media framework bundled |
+| macOS | `.dmg` / `.app` | Minimum macOS 12.0 |
+| Windows | `.msi` / `.exe` | SHA-256 digest; WebView2 bootstrapped on install |
 
 ## Building
 
+The build script (`build.rs`) delegates entirely to `tauri_build::build()`, which generates Tauri's runtime artifacts from `tauri.conf.json`.
+
 ```bash
-# Development (uses dev-server for frontend assets)
+# Development
 cargo build -p librefang-desktop
 
-# Production bundle (enables custom-protocol)
-cargo build -p librefang-desktop --features custom-protocol --release
+# Production (release with custom protocol)
+cargo build -p librefang-desktop --release --features custom-protocol
+
+# Tauri CLI (recommended for full dev experience)
+cargo tauri dev
+cargo tauri build
 ```
 
-To produce platform installers, run through Tauri's bundler which invokes `cargo tauri build`. This automatically enables the `custom-protocol` feature and generates platform-specific installers in `target/release/bundle/`.
+## System Tray Behavior
 
-## Platform Notes
-
-- **Linux**: AppImage and `.deb` are generated. No media framework bundling (`bundleMediaFramework: false`).
-- **macOS**: Requires macOS 12.0+. No special entitlements or exception domains are configured by default.
-- **Windows**: Uses SHA-256 digest for signing. WebView2 is installed via download bootstrapper if not present. No code-signing certificate thumbprint is set in the default config — supply one via environment or config override for signed builds.
+The `tray-icon` feature flag is enabled, meaning the application registers a system tray icon on launch. Since no windows are declared in the config, the app starts as a background process and surfaces its UI on demand—either through the tray menu or a global shortcut. Combined with `tauri-plugin-autostart`, the agent host can run silently from login.

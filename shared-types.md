@@ -2,336 +2,301 @@
 
 # Shared Types (`librefang-types`)
 
-The `librefang-types` crate defines the canonical data structures shared across the LibreFang agent OS. Every other crate — the kernel, runtime, channels, API server, memory store, and skills engine — depends on these types. They are serialization-stable (TOML + JSON via Serde) and must never pull in async runtimes or heavy dependencies.
+Core data structures shared across the LibreFang kernel, runtime, memory substrate, wire protocol, and dashboard. This crate contains **no business logic** — only type definitions, serialization helpers, and validation methods.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    subgraph "Identity Layer"
-        AgentId["AgentId (UUID v4/v5)"]
-        SessionId["SessionId (UUID v4/v5)"]
-        UserId["UserId (UUID v4)"]
+    subgraph "librefang-types"
+        direction TB
+        AGENT[agent<br/>identity, manifest, state]
+        APPROVAL[approval<br/>gates, risk, TOTP]
+        CAP[capability<br/>glob matching]
+        CONFIG[config<br/>global settings]
+        MSG[message<br/>LLM wire types]
+        TOOL[tool / tool_policy<br/>definitions, profiles]
+        MEM[memory<br/>substrate keys]
+        SCHED[scheduler<br/>jobs, cron]
+        EVENT[event<br/>agent lifecycle]
+        SUB[subagent<br/>orchestration]
+        SIGN[manifest_signing<br/>integrity]
+        TAINT[taint<br/>PII detection]
+        SERDE[serde_compat<br/>lenient parsers]
     end
 
-    subgraph "Manifest Layer"
-        AM["AgentManifest"]
-        MC["ModelConfig"]
-        SC["ScheduleMode"]
-        RQ["ResourceQuota"]
-        TP["ToolProfile"]
-        Cap["ManifestCapabilities"]
-    end
-
-    subgraph "Runtime State"
-        AE["AgentEntry"]
-        AS["AgentState"]
-        AM2["AgentMode"]
-    end
-
-    subgraph "Approval System"
-        AP["ApprovalPolicy"]
-        AR["ApprovalRequest"]
-        AResp["ApprovalResponse"]
-        CTR["ChannelToolRule"]
-    end
-
-    AgentId --> AE
-    SessionId --> AE
-    AM --> AE
-    MC --> AM
-    SC --> AM
-    RQ --> AM
-    TP --> AM
-    Cap --> AM
-    AP --> AR
-    AR --> AResp
-    CTR --> AP
+    KERNEL[librefang-kernel] --> AGENT
+    KERNEL --> APPROVAL
+    KERNEL --> CAP
+    RUNTIME[librefang-runtime-wasm] --> EVENT
+    RUNTIME --> CAP
+    MEMORY[librefang-memory] --> MEM
+    MEMORY --> MSG
+    API[librefang-api] --> AGENT
+    API --> APPROVAL
+    CHANNELS[librefang-channels] --> MSG
+    MIGRATE[librefang-migrate] --> TOOL_COMPAT[tool_compat]
+    SKILLS[librefang-skills] --> TOOL_COMPAT
+    DASHBOARD[dashboard TS] --> AGENT
+    DASHBOARD --> MEM
 ```
+
+Every other crate in the workspace depends on `librefang-types`. The types are designed for serde roundtripping through both JSON (API wire format, session storage) and TOML (agent manifests, daemon config).
 
 ---
 
-## Identifiers
-
-All identifiers are newtype wrappers around `uuid::Uuid`, providing type safety at compile time and consistent serialization.
+## Core Identifiers
 
 ### `AgentId`
 
-The primary identifier for an agent instance. Supports two generation modes:
+A UUID wrapper with two construction modes:
 
-- **Random** (`AgentId::new()`) — UUID v4 for unique runtime instances.
-- **Deterministic** — UUID v5 (SHA-1) derived from a fixed namespace, guaranteeing the same input always produces the same ID across daemon restarts. This preserves session history associations and prevents orphaned cron jobs.
-
-Three deterministic constructors exist:
-
-| Method | Input Format | Use Case |
+| Method | UUID Version | Use Case |
 |---|---|---|
-| `from_name(name)` | `"agent:{name}"` | Named agents with stable identity |
-| `from_hand_id(hand_id)` | Bare `hand_id` (backward compat) | Multi-agent hand instances |
-| `from_hand_agent(hand_id, role, instance_id)` | `"{hand_id}:{role}"` or `"{hand_id}:{role}:{instance_id}"` | Specific role within a hand |
+| `AgentId::new()` | v4 (random) | Fresh agents created at runtime |
+| `AgentId::from_name(name)` | v5 (SHA-1) | Named agents that must survive restarts |
+| `AgentId::from_hand_id(hand_id)` | v5 | Multi-agent hand instances |
+| `AgentId::from_hand_agent(hand, role, instance)` | v5 | Specific role within a hand |
 
-**Backward compatibility note:** `from_hand_agent` with `instance_id: None` uses the legacy format `"{hand_id}:{role}"` (no instance component). Only when `instance_id` is `Some(uuid)` does the three-part format activate. This ensures existing single-instance hands retain their original agent IDs.
+All v5 derivation uses a single fixed namespace UUID with typed prefixes (`"agent:"`, bare `hand_id`, or `"{hand}:{role}:{instance}"`) to prevent collisions between different ID categories.
+
+**Backward compatibility note**: `from_hand_agent` with `instance_id: None` produces the legacy format `"{hand_id}:{role}"`. With `Some(id)`, it produces `"{hand_id}:{role}:{instance_id}"`. Existing single-instance hands must pass `None` to preserve their original agent IDs and avoid orphaned cron jobs or memory keys.
 
 ### `SessionId`
 
-Identifies a conversation session. Like `AgentId`, supports both random and deterministic generation:
-
-- `SessionId::new()` — random UUID v4.
-- `SessionId::for_channel(agent_id, channel)` — deterministic UUID v5 derived from the agent ID and lowercase channel name. The same `(agent, channel)` pair always maps to the same session, even across restarts.
-
-The channel session namespace UUID is a fixed, randomly-generated constant (not an RFC 4122 well-known namespace) to avoid collisions with other UUID v5 consumers.
+Supports deterministic derivation for channel-based sessions via `SessionId::for_channel(agent_id, channel)`. This uses UUID v5 under a dedicated namespace so that the same `(agent, channel)` pair always maps to the same session across daemon restarts. Channel names are lowercased before hashing.
 
 ### `UserId`
 
-Simple random UUID v4 wrapper with no deterministic derivation. Used for tracking which human initiated a request.
+Simple random UUID wrapper. No deterministic derivation — users are always created fresh.
 
 ---
 
 ## Agent Manifest (`AgentManifest`)
 
-The manifest is the complete declarative definition of an agent — everything the kernel needs to spawn and run it. It is typically loaded from a TOML file on disk but can also be constructed programmatically.
+The manifest is the complete specification for an agent. It deserializes from TOML files on disk and is the primary configuration surface for operators.
 
 ### Key Fields
 
-**Identity & Discovery:**
-- `name`, `version`, `description`, `author`, `tags` — human-readable metadata for catalog and dashboard display.
-- `enabled` — when `false`, the agent is not spawned on startup. Default: `true`.
-- `is_hand` — set by the kernel when the agent is spawned by a Hand. Persisted so it survives restarts without tag-based detection.
-
-**Execution Model:**
-- `module` — path to the agent module (`"builtin:chat"`, a `.wasm` file, or a Python file).
-- `schedule` — `ScheduleMode` controlling when the agent wakes up:
-  - `Reactive` (default) — on incoming messages/events.
-  - `Periodic { cron }` — on a cron schedule.
-  - `Proactive { conditions }` — when monitored conditions are met.
-  - `Continuous { check_interval_secs }` — persistent loop (default interval: 300s).
-- `session_mode` — `SessionMode` for automated (non-channel) invocations:
-  - `Persistent` (default) — reuse the agent's session across invocations.
-  - `New` — fresh session each time.
-- `priority` — `Priority` level (`Low`, `Normal`, `High`, `Critical`) for scheduler ordering.
-
-**Model Configuration:**
-- `model` — primary `ModelConfig` (provider, model name, temperature, system prompt, etc.).
-- `fallback_models` — ordered list of `FallbackModel` entries tried if the primary model fails.
-- `routing` — optional `ModelRoutingConfig` for complexity-based auto-selection between cheap/mid/expensive models.
-- `pinned_model` — model override used in Stable mode.
-- `response_format` — optional structured output format for the LLM.
-- `thinking` — per-agent extended thinking configuration (overrides global `[thinking]` config).
-- `web_search_augmentation` — `WebSearchAugmentationMode` for models without tool support:
-  - `Off` — disabled.
-  - `Auto` (default) — augment only when model reports `supports_tools == false`.
-  - `Always` — search before every LLM call.
-
-**ModelConfig specifics:**
-- `model` field accepts `#[serde(alias = "name")]` so TOML configs can use either `model = "..."` or `name = "..."`.
-- `extra_params` is a `HashMap<String, serde_json::Value>` with `#[serde(flatten)]`, merging provider-specific parameters (e.g., Qwen's `enable_memory`) directly into the API request body. Conflicting keys override standard fields.
-- `system_prompt` supports TOML multi-line basic strings (`"""`) for complex prompts with newlines, quotes, and code blocks.
-
-**Tool Configuration:**
-- `profile` — optional `ToolProfile` that expands to a tool list and derived capabilities:
-  - `Minimal` — `file_read`, `file_list`
-  - `Coding` — adds `file_write`, `shell_exec`, `web_fetch`
-  - `Research` — `web_fetch`, `web_search`, `file_read`, `file_write`
-  - `Messaging` — `agent_send`, `agent_list`, `channel_send`, memory tools
-  - `Automation` — full set of 12 tools
-  - `Full` / `Custom` — `"*"` (all tools)
-- `tool_allowlist` — only these tools are available (empty = all).
-- `tool_blocklist` — these tools are excluded (applied after allowlist).
-- `tools_disabled` — hard override that disables all tools regardless of other settings.
-- `tools` — `HashMap<String, ToolConfig>` for per-tool configuration parameters.
-
-**Capability Grants (`ManifestCapabilities`):**
-- `network` — allowed hosts (e.g., `["api.anthropic.com:443"]`).
-- `shell` — allowed shell commands.
-- `memory_read` / `memory_write` — memory scopes.
-- `agent_spawn` — whether the agent can create sub-agents.
-- `agent_message` — agent messaging patterns.
-- `ofp_discover` / `ofp_connect` — Open Federation Protocol capabilities.
-
-**Resource Limits (`ResourceQuota`):**
-| Field | Default | Description |
+| Field | Type | Purpose |
 |---|---|---|
-| `max_memory_bytes` | 256 MB | WASM memory limit |
-| `max_cpu_time_ms` | 30,000 (30s) | CPU time per invocation |
-| `max_tool_calls_per_minute` | 60 | Tool call rate limit |
-| `max_llm_tokens_per_hour` | `None` (inherit global) | Token budget; `Some(0)` = unlimited |
-| `max_network_bytes_per_hour` | 100 MB | Network I/O limit |
-| `max_cost_per_hour_usd` | 0.0 (unlimited) | Hourly cost cap |
-| `max_cost_per_day_usd` | 0.0 (unlimited) | Daily cost cap |
-| `max_cost_per_month_usd` | 0.0 (unlimited) | Monthly cost cap |
+| `name` | `String` | Human-readable identifier |
+| `model` | `ModelConfig` | Primary LLM configuration |
+| `fallback_models` | `Vec<FallbackModel>` | Ordered chain tried on primary failure |
+| `schedule` | `ScheduleMode` | Reactive, Periodic, Proactive, or Continuous |
+| `session_mode` | `SessionMode` | `Persistent` (reuse session) or `New` (fresh per invocation) |
+| `resources` | `ResourceQuota` | Memory, CPU, token, and cost limits |
+| `profile` | `Option<ToolProfile>` | Named tool preset (Minimal, Coding, Research, etc.) |
+| `capabilities` | `ManifestCapabilities` | Explicit capability grants |
+| `routing` | `Option<ModelRoutingConfig>` | Auto-select model by prompt complexity |
+| `autonomous` | `Option<AutonomousConfig>` | Guardrails for 24/7 agents |
+| `thinking` | `Option<ThinkingConfig>` | Per-agent extended thinking override |
+| `exec_policy` | `Option<ExecPolicy>` | Shell execution restrictions |
+| `web_search_augmentation` | `WebSearchAugmentationMode` | Auto-inject web search results |
+| `auto_dream_enabled` | `bool` | Opt-in to background memory consolidation |
 
-Use `effective_token_limit()` to resolve `max_llm_tokens_per_hour`: both `None` and `Some(0)` yield `0` (unlimited), `Some(n)` yields `n`. Enforcement code should skip when the result is `0`.
+### Model Configuration
 
-**Autonomous Configuration (`AutonomousConfig`):**
-For 24/7 agents that run without human supervision:
-- `quiet_hours` — cron expression for downtime periods.
-- `max_iterations` — per-invocation loop cap (default: 50).
-- `max_restarts` — crash recovery limit before permanent stop (default: 10).
-- `heartbeat_interval_secs` — health check interval (default: 30s).
-- `heartbeat_timeout_secs` — override for unresponsive detection (default: `heartbeat_interval_secs * 2`).
-- `heartbeat_keep_recent` — how many heartbeat `NO_REPLY` messages to keep during context pruning.
-- `heartbeat_channel` — where to send heartbeat status (e.g., `"telegram"`).
+`ModelConfig` supports an `extra_params` field flattened into the API request body via `#[serde(flatten)]`. This allows provider-specific parameters (e.g., Qwen's `enable_memory`) without code changes. The `model` field accepts a TOML alias `name` for backward compatibility.
 
-**Behavioral Controls:**
-- `show_progress` — surface `🔧 tool_name` progress markers in channel replies (default: `true`). Set `false` for agents whose output feeds downstream parsers.
-- `auto_evolve` — run background skill evolution review after each turn (default: `true`). Set `false` for latency-sensitive A2A workers.
-- `auto_dream_enabled` — opt-in to background memory consolidation (costs tokens).
-- `auto_dream_min_hours` / `auto_dream_min_sessions` — per-agent overrides for consolidation time/session gates.
-- `inherit_parent_context` — whether subagents receive parent workflow context (default: `true`).
+### Fallback Chain
+
+When the primary model fails, the kernel tries each `FallbackModel` in order. Each entry specifies its own `provider`, `model`, `api_key_env`, and `base_url`.
+
+### Model Routing
+
+`ModelRoutingConfig` splits prompts by estimated token count:
+
+```
+tokens < simple_threshold  →  simple_model (e.g., claude-haiku)
+simple_threshold..complex_threshold  →  medium_model
+tokens > complex_threshold  →  complex_model
+```
+
+### Resource Quotas
+
+`ResourceQuota.effective_token_limit()` normalizes `max_llm_tokens_per_hour`:
+- `None` → `0` (unlimited, inherits global default)
+- `Some(0)` → `0` (explicitly unlimited)
+- `Some(n)` → `n`
+
+Enforcement code should skip the check when the returned value is `0`.
 
 ---
 
-## Runtime State
+## Agent Lifecycle
+
+### `AgentState`
+
+```
+Created → Running ⇄ Suspended
+              ↓         ↓
+           Terminated  Crashed
+```
+
+### `AgentMode`
+
+Permission-based operational filter:
+
+| Mode | Behavior |
+|---|---|
+| `Observe` | No tools available |
+| `Assist` | Read-only tools only: `file_read`, `file_list`, `memory_list`, `memory_recall`, `web_fetch`, `web_search`, `agent_list` |
+| `Full` | All granted tools (default) |
+
+`AgentMode::filter_tools()` applies this at runtime against the agent's tool list.
 
 ### `AgentEntry`
 
-The kernel's registry record for a live agent. Wraps the manifest with runtime state:
+The runtime registry record. Wraps `AgentManifest` with lifecycle state, session tracking, and recovery flags:
 
-- `state` — `AgentState` lifecycle: `Created` → `Running` → (`Suspended` | `Crashed` | `Terminated`).
-- `mode` — `AgentMode` permission level:
-  - `Observe` — no tool calls allowed.
-  - `Assist` — read-only tools only (`file_read`, `file_list`, `memory_list`, `memory_recall`, `web_fetch`, `web_search`, `agent_list`).
-  - `Full` (default) — all granted tools.
-- `session_id` — active session.
-- `parent` / `children` — agent hierarchy for spawned sub-agents.
-- `identity` — `AgentIdentity` (emoji, avatar, color, archetype, vibe, greeting_style).
-- `onboarding_completed` / `onboarding_completed_at` — bootstrap state tracking.
-- `force_session_wipe` — when `true`, the next LLM execution clears message history but preserves the `session_id`. Takes priority over `resume_pending`.
-- `resume_pending` — agent was interrupted by restart/shutdown; recovery expected on same transcript.
-- `reset_reason` — why the most recent automatic session reset occurred.
+- **`force_session_wipe`**: Next LLM call clears message history (keeps `session_id`). Takes priority over `resume_pending`.
+- **`resume_pending`**: Agent was interrupted by restart; will resume the existing session transcript on next turn.
+- **`reset_reason`**: Tracks why the last automatic session reset occurred.
 
-### `AgentMode::filter_tools`
+---
 
-Applies permission filtering to a `Vec<ToolDefinition>`:
-- `Observe` returns an empty vector.
-- `Assist` filters to the hardcoded read-only set.
-- `Full` passes through unchanged.
+## Tool Profiles
+
+`ToolProfile` is a named preset that expands to both a tool list and derived `ManifestCapabilities`:
+
+```rust
+let caps = ToolProfile::Coding.implied_capabilities();
+// caps.network = ["*"]      (from web_fetch)
+// caps.shell = ["*"]        (from shell_exec)
+// caps.agent_spawn = false
+```
+
+| Profile | Tools |
+|---|---|
+| `Minimal` | `file_read`, `file_list` |
+| `Coding` | `file_read`, `file_write`, `file_list`, `shell_exec`, `web_fetch` |
+| `Research` | `web_fetch`, `web_search`, `file_read`, `file_write` |
+| `Messaging` | `agent_send`, `agent_list`, `channel_send`, `memory_store`, `memory_list`, `memory_recall` |
+| `Automation` | All of the above combined |
+| `Full` / `Custom` | `["*"]` (all tools) |
+
+`implied_capabilities()` inspects the tool list to derive network, shell, agent, and memory permissions. Profiles with `["*"]` grant all capability categories.
 
 ---
 
 ## Approval System
 
-The approval system gates dangerous agent operations behind human review. When an agent attempts a restricted tool, the kernel creates an `ApprovalRequest`, pauses the agent, and waits for an `ApprovalResponse`.
+The approval module implements human-in-the-loop gating for dangerous operations.
 
-### `ApprovalPolicy`
+### Request Flow
 
-Configures which tools require approval and how the flow behaves:
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant Kernel
+    participant Operator
 
-| Field | Default | Purpose |
-|---|---|---|
-| `require_approval` | `["shell_exec", "file_write", "file_delete", "apply_patch", "skill_evolve_*"]` | Tools requiring human approval. Supports glob patterns. |
-| `timeout_secs` | 60 | Auto-deny window (range: 10–300). |
-| `timeout_fallback` | `Deny` | Behavior on timeout: `Deny`, `Skip`, or `Escalate`. |
-| `auto_approve` | `false` | Shorthand: if `true`, clears the require list entirely. |
-| `auto_approve_autonomous` | `false` | Auto-approve for agents in autonomous mode. |
-| `trusted_senders` | `[]` | User IDs that bypass approval entirely. |
-| `channel_rules` | `[]` | Per-channel tool authorization rules. |
-| `routing` | `[]` | Route approval requests to specific notification targets. |
-| `second_factor` | `None` | TOTP verification: `None`, `Totp`, `Login`, or `Both`. |
-| `totp_tools` | `[]` | Tools requiring TOTP (empty = all in `require_approval`). |
-
-**Serialization quirk:** `require_approval` accepts either a list of strings or a boolean via custom deserialization. `false` → empty list, `true` → default mutation set. This supports the TOML shorthand `require_approval = false`.
+    Agent->>Kernel: tool call (shell_exec)
+    Kernel->>Kernel: check ApprovalPolicy
+    alt tool requires approval
+        Kernel->>Operator: ApprovalRequest (notification)
+        Operator->>Kernel: ApprovalResponse
+        alt Approved
+            Kernel->>Agent: execute tool
+        else Denied / TimedOut
+            Kernel->>Agent: tool blocked
+        else ModifyAndRetry
+            Kernel->>Agent: feedback, retry
+        end
+    else auto-approved
+        Kernel->>Agent: execute tool
+    end
+```
 
 ### `ApprovalDecision`
 
-Custom serde implementation handles backward compatibility:
-- Simple variants (`Approved`, `Denied`, `TimedOut`, `Skipped`) serialize as plain strings: `"approved"`, `"denied"`, etc.
-- `ModifyAndRetry { feedback }` serializes as an object: `{"type": "modify_and_retry", "feedback": "..."}`.
+Custom serde implementation. Simple variants serialize as strings (`"approved"`, `"denied"`, `"timed_out"`, `"skipped"`). `ModifyAndRetry` serializes as `{"type": "modify_and_retry", "feedback": "..."}`. The deserializer accepts both formats for backward compatibility.
 
-Both the string form and object form are accepted on deserialization.
+### `ApprovalPolicy`
 
-### `ChannelToolRule`
+Default gated tools: `shell_exec`, `file_write`, `file_delete`, `apply_patch`, `skill_evolve_*`.
 
-Per-channel allow/deny lists with wildcard support:
+Configuration highlights:
+
+| Field | Default | Purpose |
+|---|---|---|
+| `require_approval` | 5-tool list | Accepts list or boolean shorthand |
+| `timeout_secs` | 60 | Range: 10–300 |
+| `timeout_fallback` | `Deny` | `Deny`, `Skip`, or `Escalate` |
+| `trusted_senders` | `[]` | Auto-approve bypass by user ID |
+| `channel_rules` | `[]` | Per-channel allow/deny tool lists |
+| `second_factor` | `None` | `Totp`, `Login`, or `Both` |
+| `totp_grace_period_secs` | 300 | Skip re-verification within window |
+
+The `require_approval` field uses a custom deserializer that accepts either a list of tool names or a boolean (`false` → empty list, `true` → default set).
+
+### Channel Rules
+
+`ChannelToolRule` evaluates allow/deny lists with wildcard glob patterns. **Deny wins** when both lists match. The `check_tool()` method returns `Option<bool>` — `None` means the rule has no opinion.
+
+### Tool Name Validation
+
+Tool names accept alphanumeric characters, underscores, and at most one `*` wildcard (for glob patterns like `"file_*"` or `"skill_evolve_*"`).
+
+---
+
+## Deterministic Identity Pattern
+
+A recurring pattern in this crate: using UUID v5 to derive stable identifiers from human-readable names so that associations survive process restarts.
 
 ```
-ChannelToolRule {
-    channel: "telegram",
-    allowed_tools: ["file_read", "file_*"],
-    denied_tools: ["shell_exec"],
-}
+AgentId::from_name("researcher")
+  → UUID v5(namespace, "agent:researcher")
+  → always the same UUID
+
+SessionId::for_channel(agent_id, "telegram")
+  → UUID v5(channel_namespace, "{agent_id}:telegram")
+  → always the same session for the same agent+channel pair
 ```
 
-Evaluation order: **deny wins**. If a tool matches any denied pattern, it is always blocked regardless of the allow list. The `check_tool()` method uses `glob_matches` for pattern matching (single `*` wildcard supported).
-
-### `SecondFactor`
-
-Controls TOTP enforcement scope:
-- `None` — no second factor (default).
-- `Totp` — TOTP required for tool approvals only.
-- `Login` — TOTP required for dashboard login only.
-- `Both` — TOTP required for approvals and login.
-
-Helper methods `requires_login_totp()` and `requires_approval_totp()` simplify conditional checks. A configurable grace period (`totp_grace_period_secs`, default 300s, max 3600s) allows subsequent approvals to skip TOTP re-verification within the window.
-
-### `ApprovalRequest` Validation
-
-Requests are validated before processing with strict bounds:
-
-| Field | Constraint |
-|---|---|
-| `tool_name` | 1–64 chars, alphanumeric + underscore only |
-| `description` | ≤ 1024 chars |
-| `action_summary` | ≤ 512 chars |
-| `timeout_secs` | 10–300 range |
-
-Tool names in policy lists also accept `*` wildcards (at most one per name) for glob matching.
+This is critical for:
+- Cron schedulers that need to address the same agent across restarts
+- Channel adapters that resume existing sessions
+- Memory substrate keys that must be stable
 
 ---
 
-## A/B Experiment Types
+## Serde Compatibility (`serde_compat`)
 
-The manifest module includes types for prompt experimentation:
+The `serde_compat` module provides lenient deserializers used throughout the manifest:
 
-- `PromptVersion` — a stored system prompt version with content hash, tool list, and activation state.
-- `PromptExperiment` — an A/B test with traffic split percentages, success criteria, and variant list.
-- `ExperimentVariant` — a named variant pointing to a specific prompt version.
-- `SuccessCriteria` — pass/fail rules (`require_user_helpful`, `require_no_tool_errors`, `require_non_empty`, optional `custom_min_score`).
-- `ExperimentStatus` — lifecycle: `Draft` → `Running` → (`Paused` | `Completed`).
-- `ExperimentVariantMetrics` — aggregated results per variant (success rate, latency, cost).
+- **`vec_lenient`**: Accepts both arrays and missing/null fields (defaults to empty vec)
+- **`map_lenient`**: Same for HashMap fields
+- **`exec_policy_lenient`**: Accepts string shorthands (`"allow"`, `"deny"`, `"full"`, `"allowlist"`) or full structured config
 
----
-
-## Session Labels (`SessionLabel`)
-
-Validated string wrapper for human-readable session names (e.g., "support inbox", "research"). Rules:
-- 1–128 characters after trimming.
-- Only alphanumeric, spaces, hyphens, and underscores.
-- Constructed via `SessionLabel::new(label)` which returns `Result<Self, LibreFangError>`.
+These allow TOML manifests to omit empty collections without explicit `[]`, reducing boilerplate for operators.
 
 ---
 
-## Hook Events (`HookEvent`)
+## Utility Functions
 
-Interceptable lifecycle events for agent extensions:
+### `truncate_str(s, max_bytes)`
 
-| Event | When it fires |
-|---|---|
-| `BeforeToolCall` | Before a tool executes; handler can block the call |
-| `AfterToolCall` | After a tool completes |
-| `BeforePromptBuild` | Before the system prompt is constructed |
-| `AgentLoopEnd` | After the agent loop finishes a turn |
-
----
-
-## Constants
-
-- `STABLE_PREFIX_MODE_METADATA_KEY` — metadata key `"stable_prefix_mode"` used in the manifest's metadata map.
-- `VERSION` (from crate root) — default manifest version string.
+UTF-8-safe string truncation. Walks backward from `max_bytes` to find a character boundary. Originally added to fix production panics (issue #104) caused by splitting multi-byte characters like em dashes (`—`) when constructing LLM prompts.
 
 ---
 
 ## Integration Points
 
-The types in this crate are consumed by:
+### Downstream Consumers
 
-- **Kernel** — spawns agents from `AgentManifest`, tracks them as `AgentEntry` records, enforces `ResourceQuota` and `AgentMode` filtering.
-- **API server** — exposes CRUD endpoints for manifests, serves `AgentEntry` data to the dashboard, processes `ApprovalRequest`/`ApprovalResponse` flows.
-- **Runtime (WASM)** — uses `ManifestCapabilities` for capability checks via `check_capability`, serializes `ToolDefinition` for the WASM boundary.
-- **Channel adapters** — receive `AgentIdentity` for visual branding, use `SessionId::for_channel` for session isolation per channel.
-- **Memory store** — uses `SessionId` and `AgentId` as keys for session and memory operations.
-- **Skills engine** — reads `skills` and `skills_disabled` from manifests, calls `ToolProfile::implied_capabilities()` for permission derivation.
-- **MCP runtime** — uses `ApprovalPolicy` for gating tool calls, `ChannelToolRule` for per-channel restrictions.
-- **Dashboard** — renders `AgentIdentity` (emoji, color, avatar), displays `AgentState` lifecycle badges, manages `PromptExperiment` A/B tests.
-- **Taint checker** — uses capability types and tool definitions for security analysis at sinks.
-- **Migration tools** — deserialize manifests from OpenClaw/OpenFang formats into the standard `AgentManifest` structure.
+| Consumer | Types Used |
+|---|---|
+| `librefang-kernel` | `AgentManifest`, `AgentEntry`, `ApprovalPolicy`, `AgentState` |
+| `librefang-runtime-wasm` | `Event`, capability checking via `capability_matches` |
+| `librefang-memory` | `SessionId`, `Message` types, memory key types |
+| `librefang-api` | Full agent/approval CRUD, webhook payloads |
+| `librefang-channels` | `Message` content types, i18n `t()` / `t_args()` |
+| `librefang-migrate` | `tool_compat::map_tool_name`, `is_known_librefang_tool` |
+| `librefang-skills` | Tool compatibility mapping, schema normalization |
+| Dashboard (TypeScript) | Serialized `AgentEntry`, `SessionEntry`, memory structures |
+
+### Cross-Language Contract
+
+The TypeScript dashboard consumes JSON produced by these types. Fields like `AgentIdentity` (emoji, color, archetype), `ToolProfile`, and `AgentMode` are rendered in the UI. Any serde format change to these types is a breaking API change for the dashboard.

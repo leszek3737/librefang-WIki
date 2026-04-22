@@ -2,98 +2,111 @@
 
 # librefang-extensions
 
-Extension and integration system for LibreFang. Provides three integrated subsystems: one-click MCP (Model Context Protocol) server setup, an encrypted credential vault, and OAuth2 PKCE authentication flows.
+Extension and integration layer for LibreFang. Provides three tightly-coupled subsystems that allow LibreFang to talk to external services securely:
+
+- **MCP server provisioning** — one-click setup for Model Context Protocol servers
+- **Credential vault** — encrypted-at-rest storage for API keys, tokens, and secrets
+- **OAuth2 PKCE flow** — browser-based authorization with automatic token refresh
 
 ## Architecture
 
 ```mermaid
 graph TD
-    subgraph "librefang-extensions"
-        MCPS[MCP Server Setup]
-        CV[Credential Vault]
-        OA[OAuth2 PKCE]
-    end
-
-    MCPS -->|stores config| CV
-    OA -->|stores tokens| CV
-    CV -->|AES-GCM + Argon2| ENC[Encrypted Storage]
-    OA -->|callback listener| AXUM[Local HTTP Server]
-    OA -->|token exchange| REQ[HTTP Client]
-
-    LT[librefang-types] -->|shared types| MCPS
-    LT -->|shared types| CV
-    LT -->|shared types| OA
+    A[librefang-extensions] --> B[MCP Server Setup]
+    A --> C[Credential Vault]
+    A --> D[OAuth2 PKCE]
+    C --> E[Argon2 KDF]
+    C --> F[AES-256-GCM Encryption]
+    D --> G[Axum Callback Server]
+    D --> H[reqwest HTTP Client]
+    B --> C
+    D --> C
 ```
 
-## Key Components
+MCP server setup and OAuth2 PKCE both depend on the credential vault to persist the secrets they obtain. The vault encrypts all values with AES-256-GCM using a key derived through Argon2, and clears intermediate buffers with `zeroize`.
 
-### Credential Vault
-
-Encrypted at-rest storage for sensitive credentials — API keys, OAuth tokens, MCP server secrets, and any other integration secrets.
-
-**Encryption stack:**
-- **Argon2** — derives an encryption key from a user-provided master password. Key derivation is deliberately slow to resist brute-force attacks.
-- **AES-GCM** — authenticated encryption for vault contents. Provides both confidentiality and integrity checking.
-- **Zeroize** — sensitive in-memory structures (keys, plaintext credentials) are zeroed on drop to minimize exposure window.
-
-**Runtime storage:**
-- **DashMap** — concurrent hashmap used as the in-memory credential cache. Allows multiple async tasks to read/write credentials without locking the entire map.
-- **Platform directories** — uses the `dirs` crate to locate the appropriate platform-specific directory (`~/.config/librefang/` on Linux, equivalents on macOS/Windows) for the encrypted vault file.
-- **TOML/JSON** — serialization format for persisted vault data.
-
-### OAuth2 PKCE
-
-Implements the OAuth2 Authorization Code flow with PKCE (Proof Key for Code Exchange), the recommended flow for native/desktop applications.
-
-**Flow components:**
-- **PKCE generation** — uses `rand` to generate a cryptographically random code verifier, `sha2` to produce the code challenge (S256 method), and `base64` for URL-safe encoding.
-- **Callback listener** — spins up a temporary local HTTP server using `axum` on a random port to receive the authorization redirect. The server handles exactly one request and then shuts down.
-- **Token exchange** — uses `reqwest` (backed by `rustls`) to exchange the authorization code for access/refresh tokens.
-- **URL construction** — the `url` crate handles all URL building and validation for authorization endpoints.
-
-**Token lifecycle:**
-- Access tokens and refresh tokens are stored in the credential vault after successful exchange.
-- Tokens are retrieved transparently by other subsystems when making authenticated requests.
-
-### MCP Server Setup
-
-One-click setup for MCP (Model Context Protocol) servers. Handles discovering server configuration, provisioning credentials, and preparing a server for use.
-
-- Relies on `serde_json` for MCP server configuration documents.
-- Integrates with the credential vault to store any server-specific secrets.
-- Uses types from `librefang-types` for MCP server descriptors and configuration shapes.
-
-## Dependencies and Rationale
+## Key Dependencies and Why They Exist
 
 | Dependency | Purpose |
 |---|---|
-| `librefang-types` | Shared type definitions used across all LibreFang crates |
-| `aes-gcm` | Authenticated encryption for vault contents |
-| `argon2` | Key derivation from master password |
-| `zeroize` | Secure memory clearing for keys and plaintext |
-| `dashmap` | Lock-free concurrent credential cache |
-| `axum` | Local HTTP server for OAuth2 redirect callback |
-| `reqwest` + `rustls` | TLS-backed HTTP client for OAuth2 token exchange |
-| `sha2` + `rand` + `base64` | PKCE code verifier/challenge generation |
-| `toml` + `serde_json` | Configuration and vault serialization |
-| `url` | URL parsing and construction for OAuth2 endpoints |
-| `dirs` | Platform-appropriate config directory resolution |
+| `aes-gcm` | Authenticated encryption for the credential vault |
+| `argon2` | Key derivation from a master password or system key |
+| `zeroize` | Securely overwrite secret material in memory after use |
+| `axum` | Lightweight HTTP server to receive OAuth2 redirect callbacks |
+| `reqwest` + `rustls` | TLS-capable HTTP client for token exchange; uses `rustls` with both `webpki-roots` and `rustls-native-certs` for maximum certificate compatibility |
+| `dashmap` | Lock-free concurrent map for in-memory credential and extension state |
+| `sha2` + `rand` | PKCE code verifier/challenge generation and general cryptographic randomness |
+| `base64` | Encoding PKCE challenges and vault payloads |
+| `toml` | Persisting extension configuration to disk |
 
-## Relationship to Other Crates
+## Credential Vault
 
-This crate sits between the core type system and higher-level application layers:
+The vault is the security foundation. Every secret that flows through this module — MCP server tokens, OAuth2 access/refresh pairs — lands here.
 
-- **Consumes** `librefang-types` for all shared data structures.
-- **Consumed by** application and runtime layers (including `librefang-runtime`, which appears as a dev-dependency for integration testing).
-- Other modules that need credentials, OAuth flows, or MCP configuration depend on this crate rather than reimplementing those concerns.
+**Encryption scheme:**
+
+1. A master secret (password or OS keyring-backed) is fed through Argon2 to produce a 256-bit key.
+2. Each stored value gets a random 96-bit nonce.
+3. Values are encrypted with AES-256-GCM, which provides both confidentiality and integrity.
+4. The serialized vault is written to the filesystem via `toml` (metadata) and binary blobs.
+
+**In-memory model:** `DashMap` provides concurrent read/write access without a global lock. Individual entries are sharded, so reading one credential doesn't block writes to another. Values are wrapped in types that implement `Zeroize` so that when an entry is dropped, the underlying bytes are overwritten.
+
+## OAuth2 PKCE
+
+Implements the Authorization Code flow with PKCE (Proof Key for Code Exchange), suitable for public clients that cannot hold a client secret.
+
+**Flow:**
+
+1. Generate a cryptographically random `code_verifier` (via `rand`).
+2. Derive the `code_challenge` as `BASE64URL(SHA256(code_verifier))` using `sha2` and `base64`.
+3. Spin up a temporary `axum` server on a localhost port to serve the redirect URI.
+4. Open the user's browser to the authorization endpoint with the challenge.
+5. On callback, exchange the authorization code + verifier for tokens via `reqwest`.
+6. Store the resulting access token and refresh token in the credential vault.
+
+The `rustls` stack ensures that token exchange happens over TLS with a reasonable set of trusted roots, combining Mozilla's `webpki-roots` with the system's native certificate store.
+
+## MCP Server Setup
+
+Provides streamlined provisioning of MCP-compatible servers. This subsystem:
+
+- Reads server descriptors (connection parameters, capabilities) from `toml` configuration files.
+- Manages the lifecycle of server registrations.
+- Retrieves any required authentication credentials from the credential vault, or triggers OAuth2 PKCE if a new token is needed.
+- Persists server state so that a previously configured server can be reconnected on launch without user intervention.
+
+## Error Handling
+
+All public APIs return `Result<T, E>` where `E` is a module-level error enum derived via `thiserror`. Error variants cover:
+
+- Vault decryption failures (wrong master key, corrupted data)
+- I/O errors reading or writing config/vault files
+- HTTP failures during OAuth2 token exchange
+- PKCE state mismatches (possible CSRF or stale sessions)
+- TLS handshake errors
+
+Errors are instrumented with `tracing` spans so they appear in structured logs with context.
 
 ## Testing
 
-The dev-dependencies indicate the testing approach:
+The dev-dependencies indicate the test strategy:
 
-- `tokio-test` — async test utilities for testing the OAuth2 flow and vault operations.
-- `tempfile` — creates temporary directories for vault files in isolation, ensuring tests don't touch real credentials.
-- `serial_test` — serializes tests that share filesystem or port resources, preventing race conditions in CI.
-- `librefang-runtime` — used for integration tests that exercise the full extension loading pipeline.
+- `tokio-test` — async test harness for the OAuth2 callback server and concurrent vault operations.
+- `tempfile` — isolated filesystem roots for vault and config files, no side effects on the developer's machine.
+- `serial_test` — serializes tests that share global state (such as the system keyring or a bound port).
+- `librefang-runtime` — the full runtime is available in tests for integration scenarios that exercise extension loading end-to-end.
 
-When writing tests for this crate, use `tempfile::tempdir()` for any vault path, wrap tests that bind local ports with `#[serial]`, and prefer the `tokio::test` macro for async test functions.
+## Relationship to Other Crates
+
+```
+librefang-types
+     │
+     ▼
+librefang-extensions
+     │
+     ▼
+librefang-runtime   (dev-dependency only; integration tests)
+```
+
+The module consumes shared types from `librefang-types` (extension descriptors, credential shapes, error codes) and is itself consumed by higher layers in the LibreFang stack. It has no downward dependency on `librefang-runtime` outside of tests, keeping the extension system independently testable and portable.

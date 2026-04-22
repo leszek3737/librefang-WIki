@@ -2,92 +2,106 @@
 
 # librefang-hands
 
-The **Hands** system defines curated, self-contained capability packages that can be assigned to autonomous agents within LibreFang. A "hand" represents a discrete bundle of functionality—tools, permissions, constraints, and metadata—that an agent can use to interact with its environment.
+Curated autonomous capability packages for the LibreFang system.
 
-## Purpose
+## Overview
 
-Rather than granting agents blanket access to all available capabilities, the Hands system provides a mechanism for packaging and distributing well-defined capability sets. Each hand is:
+**Hands** are self-contained, declaratively-defined capability units that encapsulate specific autonomous behaviors. Each Hand represents a discrete skill or set of skills that can be loaded, inspected, and executed by the LibreFang runtime. The term draws from the metaphor of different "hands" an agent can use to interact with the world — each one purpose-built for a class of tasks.
 
-- **Self-describing** — carries its own metadata, version, and dependency information
-- **Curated** — intentionally assembled with specific tools and constraints
-- **Composable** — multiple hands can be assigned to a single agent
-- **Persistable** — serializable to and from TOML/JSON for storage and transport
+This crate provides the infrastructure for defining, loading, validating, storing, and managing Hand packages. It does **not** execute Hands directly — that responsibility belongs to `librefang-runtime`. Instead, this module acts as the registry and lifecycle manager for Hand definitions.
 
-This module handles the definition, loading, validation, and runtime management of these capability packages.
+## Conceptual Model
 
-## Key Concepts
+```
+┌─────────────────────────────────────────────────┐
+│                  Hand Package                    │
+│                                                  │
+│  ┌──────────────┐  ┌──────────────────────────┐ │
+│  │  Manifest    │  │  Capability Definitions   │ │
+│  │  (TOML)      │  │  (Serialized Structs)     │ │
+│  └──────────────┘  └──────────────────────────┘ │
+│                                                  │
+│  Identity (UUID) · Metadata · Timestamps        │
+└─────────────────────────────────────────────────┘
+```
 
-### Hand
+A Hand is characterized by:
 
-A hand is the central unit of capability. It groups together related tools, configuration parameters, and policy constraints into a named, versioned package. Hands serve as the bridge between what an agent *can* do and what it is *allowed* to do.
-
-### Hand Registry
-
-The module maintains a thread-safe registry of loaded hands using `DashMap`, allowing concurrent lookups and modifications. The registry supports:
-
-- Dynamic registration of new hands at runtime
-- Lookup by unique identifier
-- Enumeration of all available hands and their capabilities
-
-### Manifest Format
-
-Hands are defined via manifest files (TOML or JSON) that describe:
-
-- **Identity** — name, version, unique ID (`uuid`)
-- **Capabilities** — the tools and actions the hand provides
-- **Constraints** — rate limits, permission boundaries, and safety policies
-- **Dependencies** — other hands or runtime features required
+- **Identity** — A UUID uniquely identifying the Hand package.
+- **Manifest** — A TOML-based configuration file declaring the Hand's metadata, dependencies, and capabilities.
+- **Capabilities** — The serialized definitions of what the Hand can do, structured as typed data.
+- **Timestamps** — Creation and modification records via `chrono` for lifecycle tracking.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[Manifest File<br/>TOML / JSON] -->|Load & Deserialize| B[Hand]
-    B -->|Validate| C{Valid?}
-    C -->|Yes| D[Hand Registry<br/>DashMap]
-    C -->|No| E[HandError]
-    D -->|Lookup / Enumerate| F[Agent Assignment]
-    D -->|Serialize| G[Manifest Export]
+    A[Hand Definition Files] -->|TOML parse| B[Hand Registry]
+    C[Serialized Hand Data] -->|JSON deserialize| B
+    B -->|Store| D[DashMap Concurrent Store]
+    B -->|Validate| E[Validation Layer]
+    E -->|Report| F[tracing Logs]
+    D -->|Hand Reference| G[librefang-runtime]
 ```
+
+The module is structured around a **registry pattern** backed by `DashMap`, providing lock-free concurrent access to loaded Hand definitions. This allows multiple runtime components to query available Hands without blocking.
+
+## Key Dependency Roles
+
+| Dependency | Role in this Module |
+|---|---|
+| `librefang-types` | Shared type definitions for Hand structures, capability descriptors, and cross-crate contracts |
+| `serde` / `serde_json` / `toml` | Serialization framework: TOML for human-authored manifests, JSON for machine interchange |
+| `thiserror` | Typed error definitions for Hand loading, validation, and registry operations |
+| `tracing` | Structured logging of Hand lifecycle events — registration, validation failures, lookups |
+| `uuid` | Stable unique identifiers for each Hand package |
+| `chrono` | Timestamping Hand registration and modification events |
+| `dashmap` | Concurrent hashmap for the Hand registry, enabling lock-free reads from multiple threads |
+
+## Hand Lifecycle
+
+1. **Definition** — A Hand is authored as a TOML manifest accompanied by capability descriptors.
+2. **Loading** — The manifest is parsed and deserialized into typed structures using `serde` + `toml`.
+3. **Validation** — The parsed Hand is checked for completeness, structural correctness, and compatibility.
+4. **Registration** — A valid Hand is assigned a UUID (if not already present), timestamped, and inserted into the concurrent registry.
+5. **Lookup** — Runtime and other consumers query the registry by UUID or capability type.
+6. **Deregistration** — Hands can be removed from the registry, with appropriate logging.
 
 ## Error Handling
 
-Errors are consolidated through the `HandError` enum, powered by `thiserror`. Common error conditions include:
+All errors in this module are defined using `thiserror` derivations. Expected error categories include:
 
-- **Parse failures** — malformed TOML/JSON manifests
-- **Validation errors** — missing required fields, invalid capability definitions, or unresolvable dependencies
-- **Registry conflicts** — duplicate hand registration with the same identifier
-- **IO errors** — failures reading manifest files from disk
+- **Parse errors** — Malformed TOML manifests or invalid JSON capability data.
+- **Validation errors** — Missing required fields, incompatible versions, or duplicate registrations.
+- **Registry errors** — Hands not found, or conflicts during insertion.
 
-All errors carry sufficient context for debugging via the `tracing` integration.
+Errors are propagated with context via `tracing` spans, making it possible to trace a failure back to a specific Hand package and loading step.
 
-## Dependencies
+## Relationship to Other Crates
 
-| Dependency | Role |
-|---|---|
-| `librefang-types` | Shared type definitions used across LibreFang modules |
-| `serde` / `serde_json` / `toml` | Serialization and deserialization of hand manifests |
-| `thiserror` | Ergonomic error type derivation |
-| `tracing` | Structured logging and diagnostic spans |
-| `uuid` | Unique identification for each hand instance |
-| `chrono` | Timestamp handling for metadata and audit trails |
-| `dashmap` | Lock-free concurrent map for the hand registry |
+```
+librefang-types  ←── librefang-hands  ──→  librefang-runtime
+     (shared types)    (registry/management)    (execution)
+```
+
+- **Depends on `librefang-types`** for the structural definitions that Hands conform to.
+- **Used by `librefang-runtime`** which is listed as a dev-dependency, confirming that the runtime consumes Hand references from this module's registry during integration tests.
+- The module has **no incoming or outgoing runtime calls** in its static call graph, reflecting its role as a data management layer rather than an orchestration layer.
 
 ## Testing
 
-The test suite (`dev-dependencies`) includes:
+The test suite uses:
 
-- **`tokio-test`** — async runtime support for testing concurrent registry operations
-- **`tempfile`** — isolated temporary directories for manifest file I/O tests
-- **`librefang-runtime`** — integration tests that validate hands against the actual runtime
-- **`serial_test`** — ensures certain tests (e.g., global registry state) run without parallel interference
+- **`tokio-test`** — For async test helpers, confirming that registry operations are designed for async contexts.
+- **`tempfile`** — Creates temporary directories and files for testing Hand loading from disk without polluting the filesystem.
+- **`serial_test`** — Ensures certain tests run sequentially, likely to prevent race conditions on shared registry state during test parallelism.
+- **`librefang-runtime`** (dev-only) — Integration tests that verify the runtime can correctly consume registered Hands.
 
-## Integration Points
+Tests are expected to cover manifest parsing, validation acceptance/rejection, concurrent registry access, and Hand lifecycle transitions.
 
-This module sits between the type definitions (`librefang-types`) and the execution layer (`librefang-runtime`). Other modules consume the Hands API to:
+## Design Principles
 
-1. Resolve which capabilities an agent has access to at execution time
-2. Validate that a requested action falls within the constraints of an assigned hand
-3. Export hand definitions for distribution or persistence
-
-The Hands module itself does not execute agent logic—it provides the data structures, loading machinery, and registry that upstream consumers rely on.
+- **Curated, not crowdsourced** — Hands are expected to pass validation before entering the registry. This is a deliberate quality gate.
+- **Immutable once registered** — A Hand's definition does not change after registration. If an update is needed, a new UUID/version is registered.
+- **Thread-safe by default** — The `DashMap`-backed registry eliminates the need for external locking in consumers.
+- **Declarative over imperative** — Hands are defined by what they *are* (their capabilities, metadata, constraints) rather than by executable code. Execution logic lives in the runtime.
