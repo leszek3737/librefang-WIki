@@ -2,48 +2,43 @@
 
 # LLM Drivers
 
-Provider-agnostic LLM interface with concrete implementations, automatic failover, and operational tooling for credential management, rate-limit tracking, and response filtering.
+Unified abstraction layer for interacting with multiple LLM providers through a single trait-based interface, with built-in credential management, rate-limit observability, and intelligent error-driven failover.
 
-## Sub-modules
+## Sub-module Breakdown
 
 | Sub-module | Role |
 |---|---|
-| [LLM Driver (librefang-llm-driver)](librefang-llm-driver-src.md) | Defines the `LlmDriver` trait (`complete` / `stream`), the unified `LlmError` → `ClassifiedError` taxonomy, and `FailoverReason` logic that drives automatic provider fallback. |
-| [LLM Drivers (librefang-llm-drivers)](librefang-llm-drivers-src.md) | Concrete provider implementations (Anthropic, OpenAI, Ollama, Vertex AI, Gemini, Azure OpenAI) plus shared infrastructure: credential pooling, rate-limit tracking, think-block filtering, and token rotation. |
+| [librefang-llm-driver-src](librefang-llm-driver-src.md) | **Interface & taxonomy.** Defines the `LlmDriver` trait, `CompletionRequest`/response types, and the error classification engine (`classify_error` → `ClassifiedError` → `FailoverReason`) that drives failover decisions. |
+| [librefang-llm-drivers-src](librefang-llm-drivers-src.md) | **Concrete implementations.** Ships provider-specific drivers (Anthropic, OpenAI, ChatGPT, Claude Code, Aider, Qwen Code, Vertex AI/Gemini) plus cross-cutting infrastructure: `TokenRotationDriver`, `CredentialPool`, `RateLimitTracker`, and streaming `ThinkFilter`. |
 
-## How They Fit Together
-
-`librefang-llm-driver` owns the **abstraction layer** — the trait, the request/response types, and error classification. `librefang-llm-drivers` owns the **implementations and runtime infrastructure** that sit behind that trait. Nothing in the agent loop or higher-level runtime imports a concrete provider directly; everything flows through the `LlmDriver` trait.
+## How They Connect
 
 ```mermaid
 graph LR
-    subgraph librefang-llm-driver
-        Trait[LlmDriver trait]
-        Err[LlmError / ClassifiedError / FailoverReason]
+    subgraph "librefang-llm-driver (interface)"
+        LT[LlmDriver trait]
+        ERR[classify_error → FailoverReason]
     end
 
-    subgraph librefang-llm-drivers
-        Providers[Provider impls<br/>Anthropic · OpenAI · Ollama · Vertex AI · Gemini · Azure]
-        Pool[CredentialPool<br/>round-robin keys]
-        RL[RateLimitTracker<br/>header parsing · ASCII display]
-        TF[ThinkFilter<br/>stream delta filtering]
-        TR[TokenRotation<br/>resets_sooner scheduling]
+    subgraph "librefang-llm-drivers (implementations)"
+        DRV[Anthropic / OpenAI / Vertex AI / …]
+        INF[CredentialPool · RateLimitTracker · ThinkFilter]
     end
 
-    Agent[Agent Loop] -->|CompletionRequest| Trait
-    Trait --> Providers
-    Providers --> Pool
-    Providers --> RL
-    Providers --> TF
-    Providers --> TR
-    Providers -->|Err| Err
-    Err -->|failover_reason| FallbackChain[Fallback Chain]
+    CALLER[Runtime / Agent] -->|CompletionRequest| LT
+    LT -->|delegates| DRV
+    DRV -->|uses| INF
+    DRV -->|LlmError| ERR
+    ERR -->|retry / skip / propagate| CALLER
 ```
 
-## Key Cross-Module Workflows
+1. **Request flow** — The runtime or agent layer calls `LlmDriver::complete()` or `LlmDriver::stream()` defined in the interface crate.
+2. **Provider dispatch** — A concrete driver in the implementations crate executes the request against its specific API, pulling credentials from `CredentialPool` and tracking rate-limit headers via `RateLimitTracker`.
+3. **Error classification** — Any provider error is fed through `classify_error`, producing a `FailoverReason` that the `FallbackChain` uses to decide whether to retry, switch provider, or surface the error.
+4. **Streaming post-processing** — Streaming responses pass through `ThinkFilter` to strip or transform `<think…>` blocks before reaching the consumer.
 
-**Request → response (happy path):** The agent loop calls `LlmDriver::stream` or `LlmDriver::complete`. A `ProviderEntry` is selected from the driver registry; the credential pool provides the next key via round-robin. The provider makes the HTTP call, streams deltas through `ThinkFilter` to strip `<think/>` blocks, and parses rate-limit headers into `RateLimitTracker` buckets (displayed as ASCII bars in the CLI).
+## Key Design Decisions
 
-**Error classification → failover:** When a provider returns an error, `classify_error` maps it to a `ClassifiedError` and `FailoverReason`. The fallback chain uses this classification to decide whether to retry the same provider, skip to the next one, or surface a sanitized message to the user.
-
-**Token rotation across providers:** `TokenRotation::complete` compares reset timestamps (`resets_sooner`) across providers and credential slots, preferring the one that recovers soonest — feeding back into the `ProviderEntry` selection.
+- **Trait-first**: Adding a new provider means implementing `LlmDriver` in the implementations crate; the interface crate and all consumers remain unchanged.
+- **Failover-aware errors**: Error classification is provider-agnostic, so the `FallbackChain` can reason uniformly across heterogeneous backends.
+- **Credential pooling**: Multiple API keys per provider are rotated transparently, reducing per-key rate-limit pressure.

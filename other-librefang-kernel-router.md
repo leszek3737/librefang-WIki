@@ -2,70 +2,69 @@
 
 # librefang-kernel-router
 
-Hand/Template routing engine for the LibreFang kernel.
+Hand and template routing engine for the LibreFang kernel. This module is responsible for resolving user input events to the appropriate hand definitions and template layouts, acting as the central dispatch layer between raw input and the rendering pipeline.
 
-## Overview
+## Role in the Architecture
 
-`librefang-kernel-router` provides the routing logic that maps incoming requests or events to the appropriate **Hand** definitions and **Templates** within the LibreFang kernel. It acts as the central dispatch layer, determining which hand should handle a given input based on configurable routing rules.
+`librefang-kernel-router` sits between the input layer and the layout engine. When a key event or gesture is detected, the router determines which hand configuration and which template should handle it. This decouples input detection from the actual finger positioning and glyph rendering logic.
 
-## Architecture
-
-```mermaid
-graph TD
-    A[Input Event] --> B[Router]
-    B --> C{Match Route}
-    C -->|Pattern Match| D[Hand A]
-    C -->|Pattern Match| E[Hand B]
-    C -->|Default| F[Fallback Hand]
-    D --> G[Resolved Template]
-    E --> H[Resolved Template]
+```
+┌─────────────┐     ┌──────────────────────┐     ┌──────────────┐
+│ Input Layer │────▶│ librefang-kernel-    │────▶│ Layout/      │
+│             │     │ router               │     │ Rendering    │
+└─────────────┘     └──────────────────────┘     └──────────────┘
+                           │
+                    ┌──────┴──────┐
+                    ▼             ▼
+             librefang-     Config /
+             hands          Template
+                            Files
 ```
 
-The router evaluates routing rules—defined via pattern matching—against incoming data and resolves the target hand. Each hand may further resolve to a template for response generation or processing.
+## Dependencies and What They Enable
+
+| Dependency | Purpose in This Module |
+|---|---|
+| `librefang-types` | Shared type definitions—key codes, hand identifiers, routing result types |
+| `librefang-hands` | Hand definitions and finger mapping data used during routing |
+| `serde` / `serde_json` | Deserialization of route configurations and template files |
+| `toml` | Parsing of user-facing TOML configuration files for custom routes |
+| `regex-lite` | Pattern matching against input identifiers or template selectors |
+| `dirs` | Resolving platform-specific config directories for user route overrides |
+| `tracing` | Instrumentation of routing decisions for debugging and diagnostics |
 
 ## Key Concepts
 
 ### Hands
 
-Hands are the primary processing units that the router dispatches to. The router depends on `librefang-hands` for hand definitions and lifecycle management. A hand encapsulates the logic for handling a specific category of input.
+A "hand" represents a physical hand layout—a mapping of fingers to positional slots. The router queries `librefang-hands` to look up hand definitions when resolving a route. Hands are typically identified by a string or enum variant (e.g., left hand vs. right hand, or a named custom layout).
 
 ### Templates
 
-Templates define the structure or format of outputs associated with a hand. The router resolves which template to use as part of the routing decision.
+Templates define the structural arrangement of glyphs or actions within a given context. The router matches an input event to a template, which then dictates how downstream modules render or interpret the input.
 
-### Routing Rules
+### Routing
 
-Routing rules are the core configuration that drives dispatch behavior. Rules are defined in TOML format and use pattern matching (via `regex-lite`) to match against incoming data characteristics. The router evaluates rules in priority order and selects the first matching hand.
+Routing is the process of accepting an input event (key press, gesture, or mode change) and producing a resolved target: which hand to use and which template to apply. Routes can be built-in defaults or user-defined overrides loaded from configuration.
 
-## Dependencies
+## Configuration Loading
 
-| Dependency | Purpose |
-|---|---|
-| `librefang-types` | Shared type definitions used across the kernel |
-| `librefang-hands` | Hand definitions and management |
-| `serde` / `serde_json` | Serialization of routing configuration and match results |
-| `regex-lite` | Lightweight pattern matching for route evaluation |
-| `toml` | Parsing TOML-based routing configuration files |
-| `dirs` | Resolving platform-specific configuration directories |
-| `tracing` | Structured logging and diagnostics |
+The module uses `dirs` to locate platform-appropriate configuration directories and `toml` to parse route definitions. This allows users to define custom routing rules without modifying compiled code. A typical config lookup sequence:
 
-### Development Dependencies
-
-- **`tempfile`** — Used in tests for temporary configuration files.
-- **`librefang-runtime`** — Provides the runtime context for integration tests that exercise the full routing pipeline.
-
-## Configuration
-
-Routing rules are loaded from TOML configuration files. The `dirs` crate is used to locate platform-appropriate configuration directories, allowing user-level and system-level routing overrides.
-
-## Integration Points
-
-This module sits between the input layer and the hand execution layer within the LibreFang kernel:
-
-- **Upstream consumers** pass raw input to the router for dispatch.
-- **Downstream**, the router resolves a `librefang-hands` hand instance and its associated template.
-- **`librefang-types`** provides the shared types that both the router and its consumers rely on for type-safe communication.
+1. Check the user's local config directory (via `dirs::config_dir()`).
+2. Look for a LibreFang-specific subdirectory.
+3. Parse any `.toml` route override files found.
+4. Fall back to compiled-in default routes if no overrides exist.
 
 ## Testing
 
-Tests use `tempfile` to create isolated configuration environments and `librefang-runtime` to bootstrap a minimal runtime context. This allows integration tests to exercise the full routing pipeline—from loading configuration through to hand resolution—without affecting system state.
+The dev-dependency on `librefang-runtime` indicates that integration tests spin up a minimal runtime to exercise routing end-to-end, while `tempfile` is used to create isolated config directories for deterministic test runs.
+
+## Integration Points
+
+Other kernel modules call into the router when they need to resolve an input context. The router itself is primarily a lookup and dispatch engine—it does not own state beyond its loaded configuration. It delegates to:
+
+- **`librefang-hands`** for hand structure queries.
+- **`librefang-types`** for shared data structures passed back to callers.
+
+Consumers of this module should expect a stateless or lazily-initialized service: load the configuration once, then query routes repeatedly with no side effects.

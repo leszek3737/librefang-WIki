@@ -2,213 +2,206 @@
 
 # Dashboard Frontend
 
-The dashboard is a single-page React application that provides the web management interface for the LibreFang agent infrastructure. It covers agent configuration, chat, workflow editing, skill management, monitoring, security settings, and all administrative operations.
+## Overview
 
-## Architecture Overview
+The dashboard frontend is a React single-page application that provides a web-based management console for the LibreFang agent platform. It consumes the kernel's REST API to manage agents, sessions, skills, channels, memory, schedules, workflows, and more. The stack uses React Query for server state management and auto-generated TypeScript types from the OpenAPI schema for type-safe API communication.
+
+## Architecture
 
 ```mermaid
 graph TD
-    subgraph "Entry"
-        A[main.tsx] --> B[QueryClientProvider]
-        B --> C[RouterProvider]
+    subgraph "Generated"
+        OAPI[openapi/generated.ts]
     end
-
-    subgraph "Routing Layer"
-        C --> D[router.tsx]
-        D -->|lazy import| E[Page Components]
-        D -->|renders| F[App.tsx shell]
-    end
-
-    subgraph "App Shell"
-        F --> G[Sidebar Navigation]
-        F --> H[Header Bar]
-        F --> I[Outlet - current page]
-        F --> J[AuthDialog]
-        F --> K[CommandPalette]
-        F --> L[NotificationCenter]
-    end
-
     subgraph "API Layer"
-        E -->|TanStack Query| M[lib/queries/*]
-        M --> N[api.ts]
-        N --> O[fetch / REST]
+        API[api.ts<br/>get / post / put / del]
+        AUTH[authHeader / buildHeaders]
+    end
+    subgraph "Data Layer"
+        Q[lib/queries/*<br/>useQuery hooks]
+        M[lib/mutations/*<br/>useMutation hooks]
+    end
+    subgraph "UI Layer"
+        PAGES[src/pages/*]
+        COMP[src/components/*]
+        LIB[src/lib/*]
     end
 
-    subgraph "State"
-        F --> P[useUIStore - Zustand]
-        N --> Q[localStorage - API key]
-    end
+    OAPI --> API
+    API --> AUTH
+    Q --> API
+    M --> API
+    PAGES --> Q
+    PAGES --> M
+    COMP --> PAGES
+    LIB --> PAGES
 ```
 
-## Entry Point — `main.tsx`
+## API Client (`dashboard/src/api.ts`)
 
-Boots the React tree with three providers:
+The core HTTP client wraps `fetch` with consistent authentication, error handling, and JSON parsing. Every backend call flows through one of four primitives:
 
-- **`QueryClientProvider`** — configures TanStack Query with `retry: 1`, `staleTime: 30s`, and `refetchOnWindowFocus: false`. These defaults are intentionally conservative to avoid hammering the backend.
-- **`RouterProvider`** — mounts the TanStack Router instance exported from `router.tsx`.
-- **`ToastContainer`** — global toast notification surface rendered at the root level.
-- **i18n** is initialized as a side-effect import from `./lib/i18n`.
+| Function | Method | Purpose |
+|----------|--------|---------|
+| `get` | GET | Fetch JSON from a path |
+| `getText` | GET | Fetch raw text (e.g., TOML manifests) |
+| `post` | POST | Create or action-oriented requests |
+| `put` | PUT | Update resources |
+| `del` | DELETE | Remove resources |
 
-## Routing — `router.tsx`
+### Authentication
 
-All routes live under the base path `/dashboard`. The root route (`/`) redirects to `/overview`.
+All requests pass through `buildHeaders` → `authHeader` → `getItem` (localStorage). The stored API key is attached as an `Authorization` header. On any 401 response, `parseError` calls `clearApiKey` to force re-authentication.
 
-### Lazy Loading
-
-Every page component is loaded via `lazyWithReload()`, which wraps React's `lazy()` with automatic chunk-error recovery:
-
-1. A dynamic import failure (stale chunk hash after deployment or HMR) is detected by matching against `CHUNK_ERROR_RE`.
-2. A React dispatcher-null error (transient HMR state) is detected by `REACT_DISPATCHER_RE`.
-3. If either matches and no reload has occurred in the last 10 seconds (tracked in `sessionStorage.__chunk_reload`), the page auto-reloads once.
-4. If a reload is already in flight, the import returns a never-resolving promise to prevent the error boundary from flashing.
-
-This eliminates the "white screen after deploy" problem without requiring service workers.
-
-### Error Boundary
-
-`ChunkErrorBoundary` is registered as `defaultErrorComponent` on the router. It renders a diagnostic UI with Reload / Force Reload / Show Stack controls. For chunk or dispatcher errors, it also attempts `tryAutoReload()` on mount.
-
-### Route Definitions
-
-There are 35+ routes. Each is a flat child of the root route—there is no nested route tree beyond the `/config/*` sub-routes. Key routes include:
-
-| Path | Page | Notes |
-|---|---|---|
-| `/overview` | `OverviewPage` | Dashboard landing |
-| `/chat` | `ChatPage` | Accepts `?agentId=` search param |
-| `/canvas` | `CanvasPage` | Accepts `?t=` and `?wf=` for workflow editing |
-| `/agents` | `AgentsPage` | Agent management |
-| `/workflows` | `WorkflowsPage` | Workflow list |
-| `/terminal` | `TerminalPage` | Full-height route (no scrolling wrapper) |
-| `/config/*` | `ConfigPage` | Sub-routes: general, memory, tools, channels, security, network, infra |
-| `/settings` | `SettingsPage` | Application settings |
-
-The `FULL_HEIGHT_ROUTES` set in `App.tsx` controls whether a page receives `flex-1 overflow-hidden` (terminal-style) or `overflow-y-auto` with padding.
-
-## Application Shell — `App.tsx`
-
-`App` is the root route component. It renders the persistent UI chrome (sidebar, header) and an `<Outlet />` for the current page.
-
-### Authentication Flow
-
-The app supports three auth modes, determined at startup by `checkDashboardAuthMode()`:
-
-- **`"none"`** — No authentication required. Dashboard loads immediately.
-- **`"api_key"`** — API key stored in `localStorage("librefang-api-key")`.
-- **`"credentials"`** — Username/password login with optional TOTP second factor.
-- **`"hybrid"`** — User chooses between credentials and API key tabs.
-
-On mount, `App` calls `setOnUnauthorized()` to register a global 401 handler. Any API response with status 401 triggers `clearApiKey()` and re-shows the `AuthDialog`.
-
-`AuthDialog` handles:
-- API key submission via `verifyStoredAuth()`
-- Credential login via `dashboardLogin()` with TOTP step-up
-- Error display with i18n-translated messages
-
-`ChangePasswordModal` allows credential-mode users to update their username and/or password. On success it calls `clearApiKey()` and reloads.
-
-### Sidebar Navigation
-
-Navigation items are organized into six groups (core, configure, config, automate, observe, advanced). The sidebar supports two layout modes controlled by `useUIStore.navLayout`:
-
-- **Default layout** — Groups are labeled sections, all items visible.
-- **`"collapsible"` layout** — Each group header is collapsible via `toggleNavGroup()`.
-
-The sidebar collapses to a 24px icon-only strip on desktop via `isSidebarCollapsed`. On mobile it slides in as an overlay controlled by `isMobileMenuOpen`.
-
-The `/terminal` route is conditionally shown based on `terminalEnabled`, which is fetched from `getStatus()` at startup (fail-open to `true`).
-
-### Header
-
-Contains mobile menu toggle, notification center, language toggle (en/zh), theme toggle (dark/light), and a user dropdown with links to settings, change password, and logout.
-
-### Keyboard Shortcuts
-
-`useKeyboardShortcuts` is invoked at the shell level. `⌘K` opens the command palette. The shortcuts help overlay is toggled via `setShowShortcuts`.
-
-### Theme
-
-Theme is stored in `useUIStore.theme`. A `useEffect` toggles the `dark` class on `<html>`, which drives Tailwind's `dark:` variant selectors.
-
-## API Client — `api.ts`
-
-A fully typed REST client covering every backend endpoint the dashboard uses.
-
-### HTTP Primitives
-
-Four private functions handle all requests:
-
-| Function | Method | Timeout |
-|---|---|---|
-| `get<T>` | GET | Browser default |
-| `post<T>` | POST | 60s (5min for long-running ops) |
-| `put<T>` | PUT | Browser default |
-| `patch<T>` | PATCH | Browser default |
-| `del<T>` | DELETE | Browser default |
-
-All go through `buildHeaders()`, which merges caller-provided headers with auth headers from `authHeader()` (reads `localStorage("librefang-api-key")` and `Accept-Language`).
+The `verifyStoredAuth` function validates an existing key by calling the server and clears it if invalid — used on app startup to detect expired sessions.
 
 ### Error Handling
 
-`parseError()` converts non-OK responses into `ApiError` instances. For 401 responses specifically:
-1. `_unauthorizedFired` gate prevents loops.
-2. `clearApiKey()` removes the stored token.
-3. `_onUnauthorized()` callback triggers `App`'s re-authentication flow.
+`parseError` normalizes API errors into a consistent structure. When a 401 is detected, it automatically clears the stored credentials, which triggers the router's auth guard to redirect to the login flow.
 
-### Timeout Strategy
+### Key API Functions
 
-- `DEFAULT_POST_TIMEOUT_MS = 60_000` — standard mutations.
-- `LONG_RUNNING_TIMEOUT_MS = 300_000` — agent messages, workflow runs, skill installs, skill hub operations.
-- Timeouts use `AbortController` and throw a human-readable message on expiry.
+The file exports dozens of domain-specific functions. A representative sample:
 
-### API Domains
+- **Agents**: `getAgentDetail`, `listAgentSessions`, `cloneAgent`, `suspendAgent`, `getExperimentMetrics`
+- **Hands**: `listActiveHands`, `deactivateHand`, `uninstallHand`, `getHandStats`, `getHandSession`, `getHandManifestToml`
+- **Skills/ClawHub**: `clawhubCnSearch`, `skillhubSearch`, `skillhubGetSkill`
+- **Runtime**: `getHealthDetail`, `getQueueStatus`, `testChannel`, `reloadChannels`, `pollVideo`, `deleteTaskFromQueue`
+- **Usage**: `listUsageByAgent`
+- **Schedules**: `runSchedule`, `setSessionLabel`
 
-The client exports functions organized by domain:
+Each function composes the appropriate HTTP primitive with a path and optional body:
 
-- **Agents** — CRUD, session management, messaging (`sendAgentMessage`), cloning, tool configuration.
-- **Providers** — Listing, key management, URL configuration, default selection.
-- **Models** — Listing with filters, custom model management, per-model overrides.
-- **Channels** — Listing, configuration, testing, QR flows for WeChat/WhatsApp.
-- **Skills** — CRUD, evolution (update/patch/rollback), file management, registry install.
-- **Skill Hubs** — ClawHub (global + CN mirror), SkillHub, FangHub browse/search/install.
-- **Workflows** — CRUD, run, dry-run, template management, run history.
-- **Schedules & Triggers** — Full CRUD for cron schedules and event triggers.
-- **Memory** — List, search, stats, add, update, delete, cleanup, decay.
-- **Approvals** — List, approve/reject, batch resolve, TOTP setup/confirm/revoke, audit trail.
-- **Hands** — List definitions, activate/deactivate, settings, stats, messaging.
-- **Monitoring** — Health, status, version, queue status, audit trail, usage analytics, budget.
-- **Config** — Full config read, schema discovery, per-path set, reload, backup/restore, TOML export.
-- **Media** — Image generation, TTS, transcription, video submit/poll, music generation.
-- **Comms** — Topology, events, inter-agent messaging, task posting.
-- **Auth** — Login, logout, password change, auth mode check, credential verification.
+```typescript
+// Pattern: function → primitive
+export const cloneAgent = (id: string, body: CloneAgentRequest) =>
+  post(`/api/agents/${id}/clone`, body);
+```
 
-### WebSocket Support
+## Query Hooks (`lib/queries/`)
 
-`buildAuthenticatedWebSocketUrl()` constructs a WebSocket URL with the API token as a query parameter, used by terminal and chat features.
+React Query hooks wrap API functions to provide caching, refetching, and loading states. They follow a consistent naming pattern: `use` prefix + domain noun.
 
-### Type Exports
+### Domain Modules
 
-`api.ts` is the canonical source for all response/request TypeScript interfaces used across the dashboard (e.g., `AgentItem`, `ProviderItem`, `WorkflowStep`, `MemoryItem`, etc.). Page components and query hooks import types directly from this module.
+| Module | Key Hooks | Purpose |
+|--------|-----------|---------|
+| `agents.ts` | `useAgentDetail`, `useAgentSessions`, `useExperimentMetrics` | Agent CRUD and session listing |
+| `hands.ts` | `useActiveHands`, `useHandStats`, `useHandSession` | Hand marketplace and instances |
+| `skills.ts` | `useClawHubSearch`, `useSupportingFile` | Skill discovery and file loading |
+| `memory.ts` | `useMemoryStats` | Proactive memory statistics |
+| `mcp.ts` | `useMcpHealth` | MCP server health checks |
+| `terminal.ts` | `useTerminalHealth` | Terminal connectivity status |
 
-## State Management
+Query hooks call through to the API layer, which in turn hits the kernel endpoints. For example:
 
-UI state lives in a Zustand store (`useUIStore` in `lib/store`):
+```
+useAgentSessions → listAgentSessions → get(`/api/agents/${id}/sessions`)
+```
 
-- `theme` / `toggleTheme`
-- `language` / `setLanguage`
-- `isSidebarCollapsed` / `toggleSidebar`
-- `isMobileMenuOpen` / `setMobileMenuOpen`
-- `navLayout` — `"default"` or `"collapsible"`
-- `collapsedNavGroups` — record of group key → collapsed state
-- `terminalEnabled` / `setTerminalEnabled`
+## Mutation Hooks (`lib/mutations/`)
 
-Server state is managed by TanStack Query through query/mutation hooks in `lib/queries/*` and `lib/mutations/*`, which call into `api.ts` functions.
+Mutations handle data modification and map 1:1 to POST/PUT/DELETE API calls. Each hook uses `useMutation` with appropriate cache invalidation on success.
 
-## Adding a New Page
+| Module | Key Hooks | API Operation |
+|--------|-----------|---------------|
+| `agents.ts` | `useCreatePromptVersion` | Create prompt versions for experiments |
+| `approvals.ts` | `useApproveApproval` | Approve pending requests |
+| `goals.ts` | `useUpdateGoal` | Update goal definitions |
+| `providers.ts` | `useSetProviderKey` | Set provider API keys |
+| `schedules.ts` | `useCreateSchedule`, `useDeleteSchedule`, `useRunSchedule` | Schedule CRUD and manual trigger |
+| `workflows.ts` | `useUpdateWorkflow` | Workflow definition updates |
+| `runtime.ts` | `useCreateBackup`, `useCleanupSessions` | System maintenance |
+| `config.ts` | `useSetConfigValue` | Hot-reload config changes |
+| `hands.ts` | `useSendHandMessage` | Send messages through hand instances |
 
-1. Create `src/pages/MyPage.tsx` exporting the component.
-2. Add a `lazyWithReload()` entry in `router.tsx`.
-3. Define a route with `createRoute({ getParentRoute: () => rootRoute, path: "/my-page", component: ... })`.
-4. Add it to the `routeTree` array.
-5. Optionally add a navigation entry to the appropriate `navGroups` item in `App.tsx`.
-6. Add API functions to `api.ts` if new endpoints are needed, then create corresponding query/mutation hooks in `lib/queries/` and `lib/mutations/`.
+## Auto-Generated OpenAPI Types (`openapi/generated.ts`)
+
+**Do not edit this file directly.** It is generated by `openapi-typescript` from the kernel's OpenAPI schema.
+
+The file exports:
+
+- **`paths`** — Maps every API route to its HTTP methods, parameters, request bodies, and response types
+- **`components["schemas"]`** — Request/response shapes like `MessageRequest`, `SpawnRequest`, `PatchAgentConfigRequest`, `BulkAgentIdsRequest`, etc.
+
+These types ensure the API client and all consumers are compile-time verified against the actual backend contract.
+
+### Key Schema Types
+
+- **`SpawnRequest`** — Spawning agents from TOML manifests or templates, with optional signed manifests
+- **`MessageRequest`** — Sending messages with support for attachments, ephemeral mode, group chat context, thinking controls, and channel metadata
+- **`MessageResponse`** — Response with token counts, cost, decision traces, and memory recall info
+- **`PatchAgentConfigRequest`** — Hot-updating agent identity (name, emoji, color, model, temperature, system prompt, web search augmentation)
+- **`CloneAgentRequest`** — Cloning with optional skill/tool inclusion
+- **`BulkAgentIdsRequest` / `BulkCreateRequest`** — Bulk operations across multiple agents
+
+## Page Components (`src/pages/`)
+
+Each page composes query and mutation hooks with UI to form a complete feature:
+
+| Page | Hooks Used | Function |
+|------|-----------|----------|
+| `ChatPage` | `useChatMessages`, WebSocket | Real-time agent conversation |
+| `AgentsPage` | `useCreatePromptVersion` (via `PromptsExperimentsModal`) | Agent management and prompt experimentation |
+| `ApprovalsPage` | `useApproveApproval` | Review and act on approval requests |
+| `GoalsPage` | `useUpdateGoal` | Goal CRUD |
+| `WizardPage` | `useSetProviderKey` | First-run provider setup |
+| `CanvasPage` | `useUpdateWorkflow` | Visual workflow editor |
+| `WorkflowsPage` | Workflow queries, `navigateToCanvas` | Workflow listing and navigation |
+| `TerminalPage` | Terminal hooks, localStorage | Interactive terminal sessions |
+| `McpServersPage` | `useMcpHealth` (via `AuthBadge`) | MCP server management |
+
+## Routing (`dashboard/src/router.tsx`)
+
+The router handles authentication guards and automatic reload detection:
+
+- **`tryAutoReload`** — Checks `shouldAutoReload` (localStorage flag) and triggers a full page reload when needed (e.g., after a version update)
+- Auth-protected routes redirect unauthenticated users to the login flow
+- The router uses `localStorage.setItem`/`getItem` (referenced via test mocks) for persistence
+
+## Shared Libraries (`src/lib/`)
+
+- **`chat.ts`** — `normalizeRole`, `asText` utilities for normalizing chat message roles and extracting plain text from structured messages
+- **`chatPicker.ts`** — `groupedPicker` for organizing agents/models into grouped selections
+- **`i18n.ts`** — Internationalization initialization
+
+## Common Execution Flows
+
+### Canvas Page → Workflow Save
+
+```
+CanvasPageInner → useUpdateWorkflow → updateWorkflow → put → buildHeaders → authHeader → getItem
+                                                                                           ↓
+                                                                             parseError → clearApiKey (on 401)
+```
+
+### Wizard Page → Provider Key Setup
+
+```
+WizardPage → useSetProviderKey → setProviderKey → post → buildHeaders → authHeader → getItem
+                                                                                      ↓
+                                                                        parseError → clearApiKey (on 401)
+```
+
+### Approval Action
+
+```
+ApprovalsPage → useApproveApproval → approveApproval → post → buildHeaders → authHeader → getItem
+                                                                                           ↓
+                                                                             parseError → clearApiKey (on 401)
+```
+
+All mutation flows follow the same pattern: page component → mutation hook → API function → HTTP primitive → auth headers. Errors propagate back through React Query's `onError` callbacks.
+
+## Contributing
+
+### Adding a New API Endpoint
+
+1. **Do not edit `openapi/generated.ts`**. Regenerate it from the kernel's OpenAPI schema.
+2. Add a function in `dashboard/src/api.ts` using the appropriate primitive (`get`, `post`, `put`, `del`).
+3. Create a query hook in `lib/queries/` or a mutation hook in `lib/mutations/`.
+4. Consume the hook from the relevant page component.
+
+### Running Tests
+
+The test files (`dashboard/src/api.test.ts`, `src/lib/chat.test.ts`, `src/lib/chatPicker.test.ts`, `lib/mutations/*.test.tsx`) mock `localStorage` and `fetch` to verify API functions, hook behavior, and utility logic in isolation.

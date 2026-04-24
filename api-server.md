@@ -1,271 +1,178 @@
 # API Server
 
-# API Server (`librefang-api`)
+# Channel Bridge (`channel_bridge.rs`)
 
-The HTTP/WebSocket server that exposes the LibreFang Agent OS daemon to CLI clients, the dashboard SPA, channel integrations, and external callers. It boots an in-process `LibreFangKernel`, wires up authentication, rate limiting, and middleware, then serves a versioned JSON API over Axum.
+## Purpose
+
+The channel bridge connects the LibreFang kernel to external messaging platforms. It translates kernel operations—agent message handling, session management, automation, authorization—into a unified interface that channel adapters consume, and it transforms raw kernel/LLM output into user-safe text suitable for delivery over WhatsApp, Telegram, Slack, and dozens of other channels.
+
+The daemon calls `start_channel_bridge()` during startup (from `build_router` in `server.rs`). That function reads the configuration, instantiates the appropriate adapters behind feature gates, wires them into a `BridgeManager`, and returns an `axum::Router` for webhook-based channels.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    CLI[CLI / curl] -->|HTTP Bearer| MW[Middleware Stack]
-    SPA[Dashboard SPA] -->|Cookie + Bearer| MW
-    WS[WebSocket Clients] -->|ws://| MW
-    EXT[External Platforms] -->|Webhooks| CH[Channel Routes]
+    Daemon["run_daemon / build_router"] --> SCB["start_channel_bridge()"]
+    SCB --> KBA["KernelBridgeAdapter"]
+    SCB --> Adapters["Channel Adapters (feature-gated)"]
+    SCB --> BM["BridgeManager"]
+    SCB --> WR["axum::Router (webhooks)"]
 
-    MW --> AUTH[Auth Middleware]
-    AUTH --> V1[v1 Route Handlers]
-    V1 --> K[LibreFangKernel]
+    KBA -->|implements| CBH["ChannelBridgeHandle trait"]
+    KBA -->|delegates to| Kernel["LibreFangKernel"]
 
-    subgraph Background Tasks
-        CS[Catalog Sync 24h]
-        GC[Cache GC 5m]
-        HR[Config Hot-Reload 30s]
-        BR[Bridge Manager]
-    end
+    Adapters -->|call| KBA
+    KBA -->|streaming via| STB["start_stream_text_bridge"]
 
-    K --> CS
-    K --> BR
+    STB -->|filters| LTC["looks_like_tool_call()"]
+    STB -->|sanitizes| SCE["sanitize_channel_error()"]
 ```
 
-## Server Lifecycle
+## Key Components
 
-`run_daemon()` in `server.rs` is the primary entry point. It:
+### `KernelBridgeAdapter`
 
-1. **Boots the kernel** — wraps `LibreFangKernel` in `Arc`, sets the self-handle, starts background agents.
-2. **Builds the router** — calls `build_router()` which assembles all routes, middleware layers, CORS, and shared state.
-3. **Writes `daemon.json`** — stores PID, listen address, start time, and version so the CLI can discover the running daemon. Detects stale PID files (dead process or non-responding port) and cleans them up.
-4. **Spawns background tasks** — dashboard asset sync, provider key validation, approval expiry sweep, config hot-reload watcher, model catalog sync, API cache GC.
-5. **Starts the observability stack** — optionally launches Prometheus + Grafana via Docker Compose if `telemetry.enabled = true`.
-6. **Binds and serves** — uses `socket2` with `SO_REUSEADDR` to avoid `TIME_WAIT` issues, listens with a backlog of 1024, and runs graceful shutdown on SIGINT/SIGTERM or API-triggered shutdown.
-7. **Tears down** — aborts background tasks, stops channel bridges, kills tmux sessions, shuts down the observability stack, removes the PID file, and calls `kernel.shutdown()`.
+Wraps an `Arc<LibreFangKernel>` and implements the `ChannelBridgeHandle` trait from `librefang_channels::bridge`. Every method delegates to the kernel and formats the result for channel delivery:
 
-### Embedding
+- **Message sending** — `send_message`, `send_message_with_blocks`, `send_message_with_sender`, and their streaming counterparts all route through the kernel's agent loop. Silent responses (`result.silent == true`) return an empty string so the bridge skips delivery.
+- **Streaming** — `send_message_streaming` and `send_message_streaming_with_sender` open a kernel streaming session and pipe `StreamEvent`s through `start_stream_text_bridge`, which filters leaked tool calls and injects progress markers.
+- **Agent management** — `find_agent_by_name`, `list_agents`, `spawn_agent_by_name` (loads `agent.toml` from `~/.librefang/workspaces/agents/{name}/`).
+- **Session control** — `reset_session`, `reboot_session`, `compact_session`, `set_model`, `stop_run`, `session_usage`.
+- **Automation** — workflow listing/execution, trigger CRUD, schedule CRUD, approval resolution with TOTP support.
+- **Introspection** — `list_models_text`, `list_providers_text`, `list_skills_text`, `list_hands_text`, `budget_text`, `peers_text`, `a2a_agents_text`.
+- **Authorization** — `authorize_channel_user` checks RBAC via `kernel.auth_manager()`.
+- **Delivery tracking** — `record_delivery` persists success/failure and stores the last channel for cron's `CronDelivery::LastChannel`.
 
-`build_router()` is extracted as a public function so embedders (e.g., `librefang-desktop`) can create the Axum router and shared state without running the full daemon lifecycle. It returns `(Router, Arc<AppState>)`.
+### Streaming Text Bridge
 
-## Route Organization
+`start_stream_text_bridge` and `start_stream_text_bridge_with_status` create an async pipeline that consumes `StreamEvent`s from the kernel and produces a `mpsc::Receiver<String>` of user-facing text chunks.
 
-Routes are built in `api_v1_routes()` and mounted at **both** `/api` and `/api/v1` for backward compatibility:
+**Event handling logic:**
+
+| Event | Behavior |
+|---|---|
+| `TextDelta` | Accumulates into `iter_buf` |
+| `ContentComplete` | Flushes `iter_buf` unless it's a leaked tool call, silent sentinel, or tool-use-adjacent text |
+| `ToolUseStart` | Marks `saw_tool_use`, optionally emits `🔧 Tool Name` progress line (controlled by `show_progress`) |
+| `ToolExecutionResult` (error) | Emits `⚠️ Tool Name failed` with localized "failed" suffix |
+| `PhaseChange` (`context_warning`) | Emits `⚠️ <detail>` to warn about context trimming |
+
+**Error handling after stream drain:**
+
+The spawned monitor task awaits the kernel's `JoinHandle` and:
+- For **timeouts with partial output**: appends an incomplete-output notice and reports `Ok(())` status (soft success).
+- For **group chats**: suppresses all error messages entirely.
+- For **DMs**: shows rate-limit messages verbatim when possible, otherwise passes through `sanitize_channel_error`.
+- For **panics**: sends a generic error message.
+
+### Tool Call Detection
+
+`looks_like_tool_call(text)` detects text that leaked from providers that emit tool calls as plain content rather than using proper tool_use APIs. Detection covers:
+
+- JSON-style calls: `[{…}]`, `{"type":"function"…}`
+- Tag-based: `<function=…>`, `<tool>`, `[TOOL_CALL]`, Antrophic-style `TbuD` tags
+- Backtick-wrapped: `` `tool_name {args}` ``
+- Markdown code blocks containing tool JSON
+
+Helper functions `contains_bare_json_tool_call`, `contains_markdown_tool_call`, `contains_backtick_tool_call`, `looks_like_tool_call_object`, and `looks_like_named_json_tool_call` handle the recursive scanning and JSON validation.
+
+### Error Sanitization
+
+`sanitize_channel_error(err)` maps raw technical errors to user-friendly messages:
+
+- Timeout/inactivity → "The task timed out due to inactivity. Try breaking it into smaller steps."
+- Rate limits (429, quota, "too many requests") → "I've hit my usage limit and need to rest."
+- Auth failures (401) → "I'm having trouble with my credentials."
+- Driver crashes ("exited with code", "llm driver") → "Sorry, something went wrong."
+- Unknown → "Something went wrong" with first 80 chars as a reference ID.
+
+### Reply Intent Classification
+
+`classify_reply_intent` uses a one-shot LLM call to determine whether a group message is directed at the bot. It sanitizes inputs (truncates, strips backticks/newlines/brackets) to reduce injection surface and fails open (returns `true` on any error). Supports bot name, aliases, and @mentions.
+
+### Channel Override Resolution
+
+`channel_overrides` looks up per-channel configuration (from `ChannelsConfig`) and merges the default agent's routing aliases into `group_trigger_patterns` so aliases trigger the bot in group chats without a formal @mention. Uses `\b` word boundaries for ASCII aliases and plain substring matching for CJK/non-ASCII.
+
+### Localization
+
+`tr_progress_failed(language)` returns the localized word for "failed" in tool-failure progress lines, with support for Chinese, Spanish, Japanese, German, and French. Falls back to English.
+
+`prettify_tool_name(name)` converts `snake_case`, `kebab-case`, and `dotted.tool.ids` into human-readable display names ("Web Search" instead of "web_search"), preserving acronyms.
+
+## Entry Point: `start_channel_bridge`
 
 ```rust
-// server.rs — simplified
-let v1_routes = api_v1_routes();  // all domain routers merged
-app.nest("/api/v1", v1_routes.clone())
-   .nest("/api", v1_routes)
+pub async fn start_channel_bridge(
+    kernel: Arc<LibreFangKernel>,
+) -> (Option<BridgeManager>, axum::Router)
 ```
 
-Each domain lives in its own submodule under `routes/`:
+Called by `build_router` in `server.rs`. Delegates to `start_channel_bridge_with_config` using the kernel's configured `ChannelsConfig`.
 
-| Submodule | Prefix | Purpose |
-|---|---|---|
-| `routes::agents` | `/agents` | Agent CRUD, messaging, upload |
-| `routes::channels` | `/channels` | Channel adapter management |
-| `routes::config` | `/config` | Configuration read/write/reload |
-| `routes::system` | `/system` | Health, status, TOTP management |
-| `routes::memory` | `/memory` | Agent memory inspection |
-| `routes::workflows` | `/workflows` | Workflow management |
-| `routes::skills` | `/skills` | Skill install/uninstall |
-| `routes::network` | `/network` | A2A protocol, network status |
-| `routes::plugins` | `/plugins` | Plugin lifecycle |
-| `routes::providers` | `/providers` | LLM provider configuration |
-| `routes::budget` | `/budget` | Token budget tracking |
-| `routes::auto_dream` | `/auto_dream` | Auto-dream scheduling |
-| `routes::goals` | `/goals` | Goal tracking |
-| `routes::inbox` | `/inbox` | Inbox management |
-| `routes::media` | `/media` | Media upload/processing |
-| `routes::prompts` | `/prompts` | Prompt template management |
-| `routes::terminal` | `/terminal` | Terminal session management |
+`start_channel_bridge_with_config`:
 
-Additional non-versioned routes:
+1. Checks which channels have configuration entries and whether the corresponding Cargo feature is enabled. Emits warnings for configured-but-disabled channels.
+2. Creates a `KernelBridgeAdapter` wrapping the kernel.
+3. For each configured channel with valid credentials (read from env vars via `read_token`), instantiates the feature-gated adapter and pushes it onto the adapter list.
+4. Passes all adapters to `BridgeManager` and returns `(Some(BridgeManager), Vec<started_channel_names>, webhook_router)`.
 
-- **Dashboard SPA**: `/`, `/dashboard/*`, static assets
-- **OpenAI compat**: `/v1/chat/completions`, `/v1/models`
-- **Webhooks**: `/hooks/wake`, `/hooks/agent`
-- **A2A protocol**: merged via `routes::network::protocol_router()`
-- **MCP**: `/mcp` (HTTP transport)
-- **Channel webhooks**: `/channels/{adapter_name}/*` (dynamic, hot-reloadable)
+Returns `(None, Vec::new(), empty_router)` when no channels are configured.
 
-## Authentication
+## Feature-Gated Adapters
 
-The server supports multiple auth mechanisms that can operate independently or together:
+All channel adapters are behind Cargo feature flags. The full set across five waves:
 
-### Auth Modes
+| Wave | Channels |
+|---|---|
+| 1 | Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Mattermost, IRC, Google Chat, Twitch, Rocket.Chat, Zulip, XMPP, Voice, Webhook |
+| 2 | Bluesky, Feishu/Lark, LINE, Mastodon, Messenger, Reddit, Revolt, Viber |
+| 3 | Flock, Guilded, Keybase, Nextcloud, Nostr, Pumble, Threema, Twist, Webex |
+| 4 | DingTalk, Discourse, Gitter, Gotify, LinkedIn, Mumble, ntfy, QQ, WeChat, WeCom |
 
-The `/api/auth/dashboard-check` endpoint (unauthenticated) returns the current mode:
-- **`none`** — no credentials configured, everything is open
-- **`credentials`** — dashboard username/password only
-- **`api_key`** — static API key or per-user API keys only
-- **`hybrid`** — both credentials and API keys configured
+Each adapter follows the same pattern: read token from env var, construct with config parameters, attach `account_id` and `default_agent`, push to adapter list. Sidecar channels are not feature-gated and are always available.
 
-### Static API Key
+## Trigger Pattern Parsing
 
-Set `api_key` in `config.toml`. Sent via `Authorization: Bearer <key>` or `X-API-Key` header. Supports multiple keys separated by newlines in the composite key string.
+`parse_trigger_pattern(s)` converts user-entered pattern strings into `TriggerPattern` variants:
 
-### Per-User API Keys
+| Input | Pattern |
+|---|---|
+| `lifecycle` | `TriggerPattern::Lifecycle` |
+| `terminated` | `TriggerPattern::AgentTerminated` |
+| `spawned:<name>` | `TriggerPattern::AgentSpawned { name_pattern }` |
+| `system` | `TriggerPattern::System` |
+| `system:<keyword>` | `TriggerPattern::SystemKeyword { keyword }` |
+| `memory` | `TriggerPattern::MemoryUpdate` |
+| `memory:<key>` | `TriggerPattern::MemoryKeyPattern { key_pattern }` |
+| `match:<text>` | `TriggerPattern::ContentMatch { substring }` |
+| `all` | `TriggerPattern::All` |
 
-Users defined in `config.toml` with `api_key_hash` fields. Each user has a `role` that controls access:
+## Approval Resolution with TOTP
 
-| Role | GET | POST (limited) | POST (full) | Owner-only writes |
-|---|---|---|---|---|
-| `Viewer` | ✅ | ❌ | ❌ | ❌ |
-| `User` | ✅ | ✅ (messages, approvals, clone) | ❌ | ❌ |
-| `Admin` | ✅ | ❌ | ✅ | ❌ |
-| `Owner` | ✅ | ❌ | ✅ | ✅ |
+`resolve_approval_text` handles the full approval/denial flow:
 
-Owner-only write endpoints: `/api/config`, `/api/config/set`, `/api/config/reload`, `/api/auth/change-password`, `/api/shutdown`.
+1. Matches the ID prefix against pending approvals (ambiguous matches are rejected).
+2. If the tool requires TOTP (per `policy().tool_requires_totp()`):
+   - Checks lockout from too many failed attempts.
+   - Accepts either a 6-digit TOTP code (verified against `totp_secret` in vault) or a recovery code (format-detected, verified against `totp_recovery_codes` in vault, single-use invalidation).
+3. Calls `kernel.approvals().resolve()` with the decision and TOTP verification state.
 
-### Dashboard Credentials
+## Schedule Management
 
-Username/password auth via `POST /api/auth/dashboard-login`. Passwords are verified with Argon2id with transparent fallback from legacy plaintext (which produces an upgrade hash for migration). Supports TOTP second factor when enrolled.
+`manage_schedule_text` handles three sub-actions:
 
-On success, a random session token is:
-- Returned in the JSON response body
-- Set as an `HttpOnly; SameSite=Lax` cookie scoped to `Path=/dashboard`
-- Persisted to `data/sessions.json` for restart survival
-- The `Secure` flag is added automatically when the request arrives over HTTPS (detected via `X-Forwarded-Proto`)
+- **`add`** — Expects `<agent> <min> <hour> <dom> <month> <dow> <message...>`, creates a `CronJob` with `CronSchedule::Cron`.
+- **`del`** — Removes by ID prefix match.
+- **`run`** — Immediately executes the job's action (`AgentTurn`, `SystemEvent`, or `Workflow`), resolving workflow IDs by UUID or name.
 
-### OAuth2/OIDC
+## Contributing
 
-External identity provider support (`src/oauth.rs`) with:
-- Multi-provider support (Google, GitHub, Azure AD, Keycloak, generic OIDC)
-- OIDC discovery with caching
-- PKCE-protected authorization code flow
-- JWT validation with JWKS caching and nonce verification
-- Token introspection and refresh endpoints
+When adding a new channel adapter:
 
-### Loopback Bypass
-
-Requests from loopback addresses (`127.0.0.1`, `::1`) bypass all auth. This allows the CLI to operate on the same machine without token configuration.
-
-### `require_auth_for_reads`
-
-When `None` (default), the flag is auto-derived: if *any* auth is configured, dashboard read endpoints (agent listing, config, budget, sessions, approvals, etc.) require authentication. Set `require_auth_for_reads = false` explicitly to keep reads public behind an external auth proxy.
-
-## Middleware Pipeline
-
-Middleware layers are applied bottom-to-top (last listed = outermost, runs first):
-
-```
-CorsLayer
-TraceLayer
-CompressionLayer
-security_headers        — X-Content-Type-Options, X-Frame-Options, CSP, HSTS, no-cache
-request_logging         — UUID per request, structured logging, HTTP metrics
-api_version_headers     — X-API-Version response header, Accept negotiation
-gcra_rate_limit         — Per-IP GCRA rate limiting
-oidc_auth_middleware     — OAuth/OIDC claim injection
-accept_language         — Accept-Language parsing into request extensions
-auth                    — Bearer/API-key/session authentication + role-based ACL
-```
-
-### Security Headers
-
-Applied to **all** responses: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, CSP (inline scripts allowed for SPA), `Strict-Transport-Security`, `Cache-Control: no-store`.
-
-### Rate Limiting
-
-GCRA-based rate limiting per IP, configured via `rate_limit.api_requests_per_minute` and `rate_limit.retry_after_secs` in `config.toml`.
-
-### API Versioning
-
-Every response includes `X-API-Version`. Clients can negotiate via:
-- Explicit path: `/api/v1/...`
-- Accept header: `application/vnd.librefang.v1+json`
-- Unversioned `/api/...` alias returns the latest version
-
-Unknown versions in the Accept header produce `406 Not Acceptable`.
-
-## Session Management
-
-Sessions are managed in `server.rs` with persistence:
-
-- **Storage**: `HashMap<String, SessionToken>` behind `Arc<RwLock<>>` in `AppState`
-- **Persistence**: Serialized to `data/sessions.json`, loaded on startup with expired tokens pruned
-- **Expiry**: `DEFAULT_SESSION_TTL_SECS` from `password_hash` module
-- **GC**: Background task sweeps every 5 minutes, evicting expired sessions and persisting
-- **Invalidation**: Password changes clear all sessions and delete the persistence file
-
-## Credential Resolution
-
-`resolve_dashboard_credential()` resolves config values through a priority chain:
-
-1. **Environment variable** — e.g., `LIBREFANG_DASHBOARD_USER`, `LIBREFANG_DASHBOARD_PASS`
-2. **Vault reference** — `vault:KEY_NAME` syntax reads from the encrypted credential vault at `~/vault.enc`
-3. **Literal value** — the string as-is from `config.toml`
-
-## Background Tasks
-
-| Task | Interval | Purpose |
-|---|---|---|
-| Dashboard sync | Once at boot | Downloads/updates SPA bundle from release |
-| Provider key validation | Once at boot | Validates API keys against providers |
-| Approval sweep | Every 10s | Expires pending approval requests |
-| Config hot-reload | Every 30s | Polls `config.toml` mtime, triggers kernel reload + channel bridge restart |
-| Model catalog sync | Every 24h | Syncs from community registry mirror |
-| Cache GC | Every 5m | Evicts expired clawhub/skillhub cache entries (120s TTL) and expired sessions |
-
-## Channel Bridge System
-
-`channel_bridge::start_channel_bridge()` starts polling-based adapters (Telegram, Discord, etc.) and returns webhook-based router mounts (Feishu, Teams). Webhook routes are mounted at `/channels/{adapter_name}/*` and bypass auth/rate-limit layers since external platforms handle their own signature verification. The webhook router is behind an `RwLock<Arc<Router>>` for hot-reload when channel config changes.
-
-## Key Submodules
-
-- **`ws`** — WebSocket handler for agent chat sessions with origin validation and locality detection
-- **`openai_compat`** — OpenAI-compatible `/v1/chat/completions` and `/v1/models` endpoints
-- **`password_hash`** — Argon2id password hashing, session token generation, verification with legacy fallback
-- **`rate_limiter`** — GCRA (Generic Cell Rate Algorithm) implementation
-- **`stream_chunker`** — Splits streaming LLM output into sentence-boundary chunks
-- **`stream_dedup`** — Deduplication for concurrent streams
-- **`validation`** — Input validation helpers (identifier checks, JSON depth limits, path traversal prevention)
-- **`webhook_store`** — CRUD for outgoing webhook registrations with URL validation (blocks private IPs, link-local addresses) and HMAC signature computation
-- **`webchat`** — Dashboard SPA serving, asset resolution, locale files, dashboard sync from release artifacts
-- **`terminal` / `terminal_tmux`** — Terminal session management via tmux
-- **`versioning`** — API version constants and path/header parsing
-- **`openapi`** — Auto-generated OpenAPI specification endpoint
-- **`telemetry`** *(feature-gated)* — Prometheus metrics recorder init and OpenTelemetry OTLP tracing setup
-
-## Shared State (`AppState`)
-
-The `Arc<AppState>` is shared across all route handlers and middleware:
-
-```rust
-pub struct AppState {
-    pub kernel: Arc<LibreFangKernel>,
-    pub started_at: Instant,
-    pub peer_registry: Option<Arc<PeerRegistry>>,
-    pub bridge_manager: Mutex<ChannelBridge>,
-    pub channels_config: RwLock<ChannelsConfig>,
-    pub shutdown_notify: Arc<Notify>,
-    pub clawhub_cache: DashMap<String, (Instant, Value)>,
-    pub skillhub_cache: DashMap<String, (Instant, Value)>,
-    pub provider_probe_cache: ProbeCache,
-    pub provider_test_cache: DashMap<...>,
-    pub webhook_store: WebhookStore,
-    pub active_sessions: Arc<RwLock<HashMap<String, SessionToken>>>,
-    pub api_key_lock: Arc<RwLock<String>>,
-    pub media_drivers: MediaDriverCache,
-    pub webhook_router: Arc<RwLock<Arc<Router>>>,
-    pub config_write_lock: Mutex<()>,
-    #[cfg(feature = "telemetry")]
-    pub prometheus_handle: Option<PrometheusHandle>,
-}
-```
-
-The `api_key_lock` is shared between `AppState` and `AuthState` so that credential changes (via `/api/auth/change-password`) immediately update the live key set without a server restart.
-
-## Daemon Discovery
-
-`DaemonInfo` is written to `~/.librefang/daemon.json`:
-
-```rust
-pub struct DaemonInfo {
-    pub pid: u32,
-    pub listen_addr: String,
-    pub started_at: String,  // RFC 3339
-    pub version: String,
-    pub platform: String,
-}
-```
-
-The CLI reads this file to find the running daemon. Stale files (dead PID or non-responding port) are automatically cleaned up on startup. File permissions are restricted to owner-only (`0600` on Unix).
+1. Add the adapter implementation in `librefang-channels`.
+2. Add a feature flag (`channel-<name>`) and conditional import block in this file.
+3. Add the config struct field to `ChannelsConfig` in `librefang-types`.
+4. Add a `check_channel!` macro invocation and an adapter construction block in `start_channel_bridge_with_config`.
+5. Add the channel type string to the `channel_overrides` match block.
+6. Ensure the adapter implements `ChannelAdapter` from `librefang_channels::types`.

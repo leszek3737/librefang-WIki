@@ -1,217 +1,225 @@
 # Other — librefang-api-tests
 
-# librefang-api-tests
+# LibreFang API Integration Tests
 
-Integration, lifecycle, load, and spec-generation tests for the LibreFang HTTP API. These tests boot a real `LibreFangKernel`, bind axum to a random port, and exercise endpoints over actual HTTP using `reqwest`. No mocking layers are involved.
+## Overview
 
-## Running
+The `librefang-api/tests/` directory contains integration tests that exercise the full HTTP API stack end-to-end. Every test boots a real `LibreFangKernel`, binds an actual `axum` HTTP server to a random port, and fires real TCP requests via `reqwest`. There are no mocks, no in-memory router shortcuts, and no test-only shortcuts in the application code.
+
+Tests that require a live LLM (e.g., sending a message through Groq and getting a response) are gated behind the `GROQ_API_KEY` environment variable and gracefully skip when the key is absent.
+
+### Run commands
 
 ```bash
-# All tests in this crate
+# All API integration tests
 cargo test -p librefang-api --test api_integration_test -- --nocapture
-cargo test -p librefang-api --test daemon_lifecycle_test -- --nocapture
+
+# Load tests (includes some #[ignore] stress tests)
 cargo test -p librefang-api --test load_test -- --nocapture
+
+# Daemon lifecycle tests
+cargo test -p librefang-api --test daemon_lifecycle_test -- --nocapture
+
+# Tool invoke security tests
+cargo test -p librefang-api --test tools_invoke_test -- --nocapture
+
+# OpenAPI spec generation
 cargo test -p librefang-api --test openapi_spec_test -- --nocapture
 
-# Tests that call a real LLM (requires GROQ_API_KEY in environment)
-GROQ_API_KEY=... cargo test -p librefang-api --test api_integration_test test_send_message_with_llm -- --nocapture
-
-# Skip the flaky concurrent-spawn/cycle tests (marked #[ignore])
-cargo test -p librefang-api --test load_test -- --nocapture --ignored
+# Include ignored (flaky) stress tests
+cargo test -p librefang-api -- --include-ignored -- --nocapture
 ```
+
+---
 
 ## Architecture
 
-Each test file builds its own server harness tailored to what it needs to verify:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Test Files                                                      │
-│                                                                  │
-│  api_integration_test.rs                                         │
-│    ├── TestServer        (subset of routes, raw axum Router)     │
-│    ├── FullRouterHarness (server::build_router — full stack)     │
-│    └── start_test_server_with_auth() (auth middleware enabled)   │
-│                                                                  │
-│  daemon_lifecycle_test.rs                                        │
-│    └── Minimal Router (health + status + shutdown only)          │
-│                                                                  │
-│  load_test.rs                                                    │
-│    └── TestServer (extended route set including sessions/models) │
-│                                                                  │
-│  openapi_spec_test.rs                                            │
-│    └── utoipa::OpenApi::openapi() (no server needed)            │
-└─────────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────┐
-│  Shared dependencies                     │
-│  LibreFangKernel  AppState  DaemonInfo   │
-│  KernelConfig  DefaultModelConfig        │
-└─────────────────────────────────────────┘
-```
-
 ```mermaid
 graph TD
-    A["start_test_server()"] -->|creates| B["TestServer"]
-    C["start_test_server_with_llm()"] -->|delegates| D["start_test_server_with_provider()"]
-    A --> D
-    D --> B
-    E["start_full_router()"] -->|creates| F["FullRouterHarness"]
-    G["start_test_server_with_auth()"] -->|creates| B
-    B -->|binds 127.0.0.1:0| H["tokio::net::TcpListener"]
-    F -->|calls| I["server::build_router()"]
+    subgraph "Test Harness"
+        TS["TestServer<br/>(real TCP on random port)"]
+        FR["FullRouterHarness<br/>(tower::oneshot, full router)"]
+        TH["Harness<br/>(tool-invoke focused)"]
+    end
+
+    subgraph "Infrastructure"
+        K["LibreFangKernel::boot_with_config"]
+        AS["AppState (Arc)"]
+        TMP["tempfile::TempDir"]
+    end
+
+    subgraph "Per-test lifecycle"
+        BOOT["Boot kernel"]
+        BIND["Bind 127.0.0.1:0"]
+        SPAWN["tokio::spawn(axum::serve)"]
+        HIT["reqwest / oneshot"]
+        DROP["Drop → kernel.shutdown()"]
+    end
+
+    TS --> K
+    FR --> K
+    TH --> K
+    K --> AS
+    TMP --> K
+    BOOT --> BIND --> SPAWN --> HIT --> DROP
 ```
 
-## Test Harnesses
+---
 
-### `TestServer`
+## Test Harness Infrastructure
 
-The primary harness used by `api_integration_test.rs` and `load_test.rs`. It constructs a minimal axum `Router` with a specific subset of routes, binds to an ephemeral port, and returns the base URL for `reqwest` calls.
+### `TestServer` — real TCP server
 
-Key fields:
-- `base_url` — `http://127.0.0.1:{random_port}`
-- `config_path` — path to the temp `config.toml` (used by config-reload tests)
-- `state` — `Arc<AppState>` shared with the router, used for direct kernel assertions
-- `_tmp` — `tempfile::TempDir` dropped on teardown, cleaning up all temp files
+Defined in `api_integration_test.rs` and `load_test.rs`. Boots a kernel, constructs a full `AppState`, mounts a minimal or full route set on an `axum::Router`, binds to `127.0.0.1:0` (OS-assigned random port), and spawns the server in a background tokio task.
 
-Cleanup: the `Drop` impl calls `state.kernel.shutdown()`.
+The `Drop` impl calls `state.kernel.shutdown()`, ensuring clean teardown even if a test panics. The `_tmp: tempfile::TempDir` field keeps the temporary home directory alive for the test's duration and cleans it up on drop.
 
-### `FullRouterHarness`
+Three factory functions exist:
 
-Used when tests need the full middleware stack that `server::build_router()` provides — API versioning headers (`x-api-version`), dashboard locale serving, provider discovery with `is_local` flags, and migration endpoints. Instead of a hand-built router, it delegates to the production `server::build_router()` function and uses `tower::ServiceExt::oneshot` for in-process requests (no network hop).
+| Function | Provider | Use case |
+|---|---|---|
+| `start_test_server()` | ollama (no key needed) | Most tests — kernel boots without LLM credentials |
+| `start_test_server_with_llm()` | groq / `GROQ_API_KEY` | Tests that need a real LLM round-trip |
+| `start_test_server_with_provider()` | arbitrary | Configurable provider for specialized tests |
+| `start_test_server_with_auth(api_key)` | ollama + Bearer token | Auth middleware integration tests |
 
-### Provider Variants
+### `FullRouterHarness` — in-process router
 
-| Harness function | Provider | API key env | Purpose |
-|---|---|---|---|
-| `start_test_server()` | ollama | `OLLAMA_API_KEY` | Default; no real LLM needed |
-| `start_test_server_with_llm()` | groq | `GROQ_API_KEY` | Real LLM round-trip tests |
-| `start_test_server_with_provider(...)` | configurable | configurable | Custom provider setup |
-| `start_test_server_with_auth(key)` | ollama | `OLLAMA_API_KEY` | Bearer-token auth enabled |
+Defined in `api_integration_test.rs`. Uses `server::build_router()` to construct the same router the production daemon uses, including versioned API aliases (`/api/v1/*`), dashboard locale serving, provider endpoints, and API key middleware. Tests hit this via `tower::ServiceExt::oneshot` — no TCP involved. This catches routing, middleware, and versioning bugs that a minimal test router would miss.
 
-All variants create a `tempfile::TempDir`, write a `KernelConfig` as TOML, boot the kernel via `LibreFangKernel::boot_with_config`, construct `AppState` manually, and spawn the axum server in a background tokio task.
+### `Harness` — tool-invoke security harness
 
-## Test Coverage by File
+Defined in `tools_invoke_test.rs`. Minimal router mounting only `POST /api/tools/{name}/invoke`. Accepts a `ToolInvokeConfig` parameter so each test can control whether the endpoint is enabled, which tools are allowlisted, etc. Uses `tower::oneshot` for speed.
+
+---
+
+## Test Files
 
 ### `api_integration_test.rs`
 
-The largest file, covering the full API surface:
+The largest test file. Covers the core API surface:
 
-**Core endpoints**
-- `test_health_endpoint` — `/api/health` returns `{ status: "ok", version: "..." }`, omits sensitive fields (`database`, `agent_count`), and injects `x-request-id`.
-- `test_status_endpoint` — `/api/status` returns runtime details: `agent_count`, `uptime_seconds`, `default_provider`, agent list.
-- `test_request_id_header_is_uuid` — validates `x-request-id` is a parseable UUID.
+**Health and status**
+- `test_health_endpoint` — public health returns `{ "status": "ok" }`, redacted details, includes `x-request-id`
+- `test_status_endpoint` — returns running state, agent count, uptime, default provider
+- `test_request_id_header_is_uuid` — validates the UUID format
 
 **API versioning**
-- `test_build_router_exposes_versioned_api_aliases` — both `/api/health` and `/api/v1/health` return `x-api-version: v1`. `/api/versions` lists current and supported versions.
-- `test_build_router_path_version_beats_unknown_accept_header` — path-based versioning takes precedence over `Accept: application/vnd.librefang.v99+json`.
-
-**Dashboard and providers**
-- `test_build_router_serves_dashboard_locales` — `/locales/{lang}.json` returns translation objects.
-- `test_build_router_providers_marks_local_providers` — `/api/providers` marks ollama with `is_local: true`.
-
-**Authentication**
-- `test_auth_health_is_public` — health endpoint bypasses auth.
-- `test_auth_rejects_no_token` — protected endpoints return 401 with "Missing" in error.
-- `test_auth_rejects_wrong_token` — wrong bearer token returns 401 with "Invalid".
-- `test_auth_accepts_correct_token` — correct token grants access.
-- `test_auth_disabled_when_no_key` — empty `api_key` in config disables auth entirely.
-- `test_build_router_unauthorized_responses_include_api_version_header` — even 401s include `x-api-version`.
+- `test_build_router_exposes_versioned_api_aliases` — both `/api/health` and `/api/v1/health` work, `x-api-version: v1` header present
+- `test_build_router_path_version_beats_unknown_accept_header` — path-based version wins over content negotiation
+- `test_build_router_unauthorized_responses_include_api_version_header` — even 401s carry the version header
 
 **Agent lifecycle**
-- `test_spawn_list_kill_agent` — full CRUD cycle: POST to create, GET to list, DELETE to kill. Verifies agent count changes correctly (default assistant is always present).
-- `test_multiple_agents_lifecycle` — spawns 3 named agents, verifies list count, kills selectively, verifies remaining.
-- `test_invalid_agent_id_returns_400` — non-UUID IDs return 400 for message, kill, and session endpoints.
-- `test_kill_nonexistent_agent_returns_404` — valid UUID that doesn't exist returns 404.
-- `test_spawn_invalid_manifest_returns_400` — malformed TOML returns 400 with "Invalid manifest" error.
+- `test_spawn_list_kill_agent` — full CRUD cycle: spawn → list (find by name) → kill → verify removal
+- `test_multiple_agents_lifecycle` — spawn 3 agents, verify counts, kill incrementally
+- `test_agent_session_empty` — newly spawned agent has zero messages
+- `test_agent_monitoring_endpoints` — `/metrics` returns token usage and tool call stats; `/logs` supports level filtering
+- `test_send_message_with_llm` — gated behind `GROQ_API_KEY`; sends a message, verifies non-empty response and token counts
 
-**Agent monitoring**
-- `test_agent_session_empty` — newly spawned agent has 0 messages.
-- `test_agent_monitoring_endpoints` — `/agents/{id}/metrics` returns token usage and tool call stats. `/agents/{id}/logs?level=...&n=...` filters audit log entries by outcome.
-- `test_send_message_with_llm` — gated behind `GROQ_API_KEY`. Spawns a groq agent, sends a message, verifies non-empty response and token counts > 0, checks session message count increases.
+**Pagination, sorting, search** (agent list)
+- `test_agent_list_paginated_response_format` — `{ items, total, offset, limit }`
+- `test_agent_list_invalid_sort_returns_400` — typo in `sort=` parameter
+- `test_agent_list_valid_sort_fields` — `name`, `created_at`, `last_active`, `state`
+- `test_agent_list_limit_clamped_to_max` — `limit=9999` clamped to 100
+- `test_agent_list_pagination` — offset/limit cursor through results
+- `test_agent_list_text_search` — `q=` parameter filters by name/description
 
-**Agent list filtering/pagination**
-- `test_agent_list_paginated_response_format` — response shape: `{ items, total, offset, limit }`.
-- `test_agent_list_invalid_sort_returns_400` — unknown sort field returns 400.
-- `test_agent_list_valid_sort_fields` — `name`, `created_at`, `last_active`, `state` all return 200.
-- `test_agent_list_limit_clamped_to_max` — `limit=9999` clamps to 100.
-- `test_agent_list_pagination` — `offset`/`limit` return correct page slices.
-- `test_agent_list_text_search` — `q=` parameter filters by name/description.
+**Workflows and triggers**
+- `test_workflow_crud` — create, list, verify step count
+- `test_trigger_crud` — create with `lifecycle` pattern, list (unfiltered and filtered by `agent_id`), delete, verify empty
 
-**Triggers and workflows**
-- `test_trigger_crud` — create, list (unfiltered and filtered by `agent_id`), delete. Verifies `enabled`, `max_fires` fields.
-- `test_workflow_crud` — create with steps, list, verify `steps` count.
+**Error handling**
+- `test_invalid_agent_id_returns_400` — non-UUID path parameter on message/kill/session
+- `test_kill_nonexistent_agent_returns_404` — valid UUID that doesn't exist
+- `test_spawn_invalid_manifest_returns_400` — malformed TOML in manifest
 
-**Tools**
-- `test_list_tools` — returns `{ tools: [...], total: N }` with `total > 0`.
-- `test_get_tool_found` — fetches first tool by name, verifies `description` and `input_schema`.
-- `test_get_tool_not_found` — nonexistent tool returns 404.
+**Authentication**
+- `test_auth_health_is_public` — `/api/health` accessible without token
+- `test_auth_rejects_no_token` — protected endpoint without header → 401 "Missing"
+- `test_auth_rejects_wrong_token` — wrong Bearer token → 401 "Invalid"
+- `test_auth_accepts_correct_token` — correct token → 200
+- `test_auth_disabled_when_no_key` — empty API key means auth disabled entirely
 
-**MCP bridge** (issue #2699 regression guards)
-- `test_mcp_http_rehydrates_caller_context_from_agent_header` — `POST /mcp` with `X-LibreFang-Agent-Id` header passes caller identity to tools. Without the header, `cron_list` returns "Agent ID required".
-- `test_mcp_http_invalid_agent_header_falls_back_to_unauthenticated` — garbage/unknown agent IDs degrade gracefully (error, not 500).
-- `test_mcp_http_unrestricted_agent_can_call_any_tool` — agent with no `[capabilities]` section (unrestricted) can call any tool through the bridge.
-- `test_mcp_http_enforces_agent_tool_allowlist` — agent whose manifest only grants `file_read` cannot call `cron_list` through the bridge; gets "Permission denied".
+**MCP bridge** (`/mcp` endpoint)
+- `test_mcp_http_rehydrates_caller_context_from_agent_header` — `X-LibreFang-Agent-Id` header restores caller identity; without it, tools requiring agent context fail
+- `test_mcp_http_invalid_agent_header_falls_back_to_unauthenticated` — garbage/unknown UUID degrades gracefully
+- `test_mcp_http_unrestricted_agent_can_call_any_tool` — manifest with no `[capabilities]` section means all tools allowed
+- `test_mcp_http_enforces_agent_tool_allowlist` — agent without `cron_list` in capabilities is denied even through `/mcp`
 
-**Config hot-reload**
-- `test_config_reload_hot_reloads_proxy_changes` — writes new proxy config to disk, hits `/api/config/reload`, verifies `restart_required: false` and `ReloadProxy` in `hot_actions_applied`.
+**Providers and localization**
+- `test_build_router_providers_marks_local_providers` — Ollama is flagged `is_local: true`
+- `test_build_router_serves_dashboard_locales` — `/locales/{en,zh-CN,ja}.json` return correct translations
 
-**Migration**
-- `test_run_migrate_uses_daemon_home_when_target_dir_is_empty` — migration with empty `target_dir` writes to daemon's home directory.
+**Migration and config**
+- `test_run_migrate_uses_daemon_home_when_target_dir_is_empty` — OpenClaw migration writes to daemon home
+- `test_config_reload_hot_reloads_proxy_changes` — proxy settings applied without restart; `hot_actions_applied` includes `ReloadProxy`
 
 **Hands**
-- `list_active_hands_includes_definition_metadata` — installs a hand definition, activates it, attaches agent roles via `set_agents`, then verifies `/api/hands/active` returns enriched fields: `hand_name`, `hand_icon`, `coordinator_role`, and `agent_ids` map.
+- `list_active_hands_includes_definition_metadata` — installs a hand definition, activates it, verifies the `/api/hands/active` response includes `hand_name`, `hand_icon`, `coordinator_role`, and `agent_ids`
+
+---
 
 ### `daemon_lifecycle_test.rs`
 
-Tests daemon startup, PID file management, and shutdown:
+Tests the daemon startup/shutdown lifecycle:
 
-- `test_daemon_info_serde_roundtrip` — `DaemonInfo` serializes to/from JSON correctly.
-- `test_read_daemon_info_from_file` — reads a valid `daemon.json`.
-- `test_read_daemon_info_missing_file` — returns `None` for missing file.
-- `test_read_daemon_info_corrupt_json` — returns `None` for invalid JSON.
-- `test_stale_daemon_info_detection` — `read_daemon_info` returns the file content even with a stale PID (PID liveness checking is the caller's responsibility).
-- `test_full_daemon_lifecycle` — boots kernel, starts server, writes `daemon.json`, verifies health and status endpoints, triggers shutdown, removes daemon info file.
-- `test_server_immediate_responsiveness` — health endpoint responds in <1 second after server start.
+- `test_daemon_info_serde_roundtrip` — `DaemonInfo` serializes to JSON and back
+- `test_read_daemon_info_from_file` — reads `daemon.json` from disk
+- `test_read_daemon_info_missing_file` — returns `None` for absent file
+- `test_read_daemon_info_corrupt_json` — returns `None` for invalid JSON
+- `test_full_daemon_lifecycle` — boot kernel, start server, write daemon info, hit health/status, call shutdown, verify file cleanup
+- `test_stale_daemon_info_detection` — reads file with implausible PID (stale detection is the caller's responsibility)
+- `test_server_immediate_responsiveness` — health endpoint responds in <1s from server start
+
+---
+
+### `tools_invoke_test.rs`
+
+Security-focused tests for `POST /api/tools/{name}/invoke`. Each test configures a different `ToolInvokeConfig` to exercise a specific access-control branch:
+
+| Test | Config | Expected |
+|---|---|---|
+| `test_invoke_disabled_returns_403` | `enabled: false` (default) | 403 |
+| `test_invoke_tool_not_in_allowlist_returns_403` | `enabled: true, allowlist: ["notify_owner"]` | 403 for `web_search` |
+| `test_invoke_unknown_tool_returns_404` | `enabled: true, allowlist: ["*"]` | 404 |
+| `test_invoke_approval_gated_without_agent_id_returns_400` | `enabled: true, allowlist: ["shell_exec"]` | 400 (no `?agent_id=`) |
+| `test_invoke_malformed_agent_id_returns_400` | `enabled: true, allowlist: ["notify_owner"]` | 400 for `?agent_id=not-a-uuid` |
+| `test_invoke_allowlisted_non_approval_tool_succeeds` | `enabled: true, allowlist: ["notify_owner"]` | 200 |
+| `test_invoke_writes_audit_entry` | `enabled: true, allowlist: ["notify_owner"]` | 200 + `AuditAction::ToolInvoke` entry |
+| `test_invoke_file_read_uses_plumbed_workspace_root` | `enabled: true, allowlist: ["file_read"]` | 200, reads file from sandbox |
+
+---
 
 ### `load_test.rs`
 
-Performance smoke tests with printed throughput/latency statistics:
+Performance and concurrency tests. Most print throughput/latency metrics to stderr (visible with `--nocapture`):
 
-- `load_endpoint_latency` — measures p50/p95/p99 for 8 GET endpoints over 100 requests each, with 10-request warmup. Gates on p95 < 1 second.
-- `load_concurrent_reads` — 50 simultaneous GET requests across 4 endpoints; all must return 200.
-- `load_concurrent_agent_spawns` (`#[ignore]`) — 20 parallel POST spawns; allows 2 failures.
-- `load_spawn_kill_cycle` (`#[ignore]`) — 10 sequential spawn+kill cycles.
-- `load_session_management` — creates 10 sessions, lists them, switches through each.
-- `load_workflow_operations` — 15 concurrent workflow creates, then list.
-- `load_metrics_sustained` — 200 sequential hits to `/api/metrics`, verifying Prometheus output contains `librefang_agents_active`.
+- `load_endpoint_latency` — measures p50/p95/p99 for 8 GET endpoints over 100 requests each; gates on p95 < 1s
+- `load_concurrent_reads` — 50 simultaneous requests across health/agents/status/metrics
+- `load_session_management` — creates 10 sessions, lists them, switches through them
+- `load_workflow_operations` — 15 concurrent workflow creates, then list
+- `load_metrics_sustained` — 200 sequential hits to `/api/metrics`, verifies Prometheus output
+- `load_concurrent_agent_spawns` — `#[ignore]` 20 parallel agent spawns
+- `load_spawn_kill_cycle` — `#[ignore]` 10 sequential spawn+kill cycles
+
+The `#[ignore]` tests have known race conditions in the agent registry under high concurrency and are excluded from normal CI runs.
+
+---
 
 ### `openapi_spec_test.rs`
 
-- `generate_openapi_json` — calls `ApiDoc::openapi()`, validates the spec has an `openapi` version, `info.title`, and 100+ paths, then writes `openapi.json` to the repository root for SDK codegen and CI consumption.
+Single test that generates the full OpenAPI spec from `utoipa` annotations, validates it has 100+ paths, and writes it to `<repo_root>/openapi.json` for SDK codegen and CI consumption.
 
-## Manifest Constants
+---
 
-Several TOML manifest constants are defined for spawning test agents:
+## Conventions and Patterns
 
-| Constant | Provider | Tools granted | Purpose |
-|---|---|---|---|
-| `TEST_MANIFEST` | ollama | `file_read` | Default agent for most tests |
-| `LLM_MANIFEST` | groq | `file_read` | Real LLM round-trip tests |
-| `MCP_TEST_MANIFEST` | ollama | `cron_list`, `cron_create`, `cron_cancel` | MCP bridge caller-context tests |
-| `UNRESTRICTED_MANIFEST` | ollama | none (no `[capabilities]`) | MCP unrestricted-access tests |
+**Temp directory lifecycle.** Every harness stores a `tempfile::TempDir` in a `_tmp` field. The leading underscore is intentional — the field is never read, but dropping it cleans up the kernel's home directory. The `Drop` impl on each harness struct calls `kernel.shutdown()` to stop async workers.
 
-## Adding New Tests
+**Multi-threaded tokio runtime.** All async tests use `#[tokio::test(flavor = "multi_thread")]` because the kernel spawns background tasks that require a multi-threaded runtime.
 
-1. **Pick the right harness.** Use `start_test_server()` for most endpoint tests. Use `start_full_router()` when you need API versioning, locale files, or the full middleware stack. Use `start_test_server_with_auth(key)` for auth-specific tests.
+**Manifest constants.** Test agent manifests (`TEST_MANIFEST`, `LLM_MANIFEST`, `MCP_TEST_MANIFEST`) are TOML strings embedded as constants. The ollama-based manifests don't make real LLM calls; the Groq-based manifest is only used when `GROQ_API_KEY` is set.
 
-2. **Use `#[tokio::test(flavor = "multi_thread")]`.** The kernel requires a multi-threaded runtime. Single-threaded tests will panic.
+**Default assistant.** The kernel auto-spawns a default "assistant" agent on boot. Tests account for this by expecting `agent_count >= 1` and filtering by name when looking for test-spawned agents.
 
-3. **Create a unique manifest** if your test needs specific capabilities. Name the agent distinctly to avoid collisions in list assertions.
-
-4. **Clean up agents** if the test spawns them and other tests in the same file share the server. Kill agents at the end of the test to avoid leaking into subsequent assertions.
-
-5. **Gate real LLM tests** behind `std::env::var("GROQ_API_KEY")` with an early return and `eprintln!` message.
-
-6. **Mark flaky tests** with `#[ignore]` and a comment explaining the race condition. Load tests that depend on precise spawn/kill timing are the common case.
+**Warmup rounds.** The latency test runs 10 warmup requests before measuring to avoid cold-start noise from lazy cache initialization, which caused flaky failures on Windows CI.

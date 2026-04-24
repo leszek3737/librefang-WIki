@@ -1,318 +1,16 @@
 [
   {
-    "name": "Kernel Core",
-    "slug": "kernel-core",
-    "files": [],
-    "children": [
-      {
-        "name": "Kernel Core — librefang-kernel-src",
-        "slug": "kernel-core-librefang-kernel-src",
-        "files": [
-          "librefang-kernel/src/lib.rs",
-          "librefang-kernel/src/config.rs",
-          "librefang-kernel/src/config_reload.rs",
-          "librefang-kernel/src/registry.rs",
-          "librefang-kernel/src/supervisor.rs",
-          "librefang-kernel/src/background.rs",
-          "librefang-kernel/src/event_bus.rs",
-          "librefang-kernel/src/heartbeat.rs",
-          "librefang-kernel/src/hooks.rs",
-          "librefang-kernel/src/capabilities.rs",
-          "librefang-kernel/src/scheduler.rs",
-          "librefang-kernel/src/session_policy.rs",
-          "librefang-kernel/src/cron.rs",
-          "librefang-kernel/src/triggers.rs",
-          "librefang-kernel/src/workflow.rs",
-          "librefang-kernel/src/orchestration.rs",
-          "librefang-kernel/src/pairing.rs",
-          "librefang-kernel/src/inbox.rs",
-          "librefang-kernel/src/auto_reply.rs",
-          "librefang-kernel/src/auto_dream/mod.rs",
-          "librefang-kernel/src/auto_dream/lock.rs",
-          "librefang-kernel/src/auto_dream/prompt.rs",
-          "librefang-kernel/src/wizard.rs",
-          "librefang-kernel/src/whatsapp_gateway.rs",
-          "librefang-kernel/src/kernel/manifest_helpers.rs",
-          "librefang-kernel/src/kernel/workspace_setup.rs",
-          "librefang-kernel/src/mcp_oauth_provider.rs",
-          "librefang-kernel/src/error.rs"
-        ]
-      },
-      {
-        "name": "Kernel Core — librefang-kernel-handle-src",
-        "slug": "kernel-core-librefang-kernel-handle-src",
-        "files": [
-          "librefang-kernel-handle/src/lib.rs"
-        ]
-      },
-      {
-        "name": "Kernel Core — librefang-kernel-metering-src",
-        "slug": "kernel-core-librefang-kernel-metering-src",
-        "files": [
-          "librefang-kernel-metering/src/lib.rs"
-        ]
-      },
-      {
-        "name": "Kernel Core — librefang-kernel-router-src",
-        "slug": "kernel-core-librefang-kernel-router-src",
-        "files": [
-          "librefang-kernel-router/src/lib.rs"
-        ]
-      }
-    ]
-  },
-  {
-    "name": "Agent Runtime",
-    "slug": "agent-runtime",
-    "files": [],
-    "children": [
-      {
-        "name": "Agent Runtime — librefang-runtime-src",
-        "slug": "agent-runtime-librefang-runtime-src",
-        "files": [
-          "librefang-runtime/src/lib.rs",
-          "librefang-runtime/src/agent_loop.rs",
-          "librefang-runtime/src/tool_runner.rs",
-          "librefang-runtime/src/tool_policy.rs",
-          "librefang-runtime/src/tool_budget.rs",
-          "librefang-runtime/src/context_engine.rs",
-          "librefang-runtime/src/context_budget.rs",
-          "librefang-runtime/src/context_compressor.rs",
-          "librefang-runtime/src/context_overflow.rs",
-          "librefang-runtime/src/compactor.rs",
-          "librefang-runtime/src/prompt_builder.rs",
-          "librefang-runtime/src/embedding.rs",
-          "librefang-runtime/src/routing.rs",
-          "librefang-runtime/src/retry.rs",
-          "librefang-runtime/src/audit.rs",
-          "librefang-runtime/src/interrupt.rs",
-          "librefang-runtime/src/graceful_shutdown.rs",
-          "librefang-runtime/src/loop_guard.rs",
-          "librefang-runtime/src/process_manager.rs",
-          "librefang-runtime/src/process_registry.rs",
-          "librefang-runtime/src/command_lane.rs",
-          "librefang-runtime/src/checkpoint_manager.rs",
-          "librefang-runtime/src/session_repair.rs",
-          "librefang-runtime/src/silent_response.rs",
-          "librefang-runtime/src/reply_directives.rs",
-          "librefang-runtime/src/trace_store.rs",
-          "librefang-runtime/src/hooks.rs",
-          "librefang-runtime/src/apply_patch.rs",
-          "librefang-runtime/src/browser.rs",
-          "librefang-runtime/src/image_gen.rs",
-          "librefang-runtime/src/media_understanding.rs",
-          "librefang-runtime/src/web_fetch.rs",
-          "librefang-runtime/src/web_search.rs",
-          "librefang-runtime/src/web_content.rs",
-          "librefang-runtime/src/web_cache.rs",
-          "librefang-runtime/src/link_understanding.rs",
-          "librefang-runtime/src/workspace_context.rs",
-          "librefang-runtime/src/workspace_sandbox.rs",
-          "librefang-runtime/src/subprocess_sandbox.rs",
-          "librefang-runtime/src/docker_sandbox.rs",
-          "librefang-runtime/src/shell_bleed.rs",
-          "librefang-runtime/src/str_utils.rs",
-          "librefang-runtime/src/model_catalog.rs",
-          "librefang-runtime/src/provider_health.rs",
-          "librefang-runtime/src/channel_registry.rs",
-          "librefang-runtime/src/catalog_sync.rs",
-          "librefang-runtime/src/registry_sync.rs",
-          "librefang-runtime/src/tts.rs",
-          "librefang-runtime/src/media/mod.rs",
-          "librefang-runtime/src/media/elevenlabs.rs",
-          "librefang-runtime/src/media/gemini.rs",
-          "librefang-runtime/src/media/google_tts.rs",
-          "librefang-runtime/src/media/minimax.rs",
-          "librefang-runtime/src/media/openai.rs",
-          "librefang-runtime/src/plugin_manager.rs",
-          "librefang-runtime/src/plugin_runtime.rs",
-          "librefang-runtime/src/mcp_server.rs",
-          "librefang-runtime/src/mcp_migrate.rs",
-          "librefang-runtime/src/proactive_memory.rs",
-          "librefang-runtime/src/python_runtime.rs",
-          "librefang-runtime/src/auth_cooldown.rs",
-          "librefang-runtime/src/a2a.rs",
-          "librefang-runtime/src/injection_guard.rs",
-          "librefang-runtime/src/pii_filter.rs",
-          "librefang-runtime/src/dangerous_command.rs"
-        ]
-      },
-      {
-        "name": "Agent Runtime — librefang-runtime-wasm-src",
-        "slug": "agent-runtime-librefang-runtime-wasm-src",
-        "files": [
-          "librefang-runtime-wasm/src/lib.rs",
-          "librefang-runtime-wasm/src/host_functions.rs",
-          "librefang-runtime-wasm/src/sandbox.rs"
-        ]
-      }
-    ]
-  },
-  {
-    "name": "LLM Drivers",
-    "slug": "llm-drivers",
-    "files": [],
-    "children": [
-      {
-        "name": "LLM Drivers — librefang-llm-driver-src",
-        "slug": "llm-drivers-librefang-llm-driver-src",
-        "files": [
-          "librefang-llm-driver/src/lib.rs",
-          "librefang-llm-driver/src/llm_errors.rs"
-        ]
-      },
-      {
-        "name": "LLM Drivers — librefang-llm-drivers-src",
-        "slug": "llm-drivers-librefang-llm-drivers-src",
-        "files": [
-          "librefang-llm-drivers/src/lib.rs",
-          "librefang-llm-drivers/src/backoff.rs",
-          "librefang-llm-drivers/src/credential_pool.rs",
-          "librefang-llm-drivers/src/think_filter.rs",
-          "librefang-llm-drivers/src/rate_limit_tracker.rs",
-          "librefang-llm-drivers/src/drivers/mod.rs",
-          "librefang-llm-drivers/src/drivers/anthropic.rs",
-          "librefang-llm-drivers/src/drivers/openai.rs",
-          "librefang-llm-drivers/src/drivers/gemini.rs",
-          "librefang-llm-drivers/src/drivers/chatgpt.rs",
-          "librefang-llm-drivers/src/drivers/copilot.rs",
-          "librefang-llm-drivers/src/drivers/fallback.rs",
-          "librefang-llm-drivers/src/drivers/fallback_chain.rs",
-          "librefang-llm-drivers/src/drivers/vertex_ai.rs",
-          "librefang-llm-drivers/src/drivers/aider.rs",
-          "librefang-llm-drivers/src/drivers/claude_code.rs",
-          "librefang-llm-drivers/src/drivers/codex_cli.rs",
-          "librefang-llm-drivers/src/drivers/gemini_cli.rs",
-          "librefang-llm-drivers/src/drivers/qwen_code.rs",
-          "librefang-llm-drivers/src/drivers/token_rotation.rs"
-        ]
-      }
-    ]
-  },
-  {
-    "name": "Memory System",
-    "slug": "memory-system",
-    "files": [
-      "librefang-memory/src/lib.rs",
-      "librefang-memory/src/chunker.rs",
-      "librefang-memory/src/consolidation.rs",
-      "librefang-memory/src/decay.rs",
-      "librefang-memory/src/http_vector_store.rs",
-      "librefang-memory/src/knowledge.rs",
-      "librefang-memory/src/migration.rs",
-      "librefang-memory/src/proactive.rs",
-      "librefang-memory/src/prompt.rs",
-      "librefang-memory/src/provider.rs",
-      "librefang-memory/src/semantic.rs",
-      "librefang-memory/src/session.rs",
-      "librefang-memory/src/structured.rs",
-      "librefang-memory/src/substrate.rs",
-      "librefang-memory/src/usage.rs"
-    ]
-  },
-  {
-    "name": "Channel Integrations",
-    "slug": "channel-integrations",
-    "files": [
-      "librefang-channels/src/lib.rs",
-      "librefang-channels/src/bridge.rs",
-      "librefang-channels/src/router.rs",
-      "librefang-channels/src/formatter.rs",
-      "librefang-channels/src/sanitizer.rs",
-      "librefang-channels/src/sidecar.rs",
-      "librefang-channels/src/types.rs",
-      "librefang-channels/src/http_client.rs",
-      "librefang-channels/src/message_journal.rs",
-      "librefang-channels/src/message_truncator.rs",
-      "librefang-channels/src/rate_limiter.rs",
-      "librefang-channels/src/voice.rs",
-      "librefang-channels/src/webhook.rs",
-      "librefang-channels/src/telegram.rs",
-      "librefang-channels/src/slack.rs",
-      "librefang-channels/src/discord.rs",
-      "librefang-channels/src/teams.rs",
-      "librefang-channels/src/whatsapp.rs",
-      "librefang-channels/src/wechat.rs",
-      "librefang-channels/src/wecom.rs",
-      "librefang-channels/src/matrix.rs",
-      "librefang-channels/src/irc.rs",
-      "librefang-channels/src/mattermost.rs",
-      "librefang-channels/src/email.rs",
-      "librefang-channels/src/messenger.rs",
-      "librefang-channels/src/line.rs",
-      "librefang-channels/src/signal.rs",
-      "librefang-channels/src/nostr.rs",
-      "librefang-channels/src/xmpp.rs",
-      "librefang-channels/src/bluesky.rs",
-      "librefang-channels/src/mastodon.rs",
-      "librefang-channels/src/reddit.rs",
-      "librefang-channels/src/linkedin.rs",
-      "librefang-channels/src/gotify.rs",
-      "librefang-channels/src/ntfy.rs",
-      "librefang-channels/src/zulip.rs",
-      "librefang-channels/src/rocketchat.rs",
-      "librefang-channels/src/google_chat.rs",
-      "librefang-channels/src/feishu.rs",
-      "librefang-channels/src/dingtalk.rs",
-      "librefang-channels/src/discourse.rs",
-      "librefang-channels/src/flock.rs",
-      "librefang-channels/src/gitter.rs",
-      "librefang-channels/src/guilded.rs",
-      "librefang-channels/src/keybase.rs",
-      "librefang-channels/src/mumble.rs",
-      "librefang-channels/src/nextcloud.rs",
-      "librefang-channels/src/pumble.rs",
-      "librefang-channels/src/qq.rs",
-      "librefang-channels/src/revolt.rs",
-      "librefang-channels/src/threema.rs",
-      "librefang-channels/src/twist.rs",
-      "librefang-channels/src/viber.rs",
-      "librefang-channels/src/webex.rs",
-      "librefang-channels/src/mqtt.rs"
-    ]
-  },
-  {
-    "name": "Skills System",
-    "slug": "skills-system",
-    "files": [
-      "librefang-skills/src/lib.rs",
-      "librefang-skills/src/loader.rs",
-      "librefang-skills/src/registry.rs",
-      "librefang-skills/src/evolution.rs",
-      "librefang-skills/src/config_injection.rs",
-      "librefang-skills/src/marketplace.rs",
-      "librefang-skills/src/openclaw_compat.rs",
-      "librefang-skills/src/publish.rs",
-      "librefang-skills/src/verify.rs",
-      "librefang-skills/src/clawhub.rs",
-      "librefang-skills/src/skillhub.rs",
-      "librefang-skills/src/http_client.rs"
-    ]
-  },
-  {
     "name": "API Server",
     "slug": "api-server",
     "files": [
+      "librefang-api/src/channel_bridge.rs",
       "librefang-api/src/lib.rs",
-      "librefang-api/src/server.rs",
       "librefang-api/src/middleware.rs",
       "librefang-api/src/oauth.rs",
       "librefang-api/src/openai_compat.rs",
       "librefang-api/src/openapi.rs",
       "librefang-api/src/password_hash.rs",
       "librefang-api/src/rate_limiter.rs",
-      "librefang-api/src/types.rs",
-      "librefang-api/src/validation.rs",
-      "librefang-api/src/versioning.rs",
-      "librefang-api/src/webchat.rs",
-      "librefang-api/src/ws.rs",
-      "librefang-api/src/stream_chunker.rs",
-      "librefang-api/src/stream_dedup.rs",
-      "librefang-api/src/telemetry.rs",
-      "librefang-api/src/terminal.rs",
-      "librefang-api/src/terminal_tmux.rs",
-      "librefang-api/src/webhook_store.rs",
-      "librefang-api/src/channel_bridge.rs",
       "librefang-api/src/routes/agents.rs",
       "librefang-api/src/routes/auto_dream.rs",
       "librefang-api/src/routes/budget.rs",
@@ -331,19 +29,28 @@
       "librefang-api/src/routes/skills.rs",
       "librefang-api/src/routes/system.rs",
       "librefang-api/src/routes/terminal.rs",
-      "librefang-api/src/routes/workflows.rs"
+      "librefang-api/src/routes/workflows.rs",
+      "librefang-api/src/server.rs",
+      "librefang-api/src/stream_chunker.rs",
+      "librefang-api/src/stream_dedup.rs",
+      "librefang-api/src/telemetry.rs",
+      "librefang-api/src/terminal.rs",
+      "librefang-api/src/terminal_tmux.rs",
+      "librefang-api/src/types.rs",
+      "librefang-api/src/validation.rs",
+      "librefang-api/src/versioning.rs",
+      "librefang-api/src/webchat.rs",
+      "librefang-api/src/webhook_store.rs",
+      "librefang-api/src/ws.rs"
     ]
   },
   {
     "name": "Dashboard Frontend",
     "slug": "dashboard-frontend",
     "files": [
-      "librefang-api/dashboard/src/App.tsx",
-      "librefang-api/dashboard/src/main.tsx",
-      "librefang-api/dashboard/src/router.tsx",
-      "librefang-api/dashboard/src/api.ts",
-      "librefang-api/dashboard/src/index.css",
       "librefang-api/dashboard/openapi/generated.ts",
+      "librefang-api/dashboard/src/App.tsx",
+      "librefang-api/dashboard/src/api.ts",
       "librefang-api/dashboard/src/components/AgentManifestForm.tsx",
       "librefang-api/dashboard/src/components/NodeEditor.tsx",
       "librefang-api/dashboard/src/components/NotificationCenter.tsx",
@@ -386,15 +93,6 @@
       "librefang-api/dashboard/src/lib/http/client.ts",
       "librefang-api/dashboard/src/lib/http/errors.ts",
       "librefang-api/dashboard/src/lib/i18n.ts",
-      "librefang-api/dashboard/src/lib/status.ts",
-      "librefang-api/dashboard/src/lib/store.ts",
-      "librefang-api/dashboard/src/lib/string.ts",
-      "librefang-api/dashboard/src/lib/triggerPattern.ts",
-      "librefang-api/dashboard/src/lib/tts.ts",
-      "librefang-api/dashboard/src/lib/useCreateShortcut.ts",
-      "librefang-api/dashboard/src/lib/useFocusTrap.ts",
-      "librefang-api/dashboard/src/lib/useKeyboardShortcuts.ts",
-      "librefang-api/dashboard/src/lib/useVoiceInput.ts",
       "librefang-api/dashboard/src/lib/mutations/agents.ts",
       "librefang-api/dashboard/src/lib/mutations/analytics.ts",
       "librefang-api/dashboard/src/lib/mutations/approvals.ts",
@@ -442,6 +140,16 @@
       "librefang-api/dashboard/src/lib/queries/telemetry.ts",
       "librefang-api/dashboard/src/lib/queries/terminal.ts",
       "librefang-api/dashboard/src/lib/queries/workflows.ts",
+      "librefang-api/dashboard/src/lib/status.ts",
+      "librefang-api/dashboard/src/lib/store.ts",
+      "librefang-api/dashboard/src/lib/string.ts",
+      "librefang-api/dashboard/src/lib/triggerPattern.ts",
+      "librefang-api/dashboard/src/lib/tts.ts",
+      "librefang-api/dashboard/src/lib/useCreateShortcut.ts",
+      "librefang-api/dashboard/src/lib/useFocusTrap.ts",
+      "librefang-api/dashboard/src/lib/useKeyboardShortcuts.ts",
+      "librefang-api/dashboard/src/lib/useVoiceInput.ts",
+      "librefang-api/dashboard/src/main.tsx",
       "librefang-api/dashboard/src/pages/A2APage.tsx",
       "librefang-api/dashboard/src/pages/AgentsPage.tsx",
       "librefang-api/dashboard/src/pages/AnalyticsPage.tsx",
@@ -470,29 +178,89 @@
       "librefang-api/dashboard/src/pages/TelemetryPage.tsx",
       "librefang-api/dashboard/src/pages/TerminalPage.tsx",
       "librefang-api/dashboard/src/pages/WizardPage.tsx",
-      "librefang-api/dashboard/src/pages/WorkflowsPage.tsx"
+      "librefang-api/dashboard/src/pages/WorkflowsPage.tsx",
+      "librefang-api/dashboard/src/router.tsx"
     ]
   },
   {
-    "name": "CLI & TUI",
-    "slug": "cli-tui",
+    "name": "Channel Integrations",
+    "slug": "channel-integrations",
     "files": [
-      "librefang-cli/src/main.rs",
-      "librefang-cli/src/launcher.rs",
+      "librefang-channels/src/bluesky.rs",
+      "librefang-channels/src/bridge.rs",
+      "librefang-channels/src/dingtalk.rs",
+      "librefang-channels/src/discord.rs",
+      "librefang-channels/src/discourse.rs",
+      "librefang-channels/src/email.rs",
+      "librefang-channels/src/feishu.rs",
+      "librefang-channels/src/flock.rs",
+      "librefang-channels/src/formatter.rs",
+      "librefang-channels/src/gitter.rs",
+      "librefang-channels/src/google_chat.rs",
+      "librefang-channels/src/gotify.rs",
+      "librefang-channels/src/guilded.rs",
+      "librefang-channels/src/http_client.rs",
+      "librefang-channels/src/irc.rs",
+      "librefang-channels/src/keybase.rs",
+      "librefang-channels/src/lib.rs",
+      "librefang-channels/src/line.rs",
+      "librefang-channels/src/linkedin.rs",
+      "librefang-channels/src/mastodon.rs",
+      "librefang-channels/src/matrix.rs",
+      "librefang-channels/src/mattermost.rs",
+      "librefang-channels/src/message_journal.rs",
+      "librefang-channels/src/message_truncator.rs",
+      "librefang-channels/src/messenger.rs",
+      "librefang-channels/src/mqtt.rs",
+      "librefang-channels/src/mumble.rs",
+      "librefang-channels/src/nextcloud.rs",
+      "librefang-channels/src/nostr.rs",
+      "librefang-channels/src/ntfy.rs",
+      "librefang-channels/src/pumble.rs",
+      "librefang-channels/src/qq.rs",
+      "librefang-channels/src/rate_limiter.rs",
+      "librefang-channels/src/reddit.rs",
+      "librefang-channels/src/revolt.rs",
+      "librefang-channels/src/rocketchat.rs",
+      "librefang-channels/src/router.rs",
+      "librefang-channels/src/sanitizer.rs",
+      "librefang-channels/src/sidecar.rs",
+      "librefang-channels/src/signal.rs",
+      "librefang-channels/src/slack.rs",
+      "librefang-channels/src/teams.rs",
+      "librefang-channels/src/telegram.rs",
+      "librefang-channels/src/threema.rs",
+      "librefang-channels/src/twist.rs",
+      "librefang-channels/src/twitch.rs",
+      "librefang-channels/src/types.rs",
+      "librefang-channels/src/viber.rs",
+      "librefang-channels/src/voice.rs",
+      "librefang-channels/src/webex.rs",
+      "librefang-channels/src/webhook.rs",
+      "librefang-channels/src/wechat.rs",
+      "librefang-channels/src/wecom.rs",
+      "librefang-channels/src/whatsapp.rs",
+      "librefang-channels/src/xmpp.rs",
+      "librefang-channels/src/zulip.rs"
+    ]
+  },
+  {
+    "name": "CLI & Terminal UI",
+    "slug": "cli-terminal-ui",
+    "files": [
+      "librefang-cli/src/bundled_agents.rs",
+      "librefang-cli/src/desktop_install.rs",
+      "librefang-cli/src/http_client.rs",
       "librefang-cli/src/i18n.rs",
+      "librefang-cli/src/launcher.rs",
+      "librefang-cli/src/main.rs",
       "librefang-cli/src/mcp.rs",
       "librefang-cli/src/progress.rs",
       "librefang-cli/src/table.rs",
       "librefang-cli/src/templates.rs",
-      "librefang-cli/src/ui.rs",
-      "librefang-cli/src/http_client.rs",
-      "librefang-cli/src/bundled_agents.rs",
-      "librefang-cli/src/desktop_install.rs",
-      "librefang-cli/src/tui/mod.rs",
       "librefang-cli/src/tui/chat_runner.rs",
       "librefang-cli/src/tui/event.rs",
-      "librefang-cli/src/tui/theme.rs",
-      "librefang-cli/src/tui/widgets.rs",
+      "librefang-cli/src/tui/mod.rs",
       "librefang-cli/src/tui/screens/agents.rs",
       "librefang-cli/src/tui/screens/audit.rs",
       "librefang-cli/src/tui/screens/channels.rs",
@@ -516,17 +284,20 @@
       "librefang-cli/src/tui/screens/usage.rs",
       "librefang-cli/src/tui/screens/welcome.rs",
       "librefang-cli/src/tui/screens/wizard.rs",
-      "librefang-cli/src/tui/screens/workflows.rs"
+      "librefang-cli/src/tui/screens/workflows.rs",
+      "librefang-cli/src/tui/theme.rs",
+      "librefang-cli/src/tui/widgets.rs",
+      "librefang-cli/src/ui.rs"
     ]
   },
   {
     "name": "Desktop Application",
     "slug": "desktop-application",
     "files": [
-      "librefang-desktop/src/lib.rs",
-      "librefang-desktop/src/main.rs",
       "librefang-desktop/src/commands.rs",
       "librefang-desktop/src/connection.rs",
+      "librefang-desktop/src/lib.rs",
+      "librefang-desktop/src/main.rs",
       "librefang-desktop/src/server.rs",
       "librefang-desktop/src/shortcuts.rs",
       "librefang-desktop/src/tray.rs",
@@ -534,33 +305,281 @@
     ]
   },
   {
-    "name": "Extensions System",
-    "slug": "extensions-system",
-    "files": [
-      "librefang-extensions/src/lib.rs",
-      "librefang-extensions/src/catalog.rs",
-      "librefang-extensions/src/credentials.rs",
-      "librefang-extensions/src/dotenv.rs",
-      "librefang-extensions/src/health.rs",
-      "librefang-extensions/src/http_client.rs",
-      "librefang-extensions/src/installer.rs",
-      "librefang-extensions/src/oauth.rs",
-      "librefang-extensions/src/vault.rs"
+    "name": "Agent Kernel",
+    "slug": "agent-kernel",
+    "files": [],
+    "children": [
+      {
+        "name": "Agent Kernel — librefang-kernel-src",
+        "slug": "agent-kernel-librefang-kernel-src",
+        "files": [
+          "librefang-kernel/src/approval.rs",
+          "librefang-kernel/src/auth.rs",
+          "librefang-kernel/src/auto_dream/lock.rs",
+          "librefang-kernel/src/auto_dream/mod.rs",
+          "librefang-kernel/src/auto_dream/prompt.rs",
+          "librefang-kernel/src/auto_reply.rs",
+          "librefang-kernel/src/background.rs",
+          "librefang-kernel/src/capabilities.rs",
+          "librefang-kernel/src/config.rs",
+          "librefang-kernel/src/config_reload.rs",
+          "librefang-kernel/src/cron.rs",
+          "librefang-kernel/src/error.rs",
+          "librefang-kernel/src/event_bus.rs",
+          "librefang-kernel/src/heartbeat.rs",
+          "librefang-kernel/src/hooks.rs",
+          "librefang-kernel/src/inbox.rs",
+          "librefang-kernel/src/kernel/manifest_helpers.rs",
+          "librefang-kernel/src/kernel/tests.rs",
+          "librefang-kernel/src/kernel/workspace_setup.rs",
+          "librefang-kernel/src/lib.rs",
+          "librefang-kernel/src/mcp_oauth_provider.rs",
+          "librefang-kernel/src/orchestration.rs",
+          "librefang-kernel/src/pairing.rs",
+          "librefang-kernel/src/registry.rs",
+          "librefang-kernel/src/scheduler.rs",
+          "librefang-kernel/src/session_policy.rs",
+          "librefang-kernel/src/supervisor.rs",
+          "librefang-kernel/src/triggers.rs",
+          "librefang-kernel/src/whatsapp_gateway.rs",
+          "librefang-kernel/src/wizard.rs",
+          "librefang-kernel/src/workflow.rs"
+        ]
+      },
+      {
+        "name": "Agent Kernel — librefang-kernel-handle-src",
+        "slug": "agent-kernel-librefang-kernel-handle-src",
+        "files": [
+          "librefang-kernel-handle/src/lib.rs"
+        ]
+      },
+      {
+        "name": "Agent Kernel — librefang-kernel-metering-src",
+        "slug": "agent-kernel-librefang-kernel-metering-src",
+        "files": [
+          "librefang-kernel-metering/src/lib.rs"
+        ]
+      },
+      {
+        "name": "Agent Kernel — librefang-kernel-router-src",
+        "slug": "agent-kernel-librefang-kernel-router-src",
+        "files": [
+          "librefang-kernel-router/src/lib.rs"
+        ]
+      }
     ]
   },
   {
-    "name": "Hands & Multi-Agent",
-    "slug": "hands-multi-agent",
+    "name": "Hands System",
+    "slug": "hands-system",
     "files": [
       "librefang-hands/src/lib.rs",
       "librefang-hands/src/registry.rs"
     ]
   },
   {
-    "name": "Shared Types",
-    "slug": "shared-types",
+    "name": "LLM Drivers",
+    "slug": "llm-drivers",
+    "files": [],
+    "children": [
+      {
+        "name": "LLM Drivers — librefang-llm-driver-src",
+        "slug": "llm-drivers-librefang-llm-driver-src",
+        "files": [
+          "librefang-llm-driver/src/lib.rs",
+          "librefang-llm-driver/src/llm_errors.rs"
+        ]
+      },
+      {
+        "name": "LLM Drivers — librefang-llm-drivers-src",
+        "slug": "llm-drivers-librefang-llm-drivers-src",
+        "files": [
+          "librefang-llm-drivers/src/backoff.rs",
+          "librefang-llm-drivers/src/credential_pool.rs",
+          "librefang-llm-drivers/src/drivers/aider.rs",
+          "librefang-llm-drivers/src/drivers/anthropic.rs",
+          "librefang-llm-drivers/src/drivers/chatgpt.rs",
+          "librefang-llm-drivers/src/drivers/claude_code.rs",
+          "librefang-llm-drivers/src/drivers/codex_cli.rs",
+          "librefang-llm-drivers/src/drivers/copilot.rs",
+          "librefang-llm-drivers/src/drivers/fallback.rs",
+          "librefang-llm-drivers/src/drivers/fallback_chain.rs",
+          "librefang-llm-drivers/src/drivers/gemini.rs",
+          "librefang-llm-drivers/src/drivers/gemini_cli.rs",
+          "librefang-llm-drivers/src/drivers/mod.rs",
+          "librefang-llm-drivers/src/drivers/openai.rs",
+          "librefang-llm-drivers/src/drivers/qwen_code.rs",
+          "librefang-llm-drivers/src/drivers/token_rotation.rs",
+          "librefang-llm-drivers/src/drivers/vertex_ai.rs",
+          "librefang-llm-drivers/src/lib.rs",
+          "librefang-llm-drivers/src/rate_limit_tracker.rs",
+          "librefang-llm-drivers/src/think_filter.rs"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Memory System",
+    "slug": "memory-system",
     "files": [
-      "librefang-types/src/lib.rs",
+      "librefang-memory/src/chunker.rs",
+      "librefang-memory/src/consolidation.rs",
+      "librefang-memory/src/decay.rs",
+      "librefang-memory/src/http_vector_store.rs",
+      "librefang-memory/src/knowledge.rs",
+      "librefang-memory/src/lib.rs",
+      "librefang-memory/src/migration.rs",
+      "librefang-memory/src/proactive.rs",
+      "librefang-memory/src/prompt.rs",
+      "librefang-memory/src/provider.rs",
+      "librefang-memory/src/semantic.rs",
+      "librefang-memory/src/session.rs",
+      "librefang-memory/src/structured.rs",
+      "librefang-memory/src/substrate.rs",
+      "librefang-memory/src/usage.rs"
+    ]
+  },
+  {
+    "name": "Agent Runtime",
+    "slug": "agent-runtime",
+    "files": [],
+    "children": [
+      {
+        "name": "Agent Runtime — librefang-runtime-src",
+        "slug": "agent-runtime-librefang-runtime-src",
+        "files": [
+          "librefang-runtime/src/a2a.rs",
+          "librefang-runtime/src/agent_loop.rs",
+          "librefang-runtime/src/apply_patch.rs",
+          "librefang-runtime/src/audit.rs",
+          "librefang-runtime/src/auth_cooldown.rs",
+          "librefang-runtime/src/browser.rs",
+          "librefang-runtime/src/catalog_sync.rs",
+          "librefang-runtime/src/channel_registry.rs",
+          "librefang-runtime/src/checkpoint_manager.rs",
+          "librefang-runtime/src/command_lane.rs",
+          "librefang-runtime/src/compactor.rs",
+          "librefang-runtime/src/context_budget.rs",
+          "librefang-runtime/src/context_compressor.rs",
+          "librefang-runtime/src/context_engine.rs",
+          "librefang-runtime/src/context_overflow.rs",
+          "librefang-runtime/src/dangerous_command.rs",
+          "librefang-runtime/src/docker_sandbox.rs",
+          "librefang-runtime/src/embedding.rs",
+          "librefang-runtime/src/graceful_shutdown.rs",
+          "librefang-runtime/src/hooks.rs",
+          "librefang-runtime/src/image_gen.rs",
+          "librefang-runtime/src/injection_guard.rs",
+          "librefang-runtime/src/interrupt.rs",
+          "librefang-runtime/src/lib.rs",
+          "librefang-runtime/src/link_understanding.rs",
+          "librefang-runtime/src/loop_guard.rs",
+          "librefang-runtime/src/mcp_migrate.rs",
+          "librefang-runtime/src/mcp_server.rs",
+          "librefang-runtime/src/media/elevenlabs.rs",
+          "librefang-runtime/src/media/gemini.rs",
+          "librefang-runtime/src/media/google_tts.rs",
+          "librefang-runtime/src/media/minimax.rs",
+          "librefang-runtime/src/media/mod.rs",
+          "librefang-runtime/src/media/openai.rs",
+          "librefang-runtime/src/media_understanding.rs",
+          "librefang-runtime/src/model_catalog.rs",
+          "librefang-runtime/src/pii_filter.rs",
+          "librefang-runtime/src/plugin_manager.rs",
+          "librefang-runtime/src/plugin_runtime.rs",
+          "librefang-runtime/src/proactive_memory.rs",
+          "librefang-runtime/src/process_manager.rs",
+          "librefang-runtime/src/process_registry.rs",
+          "librefang-runtime/src/prompt_builder.rs",
+          "librefang-runtime/src/provider_health.rs",
+          "librefang-runtime/src/python_runtime.rs",
+          "librefang-runtime/src/registry_sync.rs",
+          "librefang-runtime/src/reply_directives.rs",
+          "librefang-runtime/src/retry.rs",
+          "librefang-runtime/src/routing.rs",
+          "librefang-runtime/src/session_repair.rs",
+          "librefang-runtime/src/shell_bleed.rs",
+          "librefang-runtime/src/silent_response.rs",
+          "librefang-runtime/src/str_utils.rs",
+          "librefang-runtime/src/subprocess_sandbox.rs",
+          "librefang-runtime/src/tool_budget.rs",
+          "librefang-runtime/src/tool_policy.rs",
+          "librefang-runtime/src/tool_runner.rs",
+          "librefang-runtime/src/trace_store.rs",
+          "librefang-runtime/src/tts.rs",
+          "librefang-runtime/src/web_cache.rs",
+          "librefang-runtime/src/web_content.rs",
+          "librefang-runtime/src/web_fetch.rs",
+          "librefang-runtime/src/web_search.rs",
+          "librefang-runtime/src/workspace_context.rs",
+          "librefang-runtime/src/workspace_sandbox.rs"
+        ]
+      },
+      {
+        "name": "Agent Runtime — librefang-runtime-mcp-src",
+        "slug": "agent-runtime-librefang-runtime-mcp-src",
+        "files": [
+          "librefang-runtime-mcp/src/lib.rs",
+          "librefang-runtime-mcp/src/mcp_oauth.rs"
+        ]
+      },
+      {
+        "name": "Agent Runtime — librefang-runtime-oauth-src",
+        "slug": "agent-runtime-librefang-runtime-oauth-src",
+        "files": [
+          "librefang-runtime-oauth/src/chatgpt_oauth.rs",
+          "librefang-runtime-oauth/src/copilot_oauth.rs",
+          "librefang-runtime-oauth/src/lib.rs"
+        ]
+      },
+      {
+        "name": "Agent Runtime — librefang-runtime-wasm-src",
+        "slug": "agent-runtime-librefang-runtime-wasm-src",
+        "files": [
+          "librefang-runtime-wasm/src/host_functions.rs",
+          "librefang-runtime-wasm/src/lib.rs",
+          "librefang-runtime-wasm/src/sandbox.rs"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Skills System",
+    "slug": "skills-system",
+    "files": [
+      "librefang-skills/src/clawhub.rs",
+      "librefang-skills/src/config_injection.rs",
+      "librefang-skills/src/evolution.rs",
+      "librefang-skills/src/http_client.rs",
+      "librefang-skills/src/lib.rs",
+      "librefang-skills/src/loader.rs",
+      "librefang-skills/src/marketplace.rs",
+      "librefang-skills/src/openclaw_compat.rs",
+      "librefang-skills/src/publish.rs",
+      "librefang-skills/src/registry.rs",
+      "librefang-skills/src/skillhub.rs",
+      "librefang-skills/src/verify.rs"
+    ]
+  },
+  {
+    "name": "Extensions System",
+    "slug": "extensions-system",
+    "files": [
+      "librefang-extensions/src/catalog.rs",
+      "librefang-extensions/src/credentials.rs",
+      "librefang-extensions/src/dotenv.rs",
+      "librefang-extensions/src/health.rs",
+      "librefang-extensions/src/http_client.rs",
+      "librefang-extensions/src/installer.rs",
+      "librefang-extensions/src/lib.rs",
+      "librefang-extensions/src/oauth.rs",
+      "librefang-extensions/src/vault.rs"
+    ]
+  },
+  {
+    "name": "Shared Types & Configuration",
+    "slug": "shared-types-configuration",
+    "files": [
       "librefang-types/src/agent.rs",
       "librefang-types/src/approval.rs",
       "librefang-types/src/capability.rs",
@@ -574,6 +593,7 @@
       "librefang-types/src/event.rs",
       "librefang-types/src/goal.rs",
       "librefang-types/src/i18n.rs",
+      "librefang-types/src/lib.rs",
       "librefang-types/src/manifest_signing.rs",
       "librefang-types/src/media.rs",
       "librefang-types/src/memory.rs",
@@ -591,8 +611,8 @@
     ]
   },
   {
-    "name": "Networking & P2P",
-    "slug": "networking-p2p",
+    "name": "Wire Protocol & Networking",
+    "slug": "wire-protocol-networking",
     "files": [
       "librefang-wire/src/lib.rs",
       "librefang-wire/src/message.rs",
@@ -601,57 +621,12 @@
     ]
   },
   {
-    "name": "Runtime Protocols (MCP & OAuth)",
-    "slug": "runtime-protocols-mcp-oauth",
-    "files": [],
-    "children": [
-      {
-        "name": "Runtime Protocols (MCP & OAuth) — librefang-runtime-mcp-src",
-        "slug": "runtime-protocols-mcp-oauth-librefang-runtime-mcp-src",
-        "files": [
-          "librefang-runtime-mcp/src/lib.rs",
-          "librefang-runtime-mcp/src/mcp_oauth.rs"
-        ]
-      },
-      {
-        "name": "Runtime Protocols (MCP & OAuth) — librefang-runtime-oauth-src",
-        "slug": "runtime-protocols-mcp-oauth-librefang-runtime-oauth-src",
-        "files": [
-          "librefang-runtime-oauth/src/lib.rs",
-          "librefang-runtime-oauth/src/chatgpt_oauth.rs",
-          "librefang-runtime-oauth/src/copilot_oauth.rs"
-        ]
-      }
-    ]
-  },
-  {
-    "name": "Telemetry & Observability",
-    "slug": "telemetry-observability",
+    "name": "Telemetry",
+    "slug": "telemetry",
     "files": [
-      "librefang-telemetry/src/lib.rs",
       "librefang-telemetry/src/config.rs",
+      "librefang-telemetry/src/lib.rs",
       "librefang-telemetry/src/metrics.rs"
-    ]
-  },
-  {
-    "name": "Testing Framework",
-    "slug": "testing-framework",
-    "files": [
-      "librefang-testing/src/lib.rs",
-      "librefang-testing/src/helpers.rs",
-      "librefang-testing/src/mock_driver.rs",
-      "librefang-testing/src/mock_kernel.rs",
-      "librefang-testing/src/test_app.rs"
-    ]
-  },
-  {
-    "name": "Migration",
-    "slug": "migration",
-    "files": [
-      "librefang-migrate/src/lib.rs",
-      "librefang-migrate/src/openclaw.rs",
-      "librefang-migrate/src/openfang.rs",
-      "librefang-migrate/src/report.rs"
     ]
   },
   {
@@ -662,24 +637,32 @@
     ]
   },
   {
+    "name": "Testing Utilities",
+    "slug": "testing-utilities",
+    "files": [
+      "librefang-testing/src/helpers.rs",
+      "librefang-testing/src/lib.rs",
+      "librefang-testing/src/mock_driver.rs",
+      "librefang-testing/src/mock_kernel.rs",
+      "librefang-testing/src/test_app.rs",
+      "librefang-testing/src/tests.rs"
+    ]
+  },
+  {
+    "name": "Migration Tools",
+    "slug": "migration-tools",
+    "files": [
+      "librefang-migrate/src/lib.rs",
+      "librefang-migrate/src/openclaw.rs",
+      "librefang-migrate/src/openfang.rs",
+      "librefang-migrate/src/report.rs"
+    ]
+  },
+  {
     "name": "Other",
     "slug": "other",
     "files": [],
     "children": [
-      {
-        "name": "Other — AGENTS.md",
-        "slug": "other-agents-md",
-        "files": [
-          "AGENTS.md"
-        ]
-      },
-      {
-        "name": "Other — CLAUDE.md",
-        "slug": "other-claude-md",
-        "files": [
-          "CLAUDE.md"
-        ]
-      },
       {
         "name": "Other — librefang-api",
         "slug": "other-librefang-api",
@@ -693,7 +676,6 @@
         "slug": "other-librefang-api-dashboard",
         "files": [
           "librefang-api/dashboard/AGENTS.md",
-          "librefang-api/dashboard/CLAUDE.md",
           "librefang-api/dashboard/e2e/dashboard.spec.ts",
           "librefang-api/dashboard/index.html",
           "librefang-api/dashboard/package.json",
@@ -703,6 +685,7 @@
           "librefang-api/dashboard/public/sw.js",
           "librefang-api/dashboard/src/api.test.ts",
           "librefang-api/dashboard/src/components/ui/MultiSelectCmdk.test.tsx",
+          "librefang-api/dashboard/src/index.css",
           "librefang-api/dashboard/src/lib/agentManifest.test.ts",
           "librefang-api/dashboard/src/lib/agentManifestMarkdown.test.ts",
           "librefang-api/dashboard/src/lib/chat.test.ts",
@@ -762,7 +745,8 @@
           "librefang-api/tests/api_integration_test.rs",
           "librefang-api/tests/daemon_lifecycle_test.rs",
           "librefang-api/tests/load_test.rs",
-          "librefang-api/tests/openapi_spec_test.rs"
+          "librefang-api/tests/openapi_spec_test.rs",
+          "librefang-api/tests/tools_invoke_test.rs"
         ]
       },
       {
@@ -777,13 +761,6 @@
         "slug": "other-librefang-channels-benches",
         "files": [
           "librefang-channels/benches/dispatch.rs"
-        ]
-      },
-      {
-        "name": "Other — librefang-channels-src",
-        "slug": "other-librefang-channels-src",
-        "files": [
-          "librefang-channels/src/twitch.rs"
         ]
       },
       {
@@ -895,15 +872,6 @@
         ]
       },
       {
-        "name": "Other — librefang-kernel-src",
-        "slug": "other-librefang-kernel-src",
-        "files": [
-          "librefang-kernel/src/approval.rs",
-          "librefang-kernel/src/auth.rs",
-          "librefang-kernel/src/kernel/tests.rs"
-        ]
-      },
-      {
         "name": "Other — librefang-kernel-tests",
         "slug": "other-librefang-kernel-tests",
         "files": [
@@ -1003,13 +971,6 @@
         "slug": "other-librefang-testing",
         "files": [
           "librefang-testing/Cargo.toml"
-        ]
-      },
-      {
-        "name": "Other — librefang-testing-src",
-        "slug": "other-librefang-testing-src",
-        "files": [
-          "librefang-testing/src/tests.rs"
         ]
       },
       {

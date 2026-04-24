@@ -1,89 +1,79 @@
 # Other — librefang-types-tests
 
-# librefang-types-tests: Agent Form Roundtrip Tests
+# librefang-types-tests — Agent Form Round-Trip Tests
 
 ## Purpose
 
-This test module validates that the TOML output produced by the dashboard's visual editor can be correctly parsed by the kernel's Rust deserializer. It serves as a **contract test** between two independent implementations written in different languages:
+This module validates that the TOML emitted by the **dashboard's visual agent editor** can be faithfully parsed by the **kernel's Rust deserializer**. It acts as a contract test between two independently maintained code paths:
 
-- **TypeScript serializer** in `crates/librefang-api/dashboard/src/lib/agentManifest.ts` — generates TOML from form state
-- **Rust deserializer** in `librefang_types::agent::AgentManifest` — parses that TOML into structured types
+- **Producer:** `crates/librefang-api/dashboard/src/lib/agentManifest.ts` — a TypeScript serializer that converts form state into TOML.
+- **Consumer:** `librefang_types::agent::AgentManifest` — the Rust struct that deserializes that TOML via the `toml` crate.
 
-Any drift between these implementations (renamed fields, changed enum variants, altered nesting) is caught at build time.
-
-## Why This Exists
-
-A user configures an agent through the visual editor, the dashboard serializes to TOML, and the kernel must deserialize identically. Mismatches cause silent data loss or parse failures in production. These tests pin down the exact TOML shapes the serializer must emit.
+If either side renames a field, changes an enum variant, or restructures a section, these tests fail at build time, catching the drift before it reaches production.
 
 ## Architecture
 
 ```mermaid
-graph LR
-    A[Dashboard Form<br/>TypeScript Serializer] -->|produces TOML| B[This Test Suite]
-    B -->|parses via| C[AgentManifest<br/>librefang_types::agent]
-    B -.->|mirrors output of| D[agentManifest.ts]
-    E[Kernel Runtime] -->|uses same parse path| C
+flowchart LR
+    A[Dashboard Form<br/>TypeScript] -->|emits TOML| B[agent_form_roundtrip<br/>Rust tests]
+    B -->|toml::from_str| C[AgentManifest<br/>Rust struct]
+    B -.->|mirrors serializer logic| A
 ```
 
-The tests do **not** call the TypeScript code. They embed the exact TOML strings the serializer is expected to produce and verify `AgentManifest` parses them. When the serializer changes, these tests must be updated in lockstep — that coupling is the drift alarm.
+The tests contain **hardcoded TOML strings** that replicate what the dashboard serializer would produce for various form states. Each string is fed through `toml::from_str::<AgentManifest>()` and then the resulting struct is asserted against field by field.
 
-## Test Coverage
+## Test Cases
 
 ### `parses_form_minimum_viable_output`
 
-The smallest valid TOML the form can emit. Only required fields: `name`, `version`, `module`, and a `[model]` table with `provider` and `model`. Confirms the kernel accepts a bare-bones agent definition without optional sections.
+Validates the smallest valid manifest the form can emit — only the required fields (`name`, `version`, `module`, and the `[model]` section). This ensures backward compatibility: old agents saved with minimal forms continue to parse.
 
 ### `parses_form_full_output_with_capabilities_and_resources`
 
-A complete form output including:
-- Top-level optional fields: `description`, `tags`, `skills`
-- Model tuning: `temperature`, `max_tokens`, `system_prompt`
-- Resource quotas: `max_tool_calls_per_minute`, `max_cost_per_hour_usd`
-- Capability grants: `network`, `shell`, `agent_spawn`
+Covers a fully populated form with all standard sections:
+
+| Section | Fields Verified |
+|---|---|
+| Top-level | `tags`, `skills`, `description` |
+| `[model]` | `temperature`, `max_tokens`, `system_prompt` |
+| `[resources]` | `max_tool_calls_per_minute`, `max_cost_per_hour_usd` |
+| `[capabilities]` | `network`, `shell`, `agent_spawn` |
+
+This test catches field-level drift such as a renamed capability or a changed default type.
 
 ### `parses_form_with_advanced_sections`
 
-The primary drift-detection test. Mirrors the serializer's output when every advanced section is populated:
+Exercises every advanced section the form can expose. This is the most comprehensive drift-detection test and covers:
 
-| Section | Fields Validated |
-|---|---|
-| Top-level enums | `priority`, `session_mode`, `web_search_augmentation`, `exec_policy` |
-| `schedule` | Periodic cron expression |
-| `thinking` | `budget_tokens`, `stream_thinking` |
-| `autonomous` | `max_iterations`, `heartbeat_channel` |
-| `routing` | Tiered model selection (`simple_model`, `medium_model`, `complex_model`) with thresholds |
-| `[[fallback_models]]` | Array-of-tables with `provider`, `model` |
-| `[[context_injection]]` | Array-of-tables with `name`, `content`, `position` |
-| Extended capabilities | `memory_read`, `memory_write`, `agent_message`, `ofp_connect` |
+- **Enum variants:** `priority = "High"` → `Priority::High`, `session_mode = "new"` → `SessionMode::New`
+- **Inline tables:** `schedule = { periodic = { cron = "0 9 * * *" } }`
+- **Optional sections:** `[thinking]`, `[autonomous]`, `[routing]` — each wrapped in `Option<T>` on the Rust side, verified with `.is_some()` and `.as_ref().unwrap()`
+- **Array-of-tables:** `[[fallback_models]]` and `[[context_injection]]` — these use TOML's double-bracket syntax and map to `Vec<FallbackModel>` and `Vec<ContextInjection>` respectively
+- **Capability ACLs:** `memory_read`, `memory_write`, `agent_message`, `ofp_connect` — glob-style permission strings
 
 ### `parses_form_response_format_json_schema`
 
-Validates that the form's JSON-schema output — an inline TOML table with `type`, `name`, `schema`, and `strict` — deserializes into `ResponseFormat::JsonSchema`. Catches enum variant mismatches across the language boundary.
+Validates that the dashboard's inline JSON-schema serializer output deserializes into `ResponseFormat::JsonSchema`. The form emits the schema as an inline TOML table (`{ type = "json_schema", name = "user", schema = { type = "object" }, strict = true }`), and this test confirms the kernel correctly picks the `JsonSchema` variant and extracts the `name` and `strict` fields.
 
 ### `omitting_optional_sections_uses_defaults`
 
-When the form omits `resources` and `capabilities` entirely, confirms the kernel applies correct defaults:
-- `capabilities.network` → empty vec
-- `capabilities.agent_spawn` → `false`
-- `resources.max_llm_tokens_per_hour` → `None` (inherits global default)
+Verifies that when the form leaves `[resources]` and `[capabilities]` entirely absent, the kernel falls back to struct defaults. Assertions check that `capabilities.network` is empty, `capabilities.agent_spawn` is `false`, and `resources.max_llm_tokens_per_hour` is `None` (meaning "inherit global default").
 
-Prevents the form from needing to emit empty sections.
+## When These Tests Fail
+
+A failure in this module almost always means one of two things:
+
+1. **The Rust `AgentManifest` struct changed** (field renamed, type changed, section removed) without updating the dashboard serializer. Fix the serializer in `agentManifest.ts`, or update the test TOML to match the new schema.
+2. **The dashboard serializer changed** (new field, renamed key, different TOML structure) without updating the Rust struct. Add or update the corresponding field in `AgentManifest` and its `Deserialize` implementation.
+
+In both cases, the fix requires coordinating both sides of the contract — these tests exist to flag exactly this kind of cross-crate divergence.
 
 ## Running
 
 ```bash
-# Full suite
+# From the workspace root
 cargo test -p librefang-types --test agent_form_roundtrip
 
-# Single test
+# Run a specific case
 cargo test -p librefang-types --test agent_form_roundtrip parses_form_with_advanced_sections
 ```
-
-## Adding a New Form Field
-
-1. Add the field to `AgentManifest` or its sub-structs in `librefang_types::agent`
-2. Update the dashboard serializer in `agentManifest.ts`
-3. Add the TOML fragment to `parses_form_with_advanced_sections` (or write a focused new test)
-4. Assert the field deserializes to the expected value
-
-The embedded TOML strings must match **exactly** what the TypeScript serializer emits — do not add test-only fields or structures.

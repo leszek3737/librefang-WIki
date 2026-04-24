@@ -1,264 +1,238 @@
 # LLM Drivers — librefang-llm-driver-src
 
-# LLM Driver (`librefang-llm-driver`)
+# librefang-llm-driver-src
 
-Provider-agnostic abstraction over LLM APIs. Every concrete provider (Anthropic, OpenAI, Ollama, Vertex AI, Azure OpenAI, etc.) implements the same `LlmDriver` trait, and all error responses are classified into a unified taxonomy that drives automatic provider failover.
+Provider-agnostic LLM driver interface, error classification, and failover taxonomy.
+
+This crate defines the contract that all LLM provider implementations (Anthropic, OpenAI, Ollama, Gemini, etc.) satisfy, along with a classification engine that maps raw provider errors into actionable categories for the `FallbackChain` provider-switching logic.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[Agent Loop / Runtime] -->|CompletionRequest| B[LlmDriver trait]
-    B -->|complete| C[Provider impl<br/>Anthropic / OpenAI / Ollama / ...]
+    A[Caller] -->|CompletionRequest| B[LlmDriver trait]
+    B -->|complete| C[Provider-specific impl]
     B -->|stream| C
-    C -->|Ok| D[CompletionResponse]
-    C -->|Err| E[LlmError]
-    E -->|failover_reason| F[FailoverReason]
-    E -->|classify_error| G[ClassifiedError]
-    F --> H[FallbackChain<br/>retry / skip provider]
-    G --> I[User-facing<br/>sanitized message]
+    C -->|LlmError| D[failover_reason]
+    D --> E[FailoverReason]
+    E --> F[FallbackChain]
+    F -->|retry/skip/propagate| B
+
+    subgraph "Error Classification"
+        G[classify_error] --> H[ClassifiedError]
+        G --> I[sanitize_for_user]
+        G --> J[extract_retry_delay]
+    end
 ```
 
-The crate is split into two cohesive units:
+## Core Types
 
-- **`lib.rs`** — request/response types, the `LlmDriver` trait, `DriverConfig`, `StreamEvent`, and `LlmError` with its `failover_reason()` method.
-- **`llm_errors.rs`** — the full error classification pipeline (`classify_error`, `classify_error_with_context`), sanitization, and the `FailoverReason` taxonomy.
+### `LlmDriver` Trait
 
----
-
-## Core Trait
-
-### `LlmDriver`
+The central abstraction. Every provider implements two methods:
 
 ```rust
 #[async_trait]
 pub trait LlmDriver: Send + Sync {
-    async fn complete(&self, request: CompletionRequest)
-        -> Result<CompletionResponse, LlmError>;
-
-    async fn stream(
-        &self,
-        request: CompletionRequest,
-        tx: tokio::sync::mpsc::Sender<StreamEvent>,
-    ) -> Result<CompletionResponse, LlmError>;
-
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError>;
+    async fn stream(&self, request: CompletionRequest, tx: Sender<StreamEvent>) -> Result<CompletionResponse, LlmError>;
     fn is_configured(&self) -> bool { true }
 }
 ```
 
-- **`complete`** — blocking (non-streaming) request. Returns the full response at once.
-- **`stream`** — sends incremental `StreamEvent`s through the `tx` channel. The default implementation wraps `complete()`: it emits a single `TextDelta` followed by `ContentComplete`. Concrete providers override this to emit true token-by-token streaming.
-- **`is_configured`** — returns `false` only for `StubDriver`; all real providers return `true`.
+- **`complete`** — blocking (non-streaming) request. Must be implemented by each provider.
+- **`stream`** — has a default implementation that calls `complete` then emits a single `TextDelta` followed by `ContentComplete`. Providers with native SSE/streaming support override this for incremental delivery.
+- **`is_configured`** — returns `true` for real drivers. Only `StubDriver` returns `false`, allowing the kernel to skip unconfigured provider slots.
 
-### Request / Response
+### `CompletionRequest`
 
-**`CompletionRequest`** carries everything an LLM call needs:
+All parameters needed for an LLM call:
 
 | Field | Purpose |
 |---|---|
-| `model` | Provider-specific model identifier (e.g. `"claude-sonnet-4-20250514"`, `"gpt-4o"`) |
-| `messages` | Conversation history as `Vec<Message>` |
-| `tools` | Available `ToolDefinition`s for function calling |
+| `model` | Provider-specific model identifier |
+| `messages` | Conversation history (`Vec<Message>`) |
+| `tools` | Available tool definitions the model may invoke |
 | `max_tokens` | Generation cap |
 | `temperature` | Sampling temperature |
-| `system` | Extracted system prompt (some APIs need this as a separate parameter) |
-| `thinking` | Extended thinking configuration (models that support chain-of-thought) |
-| `prompt_caching` | Enable prompt caching (Anthropic: explicit cache markers; OpenAI: automatic prefix) |
+| `system` | Extracted system prompt (some APIs need it separately from messages) |
+| `thinking` | Extended thinking/reasoning config (provider-specific) |
+| `prompt_caching` | Enable cache-control markers for supported providers |
 | `response_format` | Structured output (`ResponseFormat`) |
-| `timeout_secs` | Per-request timeout override — lets the agent loop grant longer timeouts for expensive operations |
-| `extra_body` | Provider-specific parameters merged into the API body (last-wins on key conflict) |
-| `agent_id` | Calling agent's identity, forwarded as an HTTP header for MCP bridge routing |
+| `timeout_secs` | Per-request inactivity timeout override |
+| `extra_body` | Provider-specific JSON merged into the request body (last-wins) |
+| `agent_id` | Owning agent identity for MCP bridge header propagation |
 
-**`CompletionResponse`** contains:
+### `CompletionResponse`
 
-- `content: Vec<ContentBlock>` — text, thinking, and tool-use blocks
-- `stop_reason: StopReason` — why generation ended
-- `tool_calls: Vec<ToolCall>` — extracted tool invocations
-- `usage: TokenUsage` — input/output token counts
+The response contains `content` blocks, a `stop_reason`, extracted `tool_calls`, and `usage` stats. The helper `text()` concatenates all `ContentBlock::Text` variants, filtering out thinking blocks:
 
-Use `response.text()` to concatenate all `ContentBlock::Text` blocks into a single string.
+```rust
+let reply: String = response.text();
+```
 
----
+### `StreamEvent`
 
-## Streaming Events
+Emitted over a `tokio::sync::mpsc` channel during streaming:
 
-`StreamEvent` represents incremental output from a streaming LLM call:
+- **`TextDelta`** — incremental text chunk
+- **`ThinkingDelta`** — reasoning chain text (extended thinking models)
+- **`ToolUseStart` / `ToolInputDelta` / `ToolUseEnd`** — tool call lifecycle
+- **`ContentComplete`** — final event carrying `StopReason` and `TokenUsage`
+- **`PhaseChange`** — agent lifecycle signal (e.g., `"response_complete"`)
+- **`ToolExecutionResult`** — tool output (emitted by agent loop, not driver)
+- **`OwnerNotice`** — private owner-side notification (emitted by agent loop)
 
-| Variant | Direction | Meaning |
-|---|---|---|
-| `TextDelta { text }` | LLM → UI | Incremental text token |
-| `ThinkingDelta { text }` | LLM → UI | Incremental reasoning/chain-of-thought text |
-| `ToolUseStart { id, name }` | LLM → UI | A tool call block has begun |
-| `ToolInputDelta { text }` | LLM → UI | Partial JSON input for the in-progress tool call |
-| `ToolUseEnd { id, name, input }` | LLM → UI | Tool call complete with parsed JSON input |
-| `ContentComplete { stop_reason, usage }` | LLM → UI | Full response finished |
-| `PhaseChange { phase, detail }` | Agent loop → UI | Lifecycle phase transition |
-| `ToolExecutionResult { name, result_preview, is_error }` | Agent loop → UI | Tool finished executing |
-
-The constant `PHASE_RESPONSE_COMPLETE` (`"response_complete"`) is the phase name emitted when the LLM has finished streaming text and the agent loop is about to enter post-processing. Consumers use this to unblock user input before the full response payload is finalized.
-
----
+The constant `PHASE_RESPONSE_COMPLETE` (`"response_complete"`) signals that LLM text is fully streamed and post-processing is about to begin. Consumers use this to unblock user input before the full response payload is finalized.
 
 ## Error Handling
 
 ### `LlmError`
 
-Provider errors are captured in a structured enum:
+Structured error variants covering all failure modes:
+
+| Variant | Meaning |
+|---|---|
+| `Http(String)` | Transport-level failure (connection refused, TLS) |
+| `Api { status, message }` | HTTP response with non-2xx status |
+| `RateLimited { retry_after_ms, message }` | Explicit rate limit with optional backoff hint |
+| `Parse(String)` | Response body could not be deserialized |
+| `MissingApiKey(String)` | No API key configured |
+| `Overloaded { retry_after_ms }` | Provider capacity error |
+| `AuthenticationFailed(String)` | Invalid credentials |
+| `ModelNotFound(String)` | Model identifier not recognized by provider |
+| `TimedOut { inactivity_secs, partial_text, … }` | Subprocess stalled; partial output captured |
+
+The `failover_reason()` method maps any `LlmError` into a `FailoverReason` for provider-switching decisions. This is a structural, allocation-free classification:
 
 ```rust
-pub enum LlmError {
-    Http(String),
-    Api { status: u16, message: String },
-    RateLimited { retry_after_ms: u64, message: Option<String> },
-    Parse(String),
-    MissingApiKey(String),
-    Overloaded { retry_after_ms: u64 },
-    AuthenticationFailed(String),
-    ModelNotFound(String),
-    TimedOut { inactivity_secs: u64, partial_text: String, ... },
-}
+let reason: FailoverReason = error.failover_reason();
 ```
 
-Every variant implements `failover_reason()` → `FailoverReason`, which classifies the error into a provider-switching decision. Classification is purely structural (variant + status code + message content) with no allocations, making it suitable for hot-path use inside `FallbackChain`.
+Status-code disambiguation rules for `Api` errors:
 
-### Error Classification Pipeline
+- **401** → `AuthError`
+- **402** → `CreditExhausted`
+- **403** → inspect message body — rate limit keywords, billing keywords, and model keywords are checked before falling back to `AuthError`
+- **404** → `ModelUnavailable` only when message explicitly references a model; otherwise `HttpError` (generic endpoint 404)
+- **413** → `ContextTooLong`
+- **429** → `RateLimit`
+- **503** → `ModelUnavailable`
+- **400** → `ContextTooLong` if message contains context-related keywords; otherwise `HttpError`
 
-The `llm_errors` module provides two levels of classification:
+`Overloaded` maps to `RateLimit` (retry same provider with backoff). `Parse` maps to `Unknown` (propagate immediately — not recoverable by switching providers).
 
-#### `classify_error(message, status) -> ClassifiedError`
+## Error Classification Engine (`llm_errors`)
 
-The core classifier. It combines **HTTP status-code fast paths** with **case-insensitive substring pattern matching** to sort any error from any of the 19+ supported providers into one of eight `LlmErrorCategory` values:
+The `llm_errors` submodule provides a deeper classification system with two parallel taxonomies:
 
-| Category | Retryable | Typical signals |
-|---|---|---|
-| `RateLimit` | ✅ | 429, "rate limit", "quota exceeded", "TPM/RPM limit" |
-| `Overloaded` | ✅ | 503, "overloaded", "high demand", "service unavailable" |
-| `Timeout` | ✅ | "ETIMEDOUT", "ECONNRESET", "connection refused", "fetch failed" |
-| `Billing` | ❌ | 402, "insufficient credits", "payment required" |
-| `Auth` | ❌ | 401, "invalid api key", "authentication_error" |
-| `ContextOverflow` | ❌ | 413, "context_length_exceeded", "prompt is too long" |
-| `Format` | ❌ | 400, "invalid request", "schema", "validation error" |
-| `ModelNotFound` | ❌ | 404, "model not found", "unknown model" |
+### `LlmErrorCategory` (8 categories)
 
-**Classification priority order** (most specific first):
-
-1. Status-code fast paths: 429 → RateLimit, 402 → Billing, 401 → Auth, 403 → multi-way branch, 404 → ModelNotFound
-2. Context overflow patterns (very specific, checked first to avoid false matches)
-3. Billing patterns
-4. Auth patterns
-5. Rate limit patterns
-6. Model-not-found patterns
-7. Format patterns
-8. Overloaded patterns
-9. Timeout/network patterns
-10. HTML error page detection (Cloudflare)
-11. Fallback: 5xx → Overloaded, 4xx → Format, network-sounding → Timeout, else → Format
-
-The **403 handling is particularly nuanced** because different providers overload it: Anthropic uses 403 for rate limits, Chinese providers (Qwen, ZhiPu) use it for quota/region/billing issues, and others use it for model permission errors. The classifier checks `FORBIDDEN_NON_AUTH_PATTERNS` (quota, balance, region, model, etc.) before falling back to `Auth`, avoiding misclassification.
-
-#### `classify_error_with_context(message, status, provider, model) -> ClassifiedError`
-
-The preferred entry point when provider and model metadata are available. Wraps `classify_error` and enriches the result with:
-
-- `provider` and `model` fields for logging
-- `suggestion` — an actionable resolution hint (e.g. `"Model 'claude-99' may not be available on anthropic. Check available models with librefang models list."`)
-- `sanitized_message` — enriched with `[provider=X, model=Y]` suffix
-
-### `FailoverReason`
-
-The provider-switching taxonomy used by `FallbackChain`:
-
-```rust
-pub enum FailoverReason {
-    RateLimit(Option<u64>),  // back off (with optional ms hint), retry same provider
-    CreditExhausted,         // skip to next provider immediately
-    AuthError,               // skip to next provider (another slot may have a valid key)
-    ModelUnavailable,        // skip to next provider
-    ContextTooLong,          // propagate to caller — they must compress context
-    Timeout,                 // skip to next provider
-    HttpError,               // skip to next provider
-    Unknown,                 // propagate immediately
-}
+```
+RateLimit · Overloaded · Timeout · Billing · Auth · ContextOverflow · Format · ModelNotFound
 ```
 
-`LlmError::failover_reason()` maps from the structured error into this taxonomy. The `RateLimit` variant carries an optional retry-delay hint in milliseconds.
+Used for logging, metrics, and user-facing messages. Each `ClassifiedError` carries:
 
-### Sanitization
+- `category` and flags (`is_retryable`, `is_billing`)
+- `suggested_delay_ms` — parsed from `"retry after N"` patterns
+- `sanitized_message` — user-safe, with API keys and HTML stripped
+- `raw_message` — original text for logging
+- `provider` / `model` — optional context
+- `suggestion` — actionable guidance (e.g., "Check your openai account balance")
 
-All classified errors produce a user-safe `sanitized_message` that:
+### `FailoverReason` (8 variants)
 
-1. Extracts the actual error message from JSON bodies (`error.message`, `message`, or `detail` fields)
-2. Redacts secret fragments (`sk-*`, `key-*`, `Bearer *` tokens)
-3. Strips internal wrapper prefixes like `"LLM driver error: API error (NNN): "`
-4. Replaces HTML error pages (Cloudflare 521–530) with `"provider returned an error page"`
-5. Caps messages at 300 characters
+```
+RateLimit(Option<u64>) · CreditExhausted · ContextTooLong · ModelUnavailable · Timeout · HttpError · AuthError · Unknown
+```
 
-When no raw detail is available, per-category fallback messages are used (e.g. `"Billing issue. Check your API plan and balance."`).
+Drives `FallbackChain` recovery strategy:
 
-### Utility Functions
+| Reason | Action |
+|---|---|
+| `RateLimit(ms)` | Sleep (if hint present), retry same provider |
+| `CreditExhausted` | Skip to next provider |
+| `AuthError` | Skip to next provider (different key may work) |
+| `ModelUnavailable` | Skip to next provider |
+| `Timeout` | Skip to next provider |
+| `HttpError` | Skip to next provider |
+| `ContextTooLong` | Propagate to caller (must compress conversation) |
+| `Unknown` | Propagate immediately |
 
-- **`extract_retry_delay(message) -> Option<u64>`** — parses `"retry after N"`, `"retry-after: N"`, or `"try again in Nms"` into milliseconds.
-- **`is_transient(message) -> bool`** — quick heuristic: returns `true` for rate limit, overloaded, or timeout patterns.
-- **`is_html_error_page(body) -> bool`** — detects `<!DOCTYPE`, `<html`, Cloudflare `cf-error-code` attributes, and Cloudflare status codes 521–530.
+### Classification Flow
 
----
+`classify_error(message, status)` applies rules in priority order:
 
-## Configuration
+1. **Status-code fast paths** — 429, 402, 401 are unambiguous
+2. **403 special handling** — checks `FORBIDDEN_NON_AUTH_PATTERNS` to avoid misclassifying Chinese provider quota/region errors as auth failures
+3. **Pattern matching** (case-insensitive substring, no regex) in order: `ContextOverflow` → `Billing` → `Auth` → `RateLimit` → `ModelNotFound` → `Format` → `Overloaded` → `Timeout`
+4. **HTML error page detection** — Cloudflare 521–530, `<!DOCTYPE`, `cf-error-code`
+5. **Fallback** — 5xx → `Overloaded`, 4xx → `Format`, network-sounding → `Timeout`, else → `Format`
+
+Use `classify_error_with_context(message, status, provider, model)` when caller context is available — it enriches the result with `provider`, `model`, `suggestion`, and an enriched `sanitized_message`.
+
+### Sanitization Pipeline
+
+`sanitize_for_user(category, raw)` produces user-safe messages:
+
+1. `extract_json_message` — pulls `.error.message`, `.message`, or `.detail` from JSON bodies
+2. `redact_secrets` — strips `sk-*`, `key-*`, `Bearer *` token fragments
+3. `strip_llm_wrapper` — removes `"LLM driver error: API error (NNN): "` prefix
+4. `is_html_error_page` — replaces HTML with `"provider returned an error page"`
+5. `cap_message` — truncates to 300 chars with `...` suffix
+
+### Transient Detection
+
+`is_transient(message)` is a lightweight check (no full classification) that returns `true` for rate-limit, overloaded, timeout, and transient SSL patterns (`bad_record_mac`, `ssl alert`, etc. — but not handshake failures, which are configuration errors).
+
+## Driver Configuration
 
 ### `DriverConfig`
 
 Serializable configuration for constructing a driver:
 
 ```rust
-pub struct DriverConfig {
-    pub provider: String,
-    pub api_key: Option<String>,
-    pub base_url: Option<String>,
-    pub vertex_ai: VertexAiConfig,
-    pub azure_openai: AzureOpenAiConfig,
-    pub skip_permissions: bool,       // default: true
-    pub message_timeout_secs: u64,    // default: 300
-    pub mcp_bridge: Option<McpBridgeConfig>,
-    pub proxy_url: Option<String>,
-}
+let config = DriverConfig {
+    provider: "openai".into(),
+    api_key: Some("sk-...".into()),
+    base_url: None,                    // uses provider default
+    vertex_ai: VertexAiConfig::default(),
+    azure_openai: AzureOpenAiConfig::default(),
+    skip_permissions: true,            // default — daemon has no TTY
+    message_timeout_secs: 300,         // inactivity-based, not wall-clock
+    mcp_bridge: None,
+    proxy_url: None,
+    request_timeout_secs: None,
+};
 ```
 
-Key defaults and behaviors:
-
-- **`skip_permissions`** defaults to `true` because LibreFang runs as a headless daemon. The CLI driver adds `--dangerously-skip-permissions` to spawned Claude processes. LibreFang's own RBAC layer provides the actual capability restrictions.
-- **`message_timeout_secs`** (300s default) is an **inactivity timeout** for CLI-based providers — the process is killed after this many seconds of silence on stdout, not wall-clock time.
-- **`mcp_bridge`** is set at runtime by the kernel (not serialized). When present, the driver writes a temp `mcp_config.json` and passes `--mcp-config` to the CLI subprocess, bridging LibreFang tools via the daemon's `/mcp` endpoint.
-- **`proxy_url`** overrides the global proxy for this specific provider.
-
-**Security:** `DriverConfig` implements a custom `Debug` that redacts `api_key`, `vertex_ai.credentials_path`, and `proxy_url`.
+**Security**: `DriverConfig` implements a custom `Debug` that redacts `api_key`, `vertex_ai.credentials_path`, and `proxy_url`. The `#[serde(skip)]` attribute on `mcp_bridge` prevents it from being persisted — it is set only at runtime by the kernel.
 
 ### `McpBridgeConfig`
 
+Configuration for exposing LibreFang tools to CLI-based drivers (e.g., Claude Code) through the daemon's `/mcp` endpoint:
+
 ```rust
-pub struct McpBridgeConfig {
-    pub base_url: String,       // e.g. "http://127.0.0.1:4545"
-    pub api_key: Option<String>, // X-API-Key header (empty = no auth)
+McpBridgeConfig {
+    base_url: "http://127.0.0.1:4545".into(),
+    api_key: Some("daemon-key".into()),
 }
 ```
 
----
+When present, the driver writes a temporary `mcp_config.json` and passes `--mcp-config` to the spawned CLI subprocess.
 
 ## Integration Points
 
-**Who calls this crate:**
+### Consumers
 
-- `librefang-runtime` — agent loop, routing (`make_request`), proactive memory, tool execution, web fetch/search, TTS synthesis, provider health probes, plugin management
-- `librefang-runtime-mcp` — MCP tool bridging, OAuth metadata discovery
-- `librefang-runtime-oauth` — ChatGPT and Copilot device auth flows, token exchange, model discovery
-- `librefang-runtime-wasm` — WASM host functions for network fetch
-- `librefang-skills` — ClawHub file retrieval
-- `librefang-testing` — `MockLlmDriver` for test harnesses
-- `librefang-llm-drivers` — concrete `LlmDriver` implementations and `FallbackChain` logic
+- **`make_request`** in `librefang-runtime/routing` constructs `CompletionRequest` and calls `complete`/`stream`
+- **`librefang-testing/mock_driver`** implements `LlmDriver` for deterministic test doubles
+- **`FallbackChain`** in `librefang-llm-drivers` uses `failover_reason()` to decide retry vs. skip
+- Various runtime modules (`probe_model`, `extract_memories`, `sse_send_request`) call `text()` on responses
 
-**What this crate depends on:**
+### Type Dependencies
 
-- `librefang_types` — shared domain types (`Message`, `ContentBlock`, `TokenUsage`, `ToolCall`, `ToolDefinition`, config types, `ResponseFormat`, `ThinkingConfig`)
-- `async-trait` — for the `LlmDriver` trait
-- `serde` / `serde_json` — serialization for config and JSON parsing in error extraction
-- `thiserror` — error derive for `LlmError`
-- `tokio` — async runtime and `mpsc` channel for streaming
+- `librefang_types::config` — `AzureOpenAiConfig`, `VertexAiConfig`, `ResponseFormat`, `ThinkingConfig`
+- `librefang_types::message` — `ContentBlock`, `Message`, `StopReason`, `TokenUsage`
+- `librefang_types::tool` — `ToolCall`, `ToolDefinition`

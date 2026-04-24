@@ -2,54 +2,66 @@
 
 # librefang-http
 
-Shared HTTP client builder providing proxy awareness and TLS certificate fallback for the LibreFang ecosystem.
+Shared HTTP client builder providing consistent TLS configuration and proxy support across the LibreFang workspace.
 
 ## Purpose
 
-This crate centralizes the construction of `reqwest::Client` instances so that every component in LibreFang makes outbound HTTP requests with a consistent TLS and proxy configuration. Rather than each crate independently wiring up its own client, they delegate to the builder exposed here.
+Every component in LibreFang that makes outbound HTTP requests (scrapers, feed fetchers, API clients) needs a properly configured `reqwest` client. This crate centralizes that configuration so TLS trust anchors and proxy settings are handled uniformly rather than duplicated across crates.
 
-## Key Responsibilities
+The two core concerns this module owns:
 
-### TLS Configuration
-
-The crate uses **rustls** rather than the native TLS stack, configured with a two-tier certificate loading strategy:
-
-1. **System certificates** — Loaded via `rustls-native-certs`, which reads the OS certificate store.
-2. **Mozilla roots fallback** — If the system store is empty or unavailable, `webpki-roots` provides Mozilla's curated root set.
-
-This ensures the client works across minimal containers (where no system CA bundle exists) as well as standard OS environments (where corporate or custom CAs may be installed).
-
-### Proxy Support
-
-The builder forwards proxy configuration through to reqwest, respecting standard environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) by default.
+- **TLS certificate resolution** — Builds a `rustls::RootCertStore` by loading the system's native certificate store, with a fallback to Mozilla's bundled `webpki-roots` if native certs are missing or unreadable.
+- **Client construction** — Exposes a pre-configured `reqwest::ClientBuilder` (or fully-built `reqwest::Client`) so downstream crates don't have to think about TLS backends, cipher suites, or proxy environment variables.
 
 ## Dependencies
 
 | Crate | Role |
 |---|---|
-| `librefang-types` | Shared type definitions used across LibreFang crates |
-| `reqwest` | Underlying HTTP client that this crate configures |
+| `reqwest` | HTTP client; uses the `rustls-tls` feature (via workspace) rather than native-tls |
 | `rustls` | Pure-Rust TLS implementation |
-| `webpki-roots` | Bundled Mozilla CA certificates (fallback) |
-| `rustls-native-certs` | Loader for OS-native CA certificates (primary) |
-| `tracing` | Structured logging for TLS load successes and failures |
+| `webpki-roots` | Mozilla's CA certificate bundle, bundled at compile time |
+| `rustls-native-certs` | Loads certificates from the OS trust store |
+| `tracing` | Emits warnings when certificate sources fail |
+| `librefang-types` | Shared type definitions across the workspace |
 
-## Architecture
+## How TLS Certificate Loading Works
 
 ```mermaid
-graph TD
-    A[Calling crate] -->|requests client| B[librefang-http builder]
-    B --> C[reqwest::Client]
-    B --> D[rustls::ClientConfig]
-    D --> E[rustls-native-certs]
-    D -->|fallback| F[webpki-roots]
-    E -->|load system CAs| D
-    F -->|load Mozilla CAs| D
-    C --> G[Outbound requests]
+flowchart TD
+    A[Build RootCertStore] --> B{Load native certs}
+    B -->|Success| C[Use native certs]
+    B -->|Failure| D[Warn via tracing]
+    D --> E[Load webpki-roots]
+    C --> F[Configure reqwest ClientBuilder]
+    E --> F
+    F --> G[Return Client to caller]
 ```
 
-## Integration
+The strategy is defensive: on most Linux systems, `rustls-native-certs` will find certificates in `/etc/ssl/certs` or the distribution's equivalent. On minimal containers or unusual environments, that load may return empty or error. When that happens, the module logs a warning and falls back to `webpki-roots`, ensuring HTTPS requests still work.
 
-Other LibreFang crates depend on `librefang-http` and call into it to obtain a preconfigured `reqwest::Client`. The `librefang-types` dependency keeps any shared configuration or option types consistent across the boundary.
+## Integration with Other Crates
 
-Tracing spans are emitted when certificate loading succeeds or fails, making it straightforward to diagnose TLS handshake issues in production logs without enabling verbose reqwest debugging.
+Downstream crates depend on `librefang-http` at the library level:
+
+```toml
+# In a sibling crate's Cargo.toml
+[dependencies]
+librefang-http = { path = "../librefang-http" }
+```
+
+They then use the provided builder/client instead of calling `reqwest::Client::new()` directly. This guarantees that every outbound request shares the same TLS trust anchors and proxy behavior.
+
+## Relationship to `librefang-types`
+
+This crate depends on `librefang-types` for any shared configuration structs or error types related to HTTP setup (e.g., proxy configuration, timeout settings). It does **not** depend on higher-level crates — nothing in `librefang-http` knows about feeds, scraping, or domain-specific logic.
+
+## Building and Testing
+
+From the workspace root:
+
+```bash
+cargo build -p librefang-http
+cargo test -p librefang-http
+```
+
+Because the module uses `rustls` rather than `native-tls`, no system OpenSSL development headers are required. The only runtime requirement for full native cert loading is that the host system has a populated certificate store — otherwise the webpki-roots fallback is used automatically.

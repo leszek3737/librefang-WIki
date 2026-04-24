@@ -2,332 +2,288 @@
 
 # Extensions System (`librefang-extensions`)
 
-## Overview
-
-`librefang-extensions` provides the infrastructure for discovering, installing, and managing MCP (Model Context Protocol) server integrations. It handles everything from browsing a template catalog to securely storing credentials and monitoring server health.
-
-The crate is organized around five concerns:
-
-| Concern | Module | Purpose |
-|---|---|---|
-| Template discovery | `catalog` | Read-only catalog of MCP server templates cached at `~/.librefang/mcp/catalog/*.toml` |
-| Secret storage | `vault`, `dotenv` | AES-256-GCM encrypted vault (`vault.enc`) plus `.env` file loading |
-| Credential resolution | `credentials` | Unified resolution chain across vault, dotenv, env vars, and interactive prompts |
-| Installation | `installer` | Pure transforms from catalog templates into `[[mcp_servers]]` config entries |
-| OAuth & health | `oauth`, `health` | PKCE browser flows and background health monitoring with auto-reconnect |
+MCP server catalog, encrypted credential vault, OAuth2 PKCE flows, health monitoring, and installation transforms. This crate provides the infrastructure for discovering, configuring, authenticating, and monitoring MCP (Model Context Protocol) server integrations.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    subgraph "Disk"
-        CT["catalog/*.toml"]
-        CFG["config.toml (mcp_servers)"]
-        ENV[".env / secrets.env"]
-        VE["vault.enc"]
+    subgraph "On Disk"
+        CT["~/.librefang/mcp/catalog/*.toml<br/>(MCP Templates)"]
+        CFG["~/.librefang/config.toml<br/>[[mcp_servers]]"]
+        ENV["~/.librefang/.env"]
+        VAULT_FILE["~/.librefang/vault.enc"]
     end
 
-    subgraph "Extensions"
-        MC["McpCatalog"]
-        CR["CredentialResolver"]
-        CV["CredentialVault"]
-        HM["HealthMonitor"]
-        INST["Installer"]
+    subgraph "In-Memory"
+        Catalog["McpCatalog"]
+        Resolver["CredentialResolver"]
+        Vault["CredentialVault"]
+        Monitor["HealthMonitor"]
     end
 
-    CT -->|load| MC
-    MC -->|template lookup| INST
-    INST -->|produces| CFG
-    CR -->|1. vault| CV
-    CR -->|2. dotenv| ENV
-    CR -->|3. env var| ENV
-    CV -->|read/write| VE
-    HM -->|reports status| MC
+    CT -->|load| Catalog
+    Catalog -->|install_integration| Installer
+    Installer -->|produces McpServerConfigEntry| CFG
+    Vault --> VAULT_FILE
+    ENV --> Resolver
+    Vault --> Resolver
+    Resolver -->|provides secrets| Installer
+    Monitor -->|tracks status| CFG
 ```
 
-## Core Types
+## Core Types (`lib.rs`)
 
-All shared types live in the crate root (`src/lib.rs`).
+The root module defines the shared types used across all submodules.
 
-### `McpCatalogEntry`
+**`McpCatalogEntry`** — A bundled MCP server template (e.g., "github", "slack"). Deserialized from TOML files in the catalog directory. Fields include:
 
-The central data model. Each catalog template describes one MCP server:
+- `id` — Unique identifier matching the filename or directory name
+- `name`, `description`, `icon`, `tags` — Display metadata
+- `category` — One of `DevTools`, `Productivity`, `Communication`, `Data`, `Cloud`, `AI`
+- `transport` — How to launch the server (`McpCatalogTransport::Stdio`, `Sse`, or `Http`)
+- `required_env` — List of `McpCatalogRequiredEnv` describing each credential the server needs
+- `oauth` — Optional `OAuthTemplate` for servers requiring OAuth2
+- `health_check` — `HealthCheckConfig` with interval and failure threshold
 
-```rust
-pub struct McpCatalogEntry {
-    pub id: String,                          // e.g. "github"
-    pub name: String,                        // e.g. "GitHub"
-    pub description: String,
-    pub category: McpCategory,               // DevTools, Productivity, Communication, etc.
-    pub transport: McpCatalogTransport,       // Stdio, Sse, or Http
-    pub required_env: Vec<McpCatalogRequiredEnv>,  // Credentials needed
-    pub oauth: Option<OAuthTemplate>,         // OAuth config (None = API key only)
-    pub health_check: HealthCheckConfig,      // Check interval & thresholds
-    // ...
-}
-```
+**`McpStatus`** — Lifecycle state of an MCP server:
 
-Transport templates use `McpCatalogTransport` — a subset of the kernel's `McpTransportEntry` that excludes `HttpCompat` (a power-user-only transport that never ships as a catalog template). The installer converts between the two during installation.
+| Variant | Meaning |
+|---------|---------|
+| `Available` | Catalog entry exists, not yet installed |
+| `Setup` | Installed but credentials are missing |
+| `Ready` | Configured and running |
+| `Error(String)` | Server errored |
+| `Disabled` | User-disabled |
 
-### `McpStatus`
-
-Represents the lifecycle state of an MCP server:
-
-- **Available** — Catalog entry exists, not yet installed
-- **Setup** — Installed but credentials are missing
-- **Ready** — Installed, credentials present, server running
-- **Error(String)** — Server failed
-- **Disabled** — User-disabled
-
-### Error Handling
-
-All operations return `ExtensionResult<T>` via the `ExtensionError` enum, covering catalog misses, vault errors, OAuth failures, IO, and HTTP errors.
+**`ExtensionError`** — Unified error type covering `NotFound`, `AlreadyInstalled`, `VaultLocked`, `OAuth`, `Io`, and others. All fallible operations return `ExtensionResult<T>`.
 
 ---
 
-## Module Reference
+## MCP Catalog (`catalog`)
 
-### `catalog` — MCP Template Catalog
+Read-only in-memory index of MCP server templates cached at `~/.librefang/mcp/catalog/`. Templates are refreshed from the upstream registry by `librefang_runtime::registry_sync`.
 
-`McpCatalog` holds an in-memory view of all template TOML files under `~/.librefang/mcp/catalog/`. It supports two directory layouts:
+### File Layout
 
-- **Flat**: `<id>.toml` — ID derived from filename
-- **Directory**: `<id>/MCP.toml` — ID derived from directory name
+Two layouts are valid:
 
-```rust
-let mut catalog = McpCatalog::new(&home_dir);
-let count = catalog.load(&home_dir);  // Full reload — clears stale entries
-
-// Lookup
-let entry = catalog.get("github");          // Option<&McpCatalogEntry>
-
-// Browsing
-let all = catalog.list();                   // Vec<&McpCatalogEntry>, sorted by id
-let tools = catalog.list_by_category(&McpCategory::DevTools);
-
-// Search (matches id, name, description, tags, case-insensitive)
-let results = catalog.search("slack");
+```
+catalog/
+  github.toml          # Flat file — id = "github"
+  slack/
+    MCP.toml           # Directory-backed — id = "slack"
 ```
 
-Catalog entries are **read-only**. The user's installed servers live in `config.toml` under `[[mcp_servers]]` with an optional `template_id` field pointing back to the catalog entry. The catalog is refreshed from the upstream registry by `librefang_runtime::registry_sync`.
+### API
 
-### `vault` — Encrypted Credential Storage
+**`McpCatalog::new(home_dir)`** — Creates an empty catalog rooted at `home_dir/mcp/catalog/`.
 
-AES-256-GCM encrypted storage at `~/.librefang/vault.enc`. The vault file uses a custom format with an `OFV1` magic header followed by a JSON payload containing base64-encoded salt, nonce, and ciphertext.
+**`catalog.load(home_dir)`** — Full reload: clears existing entries, scans the catalog directory, parses all TOML files. Returns the count loaded. Malformed files emit a `warn!` and are skipped.
 
-**Key derivation chain:**
+**`catalog.get(id)`** — Look up a single entry by ID.
 
-1. Master key is either stored in the OS keyring (Windows Credential Manager, macOS Keychain, Linux Secret Service) or read from `LIBREFANG_VAULT_KEY` env var
-2. Master key + random salt → Argon2id → derived encryption key
-3. Derived key encrypts the JSON-serialized secrets with AES-256-GCM
+**`catalog.list()`** — All entries sorted by ID.
 
-When the OS keyring is unavailable, a **file-based fallback** wraps the master key with AES-256-GCM using an Argon2id-derived key from a machine fingerprint (username + hostname). Legacy v1 XOR-obfuscated keyring files are automatically migrated to v2 on first load.
+**`catalog.list_by_category(category)`** — Filter by `McpCategory`.
+
+**`catalog.search(query)`** — Case-insensitive substring match against `id`, `name`, `description`, and `tags`.
+
+Reload semantics are full (not incremental): `load()` clears the map first so deleted files don't linger.
+
+---
+
+## Credential Management
+
+Credentials are resolved from multiple sources through a priority chain. The three modules (`vault`, `credentials`, `dotenv`) work together but serve distinct roles.
+
+### Credential Vault (`vault`)
+
+AES-256-GCM encrypted file storage at `~/.librefang/vault.enc`.
+
+**Key management:**
+
+1. **OS keyring** (preferred) — Windows Credential Manager, macOS Keychain, or Linux Secret Service. When the OS keyring is unavailable, falls back to a file at `$LOCAL_DATA_DIR/librefang/.keyring` encrypted with AES-256-GCM using a key derived from a machine fingerprint (username + hostname via Argon2id).
+2. **Environment variable** — `LIBREFANG_VAULT_KEY` (base64-encoded 32-byte key) for headless/CI environments.
+
+**File format:** `OFV1` magic header + JSON containing base64-encoded salt, nonce, and ciphertext. Legacy JSON-only files (without the magic header) are still accepted for backward compatibility.
+
+**Encryption chain:**
+- Master key + random salt → Argon2id → derived key
+- Derived key + random nonce → AES-256-GCM → ciphertext
+- The vault is re-encrypted on every `set()` or `remove()` call with fresh salt and nonce
+
+**Key API:**
 
 ```rust
-let mut vault = CredentialVault::new(home_dir.join("vault.enc"));
-
-// Initialize (generates key, stores in OS keyring)
-vault.init()?;
-
-// Or use an explicit key (testing / programmatic)
-vault.init_with_key(master_key)?;
-
-// Unlock for read/write
-vault.unlock()?;
-
-// CRUD
-vault.set("GITHUB_TOKEN".to_string(), Zeroizing::new("ghp_...".into()))?;
-let token = vault.get("GITHUB_TOKEN");  // Option<Zeroizing<String>>
-vault.remove("GITHUB_TOKEN")?;
-let keys = vault.list_keys();  // Vec<&str>
+let mut vault = CredentialVault::new(path);
+vault.init()?;                    // Generate key, store in keyring, create empty vault
+vault.unlock()?;                  // Load and decrypt from disk
+vault.set(key, value)?;           // Insert + re-encrypt
+vault.get(key)                    // Returns Zeroizing<String>
+vault.remove(key)?;               // Delete + re-encrypt
+vault.list_keys()                 // Key names only (no values)
 ```
 
-All secret values are wrapped in `Zeroizing<String>` — memory is zeroed on drop. The `CredentialVault`'s `Drop` implementation clears all entries and the cached master key.
+For programmatic/test use, `init_with_key` and `unlock_with_key` accept an explicit `Zeroizing<[u8; 32]>`.
 
-### `dotenv` — Environment Loading
+All secret values use `Zeroizing<String>` to ensure memory is zeroed on drop. The `Drop` implementation for `CredentialVault` clears the entries map and cached key.
 
-Loads secrets into the process environment from multiple sources. Must be called from synchronous `main()` **before** spawning any Tokio runtime — `std::env::set_var` is undefined behavior once other threads exist in Rust 1.80+.
+### Credential Resolver (`credentials`)
 
-**Priority order** (highest first — earlier sources win):
+Tries multiple sources in priority order:
 
-1. System environment variables (already present — never overridden)
-2. Credential vault (`vault.enc`) — loaded and decrypted first
-3. `~/.librefang/.env`
-4. `~/.librefang/secrets.env`
-
-```rust
-// Call once from main() before tokio
-librefang_extensions::dotenv::load_dotenv();
-
-// Key management
-librefang_extensions::dotenv::save_env_key("MY_API_KEY", "sk-...")?;  // Upserts into .env + process env
-librefang_extensions::dotenv::remove_env_key("MY_API_KEY")?;
-librefang_extensions::dotenv::list_env_keys();
+```
+1. Encrypted vault (~/.librefang/vault.enc)
+2. Dotenv file (~/.librefang/.env) — boot-time snapshot
+3. Process environment variable
+4. Interactive prompt (CLI only, opt-in)
 ```
 
-`.env` files are written with `0600` permissions on Unix. Values containing spaces, `#`, or `"` are automatically double-quoted on write.
-
-### `credentials` — Credential Resolution Chain
-
-`CredentialResolver` provides a unified interface for looking up secrets across all sources:
+**Usage:**
 
 ```rust
-let vault = CredentialVault::new(home_dir.join("vault.enc"));
-let mut resolver = CredentialResolver::new(
-    Some(vault),
-    Some(&home_dir.join(".env")),
-).with_interactive(true);  // Enable stdin prompt as last resort
+let resolver = CredentialResolver::new(vault, Some(dotenv_path))
+    .with_interactive(true);
 
-// Resolve a single credential
-let token = resolver.resolve("GITHUB_PERSONAL_ACCESS_TOKEN");  // Option<Zeroizing<String>>
+// Single credential
+if let Some(val) = resolver.resolve("GITHUB_TOKEN") { ... }
 
-// Bulk resolution
-let creds = resolver.resolve_all(&["KEY_A", "KEY_B", "KEY_C"]);
+// Batch resolution
+let creds = resolver.resolve_all(&["KEY_A", "KEY_B"]);
 
-// Check what's missing (without prompting)
+// Check what's missing
 let missing = resolver.missing_credentials(&["KEY_A", "KEY_B"]);
-// e.g. ["KEY_B"]
-
-// Store a new credential
-resolver.store_in_vault("KEY_B", Zeroizing::new("value".into()))?;
-
-// Invalidate dotenv cache after external modification
-resolver.clear_dotenv_cache("STALE_KEY");
 ```
 
-Resolution order: vault → dotenv → `std::env` → interactive prompt (if enabled).
+`store_in_vault` persists a credential through the vault. `clear_dotenv_cache` evicts a stale entry from the in-memory dotenv snapshot (e.g., after a dashboard deletion).
 
-### `installer` — Catalog-to-Config Transform
+### Dotenv Loader (`dotenv`)
 
-The installer is a set of **pure functions** — no side effects. Callers (API handlers, CLI commands) decide when to persist results.
+Loads secrets into `std::env` so every entry point (CLI, desktop, kernel) behaves identically.
 
-`install_integration` takes a catalog, credential resolver, template ID, and any user-provided key-value pairs. It:
+**Priority (highest first):**
 
-1. Looks up the catalog template
-2. Stores provided credentials in the vault (best-effort)
-3. Checks which required env vars are still missing
-4. Converts the template into an `McpServerConfigEntry`
-5. Returns an `InstallResult` with the entry, status, and user message
-
-```rust
-let result = install_integration(
-    &catalog,
-    &mut resolver,
-    "github",
-    &provided_keys,  // HashMap<String, String>
-)?;
-
-// result.id = "github"
-// result.server = McpServerConfigEntry { name: "github", template_id: Some("github"), ... }
-// result.status = Ready or Setup (depending on missing credentials)
-// result.missing_credentials = vec![] or vec!["GITHUB_PERSONAL_ACCESS_TOKEN"]
-// result.message = human-readable status
-
-// Caller persists:
-config.mcp_servers.push(result.server);
-save_config(&config)?;
+```
+1. System environment variables (never overridden)
+2. Credential vault (vault.enc)
+3. ~/.librefang/.env
+4. ~/.librefang/secrets.env
 ```
 
-The `template_id` field on `McpServerConfigEntry` records which catalog entry was installed, allowing the kernel and dashboard to link back to the catalog.
+**Critical timing constraint:** `load_dotenv()` must be called from synchronous `main()` before spawning any tokio runtime. `std::env::set_var` is undefined behavior in Rust 1.80+ once other threads exist. A `Once` guard prevents double-loading.
 
-**Scaffolding helpers** are also provided:
+**File management functions:**
 
-- `scaffold_integration(dir)` — Creates a template `mcp.toml` for a new custom MCP server
-- `scaffold_skill(dir)` — Creates `skill.toml` + `SKILL.md` for a new prompt-only skill
-
-### `oauth` — OAuth2 PKCE Flows
-
-Implements browser-based OAuth2 authorization with PKCE (Proof Key for Code Exchange) for Google, GitHub, Microsoft, and Slack. PKCE doesn't require a client secret, so public client IDs are safe to embed.
-
-`run_pkce_flow` performs the complete flow:
-
-1. Generates PKCE verifier + S256 challenge
-2. Binds a temporary localhost TCP listener on a random port
-3. Opens the browser to the authorization URL (falls back to printing the URL)
-4. Serves a one-shot callback handler via Axum with CSRF state validation
-5. Exchanges the authorization code for tokens (5-minute timeout)
-6. Returns `OAuthTokens` with `Zeroizing`-wrapped access/refresh tokens
-
-```rust
-let oauth = OAuthTemplate {
-    provider: "github".into(),
-    scopes: vec!["repo".into(), "read:org".into()],
-    auth_url: "https://github.com/login/oauth/authorize".into(),
-    token_url: "https://github.com/login/oauth/access_token".into(),
-};
-
-let tokens = run_pkce_flow(&oauth, client_id).await?;
-let access = tokens.access_token_zeroizing();
-let refresh = tokens.refresh_token_zeroizing();
-```
-
-Client IDs are resolved from `OAuthConfig` with defaults overridden by user-configured values.
-
-### `health` — Server Health Monitoring
-
-`HealthMonitor` tracks the health of configured MCP servers using a `DashMap<String, McpHealth>` for concurrent access from background tasks.
-
-```rust
-let monitor = HealthMonitor::new(HealthMonitorConfig {
-    auto_reconnect: true,
-    max_reconnect_attempts: 10,
-    max_backoff_secs: 300,
-    check_interval_secs: 60,
-});
-
-monitor.register("github");
-
-// Background task reports status
-monitor.report_ok("github", 12);  // 12 tools available
-monitor.report_error("slack", "Connection refused".into());
-
-// Query
-let health = monitor.get_health("github");  // Option<McpHealth>
-let all = monitor.all_health();             // Vec<McpHealth>
-
-// Reconnect logic
-if monitor.should_reconnect("slack") {
-    monitor.mark_reconnecting("slack");
-    let backoff = monitor.backoff_duration(attempt);  // Exponential: 5s → 10s → 20s → ... → 5min max
-    // ... attempt reconnect ...
-}
-```
-
-`McpHealth` tracks consecutive failures, reconnect attempts, last success/error timestamps, tool count, and uptime.
-
-### `http_client` — Shared HTTP Client
-
-Provides a preconfigured `reqwest::Client` with CA certificate fallback:
-
-```rust
-let client = librefang_extensions::http_client::new_client();
-```
-
-Tries native system certificates first (`rustls_native_certs`). If none are found, falls back to Mozilla's `webpki_roots` bundle. Uses `aws_lc_rs` as the TLS crypto provider.
+- `save_env_key(key, value)` — Upsert into `.env`, set in process env, creates file with 0600 permissions on Unix
+- `remove_env_key(key)` — Remove from `.env` and process env
+- `list_env_keys()` — Key names only
+- `env_file_exists()` — Check if `.env` is present
 
 ---
 
-## File Layout
+## Health Monitor (`health`)
 
+Thread-safe health tracking for configured MCP servers using `DashMap` for concurrent access from background tasks.
+
+**`McpHealth`** tracks per-server state: status, tool count, last successful check timestamp, consecutive failures, reconnect state, and connected-since timestamp.
+
+**`HealthMonitor`** API:
+
+```rust
+let monitor = HealthMonitor::new(HealthMonitorConfig::default());
+monitor.register("github");
+monitor.report_ok("github", 12);          // Mark healthy, record tool count
+monitor.report_error("github", err_msg);   // Increment failure count
+monitor.should_reconnect("github");        // true if errored and attempts remain
+monitor.mark_reconnecting("github");       // Increment attempt counter
+monitor.get_health("github");              // Clone of current state
+monitor.all_health();                      // All servers
 ```
-~/.librefang/
-├── config.toml              # [[mcp_servers]] entries live here
-├── vault.enc                # AES-256-GCM encrypted credentials (OFV1 format)
-├── .env                     # User-managed environment keys
-├── secrets.env              # Additional secrets (lower priority than .env)
-└── mcp/
-    └── catalog/
-        ├── github.toml      # Flat template
-        ├── slack/
-        │   └── MCP.toml     # Directory-backed template
-        └── ...
 
-<system-local-dir>/librefang/.keyring   # File-based keyring fallback (if OS keyring unavailable)
-```
+**Auto-reconnect with exponential backoff:**
 
-## Thread Safety Notes
+| Attempt | Delay |
+|---------|-------|
+| 0 | 5s |
+| 1 | 10s |
+| 2 | 20s |
+| 3 | 40s |
+| ... | Capped at 5 minutes |
 
-- `HealthMonitor` uses `DashMap` — safe to call `register`, `report_ok`, `report_error`, `get_health` from multiple Tokio tasks concurrently.
-- `CredentialVault` and `CredentialResolver` are **not** `Sync` — create per-task or protect with a `Mutex`.
-- `dotenv::load_dotenv` uses a `Once` gate and must be called from single-threaded `main()` before spawning async tasks.
-- `CredentialResolver::clear_dotenv_cache` is for post-boot invalidation from a single task (e.g., after a dashboard deletes a key).
+Default config: `max_reconnect_attempts: 10`, `max_backoff_secs: 300`, `check_interval_secs: 60`. Set `auto_reconnect: false` to disable.
+
+`mark_ok` resets the failure counter and reconnect state. `report_error` increments `consecutive_failures` and clears `connected_since`.
+
+---
+
+## Installer (`installer`)
+
+Pure transforms — no I/O side effects. Converts a catalog template into a `McpServerConfigEntry` suitable for writing into `config.toml`.
+
+**`install_integration(catalog, resolver, id, provided_keys)`**:
+
+1. Looks up the template by `id` in the catalog
+2. Stores any `provided_keys` in the vault (best-effort, warns on failure)
+3. Checks which `required_env` keys are still unresolved
+4. Returns `InstallResult` with the constructed `McpServerConfigEntry`, status (`Ready` or `Setup`), missing credential names, and a user-facing message
+
+The caller (API handler or CLI command) is responsible for persisting the entry to `config.toml` and triggering a kernel reload.
+
+**`catalog_entry_to_mcp_server(entry)`** — Lower-level transform that maps `McpCatalogTransport` → `McpTransportEntry`, sets `template_id`, and populates env var names from `required_env`. Used internally by `install_integration`.
+
+**Scaffolding:**
+
+- `scaffold_integration(dir)` — Creates a `mcp.toml` template for a custom MCP server
+- `scaffold_skill(dir)` — Creates `skill.toml` + `SKILL.md` for a new skill
+
+---
+
+## OAuth (`oauth`)
+
+OAuth2 Authorization Code flow with PKCE (Proof Key for Code Exchange) for providers that support it (Google, GitHub, Microsoft, Slack). PKCE eliminates the need for a client secret.
+
+**`run_pkce_flow(oauth_template, client_id)`** — Async function that:
+
+1. Generates a PKCE verifier/challenge pair (S256)
+2. Binds a temporary localhost HTTP server on a random port
+3. Opens the browser to the authorization URL
+4. Waits up to 5 minutes for the callback with the authorization code
+5. Exchanges the code for tokens via POST to the token endpoint
+6. Returns `OAuthTokens` (access token, optional refresh token, expiry, scopes)
+
+The callback server uses `axum` with a single `/callback` route. CSRF protection is handled via a random `state` parameter. Tokens are available as `Zeroizing<String>` via `access_token_zeroizing()` and `refresh_token_zeroizing()`.
+
+**Client ID resolution:** `resolve_client_ids(config)` merges defaults with overrides from `OAuthConfig` (per-provider `*_client_id` fields). Defaults are placeholders — production deployments should configure real client IDs.
+
+---
+
+## HTTP Client (`http_client`)
+
+Shared `reqwest::Client` builder that handles TLS certificate verification in environments where the system cert store may be incomplete or missing.
+
+**Strategy:**
+
+1. Load native certificates via `rustls_native_certs`
+2. If zero certs were loaded, fall back to `webpki_roots` (Mozilla's bundled CA set)
+3. Build a `reqwest::Client` with the resulting `rustls::ClientConfig`
+
+**API:**
+
+- `client_builder()` — Returns a `ClientBuilder` for further customization
+- `new_client()` — Returns a fully built `Client` (panics on failure, which should never happen with bundled roots)
+
+---
+
+## Integration Points
+
+The extensions crate is consumed by:
+
+- **`librefang-kernel`** — Uses `CredentialVault` for OAuth token storage, `HealthMonitor` for MCP server lifecycle, `CredentialResolver` for credential injection
+- **`librefang-api`** — Calls `install_integration` from MCP management endpoints, uses `McpCatalog` for browsing/searching templates
+- **CLI** — Calls `dotenv::load_dotenv()` at startup, uses `CredentialResolver::with_interactive(true)` for prompts, calls `install_integration` from `mcp add` commands
+- **`librefang-skills`** — Calls `vault::exists()` as a general-purpose filesystem existence check at various skill loading/validation points
+
+### Key convention
+
+All installed MCP servers are stored as `[[mcp_servers]]` entries in `~/.librefang/config.toml`. An optional `template_id` field links back to the catalog entry. There is no separate `integrations.toml` — that file format has been removed.

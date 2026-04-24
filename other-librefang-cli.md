@@ -2,107 +2,134 @@
 
 # librefang-cli
 
-The primary command-line interface for LibreFang Agent OS. This crate produces the `librefang` binary and acts as the top-level aggregator, pulling in nearly every workspace crate to deliver a unified CLI experience.
+The command-line interface for LibreFang Agent OS. This crate produces the `librefang` binary — the primary entry point for interacting with, configuring, and running the agent system.
 
-## Role in the Workspace
+## Overview
 
-`librefang-cli` sits at the apex of the dependency graph. It does not implement business logic itself — instead it wires together the kernel, API, skills, extensions, migration, and runtime layers behind a `clap`-driven command interface and an optional `ratatui`-based TUI.
+`librefang-cli` is a thin but feature-rich shell that wires together the core LibreFang libraries and exposes them through CLI subcommands, an optional TUI, and configuration management. It does not implement business logic itself; instead, it delegates to the following internal crates:
+
+| Dependency | Role |
+|---|---|
+| `librefang-kernel` | Core agent runtime and orchestration |
+| `librefang-api` | Communication channels (feature-gated) |
+| `librefang-runtime` | Process registry and execution environment |
+| `librefang-types` | Shared data structures and types |
+| `librefang-migrate` | Database schema migrations |
+| `librefang-skills` | Skill/plugin loading and management |
+| `librefang-extensions` | Extension system |
+
+## Architecture
 
 ```mermaid
 graph TD
-    CLI[librefang-cli] --> Kernel[librefang-kernel]
-    CLI --> API[librefang-api]
-    CLI --> Skills[librefang-skills]
-    CLI --> Extensions[librefang-extensions]
-    CLI --> Migrate[librefang-migrate]
-    CLI --> Runtime[librefang-runtime]
-    CLI --> Types[librefang-types]
-    API --> Types
-    Kernel --> Types
+    CLI["librefang (binary)"]
+    CLI --> Kernel["librefang-kernel"]
+    CLI --> API["librefang-api"]
+    CLI --> Runtime["librefang-runtime"]
+    CLI --> Skills["librefang-skills"]
+    CLI --> Extensions["librefang-extensions"]
+    CLI --> Migrate["librefang-migrate"]
+    API --> |"feature: all-channels"| Channels["All channel backends"]
+    API --> |"feature: mini"| Mini["Minimal channel set"]
+    CLI --> |"feature: telemetry"| OTEL["OpenTelemetry"]
+    Runtime --> PR["process_registry"]
 ```
 
 ## Feature Flags
 
-Features control the binary's size and capability set:
+Features control which capabilities are compiled into the binary.
 
-| Feature | Default | Effect |
-|---------|---------|--------|
-| `all-channels` | **on** | Enables all communication channels via `librefang-api/all-channels` |
-| `mini` | off | Builds a stripped-down variant via `librefang-api/mini` — excludes heavyweight channels |
-| `telemetry` | **on** | Enables OpenTelemetry tracing export (`opentelemetry_sdk`, `tracing-opentelemetry`) |
+### `default`
+Enables `librefang-api/all-channels` and `telemetry`. Produces a full-featured build.
 
-To build the minimal binary:
+### `all-channels`
+Forwarded to `librefang-api/all-channels`. Includes all communication channel backends.
 
-```bash
-cargo build --package librefang-cli --no-default-features --features mini
-```
+### `mini`
+Forwarded to `librefang-api/mini`. Produces a minimal binary with reduced channel support — useful for constrained environments or faster builds during development.
+
+### `telemetry`
+Enables OpenTelemetry tracing export. Pulls in `opentelemetry_sdk` and `tracing-opentelemetry`. Also forwards the `telemetry` feature to `librefang-api`. When disabled, tracing still works locally via `tracing-subscriber` but no OTLP export occurs.
 
 ## Build Script (`build.rs`)
 
-The build script runs three tasks at compile time:
+The build script performs four tasks at compile time:
 
 ### 1. Git Hooks Configuration
+```
+git config core.hooksPath scripts/hooks
+```
+Automatically sets the shared hook path for all developers on first build. Failures are silently ignored (e.g., when not in a git repository).
 
-Automatically sets the repository's hooks path to `scripts/hooks` on every build. This ensures all developers share the same commit checks without manual setup. The command failure is silently ignored (e.g., when building outside a git checkout).
+### 2. Git Commit Hash
+```
+GIT_SHA=<short hash>
+```
+Captured via `git rev-parse --short HEAD`. Falls back to `"unknown"` when not in a git repo. Embedded as a runtime-accessible environment variable for version display.
 
-### 2. Embedding Build Metadata
+### 3. Build Date
+```
+BUILD_DATE=<YYYY-MM-DD>
+```
+UTC date at build time. Used alongside the git hash in version output. Falls back to `"unknown"`.
 
-Three environment variables are emitted and available at runtime via `env!()` or `option_env!()`:
+### 4. Rustc Version
+```
+RUSTC_VERSION=<version string>
+```
+Captured from `rustc --version`. Included in diagnostic output.
 
-| Variable | Source | Example Value |
-|----------|--------|---------------|
-| `GIT_SHA` | `git rev-parse --short HEAD` | `a3f7c2d` |
-| `BUILD_DATE` | `date -u +%Y-%m-%d` | `2025-01-15` |
-| `RUSTC_VERSION` | `rustc --version` | `rustc 1.82.0` |
+All four values are set via `cargo:rustc-env=...` and accessible at runtime through the `env!` macro.
 
-These are used in `--version` output and diagnostic logs. All three gracefully fall back to `"unknown"` when the source command is unavailable (e.g., building from a tarball without git).
+## Key External Dependencies
 
-### 3. Platform Note
-
-On non-MSVC targets (Linux, macOS, BSD), the build links against **tikv-jemallocator** with `disable_initial_exec_tls` for improved allocation performance. MSVC builds use the system allocator.
-
-## Key Dependencies and Their Roles
-
-| Crate | Purpose in the CLI |
-|-------|--------------------|
-| `librefang-kernel` | Core agent lifecycle and state management |
-| `librefang-api` | Communication channel adapters (gRPC, HTTP, etc.) |
-| `librefang-skills` | Skill loading and execution |
-| `librefang-extensions` | Extension system |
-| `librefang-migrate` | Database schema migrations |
-| `librefang-runtime` | Process registry and runtime utilities |
-| `librefang-types` | Shared domain types |
+| Crate | Purpose |
+|---|---|
 | `clap` / `clap_complete` | Argument parsing and shell completion generation |
-| `ratatui` | Terminal UI rendering |
+| `ratatui` | Terminal UI framework for interactive mode |
 | `tokio` | Async runtime |
 | `tracing` / `tracing-subscriber` | Structured logging |
-| `rusqlite` | Local SQLite storage |
-| `reqwest` | HTTP client (blocking feature enabled for synchronous operations) |
-| `rustls` | TLS without OpenSSL dependency |
-| `toml` / `toml_edit` | Configuration file reading and modification |
-| `fluent` / `unic-langid` | Internationalization (i18n) |
-| `zeroize` | Secure memory clearing for sensitive data |
+| `serde` / `serde_json` / `toml` / `toml_edit` | Configuration file serialization |
+| `dirs` | Standard directory paths (config, data, cache) |
+| `reqwest` | HTTP client (blocking feature enabled) |
+| `rusqlite` | SQLite database access |
 | `colored` | Terminal color output |
+| `fluent` / `unic-langid` | Localization/i18n |
+| `open` | Open URLs/files in the system default handler |
+| `rustls` | TLS without OpenSSL dependency |
+| `walkdir` | Recursive directory traversal |
+| `zeroize` | Secure memory clearing for sensitive data |
+| `uuid` | UUID generation |
+
+### Memory Allocator
+
+On non-MSVC targets (Linux, macOS, BSD), the binary uses `tikv-jemallocator` with `disable_initial_exec_tls` for improved allocation performance. This is not used on Windows MSVC builds.
+
+## Version Information
+
+The binary reports version metadata composed of:
+- `GIT_SHA` — embedded at build time
+- `BUILD_DATE` — embedded at build time
+- `RUSTC_VERSION` — embedded at build time
+- Package version — from `Cargo.toml` workspace
+
+This is typically exposed through a `--version` flag or `version` subcommand.
+
+## Configuration
+
+The CLI uses TOML-based configuration, with paths resolved via the `dirs` crate for platform-appropriate locations (`~/.config/librefang/` on Linux, `%APPDATA%` on Windows, etc.). The `toml_edit` dependency allows the CLI to modify configuration files while preserving comments and formatting.
 
 ## Building
 
 ```bash
 # Full build (default features)
-cargo build --package librefang-cli
+cargo build -p librefang-cli
 
-# Release binary
-cargo build --package librefang-cli --release
+# Minimal build
+cargo build -p librefang-cli --no-default-features --features mini
 
-# Minimal binary without telemetry or full channels
-cargo build --package librefang-cli --no-default-features --features mini
+# Without telemetry
+cargo build -p librefang-cli --no-default-features --features all-channels
 ```
 
-The resulting binary is located at `target/debug/librefang` or `target/release/librefang`.
-
-## Extending
-
-To add a new workspace crate into the CLI:
-
-1. Add the dependency to `librefang-cli/Cargo.toml`.
-2. Import and wire the crate into the relevant `clap` subcommand in `src/main.rs`.
-3. If the crate introduces optional heavyweight dependencies, consider gating it behind a new feature flag that mirrors the `mini`/`all-channels` pattern.
+The resulting binary is located at `target/debug/librefang` (or `target/release/librefang`).

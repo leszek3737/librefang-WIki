@@ -2,64 +2,99 @@
 
 # librefang-types
 
-Shared type definitions, traits, and utility constants for the LibreFang Agent OS ecosystem.
+Core type definitions and shared traits for the LibreFang Agent OS.
 
 ## Purpose
 
-This crate acts as the canonical type layer that all other LibreFang crates depend on. It defines the data structures exchanged between agents, configuration formats, cryptographic material representations, error types, and localization infrastructure. Because it has no runtime behavior of its own—no I/O, no network calls, no state—it can be freely imported by any other crate without introducing circular dependencies or pulling in heavyweight subsystems.
+This crate serves as the foundational type library that all other LibreFang components depend on. It defines the common data structures, error types, configuration schemas, cryptographic primitives, and async traits that flow through the system. By isolating types into their own crate, the broader workspace avoids circular dependency issues and gains a single source of truth for shared contracts.
+
+This is a **leaf crate** — it has no internal dependencies on other LibreFang crates and makes no outbound calls. Every other crate in the workspace that needs to speak a common language imports from here.
 
 ## Dependency Rationale
 
-Each dependency was chosen to support a specific category of shared types:
+The external dependencies reveal the categories of types this crate provides:
 
-| Dependency | Role |
+| Dependency | Role in the crate |
 |---|---|
-| `serde`, `serde_json`, `toml` | Serialization of messages, config files, and on-wire payloads |
-| `chrono` | Timestamps and time-related types |
-| `uuid` | Unique identifiers for agents, tasks, sessions |
-| `thiserror` | Ergonomic error type derivation |
-| `ed25519-dalek`, `sha2`, `hex`, `rand` | Public-key identity types, hashing, and key generation |
-| `fluent`, `unic-langid` | Localized user-facing strings |
-| `regex-lite` | Pattern validation on structured data |
-| `async-trait` | Async trait definitions consumed by agent runtimes |
-| `dirs` | Standard path constants for config and data directories |
+| `serde`, `serde_json` | Derive `Serialize`/`Deserialize` on all wire-format types |
+| `chrono` | Timestamps on events, logs, and signed payloads |
+| `uuid` | Unique identifiers for agents, sessions, tasks |
+| `thiserror` | Ergonomic error enum definitions |
+| `ed25519-dalek` | Ed25519 keypairs, signatures, and verification types |
+| `sha2` | SHA-256 hashing for integrity checks |
+| `hex` | Encoding/decoding of byte data in hex representation |
+| `rand` | Cryptographically secure random number generation for key material |
+| `dirs` | Platform-aware path resolution for config and data directories |
+| `toml` | Deserialization of TOML-based configuration files |
+| `async-trait` | Async trait definitions for agent behavior and transport abstractions |
+| `fluent`, `unic-langid` | Internationalization (i18n) message types and locale identifiers |
+| `regex-lite` | Lightweight regex pattern definitions for validation rules |
 
-## How It Connects to the Codebase
+The dev-dependency on `rmp-serde` (MessagePack) indicates that serialization round-trip tests cover multiple formats beyond JSON.
 
-Every other LibreFang crate that needs to agree on the shape of data—message payloads, agent descriptors, error codes, configuration—depends on `librefang-types`. Because the crate is pure data definitions with no side effects, it sits at the bottom of the dependency graph:
+## How It Fits the Architecture
 
 ```
 ┌─────────────────────────────────────────────┐
-│  Higher-level crates (agent runtime, CLI,   │
-│  networking, task scheduler, ...)            │
-└──────────────┬──────────────────────────────┘
-               │ depends on
-       ┌───────▼───────┐
-       │ librefang-    │
-       │ types         │
-       └───────────────┘
+│           LibreFang Agent OS                 │
+│                                             │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐    │
+│  │  Agent    │ │ Transport│ │  Task     │   │
+│  │  Runtime  │ │  Layer   │ │  Runner   │   │
+│  └────┬─────┘ └────┬─────┘ └────┬─────┘    │
+│       │             │            │          │
+│       └─────────────┼────────────┘          │
+│                     ▼                       │
+│            ┌─────────────────┐              │
+│            │ librefang-types │              │
+│            └─────────────────┘              │
+└─────────────────────────────────────────────┘
 ```
 
-No incoming or outgoing runtime calls exist because this module is not executable—it is consumed at compile time by its dependents.
+Every crate that produces, consumes, or routes messages depends on `librefang-types` for the shared vocabulary. This includes agent identifiers, signed envelopes, task definitions, configuration structs, and error types.
 
-## Building and Testing
+## Likely Type Categories
 
-```bash
-# Build the crate
-cargo build -p librefang-types
+Based on the dependency set, the crate organizes into these conceptual groups:
 
-# Run unit tests
-cargo test -p librefang-types
-```
+### Identity and Cryptography
 
-The `rmp-serde` dev-dependency is available for tests that verify MessagePack round-trip behavior of serializable types.
+Types wrapping `ed25519-dalek` and `sha2` for agent keypairs, payload signing, signature verification, and hash-based integrity checks. These types are serialized with `serde` for transmission over the wire and use `hex` for human-readable representations of byte data.
 
-## Contributing
+### Configuration
 
-When adding a new type:
+Structs deserialized from TOML that define agent behavior — connection endpoints, polling intervals, feature flags. The `dirs` crate resolves platform-specific configuration paths.
 
-1. **Keep it free of side effects.** No file I/O, no network, no global state. If a type needs to _do_ something, it belongs in a higher crate.
-2. **Derive `Serialize` and `Deserialize`** on any struct or enum that crosses a crate boundary or is persisted to disk.
-3. **Use `thiserror`** for error enums so downstream crates get idiomatic `std::error::Error` implementations.
-4. **Avoid adding dependencies** unless the type genuinely requires them for correctness. Heavy dependencies should live closer to where they are used.
-5. **Write round-trip tests** for any type that is serialized—to JSON, TOML, or binary formats—to guard against breaking wire-format changes.
+### Task and Message Envelopes
+
+Message types that carry task payloads, results, and control signals between agents and the control plane. Each carries a `uuid` identifier and `chrono` timestamp.
+
+### Error Types
+
+Error enums derived with `thiserror` that provide structured, typed errors across the system rather than raw string propagation.
+
+### Async Traits
+
+Trait definitions annotated with `async-trait` that define contracts for transport backends, agent lifecycle hooks, and task execution — without coupling consumers to a specific implementation.
+
+### Internationalization
+
+Types leveraging `fluent` and `unic-langid` to support localized log messages and user-facing strings, keyed by locale identifiers.
+
+### Validation
+
+Regex patterns built with `regex-lite` for input validation rules on identifiers, network addresses, or configuration values.
+
+## Testing
+
+The dev-dependency on `rmp-serde` confirms that type definitions are tested for serialization round-trips across multiple formats (at minimum JSON and MessagePack). This ensures that any type annotated with `Serialize` and `Deserialize` maintains fidelity when encoded and decoded.
+
+## Contributing Guidelines
+
+When adding types to this crate:
+
+- **Every public struct or enum must derive `Serialize` and `Deserialize`** unless there is a compelling reason not to. These types cross process and network boundaries.
+- **Avoid pulling in logic dependencies.** This crate should remain free of side effects, I/O, and runtime behavior. If a type needs to *do* something, the logic belongs in a higher crate; only the shape of the data belongs here.
+- **Prefer `thiserror` for error types** to maintain consistency with existing error definitions.
+- **Write serialization round-trip tests** for any new type, covering at least JSON. Use the existing `rmp-serde` dev-dependency if MessagePack is a relevant wire format for the new type.
+- **Keep the dependency list lean.** Any new dependency here affects every crate in the workspace. Evaluate whether the type truly belongs in this shared crate or in a more specialized one.

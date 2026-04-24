@@ -2,356 +2,328 @@
 
 # Skills System
 
-## Overview
-
-The skills system is LibreFang's pluggable extension mechanism. A **skill** is a self-contained bundle—manifest + optional executable code or prompt context—that extends what an agent can do. Skills are loaded at startup, registered as tools the LLM can invoke, and can be created, mutated, and versioned at runtime by the agent itself through the evolution subsystem.
-
-Skills come in several flavors:
-
-| Runtime | Execution model |
-|---|---|
-| `promptonly` | Injects Markdown instructions into the LLM system prompt. No executable code. |
-| `python` | Python script spawned as a subprocess; receives JSON on stdin, returns JSON on stdout. |
-| `shell` | Bash/sh script spawned as a subprocess; same I/O contract as Python. |
-| `node` | Node.js script spawned as a subprocess; same I/O contract. |
-| `wasm` | WASM module executed in a sandbox (not yet implemented). |
-| `builtin` | Compiled into the binary; handled directly by the kernel. |
+The Skills System (`librefang-skills`) manages the full lifecycle of reusable capability modules — from marketplace discovery and installation through agent-driven creation, mutation, and deletion. Skills are the primary extensibility mechanism: they inject tool definitions, prompt context, and configuration into agent sessions.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    subgraph Disk
-        ST["skill.toml"]
-        PC["prompt_context.md"]
-        EV[".evolution.json"]
+    subgraph Sources
+        CH[ClawHub Marketplace]
+        SH[Skillhub COS]
+        OC[OpenClaw / SKILL.md]
+        AGENT[Agent Self-Evolution]
     end
 
     subgraph Registry
-        SR["SkillRegistry"]
-        IS["InstalledSkill"]
-    end
-
-    subgraph Execution
-        PY["Python subprocess"]
-        SH["Shell subprocess"]
-        ND["Node.js subprocess"]
+        REG[SkillRegistry]
+        REG -->|load_all| SKILLS[InstalledSkill set]
     end
 
     subgraph Evolution
-        CS["create_skill"]
-        US["update_skill"]
-        PS["patch_skill"]
-        RB["rollback_skill"]
+        EVO[evolution.rs]
+        EVO --> CREATE[create_skill]
+        EVO --> PATCH[patch_skill]
+        EVO --> UPDATE[update_skill]
+        EVO --> ROLLBACK[rollback_skill]
+        EVO --> DELETE[delete_skill]
     end
 
-    ST --> SR
-    PC --> SR
-    SR --> IS
-    IS -->|Python| PY
-    IS -->|Shell| SH
-    IS -->|Node| ND
-    IS -->|evolve| CS
-    IS -->|evolve| US
-    IS -->|evolve| PS
-    IS -->|evolve| RB
-    EV --> RB
+    subgraph Runtime
+        TR[tool_runner]
+        TR -->|dispatch| LOADER[loader.rs execute_skill_tool]
+        TR -->|evolve tools| EVO
+        TR -->|find_tool| REG
+        TR -->|record usage| EVO
+    end
+
+    subgraph Infra
+        SEC[verify.rs Security Scanner]
+        ATOM[Atomic Write + File Locking]
+        CONFCFG[config_injection.rs]
+    end
+
+    CH -->|install| REG
+    SH -->|install| REG
+    OC -->|convert| REG
+    AGENT -->|create/patch| EVO
+    EVO -->|writes| REG
+    REG -->|provides tools + prompts| TR
+    EVO --> SEC
+    EVO --> ATOM
+    CONFCFG -->|system prompt section| TR
 ```
 
-## Skill Manifest (`skill.toml`)
+## Core Data Types
 
-Every skill is defined by a `skill.toml` file in its own directory. The manifest is parsed into `SkillManifest`.
+### `SkillManifest`
 
-### Minimal manifest
+The canonical skill definition, serialized as `skill.toml` in each skill directory. Key fields:
 
-```toml
-[skill]
-name = "my-skill"
-version = "0.1.0"
-description = "What this skill does"
+| Field | Type | Purpose |
+|-------|------|---------|
+| `skill` | `SkillMeta` | Name, version, description, author, tags |
+| `runtime` | `SkillRuntimeConfig` | `runtime_type` (`PromptOnly`, `Node`, etc.) + entry point |
+| `tools` | `SkillTools` | Tool definitions exposed to the agent |
+| `prompt_context` | `Option<String>` | Inline prompt text (or `None` if stored in `prompt_context.md`) |
+| `source` | `Option<SkillSource>` | Origin: `Local`, `Native`, marketplace source |
+| `config_vars` | `Vec<SkillConfigVar>` | Declared configuration dependencies |
+| `requirements` | `SkillRequirements` | Required binaries, permissions |
+
+### `InstalledSkill`
+
+A loaded skill bound to a filesystem path:
+
+```rust
+pub struct InstalledSkill {
+    pub manifest: SkillManifest,
+    pub path: PathBuf,    // Absolute path to skill directory
+    pub enabled: bool,
+}
 ```
 
-This produces a `PromptOnly` skill (the default runtime). Place a `prompt_context.md` file alongside the manifest containing Markdown that teaches the LLM how to behave.
+### `SkillConfigVar`
 
-### Full manifest
+Skills declare config keys they depend on in `[[config_vars]]`:
 
 ```toml
-[skill]
-name = "web-summarizer"
-version = "0.2.0"
-description = "Summarizes any web page into bullet points"
-author = "librefang-community"
-license = "MIT"
-tags = ["web", "summarizer", "research"]
-
-[runtime]
-type = "python"
-entry = "src/main.py"
-
-[[tools.provided]]
-name = "summarize_url"
-description = "Fetch a URL and return a concise bullet-point summary"
-input_schema = { type = "object", properties = { url = { type = "string" } }, required = ["url"] }
-
-[requirements]
-tools = ["web_fetch"]
-capabilities = ["NetConnect(*)"]
-
-[config]
-apiKey = "sk-..."
-endpoint = "https://api.example.com"
-
 [[config_vars]]
 key = "wiki.base_url"
 description = "Base URL of the internal wiki"
 default = "https://wiki.example.com"
 ```
 
-### Key fields
+Resolved values are injected into the system prompt at session start (see [Config Injection](#config-injection)).
 
-- **`skill.name`** — Unique identifier. Must be lowercase alphanumeric + hyphens/underscores, max 64 characters, must start with an alphanumeric character.
-- **`runtime.type`** — One of `python`, `wasm`, `node`, `shell`, `builtin`, `promptonly`. Defaults to `promptonly`.
-- **`runtime.entry`** — Path to the entry-point file, relative to the skill directory.
-- **`tools.provided`** — Array of tool definitions the skill exposes. Each tool has a `name`, `description`, and JSON Schema `input_schema`.
-- **`requirements.tools`** — Built-in tools this skill needs access to.
-- **`requirements.capabilities`** — Host capabilities required (e.g., network access).
-- **`config`** — Arbitrary key-value pairs passed to the skill's runtime via stdin payload.
-- **`config_vars`** — Declared global config keys resolved at prompt-build time and injected into the system prompt.
-- **`source`** — Provenance tracking: `Native`, `Local`, `OpenClaw`, `ClawHub`, `ClawHubCn`, or `Skillhub`.
+### Skill Directory Layout
 
-## Registry (`SkillRegistry`)
-
-The registry is the central index of installed skills. It is constructed with a root skills directory and loads all subdirectories containing a `skill.toml`.
-
-### Loading skills
-
-```rust
-let mut registry = SkillRegistry::new(skills_dir);
-let count = registry.load_all()?;
+```
+skills/
+└── my-skill/
+    ├── skill.toml              # Manifest
+    ├── prompt_context.md       # Prompt text (for evolved/PromptOnly skills)
+    ├── .evolution.json         # Version history + usage counters
+    ├── .rollback/              # Previous version snapshots
+    │   └── prompt_context_20260301_120000_001_12345.md
+    ├── references/             # Supporting files
+    ├── templates/
+    ├── scripts/
+    └── assets/
 ```
 
-`load_all` scans the skills directory. For each subdirectory:
+## Skill Sources and Format Conversion
 
-1. Look for `skill.toml`. If absent, check for `SKILL.md` (OpenClaw format) and auto-convert.
-2. Parse the manifest.
-3. Run prompt injection scanning on the content. Skills with **critical** severity warnings are blocked.
-4. Skip skills that are in the global disabled list.
-5. Skip skills whose platform tags don't match the current OS (e.g., a `linux-only` skill on macOS).
-6. If the manifest has no inline `prompt_context`, load `prompt_context.md` from the same directory (progressive loading).
-7. Canonicalize the directory path for reliable entry-point resolution.
+The system ingests skills from multiple sources and formats:
 
-### Platform filtering
+| Source | Format | Conversion Path |
+|--------|--------|----------------|
+| ClawHub marketplace | ZIP (package.json) or raw SKILL.md | `openclaw_compat::convert_openclaw_skill` or `convert_skillmd` |
+| Skillhub COS | ZIP | Same ClawHub conversion pipeline |
+| OpenClaw / SKILL.md | YAML frontmatter + markdown | `openclaw_compat::parse_skillmd` → LibreFang manifest |
+| Agent evolution | Direct writes | `evolution::create_skill` writes `skill.toml` + `prompt_context.md` |
 
-Skills can declare OS compatibility via tags: `macos`, `linux`, `windows`, `macos-only`, `linux-only`, `windows-only`. If a skill declares any platform tags, it only loads on a matching OS. Skills with no platform tags load everywhere.
+Format detection runs in order during `load_all`:
+1. Check for `skill.toml` (native LibreFang)
+2. Check for `SKILL.md` frontmatter (`detect_skillmd`)
+3. Check for OpenClaw package.json (`detect_openclaw_skill`)
 
-`derive_category` extracts the first non-platform tag for UI grouping, falling back to `"general"`.
+Non-native formats are auto-converted on first load and the resulting `skill.toml` is written back to disk.
 
-### Freezing
+## ClawHub Marketplace Client
 
-In Stable mode the registry is frozen after initial load:
+`ClawHubClient` (`clawhub.rs`) communicates with the ClawHub API (`https://clawhub.ai/api/v1`) for search, browse, and install operations.
 
-```rust
-registry.freeze();
-// All subsequent load_skill calls return SkillError::NotFound
-```
+### API Endpoints
 
-`reload_skill` is exempt—it refreshes an existing entry even when frozen. This is used by the evolution system after mutations.
+| Method | Endpoint | Returns |
+|--------|----------|---------|
+| `search(query, limit)` | `GET /api/v1/search?q=...&limit=N` | `ClawHubSearchResponse` (key: `results`) |
+| `browse(sort, limit, cursor)` | `GET /api/v1/skills?sort=...&limit=N` | `ClawHubBrowseResponse` (key: `items`, paginated via `next_cursor`) |
+| `get_skill(slug)` | `GET /api/v1/skills/{slug}` | `ClawHubSkillDetail` |
+| `get_file(slug, path)` | `GET /api/v1/skills/{slug}/file?path=...` | Raw file content |
+| `install(slug, target_dir)` | `GET /api/v1/download?slug=...` → process | `ClawHubInstallResult` |
 
-### Workspace and external skills
+### Rate Limiting and Retry
 
-- **`load_workspace_skills`** — Loads skills from a workspace-scoped directory. Workspace skills override global skills with the same name.
-- **`load_external_dirs`** — Loads skills from additional directories. External skills do **not** override local skills with the same name.
+All HTTP calls go through `get_with_retry`, which implements exponential backoff with jitter:
 
-### Querying
+- **5 attempts** maximum (`MAX_RETRIES`)
+- **1.5s base delay**, doubling per attempt, capped at **30s** (`MAX_DELAY_MS`)
+- Respects the `Retry-After` header when present (capped to 30s)
+- Retries on **429** and **5xx**; non-retryable 4xx errors fail immediately
+- Returns `SkillError::RateLimited` or `SkillError::Network` when retries exhaust
 
-```rust
-// Get a specific skill
-let skill = registry.get("my-skill");
+TLS verification can be disabled for testing via `LIBREFANG_DANGEROUSLY_SKIP_TLS_VERIFICATION=true`.
 
-// List all installed skills
-let all = registry.list();
+### Install Security Pipeline
 
-// Get all tool definitions from enabled skills (for LLM tool registration)
-let tools = registry.all_tool_definitions();
+`install` and `install_from_bytes` run a 7-step pipeline:
 
-// Find which skill provides a tool
-let provider = registry.find_tool_provider("summarize_url");
+1. **SHA256 hash** of downloaded content
+2. **Format detection** — SKILL.md (starts with `---`), ZIP (magic bytes `0x50 0x4b`), or raw package.json
+3. **Zip extraction** with path-traversal protection (`resolve_skill_child_path` rejects absolute paths and non-`Normal` components)
+4. **Format conversion** to LibreFang manifest via `openclaw_compat`
+5. **Prompt injection scan** via `SkillVerifier::scan_prompt_content` — **critical-severity findings block installation** and clean up the skill directory
+6. **Binary dependency check** — warns if declared binaries are missing from `$PATH`
+7. **Manifest security scan** via `SkillVerifier::security_scan` — warnings attached to result but don't block
 
-// Tool definitions filtered to specific skills
-let tools = registry.tool_definitions_for_skills(&["web-summarizer".to_string()]);
-```
+The result includes all warnings and any tool-name translations applied (e.g., OpenClaw `Read` → LibreFang `file_read`).
 
-## Execution (`loader`)
+### Slug Validation
 
-`execute_skill_tool` is the entry point for running a skill tool. It dispatches based on `SkillRuntime`:
+`validate_slug` enforces ASCII alphanumeric + hyphens/underscores only. This is applied before any URL construction to prevent injection into API paths.
 
-### Subprocess runtimes (Python, Node, Shell)
+## Skill Evolution
 
-All three follow the same contract:
-
-1. **Path validation** — `validate_script_path` canonicalizes both the skill directory and the script path, then verifies the script path starts with the skill directory. This blocks `../` traversal, absolute paths, and symlink escapes.
-2. **Payload construction** — A JSON object with `tool` (tool name), `input` (arguments), and optionally `config` (skill config map) is serialized.
-3. **Process spawn** — The script is executed with:
-   - `env_clear()` — the environment is scrubbed to prevent leaking host secrets (API keys, tokens) to third-party skill code.
-   - Only `PATH`, `HOME`, and platform essentials (`SYSTEMROOT`, `TEMP` on Windows) are preserved.
-   - Runtime-specific env vars: `PYTHONIOENCODING=utf-8` for Python, `NODE_NO_WARNINGS=1` for Node.
-4. **I/O** — The JSON payload is written to stdin. Stdout is parsed as JSON on success; if parsing fails, the raw stdout is wrapped as `{"result": "<trimmed text>"}`. Stderr is captured for error reporting.
-5. **Timeout** — Shell skills have a 120-second timeout. Python and Node run without a hard timeout.
-
-### PromptOnly runtime
-
-When a tool from a `PromptOnly` skill is invoked, execution returns immediately with a note directing the LLM to use built-in tools—the actual skill content is already in the system prompt.
-
-### Builtin and WASM runtimes
-
-These return `SkillError::RuntimeNotAvailable`. Builtin skills are handled by the kernel directly; WASM is not yet implemented.
-
-## Evolution System
-
-The evolution module enables agents to autonomously create, modify, and version skills. Every mutation is serialized through per-skill file locks and recorded in a version history.
-
-### File locking
-
-Mutations acquire an exclusive lock via `acquire_skill_lock`. The lock file lives at `{skills_dir}/.evolution-locks/{skill_name}.lock`—**outside** the skill directory—so that `delete_skill` can hold the lock across `remove_dir_all` without conflicting open handles on Windows.
-
-### Atomic writes
-
-All file mutations use `atomic_write`, which writes to a temp file (named with pid, thread id, monotonic counter, and nanosecond timestamp) and renames it into place. This prevents partial files on crash.
+The evolution subsystem (`evolution.rs`) enables agents to autonomously create, refine, and manage PromptOnly skills. All mutation operations are serialized per-skill via file locks and use atomic writes.
 
 ### Operations
 
-#### `create_skill`
+| Operation | Function | Mutates Version | Bumps `mutation_count` |
+|-----------|----------|:-:|:-:|
+| Create | `create_skill` | ✓ (initial `0.1.0`) | ✗ |
+| Full update | `update_skill` | ✓ (patch bump) | ✓ |
+| Fuzzy patch | `patch_skill` | ✓ (patch bump) | ✓ |
+| Rollback | `rollback_skill` | ✓ (patch bump) | ✓ |
+| Delete | `delete_skill` | — | — |
+| Uninstall | `uninstall_skill` | — | — |
+| Write supporting file | `write_supporting_file` | ✗ | ✗ |
+| Remove supporting file | `remove_supporting_file` | ✗ | ✗ |
+| Record usage | `record_skill_usage` | ✗ | ✗ (bumps `use_count`) |
 
-Creates a new `PromptOnly` skill from scratch:
+### Fuzzy Find-and-Replace
 
-```rust
-create_skill(
-    &skills_dir,
-    "my-approach",
-    "Handles X by doing Y",
-    "# Instructions\n\n...",
-    vec!["category".to_string()],
-    Some("agent:uuid"),
-)?;
+`patch_skill` uses `fuzzy_find_and_replace`, which tries 6 matching strategies in order from strict to loose:
+
+1. **Exact** — literal substring match
+2. **LineTrimmed** — trim each line's whitespace, then match
+3. **WhitespaceNormalized** — collapse whitespace runs to single space
+4. **IndentFlexible** — strip all leading whitespace
+5. **BlockAnchor** — match first + last lines, require ≥60% middle-line similarity
+6. **WhitespaceStripped** — remove all whitespace from both sides, substring match (last resort for CJK content)
+
+When no strategy matches, the error includes the closest existing lines (Jaccard similarity on character sets, threshold ≥0.3) so the agent can self-correct on its next attempt.
+
+The successful strategy is reported in `EvolutionResult::match_strategy` for diagnostics.
+
+### Concurrency Model
+
+All mutations acquire a per-skill exclusive lock before touching the filesystem:
+
+```
+{skills_dir}/.evolution-locks/{skill_name}.lock
 ```
 
-- Validates name and prompt content (size limit, injection scan).
-- Creates the skill directory, `skill.toml`, and `prompt_context.md`.
-- Records initial version `0.1.0` in `.evolution.json`.
+Lock files live **outside** the skill directory so that `delete_skill`/`uninstall_skill` can hold the lock across `remove_dir_all` (important on Windows where open file handles block directory deletion). Uses `fs2::FileExt::lock_exclusive` (`flock` on Unix, `LockFileEx` on Windows).
 
-#### `update_skill`
+All file writes use `atomic_write`: write to a temp file named with pid + thread id + monotonic counter + nanosecond timestamp, then `fs::rename`. No partial files on crash.
 
-Full rewrite of a skill's prompt context:
+Under the lock, mutations re-read `skill.toml` from disk to get the current version, preventing concurrent writers from producing duplicate version numbers.
 
-```rust
-update_skill(&installed_skill, "# New content...", "Rewritten for clarity", Some("agent:uuid"))?;
+### Version History
+
+Each skill stores `.evolution.json` with:
+
+- `versions`: up to **10** entries (`MAX_VERSION_HISTORY`), newest last, each with version, timestamp, changelog, content hash, and author
+- `evolution_count`: total version entries written (including initial creation)
+- `mutation_count`: post-creation edits only
+- `use_count`: successful tool invocations (incremented by `record_skill_usage`)
+
+Rollback snapshots are stored in `.rollback/` with nanosecond-precision filenames. After a rollback, the consumed snapshot is removed but the pre-rollback content is saved as a new snapshot, making rollback itself reversible.
+
+### Delete vs. Uninstall
+
+- **`delete_skill`** — agent-facing. Validates `source` field; only deletes `Local`/`Native` skills. Refuses to touch marketplace or unclassified skills.
+- **`uninstall_skill`** — user-facing (dashboard/CLI). Removes any skill regardless of source. The operator has explicitly decided to remove it.
+
+Both acquire the skill lock and re-check existence under the lock to prevent races with concurrent patches/updates.
+
+### Supporting Files
+
+Skills can store auxiliary files in whitelisted subdirectories: `references/`, `templates/`, `scripts/`, `assets/`. Files are limited to **1 MiB** each and undergo prompt injection scanning before write.
+
+`write_supporting_file` and `remove_supporting_file` both:
+- Validate the path is under an allowed subdirectory
+- Check for path traversal (`..`, absolute paths)
+- Canonicalize paths and verify they don't escape the skill directory (symlink protection)
+- Acquire the per-skill lock
+
+`list_supporting_files` walks subdirectories recursively (up to depth 16, no symlink following) and returns a `HashMap<subdir_name, Vec<relative_paths>>`.
+
+## Config Injection
+
+The `config_injection` module resolves skill-declared configuration variables and formats them for the system prompt.
+
+### Resolution Pipeline
+
+1. **Collect** — `collect_config_vars(skills)` gathers all `[[config_vars]]` from enabled skills, deduplicating by key (first declaration wins)
+2. **Resolve** — `resolve_config_vars(vars, config_toml)` walks `skills.config.<key>` in the user's config TOML, falling back to declared defaults
+3. **Format** — `format_config_section(resolved)` produces the prompt section
+
+### Storage Convention
+
+A declared key `wiki.base_url` is stored in `~/.librefang/config.toml`:
+
+```toml
+[skills.config.wiki]
+base_url = "https://wiki.corp.example.com"
 ```
 
-- Saves a rollback snapshot of the current `prompt_context.md` in `.rollback/`.
-- Re-reads `skill.toml` from disk under the lock to get the current version (avoids stale snapshots under concurrent writes).
-- Bumps the semver patch version.
-- Writes the new content and updated manifest atomically.
-- Records the version with `is_mutation = true`.
+The resolver walks the dotted path `skills` → `config` → `wiki` → `base_url`. Empty-string values are treated as absent and fall back to the default. Variables with neither a config value nor a default are omitted entirely.
 
-#### `patch_skill`
+### Prompt Format
 
-Fuzzy find-and-replace on prompt content. Designed to be tolerant of LLM formatting variance:
-
-```rust
-patch_skill(
-    &installed_skill,
-    "old text to find",
-    "new replacement text",
-    "Fixed typo",
-    false,  // replace_all
-    Some("agent:uuid"),
-)?;
+```
+## Skill Config Variables
+wiki.base_url = https://wiki.corp.example.com
+db.host = localhost
 ```
 
-Uses a 6-strategy fuzzy matching cascade (strict → loose):
+The function returns an empty string when no variables resolve, allowing callers to skip injection with an `is_empty()` guard.
 
-1. **Exact** — literal substring match.
-2. **LineTrimmed** — trim leading/trailing whitespace per line.
-3. **WhitespaceNormalized** — collapse whitespace runs to single space.
-4. **IndentFlexible** — strip all leading indentation.
-5. **BlockAnchor** — match first and last lines exactly, verify middle ≥60% similar.
-6. **WhitespaceStripped** — remove all whitespace from both sides; substring match. Last resort for CJK content where inter-character spaces are insignificant. Requires ≥3 non-whitespace characters in the needle to avoid false positives.
+## Security Scanning
 
-Each strategy reports back via `MatchStrategy` so callers can know what worked. Multi-match results require `replace_all = true` or produce an error. On complete failure, the error includes the closest matching lines from the content as a diagnostic hint.
+All skill content passes through `SkillVerifier` (defined in `verify.rs`):
 
-#### `rollback_skill`
+- **`security_scan(manifest)`** — inspects the manifest for suspicious tool definitions, dangerous runtime configurations, etc.
+- **`scan_prompt_content(content)`** — detects prompt injection patterns (exfiltration attempts, shell redirection bypasses, etc.)
+- **`sha256_hex(bytes)`** — content hashing for version integrity
 
-Restores the previous version from `.rollback/`:
-
-```rust
-rollback_skill(&installed_skill, Some("agent:uuid"))?;
-```
-
-#### Supporting files
-
-- **`write_supporting_file`** — Adds or overwrites an arbitrary file in the skill directory.
-- **`remove_supporting_file`** — Removes a supporting file from the skill directory.
-
-#### Usage tracking
-
-`record_skill_usage` bumps `use_count` in `.evolution.json` after a successful tool invocation, without touching the version chain.
-
-### Version history
-
-`.evolution.json` stores:
-
-- **`versions`** — Array of `SkillVersionEntry` (version, timestamp, changelog, content hash, author). Capped at 10 entries; oldest are pruned.
-- **`evolution_count`** — Total version entries written (including creation).
-- **`mutation_count`** — Post-creation mutations only. A freshly created skill has `mutation_count = 0`.
-- **`use_count`** — Successful tool invocations.
-
-`EvolutionResult` returns post-operation counters so agents don't need a second query to check state.
-
-## OpenClaw Compatibility
-
-The `openclaw_compat` module auto-detects skills in the legacy `SKILL.md` format (YAML frontmatter + Markdown body) and converts them to `skill.toml` + `prompt_context.md`. This conversion happens automatically during `load_all` and `load_workspace_skills`.
-
-## Security
-
-### Prompt injection scanning
-
-All prompt content passes through `SkillVerifier::scan_prompt_content` before being accepted. Skills with **critical** severity findings are blocked entirely at load time and during evolution operations.
-
-### Subprocess isolation
-
-Subprocess-based runtimes (Python, Node, Shell) run with a scrubbed environment (`env_clear()`) to prevent host secrets from leaking into third-party skill code. Only essential variables (`PATH`, `HOME`, platform necessities) are preserved.
-
-### Path traversal prevention
-
-`validate_script_path` canonicalizes both the skill directory and the resolved script path, then verifies containment. This blocks `../` traversal, absolute paths pointing outside the skill directory, and symlink escapes.
-
-### Name validation
-
-Skill names must be 1–64 characters, start with an alphanumeric character, and contain only `[a-z0-9_-]`. This prevents directory traversal via crafted names.
-
-## Error Handling
-
-All errors flow through `SkillError`:
-
-| Variant | Meaning |
-|---|---|
-| `NotFound` | Skill or tool doesn't exist |
-| `InvalidManifest` | Malformed `skill.toml` or failed validation |
-| `AlreadyInstalled` | Attempt to create a skill that already exists |
-| `RuntimeNotAvailable` | Required runtime (Python, Node, etc.) not found on system |
-| `ExecutionFailed` | Subprocess failed, timed out, or returned non-zero exit |
-| `Io` | Filesystem error |
-| `Network` | Remote operation failed |
-| `RateLimited` | ClawHub rate limit hit |
-| `TomlParse` | Invalid TOML |
-| `YamlParse` | Invalid YAML (OpenClaw conversion) |
-| `SecurityBlocked` | Prompt injection scan rejected the content |
+Critical-severity findings from `scan_prompt_content` **block** skill installation and creation. Lower-severity warnings are attached to the result for display.
 
 ## Integration Points
 
-The skills system is consumed by the runtime via `tool_runner`:
+### From `librefang-runtime` (`tool_runner.rs`)
 
-- **`execute_tool_raw`** — Looks up the tool provider in the registry, calls `execute_skill_tool`, and records usage.
-- **Evolve tools** — `tool_skill_evolve_create`, `_update`, `_patch`, `_rollback`, `_delete`, `_write_file`, `_remove_file` all delegate to the evolution module.
-- **CLI** — `cmd_skill_install` uses the marketplace module; `cmd_doctor` loads the registry and runs prompt scanning.
-- **API routes** — Skill CRUD endpoints in `src/routes/skills.rs` delegate to evolution operations.
+The runtime is the primary consumer. Each agent tool dispatch follows this pattern:
+
+- **Skill tool execution**: `execute_tool_raw` → `find_tool_provider` (registry) → `execute_skill_tool` (loader) → `record_skill_usage` (evolution)
+- **Evolve tools**: `tool_skill_evolve_create/update/patch/rollback/delete/write_file/remove_file` → load skill from disk → call evolution function → return `EvolutionResult`
+- All evolve tools call `ensure_not_frozen` before mutating, preventing changes when the registry is frozen
+
+### From `librefang-cli` (`main.rs`)
+
+- `cmd_skill_install` → `marketplace::install`
+- `cmd_doctor` → `registry::load_all` + `scan_prompt_content` for health checks
+
+### From the Dashboard (`src/routes/skills.rs`)
+
+HTTP handlers call evolution functions directly:
+- `evolve_delete_skill` → `delete_skill`
+- `evolve_write_file` → `write_supporting_file`
+- `evolve_remove_file` → `remove_supporting_file`
+
+All routes go through the same lock + security pipeline as the agent tools.
+
+## Key Constants
+
+| Constant | Value | Location | Purpose |
+|----------|-------|----------|---------|
+| `MAX_RETRIES` | 5 | `clawhub.rs` | ClawHub API retry attempts |
+| `BASE_DELAY_MS` | 1,500 | `clawhub.rs` | Retry backoff base |
+| `MAX_DELAY_MS` | 30,000 | `clawhub.rs` | Retry backoff cap |
+| `MAX_PROMPT_CONTEXT_CHARS` | 160,000 | `evolution.rs` | ≈55k tokens limit |
+| `MAX_NAME_LEN` | 64 | `evolution.rs` | Skill name length |
+| `MAX_VERSION_HISTORY` | 10 | `evolution.rs` | Retained version snapshots |
+| `MAX_SUPPORTING_FILE_SIZE` | 1,048,576 | `evolution.rs` | 1 MiB per supporting file |
+| `SUPPORTING_FILE_MAX_DEPTH` | 16 | `evolution.rs` | Directory walk depth limit |
