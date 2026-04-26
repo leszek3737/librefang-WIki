@@ -1,143 +1,105 @@
 # Other — librefang-runtime-tests
 
-# librefang-runtime-tests — MCP OAuth Integration
+# librefang-runtime-tests — MCP OAuth Integration Tests
+
+Integration tests that verify the MCP (Model Context Protocol) OAuth discovery, token lifecycle, provider wiring, and auth-state serialization in `librefang-runtime`.
 
 ## Purpose
 
-This module contains integration tests that validate the OAuth authentication flow for MCP (Model Context Protocol) server connections. It guards against regressions in three critical areas:
+This module guards against several classes of bugs that are difficult to catch with unit tests alone:
 
-1. **OAuth metadata discovery** — ensuring fallback behavior when remote discovery fails
-2. **Provider wiring** — confirming the OAuth provider is actually invoked during connection attempts (not silently `None`)
-3. **Token lifecycle** — verifying store/load/clear semantics and server-level isolation
-4. **Auth state machine** — asserting correct serialization of `McpAuthState` transitions, which drives the dashboard UI
+- **Silent miswiring** — an `oauth_provider: None` passed through a call chain can silently disable the entire OAuth flow without any error.
+- **Serialization regressions** — auth state enums that serialize identically can cause incorrect dashboard UI (e.g., showing "Authorizing…" before the user clicks Authorize).
+- **Token isolation** — clearing tokens for one server must not affect tokens for another.
 
-Several tests were written specifically to prevent regressions from past bugs (documented inline).
-
----
-
-## Test Architecture
+## Architecture
 
 ```mermaid
 graph TD
-    subgraph "Discovery Tests"
-        A[test_discover_fallback_to_config]
-        B[test_discover_fails_without_any_source]
-    end
-    subgraph "Provider Wiring"
-        C[test_http_connect_calls_oauth_provider_load_token]
-    end
-    subgraph "Token Lifecycle"
-        D[test_provider_store_then_load]
-        E[test_provider_clear_removes_token]
-        F[test_provider_clear_is_isolated]
-        G[test_provider_reauthorize_after_clear]
-    end
-    subgraph "Auth State Machine"
-        H[test_auth_state_lifecycle]
-        I[test_needs_auth_serializes_differently_from_pending_auth]
-    end
-
-    A -->|calls| discover_oauth_metadata
-    B -->|calls| discover_oauth_metadata
-    C -->|calls| McpConnection::connect
-    D -->|uses| InMemoryOAuthProvider
-    E -->|uses| InMemoryOAuthProvider
-    F -->|uses| InMemoryOAuthProvider
-    G -->|uses| InMemoryOAuthProvider
+    A[discover_oauth_metadata] -->|fallback| B[McpOAuthConfig]
+    C[McpConnection::connect] -->|401 triggers| D[McpOAuthProvider]
+    D -->|trait methods| E[load_token / store_tokens / clear_tokens]
+    F[McpAuthState] -->|serializes to JSON| G["needs_auth / pending_auth / authorized"]
 ```
 
----
+## Test Groups
 
-## Mock Implementations
-
-The tests define two mock implementations of `McpOAuthProvider`:
-
-### `TrackingOAuthProvider`
-
-Records whether `load_token` was called via an `AtomicBool`. Returns `None` from `load_token` to force a 401 failure. Used exclusively by `test_http_connect_calls_oauth_provider_load_token` to prove the provider is wired into the connection path.
-
-### `InMemoryOAuthProvider`
-
-Stores tokens in a `tokio::sync::Mutex<HashMap<String, OAuthTokens>>`. Implements the full `McpOAuthProvider` trait with real read/write/delete semantics. Used by all token lifecycle tests.
-
----
-
-## Test Descriptions
-
-### OAuth Metadata Discovery
+### 1. OAuth Metadata Discovery
 
 | Test | What it verifies |
 |---|---|
-| `test_discover_fallback_to_config` | When the server at the given URL is unreachable, `discover_oauth_metadata` falls back to values from `McpOAuthConfig` (auth_url, token_url, client_id). |
-| `test_discover_fails_without_any_source` | When no server is reachable and no config is provided, the function returns an error containing `"OAuth metadata"`. |
+| `test_discover_fallback_to_config` | When the remote well-known endpoint is unreachable, `discover_oauth_metadata` falls back to values supplied in `McpOAuthConfig` (auth_url, token_url, client_id). |
+| `test_discover_fails_without_any_source` | When neither remote discovery nor a local config is available, the function returns an error containing `"OAuth metadata"`. |
 
-### Provider Wiring (Regression Guard)
+These call into `discover_oauth_metadata` exported by `librefang_runtime::mcp_oauth`, which is defined in `librefang-runtime-mcp/src/mcp_oauth.rs`.
+
+### 2. OAuth Provider Wiring (Regression)
 
 **`test_http_connect_calls_oauth_provider_load_token`**
 
-This is a regression test for a bug where `oauth_provider: None` was passed in the kernel's `connect_mcp_servers`, silently disabling the entire OAuth flow. The test:
+This is a regression test for a bug where `connect_mcp_servers` in the kernel passed `oauth_provider: None`, silently disabling OAuth. It:
 
-1. Creates a `McpServerConfig` with an `Http` transport pointing at `127.0.0.1:1` (guaranteed unreachable)
-2. Attaches a `TrackingOAuthProvider`
-3. Calls `McpConnection::connect`
-4. Asserts the connection fails (expected)
-5. **Asserts `load_token_called` is `true`** — proving the provider was consulted, not silently skipped
+1. Creates a `TrackingOAuthProvider` (see mock providers below) that records whether `load_token` was invoked.
+2. Configures an `McpServerConfig` with `McpTransport::Http` pointing at `127.0.0.1:1` (guaranteed connection refused).
+3. Asserts the connection fails (expected).
+4. Asserts `load_token` **was called**, proving the provider object is wired into `McpConnection::connect`.
 
-### Token Lifecycle
+Dependencies from `librefang-runtime-mcp`:
+- `McpConnection` — the connection struct under test.
+- `McpServerConfig` — configuration including `oauth_provider` field.
+- `McpTransport::Http` — the HTTP transport variant.
+- `empty_taint_rule_sets_handle` — provides a no-op taint rule set handle required by the config.
 
-All tests in this group use `InMemoryOAuthProvider`.
+### 3. Token Lifecycle via `InMemoryOAuthProvider`
+
+Four tests exercise the `McpOAuthProvider` trait contract using `InMemoryOAuthProvider`, an in-memory mock backed by `tokio::sync::Mutex<HashMap<String, OAuthTokens>>`.
+
+| Test | Flow |
+|---|---|
+| `test_provider_store_then_load` | `store_tokens` → `load_token` returns the same access token. Verifies initial state returns `None`. |
+| `test_provider_clear_removes_token` | `store_tokens` → `clear_tokens` → `load_token` returns `None`. |
+| `test_provider_clear_is_isolated` | Stores tokens for two servers (A and B), clears A, confirms B is unaffected. |
+| `test_provider_reauthorize_after_clear` | Full lifecycle: store v1 → clear → store v2 → load returns v2. Ensures re-authorization after revocation works. |
+
+The `OAuthTokens` struct (from `librefang-types/src/oauth.rs`) has fields: `access_token`, `refresh_token` (optional), `token_type`, `expires_in`, `scope`.
+
+### 4. Auth State Serialization
+
+Two synchronous tests verify that `McpAuthState` (from `librefang_runtime::mcp_oauth`) serializes correctly via `serde_json`:
 
 | Test | What it verifies |
 |---|---|
-| `test_provider_store_then_load` | `load_token` returns `None` initially, then returns the stored access token after `store_tokens` is called. |
-| `test_provider_clear_removes_token` | After `clear_tokens`, `load_token` returns `None` for that server URL. |
-| `test_provider_clear_is_isolated` | Clearing tokens for server A does not affect tokens stored for server B. Token storage is keyed by server URL. |
-| `test_provider_reauthorize_after_clear` | The full sequence store → clear → store works, and the second store returns the new token. Validates re-authorization after revocation. |
+| `test_auth_state_lifecycle` | The state machine round-trips: `NeedsAuth` → `PendingAuth` → `Authorized` → `NeedsAuth` (after revoke). Each state serializes with the expected `"state"` discriminator. |
+| `test_needs_auth_serializes_differently_from_pending_auth` | Regression test: `NeedsAuth` and `PendingAuth` must produce distinct `"state"` values (`"needs_auth"` vs `"pending_auth"`), ensuring the dashboard shows the correct UI at boot. |
 
-### Auth State Machine
+## Mock Providers
 
-These are synchronous tests (no `#[tokio::test]`) that verify `McpAuthState` serialization.
+### `TrackingOAuthProvider`
 
-**`test_auth_state_lifecycle`**
+Minimal stub that sets an `AtomicBool` when `load_token` is called. Returns `None` for every method. Used solely to detect whether the provider is wired into the connection path.
 
-Validates the full state machine:
+### `InMemoryOAuthProvider`
 
-```
-NeedsAuth → PendingAuth → Authorized → NeedsAuth (after revoke)
-```
+Full in-memory implementation of `McpOAuthProvider` using a `HashMap` guarded by `tokio::sync::Mutex`. Suitable for testing any token store/load/clear scenario without a vault dependency.
 
-Each transition is verified by serializing to JSON and checking the `"state"` discriminator field. The final assertion confirms that after revocation, the state is `NeedsAuth` (not missing), ensuring the "Authorize" button appears in the dashboard.
+Both implement the `McpOAuthProvider` trait (requires `async_trait`):
 
-**`test_needs_auth_serializes_differently_from_pending_auth`**
-
-Regression test for a bug where the dashboard showed "Authorizing..." at boot before the user clicked Authorize. Verifies that `NeedsAuth` serializes to `"needs_auth"` and `PendingAuth` serializes to `"pending_auth"` — two distinct values.
-
----
-
-## Key Types Referenced
-
-| Type | Location | Role |
-|---|---|---|
-| `McpOAuthConfig` | `librefang_types::config` | Static OAuth configuration (auth_url, token_url, client_id, scopes) |
-| `McpAuthState` | `librefang_runtime::mcp_oauth` | State machine enum: `NeedsAuth`, `PendingAuth { auth_url }`, `Authorized { expires_at, tokens }` |
-| `OAuthTokens` | `librefang_runtime::mcp_oauth` | Token data: `access_token`, `refresh_token`, `token_type`, `expires_in`, `scope` |
-| `McpOAuthProvider` | `librefang_runtime::mcp_oauth` | Async trait: `load_token`, `store_tokens`, `clear_tokens` |
-| `McpServerConfig` | `librefang_runtime::mcp` | Full server config including transport, headers, OAuth provider and config |
-| `McpConnection` | `librefang_runtime::mcp` | Connection handler that invokes the OAuth provider on 401 |
-
----
-
-## Running
-
-```bash
-# All tests in this file
-cargo test -p librefang-runtime --test mcp_oauth_integration
-
-# Only auth state tests (synchronous, no network)
-cargo test -p librefang-runtime --test mcp_oauth_integration -- test_auth_state
-
-# Only token lifecycle tests
-cargo test -p librefang-runtime --test mcp_oauth_integration -- test_provider
+```rust
+#[async_trait]
+impl McpOAuthProvider for InMemoryOAuthProvider {
+    async fn load_token(&self, server_url: &str) -> Option<String>;
+    async fn store_tokens(&self, server_url: &str, tokens: OAuthTokens) -> Result<(), String>;
+    async fn clear_tokens(&self, server_url: &str) -> Result<(), String>;
+}
 ```
 
-The provider wiring test (`test_http_connect_calls_oauth_provider_load_token`) attempts a TCP connection to `127.0.0.1:1` which will fail immediately — no external network dependency is required.
+## External Dependencies
+
+| Crate / Module | What's used |
+|---|---|
+| `librefang_runtime::mcp_oauth` | `discover_oauth_metadata`, `McpAuthState`, `OAuthTokens`, `McpOAuthProvider` |
+| `librefang_runtime::mcp` | `McpConnection`, `McpServerConfig`, `McpTransport`, `empty_taint_rule_sets_handle` |
+| `librefang_types::config` | `McpOAuthConfig` |
+| `tokio` | `#[tokio::test]` async test runtime |
+| `async_trait` | Trait implementation for mock providers |
+| `serde_json` | Auth state serialization assertions |

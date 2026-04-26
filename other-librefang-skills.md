@@ -6,86 +6,105 @@ Skill system for LibreFang — provides the registry, filesystem loader, marketp
 
 ## Purpose
 
-LibreFang's skill system defines how game abilities, actions, and behaviors are packaged, discovered, loaded, and distributed. This module owns that entire lifecycle:
-
-- **Registry** — canonical in-memory index of all known skills, keyed by unique identifier
-- **Loader** — filesystem walker that discovers skill definitions (TOML, JSON, YAML) and validates them before registration
-- **Marketplace** — HTTP client for browsing, downloading, and installing skills from a remote marketplace; includes integrity verification and file locking for concurrent safety
-- **OpenClaw compatibility** — adapter layer that translates OpenClaw-format skill packs into LibreFang's native representation
+This crate manages the full lifecycle of **skills** in LibreFang: discovery on disk, loading and parsing, version resolution, marketplace downloads, and cross-compatibility with the OpenClaw skill format. It serves as the single source of truth for what skills are available, their metadata, and their installed state.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    FS[Filesystem Loader] -->|parse & validate| REG[Skill Registry]
-    MKT[Marketplace Client] -->|download & install| FS
-    MKT -->|verify hash| HASH[SHA-256 Integrity]
-    OCC[OpenClaw Adapter] -->|translate| REG
-    REG -->|query| CONSUMERS[Other LibreFang Modules]
+    A[librefang-skills] --> B[Skill Registry]
+    A --> C[Loader]
+    A --> D[Marketplace Client]
+    A --> E[OpenClaw Adapter]
+    C -->|scans| F[Filesystem]
+    D -->|fetches| G[Remote Marketplace]
+    B -->|stores| H[Skill Definitions]
+    E -->|translates| I[OpenClaw Format]
 ```
 
-The registry sits at the center. All skill data, regardless of origin, flows through validation and into the registry, where other modules query it at runtime.
+The crate breaks down into four cooperating subsystems:
 
-## Key Responsibilities
+| Subsystem | Role |
+|-----------|------|
+| **Registry** | In-memory index of all known skills, their versions, dependencies, and load status |
+| **Loader** | Walks configured skill directories, parses TOML/YAML manifests, validates integrity via SHA-256 hashes |
+| **Marketplace Client** | Async HTTPS client that queries a remote skill marketplace, downloads packages, and verifies them |
+| **OpenClaw Adapter** | Translates OpenClaw-format skill definitions into LibreFang's native representation |
 
-### Skill Registry
+## Key Dependencies and Why They Matter
 
-Maintains the authoritative collection of loaded skills. Each skill carries metadata including a unique identifier, semantic version, and human-readable description. The registry supports lookup by ID and enumeration of available skills.
+| Dependency | Purpose in this crate |
+|------------|----------------------|
+| `librefang-types` | Shared domain types (`SkillId`, `SkillManifest`, `SkillVersion`, etc.) |
+| `serde` / `serde_json` / `toml` / `serde_yaml` | Deserialization of skill manifests, which may be authored in TOML or YAML |
+| `walkdir` | Recursive directory traversal to discover skill packages on disk |
+| `reqwest` + `rustls` + `webpki-roots` / `rustls-native-certs` | Async HTTPS for marketplace communication, using Rustls as the TLS backend with both bundled and system certificate stores |
+| `sha2` / `hex` | SHA-256 integrity verification of downloaded or installed skill packages |
+| `zip` | Extraction of `.zip`-packaged skill archives |
+| `semver` | Semantic version parsing and constraint resolution for skill dependencies |
+| `aho-corasick` | Fast multi-pattern matching — used for bulk lookups across skill names, tags, and keywords |
+| `fs2` | File locking to prevent concurrent write corruption when installing or updating skills |
+| `chrono` | Timestamps for install date, last-updated, and cache TTL |
 
-### Filesystem Loader
+## Skill Manifest Format
 
-Scans configured skill directories using `walkdir`, parsing skill manifests in TOML, JSON, or YAML format via `serde`. Parsed skills are validated against `librefang-types` definitions before insertion into the registry. File locking (`fs2`) prevents corruption when multiple processes load or install skills concurrently.
+Skills are expected to ship with a manifest file (`skill.toml` or `skill.yaml`) at their root. The manifest is deserialized into types provided by `librefang-types`. A typical manifest includes:
 
-### Marketplace Client
+- **Skill ID** — unique identifier
+- **Version** — semver-compliant version string
+- **Dependencies** — other skill IDs with optional version constraints
+- **Entry point** — path to the skill's main logic
+- **Hash** — expected SHA-256 of the package archive (for integrity checks)
 
-Uses `reqwest` with `rustls` TLS to communicate with a remote skill marketplace. The client handles:
+The loader supports both TOML and YAML so skill authors can choose their preferred format.
 
-- Searching and browsing available skills
-- Downloading skill archives (`.zip` packages extracted via the `zip` crate)
-- Verifying downloads with SHA-256 digests (`sha2` + `hex`) against published checksums
-- Installing skills into the local filesystem for the loader to discover
+## Loading Flow
 
-User-level directories are resolved via the `dirs` crate to pick the correct platform-specific data path.
+1. **Directory scan** — `walkdir` recursively walks each configured skill directory.
+2. **Manifest discovery** — For each subdirectory, the loader looks for `skill.toml` or `skill.yaml`.
+3. **Parsing** — The manifest is deserialized and validated (required fields, semver compliance).
+4. **Integrity check** — If a hash is recorded, the package contents are hashed with SHA-256 and compared.
+5. **Registration** — The parsed skill is inserted into the registry, keyed by skill ID and version.
 
-### OpenClaw Compatibility
+## Marketplace Flow
 
-Translates skill definitions authored for OpenClaw into LibreFang's native format. This adapter reads OpenClaw skill packs, maps their fields onto `librefang-types` structures, and registers them as if they were native skills.
+1. **Query** — An async request via `reqwest` fetches available skill listings from the marketplace API.
+2. **Download** — Selected skill packages (`.zip` archives) are streamed to a temporary staging area.
+3. **Verify** — The downloaded archive's SHA-256 hash is compared to the advertised hash.
+4. **Extract** — `zip` extracts the archive into the target skill directory.
+5. **Register** — The newly extracted skill is passed through the standard loading flow.
+6. **Lock** — `fs2` file locks prevent concurrent installs from corrupting the skill store.
 
-### Version Resolution
+All network calls are TLS-secured via Rustls, which respects both the bundled Mozilla certificate store (`webpki-roots`) and the host system's native certificate store (`rustls-native-certs`).
 
-Skill versions are parsed and compared using `semver`, enabling version constraints in dependency declarations and marketplace queries.
+## OpenClaw Compatibility
 
-### Fast Pattern Matching
+The OpenClaw adapter translates OpenClaw-format skill definitions into LibreFang's native `SkillManifest` type. This allows LibreFang to consume skills originally authored for the OpenClaw ecosystem without modification. The adapter handles:
 
-The `aho-corasick` crate is used for efficient multi-pattern string matching during skill name lookups and command alias resolution.
+- Format conversion (OpenClaw metadata fields → LibreFang fields)
+- Dependency name remapping where conventions differ
+- Version normalization if OpenClaw uses a non-semver scheme
 
-## Dependencies
+## Error Handling
 
-| Dependency | Role |
-|---|---|
-| `librefang-types` | Shared type definitions for skill structs, metadata, and validation |
-| `serde`, `serde_json`, `toml`, `serde_yaml` | De/serialization of skill manifests in multiple formats |
-| `walkdir` | Recursive directory traversal for skill discovery |
-| `reqwest` + `rustls` + `webpki-roots` + `rustls-native-certs` | HTTPS client for marketplace communication with native TLS roots |
-| `sha2` + `hex` | SHA-256 integrity verification of downloaded archives |
-| `zip` | Extraction of skill distribution packages |
-| `semver` | Semantic version parsing and comparison |
-| `aho-corasick` | Fast multi-pattern matching for skill aliases and names |
-| `fs2` | File locking for concurrent-safe skill installation |
-| `uuid` | Unique skill identifiers |
-| `chrono` | Timestamps for installation and cache metadata |
-| `dirs` | Platform-standard paths for skill storage directories |
+All fallible operations return `Result<T, SkillError>` where `SkillError` is derived via `thiserror`. Common error variants include:
 
-## Integration Points
+- Manifest not found or unreadable
+- Manifest parse failure (invalid TOML/YAML, missing required fields)
+- Semver constraint violation
+- SHA-256 hash mismatch (tampered or corrupted package)
+- Network or TLS failure during marketplace operations
+- Filesystem errors during extraction (disk full, permissions)
 
-This module depends on `librefang-types` for all shared data structures — skill definitions, metadata schemas, and error types flow through that crate. Downstream modules consume the registry to resolve which skills are available and look up skill data at runtime.
+## Integration with the Rest of LibreFang
 
-Because no incoming or outgoing internal calls were detected in the call graph, this module operates as a self-contained library: other crates call into it directly rather than it calling into the broader system. Integration is pull-based — consumers query the registry when they need skill data.
+This crate depends on `librefang-types` for all shared domain types but does not itself call into other LibreFang crates. It is consumed by higher-level crates that need to:
 
-## Testing
+- Enumerate available skills before starting a session
+- Resolve skill dependencies at load time
+- Install or update skills from the marketplace
+- Load OpenClaw-format skill packs for backward compatibility
 
-Tests use `tempfile` for isolated filesystem fixtures and `tokio-test` for async marketplace client tests. Run with:
+## Development
 
-```sh
-cargo test -p librefang-skills
-```
+When running tests, the `tempfile` dev-dependency provides isolated temporary directories for testing the loader and extraction logic without touching the real skill store.

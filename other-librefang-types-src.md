@@ -1,138 +1,61 @@
 # Other — librefang-types-src
 
-# Model Catalog Types (`model_catalog`)
+# librefang-types: Model Catalog Types
 
-Shared data structures for librefang's model registry — the system that tracks available LLM providers, their models, authentication state, and inference parameters.
+Shared data structures for the model registry. This is a pure type-definition module — no I/O, no network calls, no global state. Every other crate that needs to reason about models, providers, or catalog files depends on these types.
 
-This module is purely data definitions with serde support. It contains no I/O, no network calls, and no mutation logic. Downstream crates (`librefang-runtime`, `librefang-kernel-metering`) consume these types to load catalog TOML files, merge discovered models, and estimate costs.
-
-## Data Flow
+## Architecture
 
 ```mermaid
-graph LR
-    TOML["providers/*.toml"] -->|parse| MCF[ModelCatalogFile]
-    MCF -->|provider field| PCT[ProviderCatalogToml]
-    MCF -->|models array| MCE[ModelCatalogEntry]
-    PCT -->|From trait| PI[ProviderInfo]
-    PI -->|runtime adds| AuthStatus
-    MCE -->|referenced by| Runtime["librefang-runtime"]
-    MCF -->|referenced by| Metering["librefang-kernel-metering"]
+classDiagram
+    class ModelCatalogFile {
+        +provider: Option~ProviderCatalogToml~
+        +models: Vec~ModelCatalogEntry~
+    }
+    class ProviderCatalogToml {
+        +id: String
+        +display_name: String
+        +api_key_env: String
+        +base_url: String
+        +key_required: bool
+        +regions: HashMap~String, RegionConfig~
+        +media_capabilities: Vec~String~
+    }
+    class ProviderInfo {
+        +auth_status: AuthStatus
+        +model_count: usize
+        +available_models: Vec~String~
+        +is_custom: bool
+        +proxy_url: Option~String~
+    }
+    class ModelCatalogEntry {
+        +id: String
+        +tier: ModelTier
+        +modality: Modality
+        +context_window: u64
+        +max_output_tokens: u64
+        +validate() Result
+    }
+    class ModelOverrides {
+        +temperature: Option~f32~
+        +max_tokens: Option~u32~
+        +is_empty() bool
+    }
+    class AliasesCatalogFile {
+        +aliases: HashMap~String, String~
+    }
+    ModelCatalogFile --> ProviderCatalogToml
+    ModelCatalogFile --> ModelCatalogEntry
+    ProviderCatalogToml --> ProviderInfo : From<T> conversion
+    ProviderInfo --> RegionConfig
+    ProviderCatalogToml --> RegionConfig
 ```
 
-## Core Types
+`ModelCatalogFile` is the top-level deserialization target for catalog TOML files. `ProviderCatalogToml` captures only what lives on disk; `ProviderInfo` extends it with runtime state (auth detection results, model counts, live probe data). The `From<ProviderCatalogToml>` conversion initializes all runtime fields to their defaults.
 
-### ModelTier
+## Catalog File Format
 
-Classification of a model's capability level. Serialized as lowercase strings (`"frontier"`, `"smart"`, etc.).
-
-| Variant | Meaning | Examples |
-|---------|---------|---------|
-| `Frontier` | Most capable, highest cost | Claude Opus, GPT-4.1 |
-| `Smart` | Capable but cost-effective | Claude Sonnet, Gemini 2.5 Flash |
-| `Balanced` | Speed/cost tradeoff (default) | GPT-4o-mini, Groq Llama |
-| `Fast` | Cheapest, simplest tasks | — |
-| `Local` | Self-hosted models | Ollama, vLLM, LM Studio |
-| `Custom` | User-defined at runtime | — |
-
-The default is `Balanced`. Tier is used by the model router to select models based on task complexity and budget constraints.
-
-### AuthStatus
-
-Provider authentication state, detected at runtime. This enum is **not** stored in TOML — it's populated by the runtime's `detect_auth()` probe and lives only in `ProviderInfo`.
-
-```
-ValidatedKey   ─ key present, confirmed valid via live API call
-Configured     ─ key present, not yet validated
-AutoDetected   ─ key found via fallback env var
-ConfiguredCli  ─ no key, but CLI tool available (e.g. claude-code)
-NotRequired    ─ local provider, no key needed
-InvalidKey     ─ key rejected (HTTP 401/403)
-Missing        ─ no key found (default)
-CliNotInstalled─ CLI-based provider, CLI missing
-LocalOffline   ─ local provider probed and offline
-```
-
-Use `is_available()` to check if a provider can be used. It returns `true` for `ValidatedKey`, `Configured`, `AutoDetected`, `ConfiguredCli`, and `NotRequired`. Notably, `InvalidKey` returns `false` — the key exists but the provider will reject requests.
-
-`LocalOffline` is special: unlike `Missing`, the probe owns the transition back to `NotRequired` when the service comes back up. The auth detection system will not reset it.
-
-### ModelType
-
-Distinguishes model categories: `Chat` (default), `Speech` (TTS/STT), `Embedding` (vector models).
-
-### ModelCatalogEntry
-
-A single model's metadata — the primary unit of the catalog:
-
-- **Identity**: `id` (canonical), `display_name`, `provider`, `aliases`
-- **Capabilities**: `tier`, `context_window`, `max_output_tokens`
-- **Cost**: `input_cost_per_m`, `output_cost_per_m` (USD per million tokens)
-- **Feature flags**: `supports_tools`, `supports_vision`, `supports_streaming`, `supports_thinking`
-
-All boolean feature flags default to `false` via `#[serde(default)]`.
-
-### ModelOverrides
-
-Per-model inference parameter overrides persisted to `~/.librefang/model_overrides.json`, keyed by `provider:model_id`. Every field is `Option` — `None` means "use the layer above."
-
-**Override resolution order** (highest priority first):
-1. Agent-level `ModelConfig`
-2. `ModelOverrides` (this type)
-3. System defaults
-
-Key fields:
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `temperature` | `Option<f32>` | Sampling temperature (0.0–2.0) |
-| `top_p` | `Option<f32>` | Nucleus sampling threshold |
-| `max_tokens` | `Option<u32>` | Completion token limit |
-| `reasoning_effort` | `Option<String>` | `"low"`, `"medium"`, `"high"` |
-| `use_max_completion_tokens` | `Option<bool>` | Use OpenAI-style `max_completion_tokens` |
-| `no_system_role` | `Option<bool>` | Model doesn't support system messages |
-| `force_max_tokens` | `Option<bool>` | Send `max_tokens` even when provider doesn't require it |
-
-Call `is_empty()` to check if no overrides are set (all fields `None`).
-
-## Provider Types
-
-Three types represent providers at different stages:
-
-### ProviderCatalogToml — Static (TOML-level)
-
-Maps 1:1 to the `[provider]` section in catalog files. No runtime state. Fields: `id`, `display_name`, `api_key_env`, `base_url`, `key_required`, `signup_url`, `regions`, `media_capabilities`.
-
-`key_required` defaults to `true` via a helper function (`default_key_required`) rather than `#[serde(default)]` because serde's `Default` for `bool` is `false`, but most providers do require keys.
-
-### ProviderInfo — Runtime
-
-Enriched version with runtime-only fields added during catalog loading:
-
-- `auth_status: AuthStatus` — populated by the auth probe
-- `model_count: usize` — number of catalog models for this provider
-- `available_models: Vec<String>` — model IDs confirmed via live API probe
-- `is_custom: bool` — `true` for user-added providers; drives dashboard UI (built-in providers show "Remove key", custom ones show "Delete")
-- `proxy_url: Option<String>` — per-provider proxy override
-
-Conversion from `ProviderCatalogToml` uses the `From` trait — runtime fields get safe defaults (`AuthStatus::Missing`, empty vectors, `is_custom: false`).
-
-### RegionConfig
-
-Per-region endpoint overrides within a provider. Used for providers with geographic endpoints (e.g., DashScope with separate US and international URLs).
-
-```toml
-[provider.regions.us]
-base_url = "https://dashscope-us.aliyuncs.com/compatible-mode/v1"
-api_key_env = "DASHSCOPE_US_API_KEY"  # optional; falls back to provider-level
-```
-
-At runtime, if a region is selected, its `base_url` replaces the provider's default. If the region also specifies `api_key_env`, that overrides the provider-level key source.
-
-## File Formats
-
-### ModelCatalogFile
-
-The unified TOML format for both the main repository and community model catalogs:
+Catalog TOML files live in `catalog/providers/*.toml` (main repo) and `providers/*.toml` (community catalog). Each file has an optional `[provider]` section and a `[[models]]` array:
 
 ```toml
 [provider]
@@ -142,11 +65,16 @@ api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://api.anthropic.com"
 key_required = true
 
+# Optional regional endpoints
+[provider.regions.us]
+base_url = "https://dashscope-us.aliyuncs.com/compatible-mode/v1"
+
 [[models]]
 id = "claude-sonnet-4-20250514"
 display_name = "Claude Sonnet 4"
 provider = "anthropic"
 tier = "smart"
+modality = "text"                 # optional, defaults to "text"
 context_window = 200000
 max_output_tokens = 64000
 input_cost_per_m = 3.0
@@ -154,14 +82,27 @@ output_cost_per_m = 15.0
 supports_tools = true
 supports_vision = true
 supports_streaming = true
+supports_thinking = true
 aliases = ["sonnet", "claude-sonnet"]
 ```
 
-The `[provider]` section is optional — community catalog files may omit it if the provider is already known. When present, it's parsed into `ProviderCatalogToml`.
+For image and audio models, `context_window` and `max_output_tokens` are omitted entirely:
 
-### AliasesCatalogFile
+```toml
+[[models]]
+id = "gpt-image-2"
+display_name = "GPT Image 2"
+tier = "frontier"
+modality = "image"
+input_cost_per_m = 5.00
+output_cost_per_m = 10.00
+image_input_cost_per_m = 8.00
+image_output_cost_per_m = 30.00
+supports_vision = true
+aliases = ["gpt-image-2-2026-04-21"]
+```
 
-A separate file mapping short names to canonical model IDs:
+Separate alias files (`AliasesCatalogFile`) map short names to canonical model IDs:
 
 ```toml
 [aliases]
@@ -169,11 +110,80 @@ sonnet = "claude-sonnet-4-20250514"
 haiku = "claude-haiku-4-5-20251001"
 ```
 
+## Key Types
+
+### Enums
+
+**`ModelTier`** — Capability classification. Default is `Balanced`. Serializes as lowercase strings (`"frontier"`, `"smart"`, `"balanced"`, `"fast"`, `"local"`, `"custom"`).
+
+**`AuthStatus`** — Provider authentication state. The important method is `is_available()`, which returns `true` for states where the provider is usable (`ValidatedKey`, `Configured`, `AutoDetected`, `ConfiguredCli`, `NotRequired`). `InvalidKey` deliberately returns `false` — the key exists but was rejected (HTTP 401/403). Default is `Missing`.
+
+`LocalOffline` is probe-owned: only the probe logic transitions it back to `NotRequired` when the service comes back up. `detect_auth()` does not reset it.
+
+**`Modality`** — Output type (`Text`, `Image`, `Audio`). Controls whether `context_window` and `max_output_tokens` are required during validation. Default is `Text`.
+
+**`ModelType`** — Classification for inference routing (`Chat`, `Speech`, `Embedding`). Used in `ModelOverrides`. Default is `Chat`.
+
+### ModelCatalogEntry
+
+The core model descriptor. All cost fields use USD per million tokens:
+
+| Field | Notes |
+|---|---|
+| `context_window` | `0` means unknown/N/A. **Must not** be fed into compaction thresholds or budget math. |
+| `max_output_tokens` | Same `0`-means-unknown rule. |
+| `image_input_cost_per_m` | Optional — only for multimodal models with separate image pricing. |
+| `image_output_cost_per_m` | Optional — only for image-generation models. |
+
+**`validate()`** enforces modality-aware rules:
+- `Modality::Text` entries **must** have non-zero `context_window` and `max_output_tokens`.
+- `Modality::Image` and `Modality::Audio` entries skip this check.
+
+Catalog loaders in `librefang-runtime` (`from_sources`) and the providers route (`add_custom_model`) both call `validate()` and reject entries that fail. This prevents malformed entries from silently propagating `0` into downstream calculations.
+
+**`is_image_generation()`** is a convenience check for `modality == Modality::Image`.
+
+### ModelOverrides
+
+Per-model inference parameter overrides persisted to `~/.librefang/model_overrides.json`, keyed by `provider:model_id`. Every field is `Option` — `None` means "use the agent's or system default."
+
+Resolution order: agent-level `ModelConfig` → `ModelOverrides` → system defaults.
+
+`is_empty()` returns `true` when all fields are `None`.
+
+Notable fields:
+- `use_max_completion_tokens` — switches the API parameter from `max_tokens` to `max_completion_tokens` (OpenAI reasoning models).
+- `no_system_role` — suppresses the system role message for models that don't support it.
+- `force_max_tokens` — sends `max_tokens` even when the provider doesn't require it.
+
+### ProviderInfo vs ProviderCatalogToml
+
+`ProviderCatalogToml` is the on-disk shape — it maps 1:1 to the `[provider]` TOML section with no runtime fields.
+
+`ProviderInfo` adds:
+- `auth_status` — populated by the auth detection system.
+- `model_count` — computed by the catalog loader.
+- `available_models` — filled by live API probes.
+- `is_custom` — `true` for user-added providers (via dashboard "Add provider"), `false` for registry-shipped providers. Built-in providers cannot be deleted because registry sync would re-create them.
+- `proxy_url` — per-provider proxy override.
+
+### RegionConfig
+
+Per-region endpoint overrides within a provider. Each region can override `base_url` and optionally `api_key_env`. When no region is selected, the provider-level `base_url` is used.
+
 ## Serde Behavior
 
-All types use `#[serde(rename_all = "snake_case")]` for enum variants and `#[serde(rename_all = "lowercase")]` for `ModelTier`, `ModelType`. Booleans in `ModelCatalogEntry` and optional fields in `ModelOverrides` use `#[serde(default)]` to allow partial TOML files. `ModelOverrides` additionally uses `#[serde(skip_serializing_if = "Option::is_none")]` to keep serialized output clean. `ProviderInfo.available_models` skips serialization when empty.
+All enums use `#[serde(rename_all = "lowercase")]` (for `ModelTier`, `Modality`, `ModelType`) or `snake_case` (for `AuthStatus`), so TOML/JSON values are plain strings like `"frontier"` or `"configured_cli"`.
 
-## Cross-Module Integration
+`ModelCatalogEntry` uses `#[serde(default)]` on most fields, allowing partial TOML entries. Optional cost fields (`image_input_cost_per_m`, `image_output_cost_per_m`) use `skip_serializing_if = "Option::is_none"` to keep serialized output clean.
 
-- **`librefang-runtime`**: Calls `merge_discovered_models()` which operates on `ModelCatalogEntry` instances to merge API-probed model lists into the catalog. Uses `ProviderInfo` for auth detection and region resolution.
-- **`librefang-kernel-metering`**: References `ModelCatalogFile` for cost estimation — reads `input_cost_per_m` / `output_cost_per_m` from catalog entries to calculate token costs. Falls back to legacy budget rates when catalog prices are zero.
+`ProviderCatalogToml.key_required` defaults to `true` via a custom `default_key_required()` function — TOML files that omit it get the correct behavior for cloud providers.
+
+## Integration Points
+
+This module is consumed by:
+
+- **`librefang-runtime/src/model_catalog.rs`** — `from_sources()` loads and validates catalog entries; `merge_discovered_models()` builds entries from live API probes.
+- **`librefang-runtime/src/model_metadata.rs`** — `synthesize_entry()` and the `entry()` helper construct `ModelCatalogEntry` instances for models discovered at runtime.
+- **`src/routes/providers.rs`** — `add_custom_model()` validates user-submitted model entries before persisting them.
+- **`librefang-kernel-metering`** — uses `ModelCatalogFile` data for cost estimation during token metering.

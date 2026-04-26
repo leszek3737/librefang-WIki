@@ -2,89 +2,98 @@
 
 # librefang-extensions
 
-Extension and integration system for LibreFang, providing one-click MCP server setup, an encrypted credential vault, and OAuth2 PKCE authentication flows.
+Extension and integration system for LibreFang. Provides three major capabilities:
 
-## Purpose
-
-This crate serves as the integration layer between LibreFang and external services. It handles three core responsibilities:
-
-- **MCP Server Management** — discovering, configuring, and launching Model Context Protocol servers with minimal user friction ("one-click" setup).
-- **Credential Vault** — securely storing and retrieving API keys, tokens, and other secrets at rest using AES-256-GCM encryption with Argon2 key derivation.
-- **OAuth2 PKCE** — performing browser-based OAuth2 authorization flows (with Proof Key for Code Exchange) for services that require it, including spinning up a local HTTP callback server.
+- **One-click MCP (Model Context Protocol) server setup** — streamline provisioning and connection of MCP-compatible servers.
+- **Credential vault** — encrypted at-rest storage backed by the OS keyring for secrets, API keys, and tokens.
+- **OAuth2 PKCE flow** — browser-based authorization with Proof Key for Code Exchange, for services that require user consent.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    LF["LibreFang Core"] -->|uses| EXT["librefang-extensions"]
-    EXT -->|depends on| TYPES["librefang-types"]
-    EXT -->|manages| VAULT["Credential Vault"]
-    EXT -->|manages| OAUTH["OAuth2 PKCE Flow"]
-    EXT -->|manages| MCP["MCP Server Setup"]
-    VAULT -->|AES-256-GCM| DISK["Encrypted Storage"]
-    OAUTH -->|axum callback| BROWSER["Browser Auth"]
-    MCP -->|spawns| SERVERS["MCP Server Processes"]
+    subgraph "librefang-extensions"
+        MCP["MCP Server Setup"]
+        Vault["Credential Vault"]
+        OAuth["OAuth2 PKCE"]
+    end
+
+    Types["librefang-types"]
+    Keyring["OS Keyring<br/>(libsecret / Keychain / Credential Manager)"]
+
+    MCP --> Types
+    Vault --> Types
+    OAuth --> Types
+    Vault --> Keyring
+    OAuth --> Vault
 ```
 
-## Key Components
-
-### Credential Vault
-
-Encrypts sensitive credentials before writing them to disk and decrypts them on demand. The vault never holds plaintext secrets in memory longer than necessary.
-
-**Cryptographic stack** (derived from dependencies):
-
-| Concern | Library | Details |
-|---|---|---|
-| Symmetric encryption | `aes-gcm` | AES-256-GCM authenticated encryption |
-| Key derivation | `argon2` | Argon2 password-based KDF for deriving encryption keys from a master passphrase |
-| Secure memory | `zeroize` | Plaintext keys and credentials are zeroed after use |
-| Hashing | `sha2` | SHA-256 for integrity checks and PKCE code challenges |
-| Random generation | `rand` | Cryptographically secure random nonces and salt generation |
-
-Vault files are stored under the user's data directory (via `dirs`), and all concurrent access is managed through `dashmap`.
-
-### OAuth2 PKCE
-
-Implements the full Authorization Code Flow with PKCE for browser-based authentication:
-
-1. Generates a cryptographically random code verifier (`rand` + `base64`).
-2. Derives the code challenge using SHA-256 (`sha2`).
-3. Opens the user's browser to the authorization endpoint (`url` for URL construction).
-4. Spins up a temporary local HTTP server (`axum`) to receive the callback with the authorization code.
-5. Exchanges the code for tokens via `reqwest`, using TLS verification through `rustls` with platform-native and/or Mozilla certificate roots.
-6. Stores the resulting tokens in the credential vault.
+## Key Subsystems
 
 ### MCP Server Setup
 
-Handles the lifecycle of MCP server integrations:
+Provisions and configures MCP-compatible servers with minimal manual steps. Reads server definitions from TOML configuration (via the `toml` crate) and manages their lifecycle.
 
-- **Discovery and configuration** — reads server definitions from TOML/JSON configuration files (`toml`, `serde_json`).
-- **One-click setup** — orchestrates the steps needed to get an MCP server running, including credential provisioning (pulling from the vault or triggering an OAuth2 flow as needed).
-- **Process management** — spawns and tracks MCP server processes via Tokio's async runtime.
+Relevant dependencies: `reqwest`, `rustls`, `webpki-roots`, `rustls-native-certs`, `tokio`.
 
-### TLS Stack
+### Credential Vault
 
-All outbound HTTP connections (token exchanges, MCP API calls) use `reqwest` backed by `rustls` rather than the system TLS library. Certificate roots come from two sources:
+Stores secrets (API keys, tokens, passwords) in an encrypted on-disk format using **AES-256-GCM** for encryption and **Argon2** for key derivation. The encryption key material is held in the operating-system native keyring via the `keyring` crate, meaning the vault file itself is safe to store on disk without exposing plaintext secrets even if the file is read directly.
 
-- `webpki-roots` — Mozilla's bundled CA certificates.
-- `rustls-native-certs` — Platform-native certificate store.
+Key security properties:
 
-This ensures connectivity in both bundled and system-installed configurations.
-
-## Dependencies on Other Crates
-
-| Dependency | Usage |
+| Property | Mechanism |
 |---|---|
-| `librefang-types` | Shared types (credentials, server descriptors, extension manifests) |
-| `librefang-runtime` (dev) | Used only in tests for async runtime access |
+| Encryption at rest | AES-256-GCM (`aes-gcm`) |
+| Key derivation | Argon2 (`argon2`) |
+| Key storage | OS keyring — libsecret (Linux), Keychain (macOS), Credential Manager (Windows) |
+| Memory hygiene | `zeroize` for secure clearing of sensitive buffers |
+| Platform directories | `dirs` crate for resolving config/data paths |
 
-No other LibreFang crates depend on `librefang-extensions` at the compilation level — it is consumed at the application layer by higher-level crates that compose the full LibreFang binary.
+### OAuth2 PKCE
 
-## Thread Safety and Concurrency
+Implements the Authorization Code flow with PKCE (Proof Key for Code Exchange) for public clients. This is the recommended flow for native/desktop applications that need to obtain OAuth2 tokens from providers like Google, GitHub, etc.
 
-The credential vault uses `dashmap` for lock-free concurrent read/write access, allowing multiple extension handlers to retrieve or store credentials simultaneously without blocking. All async operations run on the Tokio runtime, and the local OAuth2 callback server integrates with the same runtime.
+The flow involves:
+
+1. Generating a cryptographically random code verifier (`rand`, `sha2`).
+2. Computing the SHA-256 code challenge.
+3. Spinning up a temporary local HTTP server (`axum`) to receive the redirect callback.
+4. Exchanging the authorization code for tokens via `reqwest`.
+5. Storing the resulting tokens in the credential vault.
+
+Relevant dependencies: `axum`, `reqwest`, `rand`, `sha2`, `base64`, `chrono`.
+
+## Integration Points
+
+### librefang-types
+
+The module depends on `librefang-types` for shared data structures — credential definitions, server configuration shapes, error types, and other cross-crate contracts. Any new extension or integration should define its public types there.
+
+### Concurrency
+
+The `dashmap` dependency provides a lock-free concurrent hashmap, used for in-process caching of decrypted credentials and active OAuth2 states. This allows multiple async tasks (`tokio`) to access vault contents safely without a global mutex.
+
+## Configuration
+
+The module uses TOML for its configuration files. Configuration is resolved from platform-standard directories via the `dirs` crate. A typical configuration file defines:
+
+- MCP server endpoints and connection parameters
+- Vault storage location and encryption settings
+- OAuth2 provider client IDs and redirect parameters
+
+## Error Handling
+
+Errors are surfaced through `thiserror`-derived error enums covering:
+
+- Encryption/decryption failures (AES-GCM, Argon2)
+- Keyring access errors (OS keyring unavailable or locked)
+- Network errors (OAuth2 token exchange, MCP server communication)
+- Configuration parsing errors (TOML/JSON deserialization)
+- TLS certificate errors (rustls)
+
+All errors are instrumented through `tracing` for observability.
 
 ## Testing
 
-Dev-dependencies include `tokio-test` for async test helpers, `tempfile` for isolated vault storage during tests, and `serial_test` to serialize tests that touch shared filesystem state (such as the encrypted vault files on disk).
+Dev dependencies include `tempfile` for isolated filesystem-based tests and `serial_test` to serialize tests that interact with the OS keyring (since keyring backends are typically process-wide singletons). `librefang-runtime` is also included as a dev dependency to provide the async runtime harness needed for integration tests.

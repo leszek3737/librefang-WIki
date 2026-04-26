@@ -2,76 +2,85 @@
 
 # librefang-migrate
 
-Migration engine for importing agent configurations and data from other agent frameworks into LibreFang format.
+Migration engine for importing configurations and data from other agent frameworks into LibreFang.
 
 ## Overview
 
-`librefang-migrate` provides tooling to convert projects, configurations, and agent definitions authored in other frameworks into LibreFang-compatible structures. It handles format detection, parsing, schema mapping, and output generation.
+`librefang-migrate` provides tooling to convert projects, configurations, and agent definitions created in other agent frameworks (such as AutoGen, CrewAI, LangGraph, etc.) into the native LibreFang format. It handles format detection, file discovery, schema mapping, and validation of the resulting output.
 
-## Purpose
+## Role in the Workspace
 
-Adopting LibreFang from an existing agent framework requires translating configurations, prompts, tool definitions, and potentially conversation history. This module encapsulates that translation logic so migrations are repeatable and auditable rather than manual one-off efforts.
-
-## Key Dependencies and Their Roles
-
-The dependency selection reveals the module's design:
-
-| Dependency | Role |
-|---|---|
-| `librefang-types` | Target data structures — all migrated output conforms to LibreFang's type definitions |
-| `serde_json`, `serde_yaml`, `json5`, `toml` | Multi-format input parsing — agent frameworks use diverse configuration formats |
-| `walkdir` | Recursive directory traversal for scanning source projects |
-| `thiserror` | Typed error definitions for migration failures |
-| `tracing` | Structured logging of migration progress and warnings |
-| `chrono`, `uuid` | Timestamping and identity assignment for migrated entities |
-| `dirs` | Resolving standard platform directories for default output paths |
+This crate sits at the edge of the LibreFang workspace as a utility module. It depends on `librefang-types` for the target schema definitions used during conversion, but does not expose APIs consumed by other workspace crates. It is typically invoked directly by users or by a CLI frontend during adoption or onboarding of existing agent projects.
 
 ## Architecture
 
+The module is structured around a pipeline approach: discover source files, detect the originating framework, parse the configuration in its native format, map fields to LibreFang types, validate, and emit the result.
+
 ```mermaid
 flowchart LR
-    A[Source Framework Files] --> B[Directory Scanner]
-    B --> C[Format Detection & Parsing]
-    C --> D[Schema Mapping]
-    D --> E[librefang-types Conversion]
-    E --> F[Output Writer]
-    
-    subgraph Input Formats
-        JSON
-        YAML
-        JSON5
-        TOML
-    end
-    
-    subgraph Target
-        librefang-types
-    end
-    
-    C -.-> Input Formats
-    E -.-> Target
+    A[Source Directory] --> B[File Discovery]
+    B --> C[Format Detection]
+    C --> D[Parse Config]
+    D --> E[Schema Mapping]
+    E --> F[librefang-types]
+    F --> G[Validate & Write]
 ```
 
-The migration pipeline follows a linear flow: discover source files, parse them in their native format, map the source schema to LibreFang's data model, and write normalized output.
+## Key Dependencies and Their Purpose
 
-## Integration with LibreFang
+| Dependency | Role |
+|---|---|
+| `librefang-types` | Provides the target type definitions that migrated data is mapped into |
+| `serde`, `serde_json`, `serde_yaml`, `json5`, `toml` | Deserialization support for the various configuration formats used by different agent frameworks |
+| `walkdir` | Recursive directory traversal to locate configuration files within a source project |
+| `chrono` | Timestamp handling for migration metadata and date field conversion |
+| `dirs` | Resolution of standard platform directories (e.g., locating default config paths for supported frameworks) |
+| `thiserror` | Typed error definitions for migration failures |
+| `tracing` | Structured logging of migration progress and diagnostics |
 
-This module depends on `librefang-types` as its sole internal dependency. All migrated data is expressed through the types defined there, ensuring downstream consumers (the runtime, validators, etc.) can work with imported configurations without any special handling.
+## Supported Configuration Formats
 
-The module has no incoming calls from other LibreFang crates, indicating it is a standalone tool or CLI-invoked utility rather than a library consumed at runtime.
+The breadth of serialization libraries reflects the variety of formats used across the agent framework ecosystem:
 
-## Supported Input Formats
+- **JSON** / **JSON5** — Common in JavaScript-based frameworks and some Python frameworks that tolerate comments or trailing commas.
+- **YAML** — Used by frameworks that prefer human-editable configuration.
+- **TOML** — Common in Rust-based tooling and some Python frameworks.
 
-The inclusion of four distinct parsers (`serde_json`, `serde_yaml`, `json5`, `toml`) indicates the module handles source configurations in any of these formats. This breadth accommodates the wide variety of configuration formats used across the agent framework ecosystem.
+## Migration Workflow
+
+1. **Point at a source directory.** The user provides a path to a project built with another agent framework.
+2. **Discover files.** `walkdir` recursively scans the directory for recognizable configuration files.
+3. **Detect framework and format.** The file names, structure, and extensions are inspected to determine the source framework.
+4. **Parse.** The appropriate deserializer reads the configuration into an intermediate representation.
+5. **Map to LibreFang types.** Fields are mapped from the source schema into `librefang-types` definitions.
+6. **Validate and emit.** The resulting structure is validated and written out in the LibreFang-native format.
 
 ## Error Handling
 
-Migration errors are defined using `thiserror`, providing structured, typed errors for conditions such as:
+Errors are defined using `thiserror` and cover cases such as:
 
-- Unreadable or missing source files
-- Unparseable configuration in any supported format
-- Schema mismatches where source concepts lack LibreFang equivalents
-- I/O failures during output writing
+- Unsupported or unrecognized source frameworks
+- Malformed configuration files that fail deserialization
+- Missing required fields that have no equivalent mapping
+- Filesystem errors during discovery or output
+
+All errors are instrumented with `tracing` spans to provide diagnostic context during long migrations.
 
 ## Testing
 
-The `tempfile` dev-dependency indicates tests create temporary directories to exercise file discovery, parsing, and output writing in isolation without touching the real filesystem.
+The `tempfile` dev-dependency is used to construct isolated directory trees in tests. This allows unit and integration tests to:
+
+- Create synthetic source project directories with known configurations
+- Run the full migration pipeline against them
+- Assert on the correctness of the emitted LibreFang output
+- Clean up without side effects
+
+## Adding Support for a New Framework
+
+To add a new source framework:
+
+1. Add a detection function that identifies the framework's configuration files by name, path convention, or structural markers.
+2. Define an intermediate struct that mirrors the source framework's configuration schema, with appropriate `serde` attributes.
+3. Implement a mapper from that intermediate struct into the relevant `librefang-types`.
+4. Register the new framework in the discovery/detection pipeline.
+5. Add test fixtures under a `tempfile`-based test covering the new format.

@@ -2,77 +2,58 @@
 
 # librefang-llm-driver
 
-LLM driver trait and shared types for LibreFang.
-
 ## Purpose
 
-This crate defines the abstraction layer through which the rest of the LibreFang application communicates with large language model backends. It provides a common trait (interface) that concrete LLM implementations must satisfy, along with shared types for requests, responses, and errors.
+`librefang-llm-driver` provides the abstract interface and shared types that decouple LibreFang's core logic from any specific LLM provider. It defines the **trait** that concrete LLM backends must implement, along with the request/response types and error definitions they share.
 
-By keeping the driver contract in its own crate, the rest of the codebase depends only on this abstraction—not on any specific LLM provider. This allows swapping or adding backends without touching core game logic.
+This module contains no concrete implementations — it exists so that the rest of the codebase can depend on a stable abstraction without being tied to a particular LLM service.
 
-## Role in the Architecture
+## Dependencies
 
-```
-┌─────────────────────────────────────────────────┐
-│               LibreFang Core                     │
-│  (depends on librefang-llm-driver trait only)    │
-└──────────────┬──────────────────────────────────┘
-               │ calls through trait
-               ▼
-┌──────────────────────────────────┐
-│     librefang-llm-driver         │
-│  • Driver trait definition       │
-│  • Shared request/response types │
-│  • Error types                   │
-└──────────────┬───────────────────┘
-               │ trait is implemented by
-               ▼
-┌──────────────────────────────────┐
-│   Concrete LLM driver crates     │
-│  (e.g. OpenAI, local, etc.)      │
-└──────────────────────────────────┘
-```
-
-## Dependencies and Their Rationale
-
-| Dependency | Why It's Here |
+| Crate | Role |
 |---|---|
-| `librefang-types` | Shares domain types (game-specific definitions) that the driver needs to interpret or produce. |
-| `async-trait` | The driver trait is async. `async-trait` provides the procedural macro to make `async fn` work in trait definitions, since the driver will perform network I/O against LLM APIs. |
-| `serde` / `serde_json` | Request and response types are serializable. LLM APIs speak JSON, so the driver's shared types need `Serialize`/`Deserialize` bounds. |
-| `thiserror` | Defines structured error types for driver failures (API errors, rate limits, malformed responses, etc.). |
-| `tokio` | Async runtime. The trait's async methods rely on Tokio for I/O and task execution. |
+| `librefang-types` | Shared domain types used across the project |
+| `async-trait` | Enables `async fn` in trait definitions |
+| `serde` / `serde_json` | Serialization of request and response types |
+| `thiserror` | Derived `Error` enum for driver-specific failures |
+| `tokio` | Async runtime support |
 
-## What This Crate Provides
+## Architecture
 
-### Driver Trait
+```mermaid
+graph TD
+    A[Core / Game Logic] -->|depends on| B[librefang-llm-driver]
+    B -->|trait definition| C[LLM Driver Trait]
+    B -->|shared types| D[Request / Response / Error Types]
+    E[Concrete LLM Backend] -->|implements| C
+    F[Another LLM Backend] -->|implements| C
+    A -->|uses| E
+    A -->|uses| F
+```
 
-The central export is an async trait that concrete LLM backends implement. Any crate that needs to call an LLM accepts a boxed or generic instance of this trait, keeping the consumer decoupled from provider specifics.
+The core game logic only knows about the trait defined here. Concrete backends (e.g., an OpenAI driver, a local model driver) depend on this crate, implement the trait, and are injected at runtime.
+
+## Key Components
+
+### LLM Driver Trait
+
+An async trait (via `async-trait`) that defines the contract every LLM backend must satisfy. Implementors receive a request, interact with their specific LLM service, and return a typed response.
 
 ### Shared Types
 
-Request and response structures that are provider-agnostic. These give the rest of the codebase a stable vocabulary for talking to LLMs regardless of which backend is active.
+Request and response structures annotated with `serde` derive macros. These are the common language between callers and drivers — regardless of which LLM provider sits behind the trait, the data flowing in and out uses the same shapes.
 
-### Error Types
+### Error Type
 
-A common error enum covering the failure modes any LLM driver can hit—network issues, authentication failures, rate limiting, and unexpected response formats. Consumers handle one error type rather than provider-specific ones.
+A `thiserror`-derived error enum representing failures that can occur during LLM interaction (e.g., network errors, rate limits, malformed responses). This gives callers a uniform error type to match on, independent of the backend.
 
-## Integration Guide
+## Integration
 
-**Consuming the trait** from another crate:
+To use this module from another crate:
 
-1. Add `librefang-llm-driver` as a dependency.
-2. Accept the driver trait (typically `Box<dyn DriverTrait>`) in your component's constructor or function signature.
-3. Call the trait methods. You never reference a concrete provider type.
+```toml
+[dependencies]
+librefang-llm-driver = { path = "../librefang-llm-driver" }
+```
 
-**Implementing a new backend**:
-
-1. Create a new crate that depends on `librefang-llm-driver`.
-2. Define a struct representing your provider's client.
-3. Implement the driver trait for that struct, translating the shared request types into provider-specific HTTP calls and mapping provider-specific responses back into the shared response types.
-4. Map provider-specific errors into the shared error enum.
-
-## Design Notes
-
-- This crate intentionally has **no outbound calls**. It defines types and traits only. All I/O happens in concrete implementation crates.
-- Because it depends on `librefang-types`, the driver trait can express operations in terms of the game's domain vocabulary rather than raw strings.
+To implement a new LLM backend, depend on this crate, import the driver trait, and implement it for your backend struct. The rest of LibreFang can then accept your backend as a generic or trait object.

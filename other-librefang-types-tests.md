@@ -1,79 +1,81 @@
 # Other — librefang-types-tests
 
-# librefang-types-tests — Agent Form Round-Trip Tests
+# librefang-types-tests
 
-## Purpose
+Integration tests for the `librefang-types` crate. Two concerns live here: **round-trip contract tests** that lock the dashboard's TOML serializer to the kernel's deserializer, and **schema-dump diagnostics** for eyeballing `schemars`-generated JSON Schema output.
 
-This module validates that the TOML emitted by the **dashboard's visual agent editor** can be faithfully parsed by the **kernel's Rust deserializer**. It acts as a contract test between two independently maintained code paths:
+## Why these tests exist
 
-- **Producer:** `crates/librefang-api/dashboard/src/lib/agentManifest.ts` — a TypeScript serializer that converts form state into TOML.
-- **Consumer:** `librefang_types::agent::AgentManifest` — the Rust struct that deserializes that TOML via the `toml` crate.
+The dashboard (TypeScript) produces TOML via a visual agent-editor form. The kernel (Rust) reads that TOML into `AgentManifest`. If either side renames a field, changes an enum variant, or alters defaulting behavior, agents silently break at runtime. These tests catch that drift at build time by parsing the *exact* TOML the dashboard's serializer would emit and asserting the resulting Rust structs.
 
-If either side renames a field, changes an enum variant, or restructures a section, these tests fail at build time, catching the drift before it reaches production.
+The schema-dump tests serve a different purpose: they're a low-friction way to inspect what `schemars` produces for key config types (`BudgetConfig`, `VaultConfig`, `KernelConfig`, `ResponseFormat`) without wiring up a full HTTP endpoint.
 
-## Architecture
+---
 
-```mermaid
-flowchart LR
-    A[Dashboard Form<br/>TypeScript] -->|emits TOML| B[agent_form_roundtrip<br/>Rust tests]
-    B -->|toml::from_str| C[AgentManifest<br/>Rust struct]
-    B -.->|mirrors serializer logic| A
-```
+## Test Files
 
-The tests contain **hardcoded TOML strings** that replicate what the dashboard serializer would produce for various form states. Each string is fed through `toml::from_str::<AgentManifest>()` and then the resulting struct is asserted against field by field.
+### `agent_form_roundtrip.rs`
 
-## Test Cases
+Mirror of the serializer rules in `crates/librefang-api/dashboard/src/lib/agentManifest.ts`. Each test constructs a TOML string matching what the dashboard form emits, deserializes it into `AgentManifest`, and asserts field values.
 
-### `parses_form_minimum_viable_output`
-
-Validates the smallest valid manifest the form can emit — only the required fields (`name`, `version`, `module`, and the `[model]` section). This ensures backward compatibility: old agents saved with minimal forms continue to parse.
-
-### `parses_form_full_output_with_capabilities_and_resources`
-
-Covers a fully populated form with all standard sections:
-
-| Section | Fields Verified |
+| Test | What it covers |
 |---|---|
-| Top-level | `tags`, `skills`, `description` |
-| `[model]` | `temperature`, `max_tokens`, `system_prompt` |
-| `[resources]` | `max_tool_calls_per_minute`, `max_cost_per_hour_usd` |
-| `[capabilities]` | `network`, `shell`, `agent_spawn` |
+| `parses_form_minimum_viable_output` | Bare-minimum manifest: name, version, module, and a model block with provider + model name. |
+| `parses_form_full_output_with_capabilities_and_resources` | All basic sections populated: description, tags, skills, model options (temperature, max_tokens, system_prompt), resource quotas, and capabilities (network, shell, agent_spawn). |
+| `parses_form_with_advanced_sections` | Every advanced section filled: priority, session_mode, web_search_augmentation, schedule, exec_policy, thinking budget, autonomous config, routing tiers, fallback_models (array-of-tables), context_injection, and extended capability globs (memory_read, memory_write, agent_message, ofp_connect). |
+| `parses_form_response_format_json_schema` | Inline `ResponseFormat::JsonSchema` variant with name, schema, and strict flag. Validates that the tagged-enum TOML representation round-trips correctly. |
+| `omitting_optional_sections_uses_defaults` | Manifest with no resources or capabilities sections. Asserts that `ResourceQuota` and `ManifestCapabilities` fields fall back to their defaults (empty vecs, `None` for optional limits, `false` for booleans). |
 
-This test catches field-level drift such as a renamed capability or a changed default type.
+**Key types validated across these tests:**
 
-### `parses_form_with_advanced_sections`
+- `AgentManifest` — top-level config struct
+- `Priority` — enum (e.g. `High`)
+- `SessionMode` — enum (e.g. `New`)
+- `ResponseFormat::JsonSchema` — tagged enum variant carrying `serde_json::Value`
+- Optional advanced sections: `thinking`, `autonomous`, `routing` — each deserializes as `Option<T>`, so their absence must produce `None`
 
-Exercises every advanced section the form can expose. This is the most comprehensive drift-detection test and covers:
+### `schemars_poc.rs`
 
-- **Enum variants:** `priority = "High"` → `Priority::High`, `session_mode = "new"` → `SessionMode::New`
-- **Inline tables:** `schedule = { periodic = { cron = "0 9 * * *" } }`
-- **Optional sections:** `[thinking]`, `[autonomous]`, `[routing]` — each wrapped in `Option<T>` on the Rust side, verified with `.is_some()` and `.as_ref().unwrap()`
-- **Array-of-tables:** `[[fallback_models]]` and `[[context_injection]]` — these use TOML's double-bracket syntax and map to `Vec<FallbackModel>` and `Vec<ContextInjection>` respectively
-- **Capability ACLs:** `memory_read`, `memory_write`, `agent_message`, `ofp_connect` — glob-style permission strings
-
-### `parses_form_response_format_json_schema`
-
-Validates that the dashboard's inline JSON-schema serializer output deserializes into `ResponseFormat::JsonSchema`. The form emits the schema as an inline TOML table (`{ type = "json_schema", name = "user", schema = { type = "object" }, strict = true }`), and this test confirms the kernel correctly picks the `JsonSchema` variant and extracts the `name` and `strict` fields.
-
-### `omitting_optional_sections_uses_defaults`
-
-Verifies that when the form leaves `[resources]` and `[capabilities]` entirely absent, the kernel falls back to struct defaults. Assertions check that `capabilities.network` is empty, `capabilities.agent_spawn` is `false`, and `resources.max_llm_tokens_per_hour` is `None` (meaning "inherit global default").
-
-## When These Tests Fail
-
-A failure in this module almost always means one of two things:
-
-1. **The Rust `AgentManifest` struct changed** (field renamed, type changed, section removed) without updating the dashboard serializer. Fix the serializer in `agentManifest.ts`, or update the test TOML to match the new schema.
-2. **The dashboard serializer changed** (new field, renamed key, different TOML structure) without updating the Rust struct. Add or update the corresponding field in `AgentManifest` and its `Deserialize` implementation.
-
-In both cases, the fix requires coordinating both sides of the contract — these tests exist to flag exactly this kind of cross-crate divergence.
-
-## Running
+Run with `--nocapture` to see output:
 
 ```bash
-# From the workspace root
-cargo test -p librefang-types --test agent_form_roundtrip
-
-# Run a specific case
-cargo test -p librefang-types --test agent_form_roundtrip parses_form_with_advanced_sections
+cargo test -p librefang-types --test schemars_poc -- --nocapture
 ```
+
+| Test | What it dumps |
+|---|---|
+| `dump_budget_config_schema` | `BudgetConfig` — straightforward struct, baseline for size comparison. |
+| `dump_vault_config_schema` | `VaultConfig` — contains `Option<PathBuf>`, useful for checking how filesystem paths render in JSON Schema. |
+| `full_kernel_config_schema_generates` | `KernelConfig` — end-to-end sanity check. Asserts >50 top-level properties and >50 nested definitions, confirming the full config surface is representable. |
+| `dump_response_format_schema` | `ResponseFormat` — tagged enum with a variant carrying `serde_json::Value`. This is a high-risk point for schema fidelity. |
+
+These are not strict pass/fail contract tests (except `full_kernel_config_schema_generates`, which asserts minimum field counts). They exist for developer inspection during schema evolution.
+
+---
+
+## Relationship to the codebase
+
+```
+Dashboard (TS)                 Kernel (Rust)
+┌──────────────────┐           ┌─────────────────────┐
+│ agentManifest.ts  │──TOML──▶│ AgentManifest        │
+│ (serializer)      │          │ (serde deserializer) │
+└──────────────────┘           └─────────────────────┘
+        │                              │
+        └──── contract tested by ──────┘
+             agent_form_roundtrip.rs
+```
+
+- **Upstream dependency**: `librefang-types` provides the `AgentManifest`, `Priority`, `SessionMode`, `ResponseFormat`, and all supporting structs.
+- **Cross-repo contract**: The TOML strings in these tests must be kept in sync with `agentManifest.ts`. If the dashboard serializer changes, the corresponding test here should be updated (or should fail, signaling the break).
+- **No outbound calls**: These tests are pure deserialization + assertion. No network, no filesystem, no database.
+
+## Adding a new round-trip test
+
+When the dashboard form gains a new field or section:
+
+1. Add a test case (or extend an existing one) with the exact TOML the dashboard will emit.
+2. Assert the deserialized field values and any defaulting behavior.
+3. If the field uses a new enum variant or struct, verify it appears correctly in the parsed output.
+
+For schema work, add a `dump_*` test to `schemars_poc.rs` and inspect the output. If the type is already covered by `KernelConfig`, the `full_kernel_config_schema_generates` test will pick up new definitions automatically.

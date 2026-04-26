@@ -6,107 +6,66 @@ Memory substrate for the LibreFang Agent OS.
 
 ## Overview
 
-`librefang-memory` provides persistent storage and state management for the LibreFang agent system. It acts as the substrate layer that other LibreFang components build upon to read, write, query, and manage durable agent state across sessions.
+`librefang-memory` provides the persistence and state management layer for LibreFang agents. It abstracts storage operations behind a substrate that other modules can rely on for reading, writing, querying, and managing agent state across restarts and sessions.
 
-The module is positioned as a foundational crate — higher-level agent logic depends on it, not the other way around.
+The crate acts as a foundational library — higher-level agent logic depends on it, but it does not itself depend on other LibreFang crates beyond `librefang-types`.
 
 ## Role in the System
 
-The crate's description as a "memory substrate" means it is responsible for the mechanisms by which agents remember and recall information. This includes persistent data storage, serialization of agent state, and retrieval interfaces that other LibreFang modules consume.
-
 ```
-┌─────────────────────────────────────┐
-│        LibreFang Agent OS           │
-│                                     │
-│  ┌───────────┐    ┌──────────────┐  │
-│  │ Agent     │───▶│  librefang-  │  │
-│  │ Logic     │    │  memory      │  │
-│  └───────────┘    └──────┬───────┘  │
-│                          │          │
-│                   ┌──────▼───────┐  │
-│                   │  librefang-  │  │
-│                   │  types       │  │
-│                   └──────────────┘  │
-└─────────────────────────────────────┘
+┌──────────────────────────┐
+│    Agent Logic Layer      │
+├──────────────────────────┤
+│  librefang-memory (this)  │
+├──────────────────────────┤
+│    librefang-types        │
+├──────────────────────────┤
+│   SQLite / Filesystem     │
+└──────────────────────────┘
 ```
 
-## Dependency Analysis
+This module sits between the agent logic and the underlying storage. It is responsible for durable state, working memory, and any structured data the agent needs to persist or recall.
 
-The crate's dependencies reveal its architectural responsibilities:
+## Key Dependencies and What They Suggest
 
-### Storage
-
-| Dependency | Purpose |
+| Dependency | Purpose in This Module |
 |---|---|
-| `rusqlite` | Embedded SQLite database for structured, queryable persistent storage |
+| `rusqlite` | SQLite-backed persistent storage. Likely used for structured queries, indexes, and transactional state management. |
+| `serde` / `serde_json` / `rmp-serde` | Serialization in both JSON and MessagePack formats. Suggests the module handles serialization of arbitrary agent state, possibly with different format choices for different storage contexts. |
+| `sha2` | Cryptographic hashing. Used for content-addressed storage, integrity checks, or deduplication of stored entries. |
+| `uuid` | Unique identifier generation for memory entries, sessions, or transactions. |
+| `chrono` | Timestamps on memory entries, enabling time-based queries and expiration. |
+| `tokio` / `async-trait` | Async runtime support. Storage operations are non-blocking to integrate with the agent's async event loop. |
+| `reqwest` | HTTP client capability. May be used for remote memory backends, syncing state to a server, or fetching external data to cache locally. |
+| `tracing` | Instrumented logging for storage operations, useful for debugging agent behavior. |
+| `thiserror` | Typed error definitions for storage failures, corruption, or query errors. |
 
-### Serialization
+## Architecture
 
-| Dependency | Purpose |
-|---|---|
-| `serde` | Serialization framework (core trait derivations) |
-| `serde_json` | JSON serialization for human-readable or interoperable state |
-| `rmp-serde` | MessagePack serialization for compact binary storage |
+The module likely exposes one or more async traits or structs that represent a memory store. Consumers interact with these abstractions rather than raw SQL or file I/O.
 
-The dual serialization support (JSON and MessagePack) suggests the module supports both human-inspectable storage formats and space-efficient binary formats, likely selectable per context.
+### Expected Capabilities
 
-### Async Runtime
+Based on the dependency profile:
 
-| Dependency | Purpose |
-|---|---|
-| `tokio` | Async runtime for non-blocking storage operations |
-| `async-trait` | Async trait definitions for storage backend abstractions |
+- **Key-value or document storage** backed by SQLite, with serialization handled transparently.
+- **Content-addressed entries** using SHA-2 hashing for deduplication or integrity verification.
+- **Time-indexed records** via `chrono` timestamps, supporting queries like "most recent" or "all entries since X."
+- **UUID-tagged entries** for unique identification across distributed or multi-agent scenarios.
+- **Error handling** with structured error types rather than panics or raw `Result<T, Box<dyn Error>>`.
 
-### Identity and Integrity
+## Integration Points
 
-| Dependency | Purpose |
-|---|---|
-| `uuid` | Unique identifiers for memory entries, sessions, or records |
-| `sha2` | Cryptographic hashing for data integrity verification or content-addressed storage |
-| `chrono` | Timestamp management for temporal queries and record ordering |
+This crate depends on `librefang-types` for shared type definitions — likely the shapes of memory entries, agent identifiers, or configuration structs that flow between modules.
 
-### Networking
+No other LibreFang crates depend on this module at the code level based on available call graph data, but at runtime, any module that needs durable state would bring it in as a dependency.
 
-| Dependency | Purpose |
-|---|---|
-| `reqwest` | HTTP client — likely for remote memory backends or synchronization with external services |
+## Development
 
-### Observability and Error Handling
+Run tests with:
 
-| Dependency | Purpose |
-|---|---|
-| `tracing` | Structured logging and instrumentation of storage operations |
-| `thiserror` | Derived error types for idiomatic error propagation |
-
-### Internal Dependency
-
-| Dependency | Purpose |
-|---|---|
-| `librefang-types` | Shared type definitions used across the LibreFang workspace |
-
-## Build Configuration
-
-The module is part of the LibreFang workspace and inherits its root-level settings for version, edition, and license.
-
-```toml
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+```bash
+cargo test -p librefang-memory
 ```
 
-### Test Dependencies
-
-| Dependency | Purpose |
-|---|---|
-| `tokio-test` | Async test utilities |
-| `tempfile` | Temporary directories and files for isolated database tests |
-
-The presence of `tempfile` as a test dependency confirms that tests create isolated SQLite databases in temporary locations rather than touching the filesystem.
-
-## Development Notes
-
-- **Backend abstraction**: The combination of `async-trait` and `rusqlite` suggests the module likely defines async storage traits with a SQLite-backed implementation. The `reqwest` dependency hints at potential remote backend support or synchronization.
-
-- **Content-addressing**: The `sha2` dependency, combined with `uuid` and `serde`, suggests some memory entries may be content-addressed — keyed by hash rather than just sequential or random identifiers.
-
-- **Testing strategy**: Use `tempfile` to create ephemeral database paths when writing tests. Initialize a fresh database for each test case to ensure isolation.
+The `tempfile` dev-dependency is used in tests to create isolated temporary databases, ensuring tests don't pollute the filesystem or interfere with each other.

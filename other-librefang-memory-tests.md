@@ -1,113 +1,89 @@
 # Other — librefang-memory-tests
 
-# librefang-memory-tests: Canonical Chat-Scoped Integration Tests
+# librefang-memory-tests
+
+Integration regression tests for chat-scoped canonical context filtering in `librefang-memory`.
 
 ## Purpose
 
-This test module is an **integration regression suite** that guards a critical privacy fix in `librefang-memory`. The fix ensures that canonical context entries are tagged with the originating `SessionId` and filtered at read time. Without it, every WhatsApp DM and group sharing the same agent would see each other's history injected into the LLM prompt — meaning a private chat could leak group messages and vice versa.
+This module guards against a cross-channel message leak in the canonical memory store. Before the fix in `session.rs`, every WhatsApp DM and group that shared the same `AgentId` had each other's history injected into the LLM prompt. A private DM could surface group messages, and vice versa. The fix tags each `CanonicalEntry` with the originating `SessionId` and filters by that tag at read time.
 
-The tests exercise the full append → load → context roundtrip via the crate's public API, mirroring the actual call path the kernel uses on every inbound message.
+The tests exercise the full append → load → context roundtrip through the crate's public API (`SessionStore`), which is the same path the kernel calls on every inbound message.
 
-## What Bug It Prevents
+## Architecture
 
-Before the session-scoping fix, `SessionStore::canonical_context` returned all canonical entries for an agent regardless of which chat session they came from. In a multi-tenant WhatsApp scenario where one agent handles both DMs and groups:
+```mermaid
+flowchart LR
+    A[setup] --> B[run_migrations]
+    A --> C[SessionStore::new]
+    C --> D[append_canonical]
+    C --> E[canonical_context]
+    D --> F[(SQLite in-memory)]
+    E --> F
+```
 
-1. User sends "dm-1" in a private WhatsApp chat.
-2. Someone sends "group-1" in a WhatsApp group the agent also serves.
-3. User sends "dm-2" in the private chat.
-4. The DM's LLM prompt would receive all three messages, leaking "group-1" from the group context.
-
-The fix adds a `SessionId` column to canonical entries and a filter clause in `canonical_context`.
+Every test opens a fresh in-memory SQLite database, runs schema migrations, and constructs a `SessionStore` backed by an `Arc<Mutex<Connection>>`. This mirrors the production setup without requiring a persistent database.
 
 ## Test Infrastructure
 
-### `setup() -> SessionStore`
+### `setup()`
 
-Creates a fresh, isolated test environment:
+Creates an isolated `SessionStore` for each test:
 
-1. Opens an in-memory SQLite database via `Connection::open_in_memory`.
-2. Runs database migrations via `run_migrations`.
-3. Wraps the connection in `Arc<Mutex<Connection>>` and constructs a `SessionStore`.
+1. Opens an in-memory SQLite connection via `Connection::open_in_memory`.
+2. Runs database migrations via `run_migrations(&conn)`.
+3. Wraps the connection in `Arc<Mutex<Connection>>` and returns a new `SessionStore`.
 
-Each test gets its own blank database, so tests are fully independent.
+### `user_msg(text)`
 
-### `user_msg(text: &str) -> Message`
-
-Convenience helper that constructs a `Message` with `Role::User`, the given text as `MessageContent::Text`, `pinned: false`, and `timestamp: None`. Used to build canonical entries quickly without boilerplate.
+Helper that builds a `Message` with `Role::User`, `MessageContent::Text`, no pin, and no timestamp. Keeps test assertions focused on content rather than message construction.
 
 ## Test Cases
 
 ### `canonical_context_isolates_two_whatsapp_chats_for_same_agent`
 
-The primary isolation regression test. It simulates two WhatsApp conversations for the same agent:
+**What it validates:** Session-scoped filtering prevents cross-channel leakage.
 
-- **DM session**: derived from `SessionId::for_channel(agent, "whatsapp:393331111111@s.whatsapp.net")`
-- **Group session**: derived from `SessionId::for_channel(agent, "whatsapp:120363111111111111@g.us")`
+**Scenario:** A single agent serves both a WhatsApp DM (with Jessica) and a WhatsApp group (containing Jessica). Messages arrive interleaved across both sessions.
 
-**Sequence**:
+**Steps:**
 
-1. Append `"dm-1"` to the DM session.
-2. Append `"group-1"` to the group session.
-3. Append `"dm-2"` to the DM session (interleaved timing).
+1. Derive two `SessionId` values from channel identifiers using `SessionId::for_channel`:
+   - `session_dm` ← `"whatsapp:393331111111@s.whatsapp.net"`
+   - `session_group` ← `"whatsapp:120363111111111111@g.us"`
+2. Assert the two session IDs differ (different chats must not collapse to the same session).
+3. Append `"dm-1"` → `"group-1"` → `"dm-2"` in that order, each tagged with its own `SessionId`.
+4. Call `canonical_context(agent, Some(session_dm), None)` and assert the returned messages are exactly `["dm-1", "dm-2"]` — no `"group-1"`.
+5. Call `canonical_context(agent, Some(session_group), None)` and assert the returned messages are exactly `["group-1"]` — no `"dm-1"` or `"dm-2"`.
 
-**Assertions**:
-
-- `session_dm` and `session_group` are not equal — different channels must derive different session IDs.
-- `canonical_context(agent, Some(session_dm), None)` returns exactly `["dm-1", "dm-2"]` — no group messages.
-- `canonical_context(agent, Some(session_group), None)` returns exactly `["group-1"]` — no DM messages.
+**Failure mode:** If `append_canonical` stops tagging entries with `SessionId`, or if `canonical_context` stops filtering by that tag, the DM context will contain `"group-1"` and the test fails.
 
 ### `canonical_context_unfiltered_returns_all_for_backward_compat`
 
-Ensures backward compatibility for callers that have not adopted per-session filtering. When `canonical_context` is called with `session_id = None`, it must return all canonical entries for the agent across every session.
+**What it validates:** Passing `session_id = None` to `canonical_context` returns messages from all sessions, preserving the original cross-channel semantics.
 
-**Sequence**:
+**Scenario:** Two sessions on different platforms (WhatsApp and Telegram) each contribute one message.
 
-1. Append `"a-1"` under one session (`whatsapp` channel).
-2. Append `"b-1"` under a different session (`telegram` channel).
+**Steps:**
 
-**Assertion**:
+1. Append `"a-1"` tagged with `session_a` and `"b-1"` tagged with `session_b`.
+2. Call `canonical_context(agent, None, None)` (no session filter).
+3. Assert the returned messages are `["a-1", "b-1"]`.
 
-- `canonical_context(agent, None, None)` returns `["a-1", "b-1"]` — all entries, unfiltered.
+**Failure mode:** If the unfiltered path is accidentally broken by the session-scoping change, this test catches the regression.
 
-This guarantees that existing kernel code paths that don't pass a `SessionId` continue to work unchanged after the migration.
+## Relationships to Other Modules
 
-## Execution Flow
-
-```mermaid
-sequenceDiagram
-    participant Test
-    participant SessionStore
-    participant SQLite
-
-    Test->>SQLite: open_in_memory + run_migrations
-    Test->>SessionStore: new(conn)
-    Test->>SessionStore: append_canonical(agent, msgs, None, Some(session_dm))
-    Test->>SessionStore: append_canonical(agent, msgs, None, Some(session_group))
-    Test->>SessionStore: append_canonical(agent, msgs, None, Some(session_dm))
-    Test->>SessionStore: canonical_context(agent, Some(session_dm), None)
-    SessionStore-->>Test: [dm-1, dm-2] only
-    Test->>SessionStore: canonical_context(agent, Some(session_group), None)
-    SessionStore-->>Test: [group-1] only
-```
-
-## Dependencies and Integration Points
-
-| Dependency | Usage |
+| Module | Relationship |
 |---|---|
-| `librefang_memory::session::SessionStore` | Core unit-under-test. Provides `append_canonical` and `canonical_context`. |
-| `librefang_memory::migration::run_migrations` | Prepares the in-memory SQLite schema before each test. |
-| `librefang_types::agent::{AgentId, SessionId}` | Identity types. `SessionId::for_channel` derives a deterministic session ID from an agent + channel address. |
-| `librefang_types::message::{Message, Role, MessageContent}` | Message types used to construct canonical entries. |
-| `rusqlite::Connection` | In-memory SQLite backend for test isolation. |
+| `librefang-memory::session` | Primary target. Tests call `SessionStore::append_canonical` and `SessionStore::canonical_context`. |
+| `librefang-memory::migration` | `setup` calls `run_migrations` to prepare the schema. |
+| `librefang-types::agent` | Uses `AgentId::new()` and `SessionId::for_channel` to derive session identities from channel addresses. |
+| `librefang-types::message` | Constructs `Message` with `Role`, `MessageContent`, and related fields. |
 
 ## Running
 
-```sh
-# Run just this integration test file
+```bash
+# From the workspace root
 cargo test -p librefang-memory --test canonical_chat_scoped_integration
-
-# Run with output visible
-cargo test -p librefang-memory --test canonical_chat_scoped_integration -- --nocapture
 ```
-
-No external services or databases are required — everything runs in-memory.

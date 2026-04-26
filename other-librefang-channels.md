@@ -2,160 +2,167 @@
 
 # librefang-channels
 
-**Channel Bridge Layer** — pluggable messaging integrations for LibreFang.
-
 ## Overview
 
-`librefang-channels` is the messaging abstraction layer that bridges LibreFang's core alerting and event system to dozens of external communication platforms. It translates LibreFang's internal message types into platform-specific API calls, webhook payloads, and protocol messages, and vice versa — ingesting replies and interactions back into the system.
+**Channel Bridge Layer** — a feature-flag-driven collection of pluggable messaging integrations for LibreFang. This module provides the adapter layer between LibreFang's internal dispatch system and 45+ external messaging platforms, from major chat networks (Telegram, Discord, Slack) to niche protocols (Nostr, XMPP, IRC).
 
-Every supported platform is gated behind a Cargo feature flag, allowing downstream consumers to compile only the channels they need and minimize dependency bloat.
+Every channel is gated behind an individual Cargo feature, allowing downstream consumers to compile only the integrations they need.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    Core["librefang-types<br/>(shared types)"]
-    Chan["librefang-channels"]
-
-    Chan --> T["Telegram"]
-    Chan --> D["Discord"]
-    Chan --> S["Slack"]
-    Chan --> M["Matrix"]
-    Chan --> E["Email (SMTP/IMAP)"]
-    Chan --> W["Webhook (generic)"]
-    Chan --> O["40+ more channels"]
-
-    Core -->|"MessageEvent, Config types"| Chan
-    Chan -->|"Platform SDKs / HTTP / WS"| O
-    Chan -->|"Platform SDKs / HTTP / WS"| T
-    Chan -->|"Platform SDKs / HTTP / WS"| D
-    Chan -->|"Platform SDKs / HTTP / WS"| S
-    Chan -->|"Platform SDKs / HTTP / WS"| M
-    Chan -->|"Platform SDKs / HTTP / WS"| E
-    Chan -->|"Platform SDKs / HTTP / WS"| W
+    A[librefang-types] --> B[librefang-channels]
+    B --> C[Feature-gated Channel Adapters]
+    C --> D[HTTP-based channels]
+    C --> E[WebSocket channels]
+    C --> F[Protocol-specific channels]
+    B --> G[Dispatch & Routing]
 ```
 
-Each channel implementation follows a uniform interface defined in terms of `librefang-types`, so the rest of the codebase can dispatch messages without knowing which platform sits at the other end.
+Each channel adapter translates between LibreFang's canonical message types (from `librefang-types`) and the target platform's API or protocol. The module ships with its own dispatch benchmark (`benches/dispatch`) to measure routing overhead.
 
-## Feature Flags
+## Feature Flag System
 
-### Default
+### Default Features
 
-The `default` feature enables all channels listed below **except** `channel-mqtt`. This gives a batteries-included experience for typical deployments.
+The `default` feature enables every channel adapter except `channel-mqtt`. This is the "batteries-included" configuration suitable for development and monolithic deployments.
 
 ### `all-channels`
 
-Enables every channel including `channel-mqtt`. Useful for testing or building a universal binary.
+The `all-channels` feature enables every adapter **including** `channel-mqtt`. Use this when you explicitly need MQTT and want a single feature flag to rule them all.
 
-### Individual channel features
+### Selective Compilation
 
-Each channel is independently selectable. Combine them as needed:
+Enable only the channels you need by disabling default features and cherry-picking:
 
 ```toml
-# Minimal build — only Telegram and Discord
 [dependencies]
-librefang-channels = { version = "0.1", default-features = false, features = [
+librefang-channels = { path = "...", default-features = false, features = [
     "channel-telegram",
     "channel-discord",
 ] }
 ```
 
-### Full feature list
+This keeps compile times and binary size proportional to your actual integrations.
 
-| Feature flag | Platform | Extra dependencies |
+## Channel Catalog
+
+### HTTP / Webhook-Based Channels
+
+These channels communicate primarily via REST APIs. They rely on the shared `reqwest` and `axum` dependencies for outbound HTTP and inbound webhook handling.
+
+| Feature Flag | Platform | Notes |
 |---|---|---|
-| `channel-telegram` | Telegram Bot API | — |
-| `channel-discord` | Discord | — |
-| `channel-slack` | Slack | — |
-| `channel-matrix` | Matrix | — |
-| `channel-email` | Email (SMTP + IMAP) | `lettre`, `imap`, `rustls-connector`, `mailparse` |
-| `channel-webhook` | Generic webhooks | — |
-| `channel-whatsapp` | WhatsApp | — |
-| `channel-signal` | Signal | — |
-| `channel-teams` | Microsoft Teams | — |
-| `channel-mattermost` | Mattermost | — |
-| `channel-irc` | IRC | — |
-| `channel-google-chat` | Google Chat | `rsa` |
-| `channel-twitch` | Twitch | — |
-| `channel-rocketchat` | Rocket.Chat | — |
-| `channel-zulip` | Zulip | — |
-| `channel-xmpp` | XMPP | — |
-| `channel-bluesky` | Bluesky (AT Protocol) | — |
-| `channel-feishu` | Feishu / Lark | `aes`, `cbc` |
-| `channel-line` | LINE | — |
-| `channel-mastodon` | Mastodon | — |
-| `channel-messenger` | Facebook Messenger | — |
-| `channel-reddit` | Reddit | — |
-| `channel-revolt` | Revolt | — |
-| `channel-viber` | Viber | — |
-| `channel-voice` | Voice / telephony gateway | — |
-| `channel-flock` | Flock | — |
-| `channel-guilded` | Guilded | — |
-| `channel-keybase` | Keybase | — |
-| `channel-nextcloud` | Nextcloud Talk | — |
-| `channel-nostr` | Nostr | `k256` |
-| `channel-pumble` | Pumble | — |
-| `channel-threema` | Threema | — |
-| `channel-twist` | Twist | — |
-| `channel-webex` | Cisco Webex | — |
-| `channel-dingtalk` | DingTalk | — |
-| `channel-discourse` | Discourse | — |
-| `channel-gitter` | Gitter | — |
-| `channel-gotify` | Gotify | — |
-| `channel-linkedin` | LinkedIn | — |
-| `channel-mumble` | Mumble | — |
-| `channel-ntfy` | ntfy | — |
-| `channel-qq` | QQ | — |
-| `channel-wechat` | WeChat | — |
-| `channel-wecom` | WeCom (Enterprise WeChat) | `aes`, `cbc`, `roxmltree` |
-| `channel-mqtt` | MQTT | `rumqttc` |
+| `channel-telegram` | Telegram Bot API | |
+| `channel-discord` | Discord | |
+| `channel-slack` | Slack | |
+| `channel-teams` | Microsoft Teams | |
+| `channel-mattermost` | Mattermost | |
+| `channel-twitch` | Twitch | |
+| `channel-rocketchat` | Rocket.Chat | |
+| `channel-zulip` | Zulip | |
+| `channel-bluesky` | Bluesky (AT Protocol) | |
+| `channel-line` | LINE | |
+| `channel-mastodon` | Mastodon | |
+| `channel-messenger` | Facebook Messenger | |
+| `channel-reddit` | Reddit | |
+| `channel-revolt` | Revolt | |
+| `channel-viber` | Viber | |
+| `channel-flock` | Flock | |
+| `channel-guilded` | Guilded | |
+| `channel-pumble` | Pumble | |
+| `channel-threema` | Threema | |
+| `channel-twist` | Twist | |
+| `channel-webex` | Cisco Webex | |
+| `channel-dingtalk` | DingTalk | |
+| `channel-discourse` | Discourse | |
+| `channel-gitter` | Gitter | |
+| `channel-gotify` | Gotify | |
+| `channel-linkedin` | LinkedIn | |
+| `channel-ntfy` | ntfy.sh | |
+| `channel-webhook` | Generic Webhook | Catch-all HTTP endpoint |
+| `channel-voice` | Voice/TTS | Voice-specific delivery |
 
-## Core Dependencies
+### Channels with Cryptographic Dependencies
 
-These are always linked regardless of which channels are enabled:
+| Feature Flag | Platform | Extra Dependencies | Purpose |
+|---|---|---|---|
+| `channel-email` | Email (SMTP/IMAP) | `lettre`, `imap`, `rustls-connector`, `mailparse` | Full email send/receive pipeline |
+| `channel-google-chat` | Google Chat | `rsa` | Google service account authentication (JWT signing) |
+| `channel-feishu` | Feishu / Lark | `aes`, `cbc` | AES-CBC encryption for event verification |
+| `channel-wecom` | WeCom (企业微信) | `aes`, `cbc` | AES-CBC decryption for callback payloads |
+| `channel-nostr` | Nostr | `k256` | secp256k1 key generation and event signing |
+| `channel-mqtt` | MQTT | `rumqttc` | MQTT v5 pub/sub transport |
+
+### Protocol-Based Channels
+
+| Feature Flag | Platform | Transport |
+|---|---|---|
+| `channel-matrix` | Matrix | HTTP (Sync) / WebSocket |
+| `channel-xmpp` | XMPP | XML stream |
+| `channel-irc` | IRC | Plain/TLS TCP |
+| `channel-mumble` | Mumble | Protobuf over TLS |
+| `channel-whatsapp` | WhatsApp Business | HTTP API |
+| `channel-signal` | Signal | HTTP API |
+| `channel-nextcloud` | Nextcloud Talk | HTTP API |
+| `channel-keybase` | Keybase | HTTP API |
+| `channel-qq` | QQ | HTTP API |
+| `channel-wechat` | WeChat | HTTP API |
+
+## Key Dependencies
+
+### Shared Across All Channels
 
 | Crate | Role |
 |---|---|
-| `librefang-types` | Shared domain types — message events, channel configs, error types |
-| `tokio` | Async runtime for all channel I/O |
-| `reqwest` | HTTP client for REST-based channel APIs |
-| `axum` | HTTP server for receiving webhook callbacks |
-| `tokio-tungstenite` | WebSocket client for streaming platforms |
-| `serde` / `serde_json` | Serialization of payloads and configs |
-| `dashmap` | Concurrent maps for channel state tracking |
-| `async-trait` | Trait object support for channel implementations |
-| `hmac` / `sha2` / `sha1` | Signature verification on incoming webhooks |
-| `base64` / `hex` | Encoding utilities |
-| `image` | Image processing (JPEG, PNG, WebP) for media attachments |
+| `librefang-types` | Canonical message types shared across the LibreFang workspace |
+| `tokio` | Async runtime |
+| `reqwest` | HTTP client for outbound API calls |
+| `axum` | HTTP server for inbound webhook endpoints |
+| `tokio-tungstenite` | WebSocket transport (used by several real-time channels) |
+| `serde` / `serde_json` | Serialization of API payloads |
+| `hmac` / `sha2` / `sha1` | Webhook signature verification |
+| `dashmap` | Concurrent channel state management |
 | `tracing` | Structured logging |
-| `uuid` | Correlation IDs for message tracking |
 | `url` | URL parsing and construction |
 
-## Benchmarks
+### Cryptographic / Verification
 
-The crate ships a Criterion benchmark suite under `benches/dispatch` measuring message dispatch throughput:
+| Crate | Role |
+|---|---|
+| `base64` / `hex` | Encoding for signature payloads |
+| `zeroize` | Secure memory clearing for key material |
+| `rustls` + `webpki-roots` / `rustls-native-certs` | TLS without OpenSSL |
+
+### Utility
+
+| Crate | Role |
+|---|---|
+| `image` | Image processing (JPEG, PNG, WebP) for media attachments |
+| `regex` / `regex-lite` | Pattern matching for command parsing |
+| `html-escape` | HTML sanitization for cross-platform rendering |
+| `smallvec` | Stack-allocated small collections to reduce allocations |
+| `bytes` | Zero-copy byte buffer handling |
+| `uuid` | Correlation ID generation |
+| `chrono` | Timestamp handling |
+| `futures` / `tokio-stream` / `async-trait` | Async trait definitions and stream combinators |
+
+## Benchmarking
+
+The module includes a dispatch benchmark at `benches/dispatch`, runnable via:
 
 ```sh
-cargo bench --bench dispatch
+cargo bench -p librefang-channels --bench dispatch
 ```
 
-## Relationship to Other Crates
+This measures the overhead of message routing through the channel layer, which is critical for deployments bridging many platforms simultaneously.
 
-- **`librefang-types`** — Defines the `MessageEvent`, `ChannelConfig`, and related types that this crate consumes and produces. Every channel implementation translates between these shared types and its platform-specific wire format.
-- **Downstream consumers** — The main LibreFang binary or other workspace crates depend on `librefang-channels` to get a ready-to-use set of channel drivers without touching individual platform SDKs.
+## Relationship to Other Modules
 
-## Adding a New Channel
+This module sits between `librefang-types` and the application layer:
 
-1. Add a new feature flag in `Cargo.toml`:
+- **Depends on** `librefang-types` for all shared message, event, and configuration types. Channel adapters consume these types as input and produce them from incoming platform events.
+- **Consumed by** the core application or bot framework, which instantiates channel adapters based on runtime configuration and feeds messages through the dispatch pipeline.
 
-   ```toml
-   channel-example = []
-   ```
-
-   Add any platform-specific optional dependencies if needed. Include the feature in both `default` and `all-channels` lists.
-
-2. Create the channel module under the appropriate source file, implementing the shared channel trait from `librefang-types`.
-
-3. Gate the module with `#[cfg(feature = "channel-example")]`.
-
-4. Register the channel in the dispatch registry so it can be resolved by name at runtime.
+The channel adapters are designed to be interchangeable — the rest of the system should not need to know which specific platform is handling a given message.

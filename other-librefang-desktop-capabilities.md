@@ -1,109 +1,96 @@
 # Other — librefang-desktop-capabilities
 
-# librefang-desktop-capabilities
+# LibreFang Desktop Capabilities
 
 ## Overview
 
-This module defines the **default capability set** for the LibreFang desktop application using Tauri's permission system. It is a static configuration file (`default.json`) that declares which Tauri plugins and core APIs the application is authorized to use.
+The `librefang-desktop-capabilities` module defines the **default permission set** for the LibreFang desktop application. It is a declarative Tauri configuration that controls which system-level APIs the app is authorized to use. Tauri's capability system acts as a security boundary — no plugin or core command can be invoked at runtime unless it has been explicitly granted permission in a capability file like this one.
 
-Tauri's capability system acts as an allowlist: if a permission is not listed here, the corresponding API calls will be rejected at runtime. This file gates access for the **main window** of the application.
+This module lives under `librefang-desktop/capabilities/` and is consumed by the Tauri runtime at application startup.
 
-## File Location
+## File Reference
 
-```
-librefang-desktop/capabilities/default.json
-```
+### `default.json`
 
-## Schema
-
-The file is validated against Tauri's official schema:
-
-```
-https://raw.githubusercontent.com/nicedoc/tauri/refs/heads/dev/crates/tauri-utils/schema.json
-```
-
-Editor tooling that supports `$schema` (VS Code, JetBrains IDEs) will provide autocompletion and validation against this schema.
-
-## Structure
+The sole file in this module. It declares a single capability scope:
 
 | Field | Value | Purpose |
 |---|---|---|
-| `identifier` | `"default"` | Names this capability set; referenced internally by Tauri's permission resolver |
-| `description` | Human-readable string | Documentation only — not evaluated at runtime |
-| `windows` | `["main"]` | Restricts these permissions to the window labeled `"main"` |
-| `permissions` | Array of strings | The granted permission identifiers |
+| `$schema` | References the Tauri JSON schema | Enables IDE validation and autocomplete |
+| `identifier` | `"default"` | Unique name for this capability set |
+| `description` | Human-readable summary | Documents intent for developers |
+| `windows` | `["main"]` | Restricts these permissions to the `main` window only |
+| `permissions` | Array of permission tokens (see below) | Grants access to specific Tauri commands |
 
 ## Granted Permissions
 
-### Core
+### Core and Plugin Defaults
 
-| Permission | Effect |
+These tokens each unlock a bundle of commands provided by their respective Tauri plugins or core modules:
+
+| Permission | Source | What it enables |
+|---|---|---|
+| `core:default` | `tauri` core | Window management, event system, basic IPC |
+| `notification:default` | `tauri-plugin-notification` | Sending native OS notifications |
+| `shell:default` | `tauri-plugin-shell` | Executing shell commands and opening external programs/URLs |
+| `dialog:default` | `tauri-plugin-dialog` | Native file pickers, message dialogs, confirmations |
+| `autostart:default` | `tauri-plugin-autostart` | Registering the app to launch on system boot |
+| `updater:default` | `tauri-plugin-updater` | Checking for and applying application updates |
+
+### Global Shortcut (Granular Permissions)
+
+Unlike the bundled defaults above, global shortcut permissions are specified individually. This follows the principle of least privilege — only the exact commands needed are exposed:
+
+| Permission | Command it authorizes |
 |---|---|
-| `core:default` | Standard Tauri core APIs — window management, event system, basic IPC |
-
-### Shell
-
-| Permission | Effect |
-|---|---|
-| `shell:default` | Default shell operations (e.g., opening URLs in the system browser) |
-
-### Dialog
-
-| Permission | Effect |
-|---|---|
-| `dialog:default` | Native file picker, message boxes, and confirm dialogs |
-
-### Notification
-
-| Permission | Effect |
-|---|---|
-| `notification:default` | System notification delivery |
-
-### Global Shortcut
-
-| Permission | Effect |
-|---|---|
-| `global-shortcut:allow-register` | Register global keyboard shortcuts that work even when the app is not focused |
-| `global-shortcut:allow-unregister` | Remove previously registered shortcuts |
+| `global-shortcut:allow-register` | Register a new system-wide keyboard shortcut |
+| `global-shortcut:allow-unregister` | Remove a previously registered shortcut |
 | `global-shortcut:allow-is-registered` | Query whether a shortcut is currently registered |
 
-Note: Global shortcut permissions are granted individually rather than via the `default` set, indicating the app uses explicit register/unregister/query control rather than blanket access.
+Notably absent is `global-shortcut:allow-unregister-all`, meaning the app cannot bulk-clear all shortcuts.
 
-### Autostart
+## Architecture and Security Model
 
-| Permission | Effect |
-|---|---|
-| `autostart:default` | Read and write the application's launch-at-login configuration |
+Tauri's capability system is **deny-by-default**. The `default.json` file acts as an allowlist that bridges the frontend (web view) to privileged backend operations. Without an entry here, any `invoke()` call from the JavaScript layer to a protected command will be rejected at the IPC boundary.
 
-### Updater
+```mermaid
+flowchart LR
+    subgraph Frontend
+        A[Web view / Renderer]
+    end
+    subgraph Capability Layer
+        B[default.json]
+    end
+    subgraph Backend
+        C[Core APIs]
+        D[Plugins]
+    end
+    A -->|invoke| B
+    B -->|allow| C
+    B -->|allow| D
+    B -.->|deny| E[Unlisted commands]
+```
 
-| Permission | Effect |
-|---|---|
-| `updater:default` | Check for and apply application updates |
+The capability is scoped to the `"main"` window. If the application opens additional windows (e.g., an about dialog or a secondary panel), those windows will **not** inherit these permissions unless they are explicitly added to the `windows` array or a separate capability file targets them.
 
-## How It Connects to the Codebase
+## How to Modify
 
-This file has no imports, function calls, or runtime logic. It is consumed at **build time** by Tauri's capability resolver:
+### Adding a new permission
 
-1. Tauri's build plugin reads all JSON files under the `capabilities/` directory.
-2. The declared permissions are compiled into the application binary.
-3. At runtime, when frontend JavaScript or Rust backend code invokes a Tauri command (e.g., registering a global shortcut), the permission is checked against this compiled set.
-4. Unauthorized calls return a permission-denied error.
+1. Identify the permission token from the plugin's documentation (e.g., `fs:allow-read-text-file` for `tauri-plugin-fs`).
+2. Add the token string to the `permissions` array in `default.json`.
+3. The change takes effect on the next application rebuild — no Rust code changes are required.
 
-Because there are no additional capability files, this single file is the **complete** permission surface for the application.
+### Restricting to specific windows
 
-## Modifying Permissions
+If a permission should only apply to certain windows, create a **new capability file** alongside `default.json` with a different `identifier` and a targeted `windows` list, rather than broadening the existing one.
 
-To add a new permission (for example, filesystem access):
+### Schema validation
 
-1. Add the permission identifier to the `permissions` array.
-2. Rebuild the application — changes to this file are not hot-reloaded.
-3. Verify that the corresponding Tauri plugin is also registered in the app's Rust-side builder (typically in `main.rs` or `lib.rs`), since a declared permission without a registered plugin has no effect.
+The `$schema` field points to a remote JSON schema hosted on GitHub. IDEs like VS Code will automatically validate the file against this schema, catching invalid permission tokens or structural errors before runtime.
 
-To scope permissions to additional windows, add the window label to the `windows` array, or create a separate capability file with a different `identifier`.
+## Relationship to the Broader Codebase
 
-## Security Considerations
+This module has **no direct code dependencies** — it is pure configuration consumed by the Tauri build tooling. However, any frontend code that calls `invoke()` to use notifications, dialogs, shortcuts, autostart, or the updater depends implicitly on the permissions declared here. Removing a permission token will cause those frontend calls to fail silently or throw a runtime error, depending on the plugin's error handling.
 
-- This file grants permissions to the **main** window. If the application opens additional windows (e.g., a popout or secondary view), they will have **no permissions** unless explicitly added.
-- `shell:default` allows opening external URLs. Validate any user-controlled input before passing it to shell APIs to prevent unintended resource access.
-- `global-shortcut` permissions allow key registration system-wide. Conflicting shortcuts with other applications should be handled gracefully via error handling around `register` calls.
+When adding a new Tauri plugin to the project, corresponding permission entries must be added to this file (or a new capability file) for the plugin's commands to be callable from the renderer.
