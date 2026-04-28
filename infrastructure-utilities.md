@@ -2,50 +2,38 @@
 
 # Infrastructure & Utilities
 
-Shared foundations that every other LibreFang crate depends on — HTTP transport, kernel abstractions, cost enforcement, routing, observability, migration tooling, and test infrastructure.
+Shared foundations that every other LibreFang crate depends on — HTTP networking, observability, framework migration, and test tooling.
 
-## What This Module Group Provides
+## How the crates relate
 
-These crates have no dependency on each other (except [`librefang-testing`](librefang-testing-src.md), which mocks several of them). They are grouped here because they are horizontal concerns: cross-cutting capabilities that the kernel, runtime, API, and CLI layers all consume but that don't implement business logic themselves.
+```mermaid
+flowchart LR
+    HTTP["librefang-http<br/>HTTP + TLS + Proxy"]
+    TELEMETRY["librefang-telemetry<br/>Metrics & Tracing"]
+    MIGRATE["librefang-migrate<br/>Framework Import"]
+    TESTING["librefang-testing<br/>Mock Infrastructure"]
+    API["librefang-api"]
+    RUNTIME["Agent Runtime"]
 
-| Sub-module | One-line role |
+    HTTP -->|"http client"| API
+    HTTP -->|"http client"| RUNTIME
+    TELEMETRY -->|"metrics recorder"| API
+    TESTING -->|"TestAppState, MockKernel"| API
+    TESTING -->|"MockLlmDriver"| RUNTIME
+    HTTP -.->|"uses in integration tests"| TESTING
+    MIGRATE -.->|"reads source configs"| HTTP
+```
+
+All outbound HTTP traffic flows through [librefang-http](librefang-http-src.md), which ensures consistent proxy handling and survives environments with missing CA certificates (musl, minimal Docker, etc.). [librefang-telemetry](librefang-telemetry-src.md) normalizes request paths and feeds `metrics::counter!` / `metrics::histogram!` calls into whatever global recorder `librefang-api` has installed — typically a Prometheus exporter.
+
+[librefang-migrate](librefang-migrate-src.md) is a standalone tool that imports agents, sessions, and configuration from other agent frameworks (OpenClaw, OpenFang, with more planned). It produces a complete LibreFang home directory and a `MigrationReport`.
+
+[librefang-testing](librefang-testing-src.md) provides `MockKernelBuilder`, `MockLlmDriver`, `FailingLlmDriver`, and `TestAppState` so that integration tests across the codebase can exercise API routes and kernel services without a live daemon or external LLM connection. The other infrastructure crates use it in their own test suites — for example, `librefang-http` validates proxy behaviour through `MockKernelBuilder`.
+
+## Key cross-cutting workflows
+
+| Workflow | Path |
 |---|---|
-| [`librefang-http`](librefang-http-src.md) | Centralized HTTP client factory — proxy config, TLS fallback, uniform request handling |
-| [`librefang-kernel-handle`](librefang-kernel-handle-src.md) | Trait that lets runtime tools call back into the kernel without creating a circular dependency |
-| [`librefang-kernel-metering`](librefang-kernel-metering-src.md) | Token/cost tracking and quota enforcement across agent, global, provider, and user budgets |
-| [`librefang-kernel-router`](librefang-kernel-router-src.md) | Routes incoming messages to the best hand or template using keywords, metadata, and embeddings |
-| [`librefang-migrate`](librefang-migrate-src.md) | Imports agents, channels, sessions, and config from external frameworks (OpenClaw) into LibreFang format |
-| [`librefang-telemetry`](librefang-telemetry-src.md) | OpenTelemetry/Prometheus recording helpers and HTTP path normalization |
-| [`librefang-testing`](librefang-testing-src.md) | In-memory mock kernel, mock LLM drivers, and `TestAppState` builder for integration tests |
-
-## How They Fit Together
-
-```
-┌─────────────────────────────────────────────────────┐
-│                   Consumer layers                    │
-│          (API · CLI · Kernel · Runtime)              │
-└──────┬──────────┬──────────┬──────────┬─────────────┘
-       │          │          │          │
-       ▼          ▼          ▼          ▼
-  ┌─────────┐ ┌────────┐ ┌───────┐ ┌──────────┐
-  │  HTTP   │ │Metering│ │Router │ │Telemetry │
-  │ client  │ │ quotas │ │routing│ │ metrics  │
-  └─────────┘ └────────┘ └───────┘ └──────────┘
-       ▲          ▲          ▲
-       │          │          │
-       │      ┌───┴──────────┴───┐
-       │      │  KernelHandle    │
-       │      │  (trait bridge)  │
-       │      └──────────────────┘
-       │
-  ┌────┴─────────────────────────────────────────┐
-  │              librefang-testing                │
-  │  (mocks for all of the above, in-memory DB)  │
-  └──────────────────────────────────────────────┘
-```
-
-**Request lifecycle across crates:** When a user message arrives, [`librefang-kernel-router`](librefang-kernel-router-src.md) selects the appropriate hand or template. Before the LLM call is dispatched, [`librefang-kernel-metering`](librefang-kernel-metering-src.md) checks quota across all budget dimensions. The runtime processes the response using [`librefang-kernel-handle`](librefang-kernel-handle-src.md) callbacks to reach back into the kernel (spawning sub-agents, reading shared memory, requesting approval). Every outbound HTTP request — whether to an LLM provider or an external API — flows through [`librefang-http`](librefang-http-src.md). Throughout, [`librefang-telemetry`](librefang-telemetry-src.md) records request metrics.
-
-**Migration path:** [`librefang-migrate`](librefang-migrate-src.md) operates independently at import time, converting external framework data (OpenClaw JSON5/YAML layouts, channel definitions, secrets) into LibreFang's TOML-based workspace format.
-
-**Testing foundation:** Every crate's integration tests rely on [`librefang-testing`](librefang-testing-src.md), which provides `TestAppState`, `MockKernelBuilder`, configurable mock LLM drivers, and an in-memory SQLite database — enabling full route and kernel testing without external services.
+| **Authenticated HTTP request** | `librefang-http` builds a `reqwest::Client` with TLS roots + proxy env vars → caller issues request → `librefang-telemetry` records the normalized request via `record_http_request()` |
+| **Framework migration** | User calls `run_migration(MigrateSource::OpenClaw, …)` → `librefang-migrate` parses source configs → writes LibreFang home directory → returns `MigrationReport` |
+| **Integration test** | `MockKernelBuilder` constructs a kernel → `TestAppState::with_builder(…)` wires it into an `axum::Router` → `test_request()` exercises a route → `assert_json_ok` / `assert_json_error` validates the response |

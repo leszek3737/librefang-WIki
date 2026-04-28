@@ -4,52 +4,74 @@
 
 Cost metering and quota enforcement for the LibreFang kernel.
 
+## Overview
+
+This module is responsible for tracking resource consumption and enforcing usage quotas within the LibreFang kernel. It provides the machinery to measure the cost of operations and ensure that consumers of kernel services stay within their allocated budgets.
+
 ## Purpose
 
-This module provides the metering layer responsible for tracking resource consumption and enforcing usage quotas within the LibreFang kernel. It serves as the economic and resource governance component, ensuring that operations stay within defined budget and quota boundaries.
+Metering is a critical cross-cutting concern in the LibreFang kernel. Every operation that consumes resources — memory allocations, compute time, I/O — needs to be accounted for. This module provides:
 
-Metering in this context refers to the measurement and accounting of computational costs — such as memory allocations, execution time, or operation counts — while quota enforcement acts on those measurements to prevent runaway or unauthorized resource consumption.
+- **Cost tracking**: Recording resource consumption as operations execute.
+- **Quota enforcement**: Rejecting or throttling operations when a consumer exceeds its allocated budget.
+- **Budget lifecycle**: Managing the creation, adjustment, and expiration of resource budgets.
 
 ## Dependencies
 
 | Crate | Role |
-|-------|------|
-| `librefang-types` | Shared type definitions used across the kernel |
-| `librefang-memory` | Memory allocation tracking and management |
-| `librefang-runtime` | Runtime primitives and execution context |
-| `serde` | Serialization support for persisting or transmitting metering data |
+|---|---|
+| `librefang-types` | Shared type definitions for metering-related structures, identifiers, and error types. |
+| `librefang-memory` | Memory allocation tracking — metering needs to understand memory consumption to cost allocations accurately. |
+| `librefang-runtime` | Execution context and runtime state — metering decisions may depend on the current runtime environment. |
+| `serde` | Serialization support for persisting metering state, quotas, and usage reports across restarts or for external reporting. |
 
 ## Architecture
 
-```mermaid
-graph TD
-    A[librefang-kernel-metering] --> B[librefang-types]
-    A --> C[librefang-memory]
-    A --> D[librefang-runtime]
-    A --> E[serde]
-    style A fill:#2d5a88,color:#fff
-```
+The metering module sits between the runtime and the resource-consuming subsystems. It acts as an intermediary that all billable operations pass through:
 
-The module sits at the intersection of three core kernel crates. It draws type definitions from `librefang-types`, uses `librefang-memory` to ground its understanding of memory costs, and hooks into `librefang-runtime` for execution-level metering. The `serde` dependency enables metering data — such as usage snapshots or quota configurations — to be serialized for logging, reporting, or persistence.
+```
+┌─────────────┐     operation request     ┌──────────────────┐
+│   Runtime   │ ───────────────────────── │  Kernel Metering  │
+│   (caller)  │                            │                  │
+└─────────────┘     allow / deny          │  ┌────────────┐  │
+                     ◄───────────────────  │  │ Quota Store │  │
+                                          │  └────────────┘  │
+                                          │  ┌────────────┐  │
+┌─────────────┐   resource usage report   │  │ Cost Ledger │  │
+│   Memory /  │ ────────────────────────► │  └────────────┘  │
+│   I/O / ... │                            └──────────────────┘
+└─────────────┘
+```
 
 ## Key Concepts
 
-### Metering
+### Cost Units
 
-Metering involves instrumenting kernel operations to record their resource cost. This provides the raw data needed to answer questions like:
+Resources are measured in abstract cost units rather than raw bytes or cycles. This allows the kernel to normalize different resource types — memory, compute, I/O — into a single comparable metric for budgeting purposes.
 
-- How much memory has a session or tenant consumed?
-- How many operations have been executed?
-- Is a particular code path more expensive than expected?
+### Quotas
 
-### Quota Enforcement
+A quota represents a hard or soft limit on resource consumption for a given context (e.g., a session, a tenant, or a workload). When an operation's projected cost would push usage past a quota, the metering module signals enforcement.
 
-Quota enforcement builds on metering data by comparing current usage against configured limits. When a quota is exceeded, the enforcement layer takes action — typically by rejecting the operation, signaling an error, or throttling further requests.
+### Metering Context
 
-## Integration Notes
+Each billable operation is evaluated within a metering context that determines which quota applies and how costs are attributed. The context is typically derived from the runtime state provided by `librefang-runtime`.
 
-When integrating with this module:
+## Integration Points
 
-- **Reading metering data.** Consumers should rely on the serialized forms exposed through `serde`-compatible types for structured access to usage statistics.
-- **Setting quotas.** Quota thresholds are expected to be expressed in terms of the types defined in `librefang-types`, ensuring consistency across the kernel.
-- **Memory-sensitive operations.** Any code path that allocates through `librefang-memory` should consider whether metering is required for that allocation class.
+When extending or consuming this module:
+
+- **New resource types**: If a new kernel subsystem produces billable resources, report consumption through this module's metering interface rather than implementing ad-hoc tracking.
+- **Quota configuration**: Quotas are serializable via `serde`, allowing them to be loaded from configuration files or external services.
+- **Enforcement hooks**: Subsystems that perform costly operations should check with the metering module *before* committing the operation, not after.
+
+## Current Status
+
+The module currently has no detected execution flows or call edges, indicating it is in an early or scaffolded state. The dependency chain is in place (`librefang-types`, `librefang-memory`, `librefang-runtime`, `serde`), but the core metering and enforcement logic has not yet been wired into the rest of the kernel.
+
+When implementing this module, start with:
+
+1. Define the cost model — what operations are billable and how they are weighted.
+2. Implement the quota store with serialization support.
+3. Wire cost checks into the memory allocation path via `librefang-memory`.
+4. Expose enforcement decisions to `librefang-runtime` so callers receive clear feedback on quota violations.

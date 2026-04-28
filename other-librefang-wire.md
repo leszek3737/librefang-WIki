@@ -2,86 +2,86 @@
 
 # librefang-wire
 
-Agent-to-agent networking layer implementing the **LibreFang Protocol (OFP)** — responsible for authenticating, serializing, transporting, and dispatching messages between LibreFang agents.
+LibreFang Protocol (OFP) — agent-to-agent networking layer.
 
 ## Purpose
 
-`librefang-wire` is the networking backbone of the LibreFang distributed system. Every agent communicates exclusively through this crate. It provides:
+`librefang-wire` defines and implements the wire protocol used for secure, authenticated communication between LibreFang agents. It is responsible for message framing, serialization, cryptographic authentication, and the async transport abstractions that carry OFP messages over the network.
 
-- **Authenticated message framing** — every message is HMAC-signed and verified, preventing tampering and impersonation on the wire.
-- **Async transport** — built on Tokio, the crate exposes non-blocking read/write interfaces suitable for high-concurrency agent deployments.
-- **Concurrent connection management** — uses `DashMap` for lock-free tracking of peer connections and session state across Tokio tasks.
-- **Structured serialization** — all payloads are JSON-encoded via `serde_json`, enabling interoperability and human-readable debugging.
+This crate does **not** implement application-level RPC or command logic. It provides the foundational transport and protocol primitives that higher-level agent communication builds upon.
 
-## Architecture
+## Role in the Architecture
 
-```mermaid
-graph TD
-    A[Agent Application] -->|send/recv| B[librefang-wire]
-    B --> C[HMAC-SHA256 Authenticator]
-    B --> D[JSON Serializer / Deserializer]
-    B --> E[Connection Manager - DashMap]
-    B --> F[Tokio Async Transport]
-    D --> G[librefang-types]
+```
+┌─────────────────────────────────────────────┐
+│              Agent Application              │
+│         (commands, RPC, session logic)      │
+├─────────────────────────────────────────────┤
+│            librefang-wire (OFP)             │◄── you are here
+│  framing · auth · serialization · transport │
+├─────────────────────────────────────────────┤
+│            librefang-types                  │
+│        shared domain types & errors         │
+└─────────────────────────────────────────────┘
 ```
 
-The crate sits between the agent application logic and the raw async I/O layer. Messages flow downward through authentication and serialization before hitting the network, and arrive upward through deserialization and verification before being dispatched to the application.
+`librefang-wire` sits directly above `librefang-types`, consuming shared domain types and error definitions. It exposes async transport and protocol primitives to the rest of the codebase.
 
-## Key Dependency Roles
+## Key Capabilities
+
+### Message Authentication (HMAC-SHA256)
+
+The crate depends on `hmac`, `sha2`, `hex`, and `subtle`, indicating that every message on the wire is authenticated using HMAC-SHA256. The `subtle` crate provides constant-time comparison, which prevents timing side-channel attacks during signature verification.
+
+This means:
+- Outbound messages are signed with a shared secret key.
+- Inbound messages are verified before any processing occurs.
+- Signature comparison is constant-time to resist timing attacks.
+
+### Async Transport
+
+Built on `tokio`, all I/O is fully asynchronous. The `async-trait` dependency suggests that transport behaviors are defined as async traits, allowing different underlying implementations (TCP, TLS, Unix sockets, etc.) to be swapped in behind a common interface.
+
+### Concurrent Connection Management
+
+The `dashmap` dependency indicates that the module maintains a concurrent map of active connections or sessions. `DashMap` provides lock-free concurrent access, which is critical for agents handling many simultaneous peer connections without contention bottlenecks.
+
+### Serialization
+
+Messages are serialized to JSON via `serde` and `serde_json`. Each message carries a `uuid` for correlation and `chrono` timestamps for ordering and replay protection.
+
+### Error Handling
+
+Errors are defined using `thiserror`, producing typed, ergonomic error variants that integrate cleanly with the `?` operator and the broader LibreFang error hierarchy in `librefang-types`.
+
+## Dependency Breakdown
 
 | Dependency | Role in `librefang-wire` |
 |---|---|
-| `librefang-types` | Shared domain types (messages, commands, responses) serialized on the wire |
-| `tokio` | Async runtime — TCP streams, I/O drivers, task spawning for concurrent peer handling |
-| `serde` / `serde_json` | Derive-based serialization of `librefang-types` to/from JSON frames |
-| `uuid` | Correlation IDs for request/response matching and session identifiers |
-| `chrono` | Timestamps for message headers, replay-protection windows, and logging |
-| `hmac` / `sha2` / `subtle` | HMAC-SHA256 message authentication with constant-time comparison to prevent timing attacks |
-| `hex` | Encoding/decoding of HMAC digests for header transport |
-| `thiserror` | Typed error enums for wire-level failures (authentication, framing, I/O) |
-| `tracing` | Structured diagnostic spans for connection lifecycle and message processing |
-| `async-trait` | Trait definitions for transport abstraction and handler interfaces |
-| `dashmap` | Lock-free concurrent map for tracking active peer connections and routing tables |
+| `librefang-types` | Shared domain types, message envelopes, error types |
+| `tokio` | Async runtime for all network I/O |
+| `serde` / `serde_json` | Message serialization and deserialization |
+| `uuid` | Unique message and correlation IDs |
+| `chrono` | Timestamps for message ordering |
+| `thiserror` | Typed error definitions |
+| `tracing` | Structured logging of protocol events |
+| `async-trait` | Async trait definitions for transport abstraction |
+| `hmac` / `sha2` | HMAC-SHA256 message authentication |
+| `hex` | Hex encoding/decoding of signatures and keys |
+| `subtle` | Constant-time comparison for signature verification |
+| `dashmap` | Concurrent map for connection/session tracking |
 
-## Security Model
+## Security Considerations
 
-Message authentication is the core security guarantee. The `hmac`, `sha2`, and `subtle` crates work together:
+- **Authentication**: HMAC-SHA256 ensures message integrity and authenticity. Messages that fail verification are rejected before deserialization of any payload.
+- **Constant-time comparison**: The `subtle` crate ensures that HMAC verification does not leak information through timing differences.
+- **No plaintext secrets in logs**: The `tracing` integration should be used to log protocol events without exposing key material or raw message bodies.
 
-1. **Signing** — An HMAC-SHA256 digest is computed over the serialized message body using a pre-shared key.
-2. **Transport** — The digest is attached (via `hex` encoding) as a header or wrapper around the payload.
-3. **Verification** — The receiver recomputes the digest and compares it in **constant time** using `subtle`, preventing timing side-channel attacks.
-4. **Rejection** — Mismatched digests result in an immediate authentication error (defined via `thiserror`) and connection termination.
+## Integration Points
 
-This ensures that only agents possessing the correct shared secret can inject or modify messages on the wire.
+When consuming `librefang-wire` from other crates:
 
-## Relationship to the Wider Codebase
-
-`librefang-wire` is a **leaf library** in the dependency graph — it depends on `librefang-types` but is consumed by higher-level agent and server binaries. No other crate calls into it; instead, the runtime agent executable wires it into its event loop.
-
-The contract is:
-
-- **Input**: `librefang-types` message structs.
-- **Output**: Authenticated, serialized byte frames over async TCP (or equivalent Tokio transport).
-- **Inbound**: Raw bytes from peers, deserialized and verified into typed `librefang-types` messages delivered to the application.
-
-## Error Handling
-
-All fallible operations produce typed errors via `thiserror` derive macros. Expected error categories include:
-
-- **Authentication failures** — invalid or missing HMAC digests.
-- **Framing errors** — malformed message boundaries or incomplete reads.
-- **Serialization errors** — JSON decode failures from malformed payloads.
-- **I/O errors** — wrapped `tokio` / `std::io` errors from the transport layer.
-
-Consumers should match on these variants to decide between retry, reconnect, or shutdown behavior.
-
-## Logging and Observability
-
-The crate uses `tracing` spans and events throughout the connection lifecycle. Key instrumentation points include:
-
-- Peer connection established / dropped.
-- Message sent / received with correlation IDs (`uuid`).
-- Authentication successes and failures.
-- Serialization errors with malformed data summaries.
-
-Integrate with the agent's `tracing` subscriber to capture wire-level diagnostics.
+1. Depend on `librefang-wire` in `Cargo.toml`.
+2. Use the transport trait implementations to establish connections to peer agents.
+3. Construct messages using types from `librefang-types`, then pass them to the wire layer for signing and transmission.
+4. Incoming messages arrive authenticated and deserialized, ready for application-level handling.

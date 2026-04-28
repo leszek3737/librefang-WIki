@@ -2,75 +2,56 @@
 
 # librefang-hands
 
-Curated autonomous capability packages for the LibreFang system.
+Hands system for LibreFang — curated autonomous capability packages.
 
 ## Overview
 
-`librefang-hands` manages **hands** — discrete, self-contained capability packages that can be assigned to agents within the LibreFang framework. Each hand represents a curated set of behaviors or tools that an agent can use autonomously. The module is responsible for defining, loading, storing, and retrieving these capability packages.
+A **hand** in LibreFang is a curated, self-contained capability package that describes an autonomous action or set of actions the system can perform. This module provides the core abstractions for defining, loading, storing, and managing hands throughout their lifecycle.
 
-## Concept: What Is a Hand?
-
-A hand is a named, versioned bundle of autonomous capability. Rather than granting agents unrestricted access to all available actions, hands provide a controlled mechanism for scoping what an agent can do. This enables:
-
-- **Principle of least privilege** — agents receive only the capabilities they need
-- **Reusability** — common capability sets are defined once and shared across agents
-- **Auditing** — each hand is identifiable and traceable
-
-## Dependencies and Their Roles
-
-| Dependency | Purpose |
-|---|---|
-| `librefang-types` | Shared type definitions used across the LibreFang ecosystem |
-| `serde`, `serde_json`, `toml` | Serialization and deserialization — hands are loaded from declarative config files (TOML) and may be serialized to JSON for transport or storage |
-| `thiserror` | Ergonomic error types for hand loading, validation, and lookup failures |
-| `tracing` | Structured logging throughout the hand lifecycle |
-| `uuid` | Unique identification for hand instances and registrations |
-| `chrono` | Timestamping for hand creation, modification, and audit records |
-| `dashmap` | Concurrent hashmap for thread-safe storage and retrieval of registered hands |
+Hands serve as the bridge between high-level task intent and concrete execution. Each hand encapsulates everything needed to carry out a specific capability — metadata, configuration, and a reference to the logic that implements it.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[TOML Config Files] -->|parse| B[Hand Definitions]
-    B -->|validate| C[Hand Registry]
-    C -->|dashmap| D[Concurrent Store]
-    E[librefang-runtime] -.->|queries| C
-    F[librefang-types] -.->|shared types| B
+    A[TOML Manifest] -->|deserialize| B[Hand Definition]
+    B -->|register| C[Hand Registry<br/>DashMap]
+    C -->|resolve| D[Runtime Execution]
+    E[librefang-types] -->|shared types| B
+    E -->|shared types| C
 ```
 
-Hands originate as TOML configuration files, are parsed and validated into structured definitions, and then registered in a concurrent store backed by `dashmap`. The runtime (`librefang-runtime`, a dev dependency here) queries the registry when assigning capabilities to agents.
+Hands are defined declaratively (via TOML manifests), loaded into an in-memory registry backed by `DashMap` for concurrent access, and resolved at runtime when the system needs to invoke a capability.
 
-## Key Design Decisions
+## Key Dependencies
 
-### Concurrent Access via DashMap
+| Dependency | Role |
+|---|---|
+| `librefang-types` | Shared type definitions used across all LibreFang modules |
+| `serde` / `serde_json` / `toml` | Serialization and deserialization of hand manifests and metadata |
+| `dashmap` | Lock-free concurrent hashmap powering the hand registry |
+| `uuid` | Unique identification of hand instances |
+| `chrono` | Timestamp tracking for hand lifecycle events |
+| `thiserror` | Ergonomic error types for hand loading and validation failures |
+| `tracing` | Structured logging throughout hand operations |
 
-The use of `dashmap` indicates that the hand registry is accessed from multiple threads simultaneously — likely because the runtime manages several agents in parallel, each needing to resolve its assigned hands without blocking others.
+## Hand Lifecycle
 
-### TOML-First Configuration
+1. **Definition** — A hand is authored as a TOML manifest describing its identity, capabilities, and configuration schema.
+2. **Loading** — The manifest is read and deserialized into a typed hand definition. Validation ensures required fields are present and well-formed.
+3. **Registration** — The validated hand is inserted into the registry, making it available for lookup by ID or capability name.
+4. **Resolution** — When the runtime needs a capability, it queries the registry to find a matching hand.
+5. **Execution** — The resolved hand is handed off to `librefang-runtime` for dispatch and execution.
 
-Hands are defined declaratively in TOML. This choice keeps configuration human-readable and version-control friendly, separating the definition of capabilities from the code that executes them.
+## Module Boundaries
 
-### Error Handling
+This module is intentionally self-contained. It owns the data model and storage layer for hands but does not execute them directly. Execution is delegated to `librefang-runtime`, which is listed as a dev-dependency — the runtime depends on this module, not the other way around.
 
-Errors are handled through `thiserror`, providing typed, descriptive error variants for common failure modes such as:
-
-- Malformed or missing TOML configuration
-- Validation failures (missing required fields, invalid values)
-- Lookup failures when a requested hand is not registered
-
-## Relationship to Other Modules
-
-- **`librefang-types`**: Defines the base data structures that hands build upon. This crate depends on it directly.
-- **`librefang-runtime`**: Consumes the hand registry at execution time. It appears as a dev dependency, suggesting the crate is tested against the runtime but does not depend on it at compile time.
-- **Broader system**: Hands sit between the static definition layer (config files, types) and the dynamic execution layer (runtime, agents), acting as the bridge that translates declared capabilities into actionable agent behavior.
+The separation means:
+- Hand definitions can be loaded and inspected without spinning up the full runtime.
+- The registry can be populated in tests using `tempfile`-backed manifests without side effects.
+- Other modules can query hand metadata without pulling in execution logic.
 
 ## Testing
 
-The test suite uses:
-
-- `tempfile` — for creating isolated temporary directories when testing config file loading
-- `serial_test` — to serialize tests that may share global state or filesystem resources
-- `librefang-runtime` — for integration tests that verify hand registration works correctly within the runtime context
-
-Tests are expected to cover TOML parsing, validation logic, concurrent registration and lookup, and error paths.
+Tests use `serial_test` to serialize access to shared state, and `tempfile` to create isolated temporary directories for hand manifests. The `librefang-runtime` dev-dependency enables integration tests that verify hand resolution through the runtime path.

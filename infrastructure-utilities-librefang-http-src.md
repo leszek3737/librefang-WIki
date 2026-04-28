@@ -2,113 +2,116 @@
 
 # librefang-http
 
-Centralized HTTP client factory with TLS fallback and proxy management.
+Centralized HTTP client construction with TLS fallback and proxy management.
 
-Every outbound HTTP request in the codebase should go through this module. It guarantees that proxy settings from `config.toml` and environment variables are applied uniformly, and that TLS works even on systems without system CA certificates (minimal Docker images, Termux/Android, musl builds).
+Every outbound HTTP connection in the codebase should route through this module so that proxy settings and TLS configuration are applied uniformly. The module solves two practical problems:
+
+1. **Missing system CA certificates** — On musl builds (Termux/Android), minimal Docker images, or corporate Linux with partial CA bundles, `reqwest`'s default TLS initialization panics. This module seeds the trust store with bundled Mozilla CA roots first, then supplements with whatever system certs are available.
+
+2. **Proxy consistency** — Proxy settings from `config.toml` are applied both as explicit `reqwest::Proxy` entries *and* as environment variables, ensuring that crates which build their own clients independently still pick up the configuration.
 
 ## Architecture
 
 ```mermaid
-graph TD
+flowchart TD
     subgraph "Startup (single-threaded)"
-        A[init_proxy] -->|writes| B["GLOBAL_PROXY (RwLock)"]
-        A -->|exports env vars| C["HTTP_PROXY / HTTPS_PROXY / NO_PROXY"]
+        A[init_proxy] --> B["Set env vars\n(HTTP_PROXY, HTTPS_PROXY, NO_PROXY)"]
+        A --> C["Store ProxyConfig\nin GLOBAL_PROXY"]
     end
-
     subgraph "Runtime (multi-threaded)"
-        D["proxied_client()"] --> E["proxied_client_builder()"]
-        E --> F["active_proxy()"]
-        F --> B
-        E --> G["build_http_client()"]
-        G --> H["tls_config()"]
-        H --> I["TLS_CONFIG (OnceLock)"]
-        J["proxied_client_with_override()"] --> H
+        D["proxied_client()\nproxied_client_builder()"] --> E["active_proxy()"]
+        E --> F["build_http_client()"]
+        F --> G["tls_config()"]
+        G --> H["webpki-roots\n(Mozilla CA bundle)"]
+        G --> I["rustls-native-certs\n(system CA store)"]
     end
 ```
 
-## Startup
+## Initialization
 
-At daemon boot, call `init_proxy` once with the `[proxy]` section from `config.toml`:
+### `init_proxy(cfg: ProxyConfig)`
+
+Call **once** at daemon startup with the `[proxy]` section from `config.toml`. Can be called again during hot-reload.
+
+On the initial call (when `GLOBAL_PROXY` is `None`), the function:
+
+1. Validates `http_proxy` and `https_proxy` URLs — must use `http://`, `https://`, `socks5://`, or `socks5h://` schemes. Invalid URLs are logged with a warning and skipped.
+2. Exports validated values to environment variables (`HTTP_PROXY`, `http_proxy`, `HTTPS_PROXY`, `https_proxy`, `NO_PROXY`, `no_proxy`).
+3. Stores the `ProxyConfig` in `GLOBAL_PROXY` for use by `proxied_client_builder`.
+
+On subsequent calls (hot-reload), only `GLOBAL_PROXY` is updated. Environment variables are **not** re-set because `std::env::set_var` is inherently racy in a multi-threaded Tokio runtime.
 
 ```rust
-let proxy_cfg: ProxyConfig = config.proxy; // from config.toml
-librefang_http::init_proxy(proxy_cfg);
+// At startup, before spawning worker threads:
+init_proxy(config.proxy);
 ```
-
-This does two things:
-
-1. **Sets global proxy state** in `GLOBAL_PROXY`, a `RwLock<Option<ProxyConfig>>` that is read by every subsequent client builder call.
-2. **Exports environment variables** (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) so that crates building their own `reqwest::Client` independently (e.g., `librefang-channels`) still pick up the proxy settings via reqwest's built-in env-var detection.
-
-Environment variable export only happens during the initial call (when `GLOBAL_PROXY` is still `None`), which must occur before the Tokio runtime spawns worker threads. This avoids the unsound `std::env::set_var` in a multi-threaded context. Subsequent calls (hot-reload) update `GLOBAL_PROXY` only.
 
 ## TLS Configuration
 
-On systems where native CA certificates are unavailable, the default `reqwest` TLS initialization panics. This module solves that by building a `rustls::ClientConfig` that layers two certificate sources:
+### `tls_config() -> rustls::ClientConfig`
 
-1. **Bundled Mozilla CA roots** (`webpki_roots`) — always seeded first so common public CAs are trusted everywhere.
-2. **System CA certificates** (`rustls_native_certs`) — supplements with org-internal and self-signed CAs.
+Returns a cached `rustls::ClientConfig` built on the first call:
 
-The result is cached in a `OnceLock<rustls::ClientConfig>` after the first call to `tls_config()`. Every client builder clones this cached config, so the cert-loading work happens exactly once.
+1. Seeds the root store with **bundled Mozilla CA roots** (`webpki_roots::TLS_SERVER_ROOTS`) — this guarantees common public CAs are always trusted.
+2. Supplements with **system CA certificates** via `rustls_native_certs::load_native_certs()` — adds org-internal/self-signed CAs and keeps trust anchors current.
+3. If no system certs are found, a debug-level log is emitted; the Mozilla roots still provide coverage for public endpoints.
+
+The result is stored in a `OnceLock` and cloned on subsequent calls.
 
 ## Client Builders
 
 ### Primary API
 
-| Function | Returns | Use When |
+| Function | Returns | Use when |
 |---|---|---|
-| `proxied_client_builder()` | `reqwest::ClientBuilder` | You need to customize the client further (add headers, cookies, custom timeouts) |
-| `proxied_client()` | `reqwest::Client` | You just need a ready-to-use client |
-| `proxied_client_with_override(url)` | `reqwest::Client` | A specific provider requires a different proxy than the global one |
+| `proxied_client()` | `reqwest::Client` | You need a ready-to-use client with global proxy settings |
+| `proxied_client_builder()` | `reqwest::ClientBuilder` | You need to customize timeouts, headers, or other options before building |
+| `proxied_client_with_override(proxy_url)` | `reqwest::Client` | A specific provider requires a different proxy than the global config |
 
-### Backward-Compatible Aliases
+### Legacy aliases
 
-- `client_builder()` → `proxied_client_builder()`
 - `new_client()` → `proxied_client()`
+- `client_builder()` → `proxied_client_builder()`
 
-These exist for compatibility and should not be used in new code.
+These exist for backward compatibility and delegate directly to the primary functions.
 
-### Default Timeouts
+### `build_http_client(proxy: &ProxyConfig) -> reqwest::ClientBuilder`
 
-All clients are built with sensible per-request defaults to prevent the agent loop from hanging when an upstream stalls:
+The core builder function. It:
 
-- **Connect timeout**: 30 seconds (TCP + TLS handshake)
-- **Read timeout**: 300 seconds (per-read inactivity, not total request time)
+- Applies the preconfigured TLS config via `use_preconfigured_tls`.
+- Sets a `User-Agent` header: `librefang/<version>`.
+- Sets default timeouts:
+  - **Connect timeout**: 30 seconds (TCP + TLS handshake).
+  - **Read timeout**: 300 seconds (per-read inactivity, not total request time — streaming LLM responses stay alive as long as tokens arrive).
+- Applies explicit proxy settings from the `ProxyConfig` argument. When a field is `None`, reqwest's built-in env-var detection (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) provides the fallback automatically, avoiding double-application.
+- Constructs a `NoProxy` filter from the `no_proxy` field and attaches it to each proxy.
 
-Streaming LLM responses keep the read timeout alive as long as tokens arrive; a true upstream stall triggers it. Callers can override these via `.timeout()` / `.connect_timeout()` on the returned `ClientBuilder`.
+Callers can override the default timeouts by calling `.timeout()` or `.connect_timeout()` on the returned builder.
 
-### Proxy Resolution Order
+### `proxied_client_with_override(proxy_url: &str) -> reqwest::Client`
 
-`build_http_client` applies proxy settings in this priority:
+Routes **all** traffic through the given proxy URL using `Proxy::all()`, ignoring the global config. Used by provider drivers that support per-provider proxy overrides (e.g., `chatgpt::with_proxy`, `anthropic::with_proxy_and_timeout`, `gemini::with_proxy_and_timeout`, `openai::with_proxy_and_timeout`, `openai::new_azure_with_proxy`).
 
-1. **Explicit `ProxyConfig` values** (from `config.toml`) are set directly on the builder via `reqwest::Proxy::http()` / `reqwest::Proxy::https()` with the `no_proxy` filter.
-2. **Environment variable fallback** — when a `ProxyConfig` field is `None`, reqwest's built-in env-var detection reads `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` automatically.
+If the URL is invalid, it logs a warning and falls back to `proxied_client()` (global proxy).
 
-This avoids double-applying settings that `init_proxy` already exported.
+## Consumers
 
-### User-Agent
+The module is used throughout the codebase by a wide range of components:
 
-Every client sends `librefang/<version>` as the User-Agent string, where `<version>` is the crate version at compile time.
+- **LLM provider drivers** — `chatgpt`, `anthropic`, `gemini`, `openai`, `copilot`, `bedrock` all construct clients via `proxied_client()` or `proxied_client_with_override()`.
+- **Tool execution** — `tool_web_fetch_legacy`, `tool_web_search_legacy`, `tool_location_get` use `proxied_client_builder()` to build customized clients.
+- **Media processing** — `whisper_transcribe`, `elevenlabs_transcribe`, `gemini_transcribe`, `generate_image`, `synthesize_elevenlabs`, `synthesize_openai` all use `proxied_client()`.
+- **Infrastructure** — `provider_health::probe_model`, `model_catalog::probe_api_key`, `embedding::new`, `a2a::new`, `pairing::notify_devices`.
 
-## Internal Functions
+## Thread Safety
 
-### `active_proxy()`
+| Component | Mechanism | Notes |
+|---|---|---|
+| `TLS_CONFIG` | `OnceLock` | Write-once, read-many. Safe across threads. |
+| `GLOBAL_PROXY` | `RwLock<Option<ProxyConfig>>` | Read on every client build; written on `init_proxy`. |
+| Env var export | Guarded by `is_initial` check | Only runs during bootstrap before the Tokio runtime spawns workers. |
 
-Reads `GLOBAL_PROXY` and returns the current `ProxyConfig`. Returns `ProxyConfig::default()` (all fields `None`) if `init_proxy` has not been called yet, so clients always build successfully.
+## Validation
 
-### `is_valid_proxy_url(url)`
-
-Validates that a proxy URL uses one of the supported schemes: `http://`, `https://`, `socks5://`, or `socks5h://`. Used by `init_proxy` to reject invalid URLs before setting environment variables, and by `proxied_client_with_override` as a safety check.
-
-## Usage Across the Codebase
-
-The call graph shows this module is used pervasively:
-
-- **Provider drivers** (`openai`, `gemini`, `chatgpt`, `copilot`) call `proxied_client_with_override` for per-provider proxy overrides and `proxied_client` for standard access.
-- **Media generation** (`minimax`, `elevenlabs`, `google_tts`, `openai` media) call `proxied_client` for image, video, music, and speech synthesis.
-- **Runtime services** (`provider_health`, `model_catalog`, `embedding`, `a2a`) call `proxied_client_builder` when they need to add custom request configuration.
-- **CLI** (`librefang-cli`) calls `tls_config` directly to reuse the TLS setup in its own HTTP client.
-
-## Hot-Reload
-
-`init_proxy` is safe to call multiple times. On subsequent calls it updates `GLOBAL_PROXY` in place without touching environment variables, making it suitable for configuration hot-reload during runtime.
+`is_valid_proxy_url(url)` checks that the URL starts with one of the four supported schemes: `http://`, `https://`, `socks5://`, `socks5h://`. URLs with other schemes (or no scheme) are rejected with a logged warning. The function is called both in `init_proxy` (for env-var export) and implicitly in `build_http_client` (via `Proxy::http` / `Proxy::https` construction).

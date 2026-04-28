@@ -2,72 +2,67 @@
 
 # librefang-llm-drivers
 
-Concrete LLM provider drivers implementing the `librefang-llm-driver` trait. This crate contains the actual integrations with LLM APIs—Anthropic, OpenAI, Gemini, and others—translating the shared driver interface into provider-specific HTTP requests and response parsing.
-
-## Purpose
-
-While `librefang-llm-driver` defines *what* an LLM driver looks like (the trait), this crate provides the *implementations*. Each driver handles the specifics of its provider's authentication scheme, request format, streaming protocol, and response structure, while exposing a uniform interface to the rest of the application.
+Concrete LLM provider drivers implementing the `librefang-llm-driver` trait. Each driver encapsulates the API specifics, authentication, and request/response handling for a particular LLM provider (Anthropic, OpenAI, Gemini, etc.).
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[librefang-llm-driver<br/>trait definition] --> B[librefang-llm-drivers<br/>concrete implementations]
+    A[librefang-llm-driver] -->|trait LlmDriver| B[librefang-llm-drivers]
     B --> C[Anthropic Driver]
     B --> D[OpenAI Driver]
     B --> E[Gemini Driver]
-    B --> F[Other Providers]
-    C & D & E & F --> G[librefang-http<br/>HTTP client layer]
-    H[librefang-runtime-oauth] --> C & D & E & F
-    B --> I[librefang-types<br/>shared types]
+    B --> F[...other providers]
+    B -->|HTTP requests| G[librefang-http]
+    B -->|OAuth flows| H[librefang-runtime-oauth]
+    B -->|shared types| I[librefang-types]
 ```
+
+All drivers share a common interface defined in `librefang-llm-driver`, allowing the rest of the codebase to interact with any LLM provider without knowing the specifics of its API.
 
 ## Key Dependencies and Their Roles
 
-| Dependency | Role |
+| Dependency | Purpose |
 |---|---|
-| `librefang-llm-driver` | Provides the trait (`LlmDriver` or similar) that each provider implements |
-| `librefang-types` | Shared types for prompts, completions, messages, and error types |
-| `librefang-http` | HTTP client abstraction used to make outbound requests to provider APIs |
-| `librefang-runtime-oauth` | OAuth token acquisition for providers that require dynamic authentication |
-| `reqwest` | Underlying HTTP client for raw request/response handling |
-| `async-trait` | Enables async methods in the driver trait implementation |
-| `serde` / `serde_json` | Serialization of request bodies and deserialization of provider responses |
-| `dashmap` | Concurrent map, likely used for caching tokens or connection state |
-| `sha2` | Hashing, possibly for request signing or cache key generation |
-| `zeroize` | Secure clearing of sensitive data (API keys, tokens) from memory |
+| `librefang-llm-driver` | Provides the trait (`LlmDriver` or similar) that each concrete driver implements |
+| `librefang-http` | Shared HTTP client configuration, request building, and response handling |
+| `librefang-runtime-oauth` | OAuth token acquisition and refresh for providers that require it (e.g., Gemini via Google Cloud credentials) |
+| `librefang-types` | Shared domain types — model identifiers, message structures, completion responses, error types |
+| `reqwest` | Underlying HTTP client used to call provider APIs |
+| `serde` / `serde_json` | Serialization of request payloads and deserialization of provider-specific JSON responses |
+| `dashmap` | Concurrent hashmap used for thread-safe caching (likely token/credential caching) |
+| `sha2` / `base64` | Cryptographic hashing and encoding — used in request signing or key derivation |
+| `zeroize` | Secure memory clearing for sensitive credentials after use |
+| `dirs` | Resolution of platform-specific config/cache directories for credential storage |
 
-## How It Works
+## How Drivers Work
 
-Each driver follows a consistent internal pattern:
+Each driver follows the same general pattern:
 
-1. **Request Construction** — Translates the generic prompt/completion request into the provider's native JSON format.
-2. **Authentication** — Attaches the appropriate credentials. This may be a static API key, a Bearer token, or an OAuth token obtained via `librefang-runtime-oauth`.
-3. **HTTP Dispatch** — Sends the request through `librefang-http`, which wraps `reqwest` with shared configuration, retry logic, and observability.
-4. **Response Parsing** — Deserializes the provider-specific response into the shared types from `librefang-types`.
-5. **Credential Cleanup** — Uses `zeroize` to securely clear API keys and tokens from memory when they are no longer needed.
+1. **Configuration** — The driver is constructed with provider-specific configuration (API key, base URL, default model, etc.).
 
-## Adding a New Provider
+2. **Authentication** — Depending on the provider, the driver either attaches a static API key to requests or uses `librefang-runtime-oauth` to obtain and refresh OAuth tokens. Credentials are held in memory with `zeroize`-protected types where sensitivity demands it, and may be cached in a `DashMap` to avoid redundant auth round-trips.
 
-To add support for a new LLM provider:
+3. **Request Construction** — The driver translates the generic input types from `librefang-types` into the provider's expected JSON format using `serde`. Provider-specific quirks (e.g., Anthropic's `messages` format vs. OpenAI's `chat.completions` endpoint) are handled here.
 
-1. Create a new module file (e.g., `src/newprovider.rs`).
-2. Define a struct representing the driver, holding any provider-specific configuration (API key, base URL, model identifiers).
-3. Implement the driver trait from `librefang-llm-driver` for your struct.
-4. Handle request serialization matching the provider's API specification.
-5. Register the driver in the module's public exports so consumers can instantiate it.
+4. **HTTP Call** — Requests are dispatched through `librefang-http` / `reqwest`. The driver manages retries, timeouts, and rate-limit handling as appropriate for each provider.
 
-Key considerations for new drivers:
-- Use `librefang-http` for all outbound requests rather than calling `reqwest` directly, to maintain consistent tracing, error handling, and retry behavior.
-- If the provider uses OAuth, integrate with `librefang-runtime-oauth` for token management.
-- Ensure all sensitive fields (keys, tokens) derive or implement `Zeroize` so they are scrubbed from memory on drop.
-- Use `tracing` instrumentation on public methods for observability.
+5. **Response Parsing** — Provider-specific JSON responses are deserialized into the shared response types from `librefang-types`, normalizing differences across APIs into a uniform shape.
 
-## Connection to the Codebase
+6. **Error Handling** — Provider-specific error responses are mapped into the common error types defined in `librefang-types`.
 
-This crate sits between the abstract driver interface and the network layer:
+## Relationship to the Rest of the Codebase
 
-- **Downstream consumers** (e.g., `librefang-core`, application code) depend only on `librefang-llm-driver` for the trait, then select a concrete driver from this crate at runtime or configuration time.
-- **Upstream dependencies** provide the building blocks: trait definition, types, HTTP transport, and OAuth flow.
+This module is a **pure consumer** of the trait defined in `librefang-llm-driver`. Downstream code (e.g., orchestration layers, evaluation pipelines) depends only on the trait, selecting a concrete driver at runtime based on configuration. This separation means:
 
-Because the trait is the contract, the rest of the codebase never needs to know which provider is in use. Swapping from OpenAI to Anthropic is a matter of changing which concrete driver is instantiated.
+- Adding a new LLM provider requires only a new driver module here, implementing the existing trait.
+- The rest of the codebase remains agnostic to provider specifics.
+- Drivers can be tested in isolation using mocked HTTP responses.
+
+## Credential Security
+
+Given the dependency on `zeroize` and `sha2`, this module takes care to:
+
+- Clear sensitive credentials (API keys, OAuth tokens) from memory when they are no longer needed.
+- Avoid logging raw credentials via `tracing`.
+- Store cached credentials in platform-appropriate directories resolved through `dirs`, never hardcoding paths.

@@ -2,95 +2,71 @@
 
 # librefang-testing
 
-Test infrastructure crate providing mock implementations and route-level test utilities for the librefang ecosystem.
+Test infrastructure crate providing mock implementations and HTTP route test utilities for the Librefang ecosystem.
 
 ## Purpose
 
-This crate centralizes reusable test support code so that integration and unit tests across the workspace can share consistent mock implementations rather than each crate building its own. It ships three categories of test helpers:
+This crate centralizes all test-only code so that other crates never need to pull in mock-specific dependencies in production builds. It ships three categories of test support:
 
-1. **Mock kernel** — a stand-in for `librefang-kernel` that exercises the same trait boundaries without touching real kernel resources.
-2. **Mock LLM driver** — simulates LLM responses for testing reasoning and generation paths without network calls or API keys.
-3. **API route test utilities** — helpers for constructing `axum` test requests, wiring up router instances with mock state, and asserting on responses.
+1. **Mock kernel** — an in-memory stand-in for `librefang-kernel` that skips real I/O.
+2. **Mock LLM driver** — a deterministic fake for the LLM backend used by the runtime.
+3. **API route test utilities** — helpers for constructing `axum` test requests against `librefang-api` routes without binding a real HTTP listener.
+
+## Dependencies & Integration
+
+| Dependency | Why it's here |
+|---|---|
+| `librefang-types` | Re-exports shared domain types so tests can construct fixtures. |
+| `librefang-kernel` | The real kernel trait/interface that the mock must satisfy. |
+| `librefang-runtime` | The runtime under test; tests feed it the mock kernel and mock LLM. |
+| `librefang-api` (feature `telemetry`) | Route definitions. Tests build an `axum::Router` from these and fire requests through it. |
+| `axum` / `tower` | Used to assemble a one-shot `Service` for route-level HTTP tests. |
+| `tokio` | Async test runtime. |
+| `serde_json` | JSON body construction and assertion helpers. |
+| `dashmap` | Concurrent map used internally by mocks to track state across await points. |
+| `tempfile` | Temporary directories for tests that touch the filesystem. |
+| `uuid` | Generating deterministic or random test IDs. |
+| `http-body-util` | Reading response bodies in route tests. |
 
 ## Architecture
 
 ```mermaid
 graph TD
-    TT[librefang-testing] --> LT[librefang-types]
-    TT --> LK[librefang-kernel]
-    TT --> LR[librefang-runtime]
-    TT --> LA[librefang-api]
-    TT --> TOK[tokio]
-    TT --> AXUM[axum / tower]
-    
-    LK -.->|trait impl| MK[Mock Kernel]
-    LA -.->|route helpers| RT[Route Test Utils]
-    LR -.->|driver trait| MD[Mock LLM Driver]
+    T[librefang-testing] --> MK[Mock Kernel]
+    T --> ML[Mock LLM Driver]
+    T --> RT[Route Test Helpers]
+    MK -.-> K[librefang-kernel trait]
+    ML -.-> LR[librefang-runtime LLM interface]
+    RT -.-> A[librefang-api Router]
 ```
 
-The crate sits downstream of the core libraries it mocks. It depends on:
+Tests in other crates depend on `librefang-testing` as a dev-dependency. The test code instantiates the mocks it needs, wires them into the component under test, and optionally uses the route helpers to exercise HTTP endpoints end-to-end.
 
-| Dependency | Role in this crate |
-|---|---|
-| `librefang-types` | Shared domain types used in test assertions and fixture construction. |
-| `librefang-kernel` | Provides the traits that the mock kernel implements. |
-| `librefang-runtime` | Provides the LLM driver trait that the mock driver implements. |
-| `librefang-api` | Router builder and route handlers being tested; imported with only the `telemetry` feature to keep the dependency graph light. |
-| `tokio` | Async test runtime (`#[tokio::test]` support). |
-| `axum` + `tower` | Building test router instances and invoking them via `tower::ServiceExt`. |
-| `serde_json` | Constructing and inspecting JSON request/response bodies. |
-| `dashmap` | Concurrent map used internally by mock state to track calls. |
-| `tempfile` | Creating ephemeral directories for tests that touch the filesystem. |
-| `uuid` | Generating deterministic or random IDs for test fixtures. |
-| `http-body-util` | Reading response bodies in route tests. |
+## Usage Patterns
 
-## Key Components
-
-### Mock Kernel
-
-A test double implementing the kernel trait(s) from `librefang-kernel`. This allows tests for the API layer and runtime to execute without a real kernel backend. Typical capabilities include:
-
-- Recording method invocations for later assertion (e.g., "was `create_session` called with these arguments?").
-- Returning pre-configured responses or errors to exercise success and failure paths.
-
-### Mock LLM Driver
-
-An implementation of the LLM driver trait from `librefang-runtime` that returns canned completions. Use it to test:
-
-- Prompt construction and template rendering without hitting an external API.
-- Error handling when the driver returns a failure.
-- Token counting and cost-related logic against deterministic outputs.
-
-### API Route Test Utilities
-
-Helpers that reduce boilerplate when testing `axum` routes in isolation:
-
-- **Router construction** — build an `axum::Router` with mock state injected so routes resolve normally.
-- **Request helpers** — convenience functions for common HTTP methods with JSON bodies already serialized.
-- **Response assertions** — utilities for reading and parsing response bodies via `http-body-util`.
-
-A typical route test follows this pattern:
-
-```
-1. Set up mock kernel / mock driver with desired behavior.
-2. Build a router, injecting the mock state.
-3. Send a request through tower's ServiceExt.
-4. Assert on status code and deserialize the response body.
-```
-
-## Usage in the Workspace
-
-Other crates depend on `librefang-testing` as a dev-dependency. Because it is a dedicated test-support crate, it should never appear as a runtime dependency. In a consuming crate's `Cargo.toml`:
+### Adding to a crate's dev-dependencies
 
 ```toml
 [dev-dependencies]
 librefang-testing = { path = "../librefang-testing" }
 ```
 
-Tests then import the mock implementations and helpers they need, construct the desired state, and exercise the system under test.
+### Route-level testing
+
+The route helpers wrap `tower::ServiceExt` to send a request through an `axum::Router` without a live server. A typical test:
+
+1. Build a `Router` from `librefang-api`, injecting the mock kernel and mock LLM via state.
+2. Construct an `axum::extract::Request` (or use a convenience builder from this crate).
+3. Call `tower::ServiceExt::oneshot(router, request)` and inspect the response.
+
+This keeps tests fast—no TCP, no real LLM, no real kernel I/O—while still exercising the full middleware and handler stack.
+
+### Mock state inspection
+
+Mocks built with `dashmap` allow tests to inspect internal state (e.g., how many times the kernel was called, what arguments were passed) from concurrent test tasks without external synchronization.
 
 ## Design Notes
 
-- **No production code.** This crate compiles only for test targets. It must not be published or referenced from non-test code.
-- **Minimal features on `librefang-api`.** The dependency on `librefang-api` uses `default-features = false` with only `telemetry` enabled, avoiding pulling in unnecessary backend dependencies during test compilation.
-- **State isolation.** Mock implementations use `dashmap` internally so that tests running concurrently under tokio do not race on shared mutable state within a single mock instance.
+- **No production code depends on this crate.** It is exclusively a `[dev-dependencies]` target.
+- The `librefang-api` dependency enables only the `telemetry` feature and uses `default-features = false` to avoid pulling in server-side extras (like real TLS or listener setup) that route tests don't need.
+- Because no execution flows originate or terminate here, the mocks are entirely passive—they respond to calls from the runtime and API layers under test.

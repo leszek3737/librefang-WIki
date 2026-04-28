@@ -6,66 +6,51 @@ Hand/Template routing engine for the LibreFang kernel.
 
 ## Purpose
 
-This crate is responsible for **routing** — resolving which hand definition and which template should handle a given request or input event. It acts as the dispatch layer that sits between raw input and the kernel's hand execution system, mapping symbolic names or patterns to concrete hand/template configurations.
+This module is responsible for **routing incoming data to the appropriate Hand or Template** based on pattern matching rules. It acts as the kernel's dispatch layer — given some input, it determines which registered handler should process it by evaluating match conditions defined in routing configuration.
 
 ## Role in the Architecture
 
-```
-┌──────────────┐    ┌─────────────────────┐    ┌────────────────┐
-│  Input/Event  │───▶│  kernel-router      │───▶│  librefang-    │
-│  Source       │    │  (route resolution) │    │  hands         │
-└──────────────┘    └─────────────────────┘    └────────────────┘
-                            │
-                            ▼
-                     ┌────────────────┐
-                     │  librefang-    │
-                     │  types         │
-                     └────────────────┘
+```mermaid
+graph LR
+    A[librefang-types] --> B[librefang-kernel-router]
+    C[librefang-hands] --> B
+    B --> D[librefang-runtime]
 ```
 
-The router consumes type definitions from `librefang-types` and produces routing decisions that are consumed by `librefang-hands`. It is the glue that determines *which* hand runs, *where* its template lives, and *how* parameters bind.
+The router sits between the type definitions (`librefang-types`) and the hand implementations (`librefang-hands`). At runtime, the `librefang-runtime` module loads and exercises the router to resolve which hand to invoke for a given input.
 
-## Key Dependencies
+## Dependencies and What They Indicate
 
-| Dependency | Role in this crate |
+| Dependency | Role in This Module |
 |---|---|
-| `librefang-types` | Shared type definitions — route descriptors, hand identifiers, template metadata |
-| `librefang-hands` | Hand definitions and execution targets that routes resolve to |
-| `regex-lite` | Pattern matching for route rules — supports wildcard/glob-style matching of hand names or template paths |
-| `serde_json` | Deserialization of route configuration files (JSON format) |
-| `toml` | Deserialization of route configuration files (TOML format) |
-| `dirs` | Resolving platform-specific config directories to locate route definition files |
-| `tracing` | Structured logging of route resolution, cache hits/misses, and fallback behavior |
+| `librefang-types` | Shared type definitions — route entries, match criteria, hand references |
+| `librefang-hands` | Access to registered hand definitions that routes point to |
+| `regex-lite` | Pattern-based matching logic for route evaluation |
+| `serde_json` | Deserialization of routing rules from JSON-format configuration |
+| `toml` | Deserialization of routing rules from TOML-format configuration |
+| `dirs` | Resolving platform-specific config/data directories for route file discovery |
+| `tracing` | Instrumentation of route resolution and match evaluation |
 
-## Configuration Loading
+The presence of both `serde_json` and `toml` indicates the router supports at least two configuration formats. The `dirs` crate suggests it looks for routing configuration in standard user or system directories rather than requiring hardcoded paths.
 
-The router supports loading routing tables from both **TOML** and **JSON** configuration files. It uses the `dirs` crate to resolve platform-standard configuration directories (e.g., `~/.config/librefang/` on Linux), allowing users to define custom hand-to-template mappings without modifying compiled code.
+## Key Concepts
 
-Typical config lookup order:
+### Routes
 
-1. Path specified by environment variable (if applicable)
-2. User config directory (`dirs::config_dir()` / `librefang/`)
-3. Bundled/fallback defaults
+A route is a mapping from a **match condition** to a **target hand or template**. Routes are likely loaded from configuration files at startup and organized into a routing table.
 
-## Route Resolution
+### Match Evaluation
 
-A route maps a **hand identifier** (and optionally a template name or pattern) to a concrete execution target. The `regex-lite` dependency indicates that route rules support pattern-based matching rather than only exact string equality — allowing a single rule to match multiple hands or template variants.
+The `regex-lite` dependency indicates that route matching uses regular expressions. Routes may match against fields of the incoming data — for example, matching on identifiers, type tags, or content patterns.
 
-Resolution follows a priority model:
+### Routing Table
 
-1. **Exact matches** are checked first.
-2. **Pattern matches** (regex) are evaluated in definition order.
-3. **Fallback/default** route applies if nothing else matches.
+Routes are assembled into a routing table. When the router receives input, it evaluates match conditions in a defined order and returns the first matching hand/template reference.
 
-All resolution steps are instrumented with `tracing` spans, making it straightforward to debug why a particular hand was (or wasn't) routed.
+## Configuration
+
+Route definitions are loaded from configuration files. The router searches standard platform directories (via `dirs`) and supports both JSON and TOML formats. This allows users to define routing rules without modifying compiled code.
 
 ## Testing
 
-The `librefang-runtime` dev-dependency indicates that integration tests exercise the router within a full or partial runtime environment, verifying that routes resolve correctly end-to-end rather than in isolation. The `tempfile` dev-dependency suggests tests that create temporary configuration files to validate loading and parsing behavior without touching the user's real config.
-
-## Relationship to Other Crates
-
-- **Consumers** call into this crate to resolve which hand/template pair to activate.
-- **`librefang-hands`** provides the target definitions; the router does not execute hands itself — it only selects them.
-- **`librefang-types`** supplies the shared vocabulary (structs, enums) that both the router and its consumers agree on.
-- **`librefang-runtime`** orchestrates the router alongside other kernel subsystems during actual execution.
+The dev-dependency on `tempfile` and `librefang-runtime` indicates that tests create temporary configuration files to verify route loading and resolution behavior end-to-end through the runtime.

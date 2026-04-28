@@ -2,291 +2,296 @@
 
 # Agent Runtime
 
-The Agent Runtime is the execution engine at the heart of LibreFang. It governs how agents receive messages, interact with LLMs, execute tools, manage conversation state, and interoperate with external agents. The runtime lives in `librefang-runtime` and is structured around three primary concerns: the **agent execution loop**, **A2A protocol interoperability**, and **per-turn context loading**.
+The agent runtime is the execution engine at the heart of LibreFang. It orchestrates the full lifecycle of an agent turn: receiving a user message, recalling memories, calling the LLM, executing tool calls, persisting state, and returning a response. Three subsystems compose the runtime:
+
+| Subsystem | File | Purpose |
+|---|---|---|
+| **Agent Loop** | `agent_loop.rs` | Core iterative LLM ↔ tool execution cycle |
+| **Agent Context** | `agent_context.rs` | Per-turn loading of external `context.md` files |
+| **A2A Protocol** | `a2a.rs` | Cross-framework agent interoperability via Google's A2A spec |
 
 ## Architecture Overview
 
 ```mermaid
 graph TD
-    subgraph Entry
-        A[Kernel] -->|user message| B[run_agent_loop]
+    User["User message"] --> AL["Agent Loop"]
+    AL -->|"recall"| MEM["Memory Substrate"]
+    AL -->|"completion request"| LLM["LLM Driver"]
+    LLM -->|"tool_use"| STAGED["StagedToolUseTurn"]
+    STAGED -->|"execute"| TR["tool_runner"]
+    TR -->|"result"| STAGED
+    STAGED -->|"commit"| SESSION["Session"]
+    AL -->|"save"| MEM
+    AL -->|"response"| OUT["AgentLoopResult"]
+
+    subgraph "Per-turn context"
+        AC["agent_context"] -->|"context.md"| AL
     end
 
-    subgraph Agent Loop
-        B --> C[Prepare Messages]
-        C --> D[LLM Completion]
-        D -->|text response| E[Finalize Turn]
-        D -->|tool_use| F[StagedToolUseTurn]
-        F --> G[execute_single_tool_call]
-        G -->|result| F
-        F -->|commit| C
-        E --> H[Proactive Memory]
-        H --> I[AgentLoopResult]
+    subgraph "A2A interoperability"
+        A2A_CLIENT["A2aClient"] -->|"discover"| EXT["External agents"]
+        A2A_STORE["A2aTaskStore"] -->|"task tracking"| A2A_CLIENT
     end
-
-    subgraph A2A
-        J[A2aClient] -->|discover| K[AgentCard]
-        L[A2aTaskStore] -->|lifecycle| M[A2aTask]
-        N[build_agent_card] --> K
-    end
-
-    subgraph Context
-        O[load_context_md] -->|per-turn| P[context.md]
-    end
-
-    B -.->|uses| O
-    G -.->|dispatches to| tool_runner
-    J -.->|called during| A
 ```
 
-## The Agent Execution Loop (`agent_loop.rs`)
+---
 
-The agent loop is the central state machine that drives every agent turn. It handles the full lifecycle: receiving a user message, recalling memories, calling the LLM, executing tool calls in sequence, persisting state, and returning a result.
+## Agent Loop
 
-### Entry Points
+### Core Loop Flow
 
-- **`run_agent_loop`** — Non-streaming execution. Blocks until the agent produces a final response.
-- **`run_agent_loop_streaming`** — Streaming variant. Emits `StreamEvent` values over an `mpsc` channel as the LLM generates tokens and tools execute.
+The agent loop (`run_agent_loop` / `run_agent_loop_streaming`) is an iterative cycle bounded by `MAX_ITERATIONS` (default 100, configurable via manifest or operator override):
 
-Both share the same internal logic, differing only in how the LLM response is consumed and how results are delivered back to the caller.
+1. **Prepare messages** — load session history, inject system prompt with memory context, apply PII filtering and group-chat sender prefixes
+2. **Trim history** — enforce `max_history_messages` cap at safe turn boundaries (never splitting ToolUse/ToolResult pairs)
+3. **Call LLM** — acquire a global concurrency semaphore (cap: 5 simultaneous calls), send `CompletionRequest`
+4. **Handle response** based on stop reason:
+   - **`EndTurn`** — return text to caller (unless it's a silent reply or progress-text leak)
+   - ****`ToolUse`** — stage a `StagedToolUseTurn`, execute each tool, commit results atomically
+   - **`MaxTokens`** — continue generation (up to `MAX_CONTINUATIONS = 5`)
+5. **Finalize** — auto-memorize, save session, fire hooks, extract reply directives
 
-### Loop Lifecycle
+### Key Types
 
-Each iteration of the agent loop follows this sequence:
+#### `LoopOptions`
 
-1. **Prepare messages** — The conversation history is trimmed, repaired, and assembled into the format expected by the LLM provider. Images from prior turns are stripped to save tokens. The system prompt is built, incorporating recalled memories, workspace metadata, and any active A/B experiment variants.
+Non-default invocations (forks, auto-dream, sub-agent calls) pass `LoopOptions` to modify behavior:
 
-2. **Call the LLM** — A `CompletionRequest` is sent via the `LlmDriver`. A process-global semaphore (`LLM_CONCURRENCY`, cap of 5) gates concurrent API calls to prevent memory spikes on constrained deployments.
+| Field | Type | Effect |
+|---|---|---|
+| `is_fork` | `bool` | Derivative turn: skip session persistence, mark hooks `is_fork: true` |
+| `allowed_tools` | `Option<Vec<String>>` | Runtime tool allowlist enforced at execute time (not request schema) |
+| `interrupt` | `Option<SessionInterrupt>` | Per-session cancellation handle for long-running tools |
+| `max_iterations` | `Option<u32>` | Operator override for iteration cap |
+| `max_history_messages` | `Option<usize>` | Operator override for history trim cap (floored at 4) |
+| `aux_client` | `Option<Arc<AuxClient>>` | Cheap-tier LLM for side tasks (compression, title gen) |
 
-3. **Handle the response**:
-   - **`stop_reason: EndTurn`** — The agent's text response is finalized. Silent responses (NO_REPLY tokens) and progress-text leaks (dangling `"..."` preambles) are detected and handled.
-   - **`stop_reason: ToolUse`** — Tool calls are staged, executed, and their results are committed back into the conversation. The loop then returns to step 1 with the updated history.
-   - **`stop_reason: MaxTokens`** — The response is continued by sending the partial output back to the LLM (up to `MAX_CONTINUATIONS = 5`).
+Fork turns share the parent session prefix for Anthropic prompt cache alignment. Setting `is_fork` does not change the request body — only post-response persistence.
 
-4. **Finalize the turn** — Proactive memory extraction runs, session state is persisted, hooks fire, and an `AgentLoopResult` is returned.
+#### `AgentLoopResult`
 
-### Staged Tool Execution (`StagedToolUseTurn`)
+Returned from every loop invocation:
 
-Tool execution uses a staging pattern to prevent a critical bug (upstream #2381) where orphaned `ToolUse` blocks without paired `ToolResult` blocks could brick an agent session.
+```
+AgentLoopResult {
+    response: String,           // Final text response
+    total_usage: TokenUsage,    // Accumulated token counts
+    iterations: u32,            // Loop iterations consumed
+    silent: bool,               // Agent chose not to reply
+    directives: ReplyDirectives, // Reply-to, thread routing
+    decision_traces: Vec<DecisionTrace>,  // Tool call audit trail
+    memories_saved: Vec<String>,
+    memories_used: Vec<String>,
+    memory_conflicts: Vec<MemoryConflict>,
+    owner_notice: Option<String>,  // From notify_owner tool
+    new_messages_start: usize,     // Index for slicing turn messages
+    skill_evolution_suggested: bool,
+    experiment_context: Option<ExperimentContext>,
+    ...
+}
+```
 
-The `StagedToolUseTurn` struct accumulates:
-- The assistant message containing `ToolUse` blocks
-- Tool result blocks as each `execute_single_tool_call` completes
-- Metadata for padding any unexecuted calls
+### StagedToolUseTurn — Atomic Tool-Use Commits
 
-The turn is only committed to `session.messages` and the LLM working copy via `commit()`, which atomically pushes both the assistant message and the paired user `{tool_result}` message. If the staged turn is dropped without committing (e.g., due to error propagation with `?`), `session.messages` remains untouched — no orphan blocks can leak.
+The `StagedToolUseTurn` struct is the structural fix for issue #2381. Previously, the assistant's `tool_use` message was eagerly pushed to `session.messages` before tools executed. Any control-flow exit between push and finalization left orphan `tool_use_id`s that caused provider 400 errors.
 
-### Tool Execution (`execute_single_tool_call`)
+**Staged commits fix this**: the assistant message and all tool-result blocks are buffered locally. Only `commit()` writes to `session.messages` and the LLM working copy, atomically pushing both the assistant message and the user `{tool_results}` message together.
 
-Each tool call passes through several gates before execution:
+```
+stage_tool_use_turn()     // creates buffer, no mutation
+  → append_result()       // per-tool, accumulates ContentBlock::ToolResult
+  → pad_missing_results() // fills stubs for interrupted tools
+  → commit()              // atomic push to session + working copy
+```
 
-| Gate | Purpose |
-|------|---------|
-| `LoopGuard` | Circuit breaker / rate limiter for repetitive tool calls |
-| Fork allowlist | Restricts tools in derivative (fork) turns |
-| Hook registry (`BeforeToolCall`) | Plugins can block tool calls |
-| `tool_runner::execute_tool` | Actual dispatch to the tool implementation |
-| Hook registry (`AfterToolCall`, `TransformToolResult`) | Plugins can observe or rewrite results |
+If a staged turn is dropped without commit (e.g., `?` propagation), `session.messages` is untouched.
 
-Tool execution is bounded by a configurable timeout (default 600s). Results are sanitized (injection markers stripped, content truncated to fit the context budget) before being appended to the staged turn.
+### Tool Execution
 
-### Message History Management
+Each tool call passes through these guards in `execute_single_tool_call`:
 
-Conversation history grows unbounded without intervention, so the runtime trims it at safe boundaries:
+1. **Loop guard** — circuit breaker, block, or warn based on repetition detection
+2. **Fork allowlist** — synthetic error for tools outside `LoopOptions::allowed_tools`
+3. **Before hook** — `HookEvent::BeforeToolCall` can block execution
+4. **Timeout** — per-tool timeout (default 600s), producing `ToolExecutionStatus::Expired`
+5. **Execution** — dispatched via `tool_runner::execute_tool`
+6. **Transform hook** — `HookEvent::TransformToolResult` can rewrite result content
+7. **Sanitization** — strip injection markers, truncate to context budget
 
-- **`safe_trim_messages`** — Trims at conversation-turn boundaries so `ToolUse`/`ToolResult` pairs are never split. Applied to both the LLM working copy and the persistent session store.
-- **`resolve_max_history`** — Determines the trim cap from manifest overrides → kernel config → compiled default (40 messages). Values below 4 are clamped up.
-- **`strip_prior_image_data`** — Removes base64 image data from all messages except the last user message, preventing token bloat from stale images.
+After all tools in a turn execute, `finalize_tool_use_results` applies:
+- **Tool budget enforcement** — aggregate per-turn output budget
+- **Guidance blocks** — system messages appended for denied tools, parameter errors, and execution errors to steer LLM self-correction
 
-### Memory Integration
+### Consecutive Failure Tracking
 
-The loop integrates with the memory subsystem at several points:
+`MAX_CONSECUTIVE_ALL_FAILED = 3` — if every tool in a turn fails with hard errors (not soft errors like sandbox rejections or parameter mistakes) for 3 consecutive iterations, the loop aborts with `RepeatedToolFailures`. Soft errors are excluded so the LLM can self-correct.
 
-- **Recall** (`setup_recalled_memories`) — Before each turn, relevant memories are retrieved via the context engine (semantic search over embeddings) and injected into the system prompt.
-- **Proactive memory** — The `ProactiveMemoryHooks` system can extract facts, decisions, and preferences from the conversation automatically.
-- **Episodic memory** — Interaction summaries are persisted asynchronously via `remember_interaction_best_effort`.
-- **Conflict detection** — New memories are checked against existing ones for contradictions.
+### History Management
 
-### Loop Options (`LoopOptions`)
+**Resolution order** for `max_history`:
+1. `manifest.max_history_messages`
+2. `opts.max_history_messages`
+3. `DEFAULT_MAX_HISTORY_MESSAGES` (40)
 
-`LoopOptions` controls non-standard invocation modes:
+Values are clamped up to `MIN_HISTORY_MESSAGES` (4) — below this the safe-trim heuristic can't guarantee at least one full tool round-trip survives.
 
-| Field | Purpose |
-|-------|---------|
-| `is_fork` | Marks derivative turns (e.g., auto-dream). Session state is not persisted. |
-| `allowed_tools` | Runtime tool allowlist enforced at execute time (not schema time) to preserve Anthropic prompt cache alignment. |
-| `interrupt` | Per-session interrupt handle for long-running tools to observe `/stop` signals. |
-| `max_iterations` | Operator-level override for the iteration cap. |
-| `max_history_messages` | Operator-level override for the history trim cap. |
+`safe_trim_messages` trims both the LLM working copy and the persistent session store at turn boundaries. After trimming, `validate_and_repair` and `ensure_starts_with_user` guarantee structural validity. If fewer than 2 messages survive, a minimal user message is synthesized.
 
-### Result (`AgentLoopResult`)
+### Context Window Protection
 
-The loop returns a structured result containing:
+- **Image stripping** — `strip_processed_image_data` replaces base64 image blocks with text placeholders after the LLM processes them. `strip_prior_image_data` preserves only the last user message's images.
+- **Tool result truncation** — `sanitize_tool_result_content` delegates to the context engine (plugin-customizable) or falls back to built-in head+tail truncation.
+- **Accumulated text buffer** — capped at 64 KiB (`ACCUMULATED_TEXT_MAX_BYTES`) to prevent unbounded growth from intermediate text across many iterations.
 
-- `response` — Final text output
-- `total_usage` — Aggregate token counts across all LLM calls
-- `iterations` — How many loop iterations ran
-- `decision_traces` — Structured records of every tool call (input, rationale, timing, outcome)
-- `memories_saved` / `memories_used` / `memory_conflicts` — Memory system activity
-- `directives` — Reply routing directives (reply-to, thread, silent)
-- `owner_notice` — Private messages to the operator via `notify_owner`
-- `silent` — Whether the agent chose not to reply
-- `new_messages_start` — Index into `session.messages` where this turn's messages begin
+### A/B Experiments
 
-### Key Constants
-
-| Constant | Value | Purpose |
-|----------|-------|---------|
-| `MAX_ITERATIONS` | 100 | Loop iteration cap |
-| `MAX_CONCURRENT_LLM_CALLS` | 5 | Process-global LLM call semaphore |
-| `DEFAULT_MAX_HISTORY_MESSAGES` | 40 | Message history trim cap |
-| `MIN_HISTORY_MESSAGES` | 4 | Floor for history cap |
-| `TOOL_TIMEOUT_SECS` | 600 | Per-tool execution timeout |
-| `MAX_CONTINUATIONS` | 5 | MaxTokens continuation limit |
-| `MAX_CONSECUTIVE_ALL_FAILED` | 3 | Consecutive hard-failure abort threshold |
-| `LAZY_TOOLS_THRESHOLD` | 30 | Tool count that triggers lazy loading |
-| `ACCUMULATED_TEXT_MAX_BYTES` | 64 KB | Cap on intermediate text buffer |
+When a prompt experiment is active for an agent, `select_running_experiment` deterministically assigns a variant based on `session.id % 100` against cumulative traffic split weights. The selected variant's system prompt additions are injected, and `ExperimentContext` is returned in `AgentLoopResult` for tracking.
 
 ### Lazy Tool Loading
 
-When an agent's granted tool set exceeds `LAZY_TOOLS_THRESHOLD` (30 tools), the runtime switches to lazy mode. Instead of shipping all tool definitions in every request, only the always-native subset plus any tools the LLM has explicitly loaded via `tool_load` are included. This keeps the request payload small for agents with large tool catalogs while giving the LLM an escape hatch to discover and pull in additional tools on demand.
+Agents with > 30 granted tools and `tool_load` available enter lazy mode: only native tools + session-loaded tools are shipped in the request schema. The LLM can discover and load additional tools on demand via `tool_load(name)`. This reduces prompt size for agents with the full ~75 builtin catalog.
 
-`resolve_request_tools` handles the logic: if `tool_load` is not in the agent's allowlist, lazy mode is disabled entirely — the LLM would have no way to recover stripped tools.
+### Provider Prefix Stripping
 
-### Provider Prefix Handling (`strip_provider_prefix`)
-
-Model IDs are often stored as `provider/org/model` but APIs expect just `org/model`. The `strip_provider_prefix` function handles this stripping and also normalizes bare model names (e.g., `gemini-2.5-flash` → `google/gemini-2.5-flash`) for providers that require qualified `org/model` format (OpenRouter, Together, Fireworks, Replicate, HuggingFace).
-
-### Group Chat Support
-
-For group-chat agents (identified by `is_group: true` in manifest metadata), the runtime prepends a sanitized `[sender]: ` prefix to user messages. The `sanitize_sender_label` function strips characters that could spoof other senders (brackets, colons, newlines, control characters) and truncates to 64 characters.
+`strip_provider_prefix` normalizes model IDs for multi-provider routing:
+- Strips `provider/` or `provider:` prefixes
+- For providers requiring `org/model` format (OpenRouter, Together, Fireworks, Replicate, HuggingFace), bare names like `gemini-2.5-flash` are auto-qualified to `google/gemini-2.5-flash`
 
 ---
 
-## A2A Protocol (`a2a.rs`)
+## Agent Context
 
-Implements Google's Agent-to-Agent protocol for cross-framework agent interoperability. A2A enables LibreFang agents to discover and interact with external agents, and exposes LibreFang agents to external systems via Agent Cards.
+The agent context loader provides per-turn refreshable context from `context.md` files updated by external tools (cron jobs, scripts).
 
-### Agent Cards (`AgentCard`)
+### File Resolution
 
-An `AgentCard` is a JSON capability manifest served at `/.well-known/agent.json`. It describes:
+```
+resolve_context_path(workspace)
+  → workspace/.identity/context.md   (preferred, new layout)
+  → workspace/context.md              (legacy fallback)
+```
 
-- **Identity** — name, description, URL, version
-- **Capabilities** — streaming, push notifications, state transition history
-- **Skills** — `AgentSkill` descriptors mapping LibreFang tools to A2A skill entries
-- **Content modes** — supported input/output MIME types
+The first candidate that exists wins, even if empty — so failures are attributed to the canonical location.
 
-`build_agent_card` constructs an `AgentCard` from a LibreFang `AgentManifest`, converting each tool into an A2A skill descriptor and setting the endpoint to `{base_url}/a2a`.
+### Loading Behavior
 
-### Tasks (`A2aTask`)
+`load_context_md(workspace, cache_context)`:
 
-Tasks are the unit of work exchanged between agents. Each task has:
-
-- An ID and optional session ID for conversation continuity
-- A status (`A2aTaskStatus`): `Submitted`, `Working`, `InputRequired`, `Completed`, `Cancelled`, `Failed`
-- Messages (`A2aMessage`) with content parts (`A2aPart` — text, file, or structured data)
-- Artifacts (`A2aArtifact`) produced by the task
-
-The `A2aTaskStatusWrapper` handles a serialization quirk: some A2A implementations encode status as a bare string (`"completed"`), others as an object (`{"state": "completed", "message": null}`). The `#[serde(untagged)]` enum transparently accepts both forms.
-
-### Task Store (`A2aTaskStore`)
-
-An in-memory, bounded store for tracking A2A task lifecycle. Tasks are created by `tasks/send`, polled by `tasks/get`, and cancelled by `tasks/cancel`.
-
-**Eviction policy** (applied lazily on each `insert`):
-
-1. **TTL sweep** — Any task older than the configured TTL (default 24 hours) is removed regardless of state. This prevents `Working`/`InputRequired` tasks from accumulating indefinitely.
-2. **Capacity eviction** — If still at capacity after the TTL sweep, the oldest terminal-state task (Completed/Failed/Cancelled) is evicted first. If no terminal tasks exist, the oldest task overall is evicted.
-
-The store is thread-safe via an internal `Mutex`. The poisoned-mutex recovery pattern (`unwrap_or_else(|e| e.into_inner())`) ensures a panic in one thread doesn't permanently deadlock the store.
-
-### A2A Client (`A2aClient`)
-
-HTTP client for discovering and interacting with external A2A agents:
-
-- **`discover(url)`** — Fetches the Agent Card from `{url}/.well-known/agent.json`
-- **`send_task(url, message, session_id)`** — Sends a JSON-RPC `tasks/send` request to an external agent
-- **`get_task(url, task_id)`** — Polls task status via `tasks/get`
-
-The client uses a proxied HTTP client builder with a 30-second timeout and a custom `User-Agent` header identifying the LibreFang version.
-
-### Discovery
-
-`discover_external_agents` is called during kernel boot. It iterates over configured `ExternalAgent` entries, fetches each one's Agent Card, and returns successfully discovered agents. Failures are logged but do not block boot.
-
----
-
-## Agent Context (`agent_context.rs`)
-
-Handles per-turn loading of `context.md` files — Markdown files that external tools (cron jobs, scripts) update with live data that the agent should see in its prompt.
-
-### Resolution Order
-
-`resolve_context_path` looks for context files in this order:
-
-1. `{workspace}/.identity/context.md` (new layout)
-2. `{workspace}/context.md` (legacy / unmigrated workspaces)
-
-The first candidate that exists on disk wins.
-
-### Caching Behavior
-
-The `cache_context` flag on `AgentManifest` controls behavior:
-
-- **`cache_context = false`** (default) — The file is re-read from disk every turn, so external updates reach the LLM immediately.
-- **`cache_context = true`** — The first successful read is cached and returned verbatim on every subsequent call.
-
-### Failure Handling
-
-When a re-read fails (e.g., an external writer is mid-rewrite and the file contains invalid UTF-8), the system falls back to the last successfully cached content with a warning. This prevents context from disappearing mid-conversation. If no cache exists, `None` is returned.
+- **`cache_context = false`** (default): re-reads from disk every turn. If the read fails after a previous success, falls back to cached content with a warning. If the file is deleted, returns `None`.
+- **`cache_context = true`**: returns the first successful read for the lifetime of the process, freezing the agent's view of the file.
 
 ### Security
 
-- **Symlink rejection** — Uses `symlink_metadata` (not `metadata`) to detect and refuse symlinks. This prevents a prompt-injection vector where an attacker could point `context.md` at sensitive system files (e.g., `/etc/passwd`) and have their contents injected into the LLM prompt.
-- **Size cap** — Files are capped at 32 KB (`MAX_CONTEXT_BYTES`). Reads are bounded at the I/O level so multi-GB files are never fully loaded into memory. Truncation preserves valid UTF-8 boundaries.
-- **Binary rejection** — Files with zero valid UTF-8 prefix bytes are treated as errors, triggering the cache fallback path.
+- **Symlink rejection** — `symlink_metadata` is used instead of `metadata`; symlinks are explicitly refused to prevent an attacker from pointing `.identity/context.md` at sensitive files and having their contents injected into the LLM prompt.
+- **Size cap** — reads are capped at 32 KiB (`MAX_CONTEXT_BYTES`) to prevent prompt size blowup.
+- **UTF-8 validation** — reads are capped at `MAX_CONTEXT_BYTES + 4` bytes, then trimmed to the last valid UTF-8 boundary. Files with zero valid UTF-8 prefix are treated as I/O errors to trigger cache fallback rather than serving empty content.
 
 ---
 
-## Integration Points
+## A2A Protocol
 
-### Kernel
+Implements Google's Agent-to-Agent protocol for cross-framework interoperability via Agent Cards and Task-based coordination.
 
-The kernel (`librefang-kernel`) is the primary consumer of the runtime. It:
-- Calls `run_agent_loop` / `run_agent_loop_streaming` when a user message arrives
-- Populates `LoopOptions` from `KernelConfig` (max iterations, history cap, interrupt handles)
-- Calls `discover_external_agents` during boot
-- Serves Agent Cards via the HTTP API
+### Agent Card
 
-### Tool Runner (`tool_runner.rs`)
+`AgentCard` is the JSON capability manifest served at `/.well-known/agent.json`:
 
-`execute_single_tool_call` delegates to `tool_runner::execute_tool` for actual tool dispatch. The tool runner handles:
-- Capability enforcement (agents can only use tools in their manifest)
-- MCP connection management
-- Skill registry lookups
-- Sandbox enforcement (workspace isolation, command allowlists)
-- Approval workflows (human-in-the-loop gating)
+```
+AgentCard {
+    name, description, url, version,
+    capabilities: AgentCapabilities { streaming, push_notifications, state_transition_history },
+    skills: Vec<AgentSkill>,
+    default_input_modes, default_output_modes,
+}
+```
 
-### Memory Subsystem (`librefang-memory`)
+`build_agent_card(manifest, base_url)` converts a LibreFang `AgentManifest` into an `AgentCard`, mapping tool names to A2A skill descriptors.
 
-The loop depends on `MemorySubstrate` and `ProactiveMemoryStore` for:
-- Semantic memory recall (embedding-based search)
-- Episodic memory persistence
-- Proactive fact extraction
-- Memory conflict detection
+### Task Model
 
-### Context Engine (`context_engine.rs`)
+`A2aTask` represents a unit of work:
 
-An optional plugin interface that customizes:
-- Tool result truncation strategy
-- Memory recall and ingestion
-- Context window budget management
+```
+A2aTask {
+    id: String,
+    session_id: Option<String>,
+    status: A2aTaskStatusWrapper,
+    messages: Vec<A2aMessage>,
+    artifacts: Vec<A2aArtifact>,
+}
+```
 
-When no context engine is registered, built-in head+tail truncation and default recall behavior apply.
+Task statuses: `Submitted → Working → Completed | Failed | Cancelled | InputRequired`
 
-### Hooks (`hooks.rs`)
+`A2aTaskStatusWrapper` handles both encoding forms in the wild — bare string (`"completed"`) and object (`{"state": "completed", "message": ...}`) — via `#[serde(untagged)]`.
 
-The hook registry provides extension points at:
-- `BeforeToolCall` / `AfterToolCall` — Observe or block tool execution
-- `TransformToolResult` — Rewrite tool results before they enter the conversation
-- `AgentLoopEnd` — React to turn completion (used by auto-dream triggers)
+Messages use `A2aPart` content parts (tagged enum): `Text`, `File` (base64), or `Data` (structured JSON).
+
+### Task Store
+
+`A2aTaskStore` is an in-memory bounded store tracking task lifecycle:
+
+- **Capacity**: configurable `max_tasks` (default 1000)
+- **TTL**: default 24 hours; expired tasks are swept lazily on every insert
+- **Eviction policy** (applied when at capacity after TTL sweep):
+  1. Oldest terminal-state task (Completed/Failed/Cancelled)
+  2. Fallback: oldest task overall
+
+Key operations:
+- `insert(task)` — sweep + evict + store
+- `get(task_id)` → `Option<A2aTask>`
+- `update_status(task_id, status)` — returns `false` if not found
+- `complete(task_id, response, artifacts)` — append message, set Completed
+- `fail(task_id, error_message)` — append message, set Failed
+- `cancel(task_id)` — delegate to `update_status(Cancelled)`
+
+### A2A Client
+
+`A2aClient` discovers and interacts with external A2A agents:
+
+| Method | Protocol | Description |
+|---|---|---|
+| `discover(url)` | `GET /.well-known/agent.json` | Fetch and parse an Agent Card |
+| `send_task(url, message, session_id)` | JSON-RPC `tasks/send` | Create a new task with a user message |
+| `get_task(url, task_id)` | JSON-RPC `tasks/get` | Poll task status |
+
+`discover_external_agents` is called during kernel boot to populate the list of known external agents from configuration. Failed discoveries log warnings but don't prevent boot.
+
+### Configuration
+
+A2A is configured via `A2aConfig` in the kernel config:
+
+```
+A2aConfig {
+    enabled: bool,
+    name: String,
+    description: String,
+    listen_path: String,         // e.g. "/a2a"
+    external_agents: Vec<ExternalAgent { name, url }>,
+}
+```
+
+---
+
+## Error Handling Patterns
+
+The runtime uses several layered defenses:
+
+- **Loop guard** — circuit breaker after repeated identical tool calls; block for dangerous patterns; warn for borderline cases
+- **Context overflow recovery** — `recover_from_overflow` applies staged message pruning when the LLM returns a context-length error
+- **Retry with backoff** — rate-limited and overloaded API calls retry up to `MAX_RETRIES = 3` with exponential backoff (base 1s)
+- **Provider cooldown** — `ProviderCooldown` tracks per-provider failure rates and temporarily blacklists degraded providers
+- **Safe error classification** — `is_soft_error_content` distinguishes recoverable errors (sandbox rejections, parameter mistakes) from hard failures, preventing premature loop abort
+
+## Hooks Integration
+
+The agent loop fires hooks at these points via `HookRegistry`:
+
+| Hook Event | Timing | Can Block? |
+|---|---|---|
+| `BeforeToolCall` | Before tool execution | Yes — returns error reason |
+| `AfterToolCall` | After tool execution | No (best-effort) |
+| `TransformToolResult` | After tool, before LLM sees result | Transforms content |
+| `AgentLoopEnd` | After loop completes | No (best-effort) |
+
+Hook failures in critical paths (tool execution) produce warn logs but don't abort the loop. Hook failures in best-effort paths (post-loop save) are silently absorbed.

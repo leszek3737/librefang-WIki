@@ -2,53 +2,55 @@
 
 # LLM Provider Drivers
 
-This module group provides LibreFang's complete LLM integration layer — a trait-based abstraction that decouples the rest of the codebase from any specific LLM provider, plus concrete driver implementations for seven backends.
+The LLM Provider Drivers module is LibreFang's interface to every supported large language model provider. It is split into two cooperating crates: one that defines the abstraction contract, and one that ships concrete implementations and the shared operational infrastructure they all rely on.
 
-## Sub-modules
+## Structure
 
-| Sub-module | Role |
+```mermaid
+graph LR
+    subgraph Consumers
+        AL[agent_loop]
+        AU[aux_client]
+        MU[media_understanding]
+    end
+
+    subgraph "llm-driver (trait layer)"
+        LD[LlmDriver trait]
+        CR[CompletionRequest / CompletionResponse]
+        SE[StreamEvent]
+        LE[LlmError / FailoverReason]
+    end
+
+    subgraph "llm-drivers (implementation layer)"
+        DR[Provider Drivers]
+        BO[Backoff & Retry]
+        TR[Token Rotation]
+        RL[Rate Limit Tracker]
+        SG[Shared Rate Guard]
+    end
+
+    Consumers --> LD
+    LD -.->|implemented by| DR
+    DR --> BO
+    DR --> TR
+    DR --> RL
+    DR --> SG
+    DR --> CR
+    DR --> SE
+    DR --> LE
+```
+
+| Sub-module | Responsibility |
 |---|---|
-| [librefang-llm-driver](librefang-llm-driver-src.md) | Defines the `LlmDriver` trait, request/response types (`CompletionRequest`, `CompletionResponse`, `StreamEvent`), and error classification infrastructure |
-| [librefang-llm-drivers](librefang-llm-drivers-src.md) | Ships concrete `LlmDriver` implementations for Anthropic, OpenAI, AWS Bedrock, Google Vertex AI, Aider, Claude Code, and Qwen Code, along with shared credential pooling, rate-limit tracking, and think-tag filtering |
+| [librefang-llm-driver](librefang-llm-driver-src.md) | Defines the `LlmDriver` trait, request/response types (`CompletionRequest`, `CompletionResponse`), streaming protocol (`StreamEvent`), error taxonomy (`LlmError`, `FailoverReason`), and driver configuration. This is the contract that every provider implements. |
+| [librefang-llm-drivers](librefang-llm-drivers-src.md) | Contains the concrete driver implementations (OpenAI, Anthropic, Gemini, Bedrock, Vertex AI, Ollama, Aider, Claude Code, Qwen Code, and OpenAI-compatible proxies) plus the shared cross-cutting infrastructure: retry backoff with jitter, credential pooling via `token_rotation`, rate-limit tracking, and cross-process rate-limit guards. |
 
-## How they fit together
+## Key Cross-Module Workflows
 
-```
-┌─────────────────────────────────────────────────────┐
-│  Consumers: agent_loop, compactor, context_engine,  │
-│  proactive_memory, routing, media_understanding     │
-└──────────────────────┬──────────────────────────────┘
-                       │  calls trait methods only
-                       ▼
-┌──────────────────────────────────────────────────────┐
-│  librefang-llm-driver                                │
-│  LlmDriver trait · CompletionRequest · StreamEvent   │
-│  LlmError · classify_error · extract_retry_delay     │
-└──────────────────────┬──────────────────────────────┘
-                       │  implements trait
-                       ▼
-┌──────────────────────────────────────────────────────┐
-│  librefang-llm-drivers                               │
-│  Provider impls · CredentialPool · RateLimitTracker  │
-│  ThinkFilter · jittered_backoff                      │
-└──────────────────────────────────────────────────────┘
-```
+**Request lifecycle.** A consumer such as `agent_loop` builds a `CompletionRequest` (types from `llm-driver`) and calls a concrete driver (from `llm-drivers`). The driver serialises the request for its specific provider, then deserialises the response back into the shared `CompletionResponse` / `StreamEvent` types so the caller never needs to know which provider was used.
 
-**librefang-llm-driver** owns the contract: the `LlmDriver` trait (`complete()`, `stream()`), the shared request/response types, and the error taxonomy (`LlmError`, `FailoverReason`) with utilities like `classify_error` and `sanitize_raw_excerpt`. No provider-specific logic lives here.
+**Credential rotation and failover.** Drivers use `token_rotation` to cycle through available API keys, cooling down slots that return errors. When a request fails, the error is classified into a `FailoverReason` (defined in `llm-driver`), which the runtime uses to decide whether to retry with a different key, fall back to another provider, or surface the error to the user.
 
-**librefang-llm-drivers** fills in that contract. Each provider (Anthropic, OpenAI, Bedrock, Vertex AI, Aider, Claude Code, Qwen Code) implements `LlmDriver`. The crate also supplies cross-provider infrastructure:
+**Rate-limit awareness.** Before issuing a request, each driver checks the `shared_rate_guard` (cross-process mutex) and the `rate_limit_tracker`. After a response, 429 headers are recorded. This state is shared across all driver instances so that one process's rate-limit backoff benefits every other process using the same guard file.
 
-- **CredentialPool** — round-robin credential rotation that skips exhausted keys.
-- **RateLimitTracker** — parses rate-limit headers (ISO 8601 and HTTP date formats) and exposes usage-ratio diagnostics used by the CLI.
-- **ThinkFilter** — a streaming filter that strips `<think …>…</think)` blocks from model output.
-- **jittered_backoff** — retry pacing shared across all provider implementations.
-
-## Key cross-module workflow
-
-A typical completion request flows like this:
-
-1. A consumer (e.g., `agent_loop`) builds a `CompletionRequest` (types from **llm-driver**).
-2. It calls `driver.stream(req)` or `driver.complete(req)` against the `LlmDriver` trait.
-3. The concrete implementation in **llm-drivers** acquires a credential from `CredentialPool`, applies `jittered_backoff` for retries, and tracks rate limits via `RateLimitTracker`.
-4. On error, the driver calls back into **llm-driver**'s `classify_error` (and related helpers like `extract_retry_delay`, `is_transient`) to determine whether to retry, fail over, or surface the error to the caller.
-5. Streaming responses pass through `ThinkFilter` before reaching the consumer as `StreamEvent` values.
+**Retry with backoff.** Transient failures trigger `standard_retry_delay` (exponential backoff with jitter), also defined in `llm-drivers`. The error taxonomy from `llm-driver` determines which failures are retryable versus fatal.

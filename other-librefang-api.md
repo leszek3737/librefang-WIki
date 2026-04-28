@@ -2,65 +2,50 @@
 
 # librefang-api
 
-The HTTP/WebSocket API server for the LibreFang Agent OS daemon. This crate exposes a RESTful API and WebSocket endpoints for managing agents, channels, skills, sessions, extensions, and all other LibreFang subsystems. It also serves the embedded React-based dashboard UI.
+The HTTP/WebSocket API server for the LibreFang Agent OS daemon. This crate is the primary entry point for external clients — dashboard UIs, CLI tools, and programmatic integrations — exposing the full agent lifecycle over a RESTful and real-time WebSocket surface.
 
 ## Architecture
 
+`librefang-api` sits at the top of the crate dependency graph, importing nearly every other `librefang-*` crate to compose a unified server. It does not contain business logic itself; instead it wires together the kernel, runtime, memory, channels, skills, and extensions behind HTTP/WebSocket handlers.
+
 ```mermaid
 graph TD
-    Client[Browser / API Client]
-    API[librefang-api<br/>Axum + Tower]
-    Client -->|HTTP / WebSocket| API
-    API --> KT[librefang-kernel]
-    API --> RT[librefang-runtime]
-    API --> CH[librefang-channels]
-    API --> SK[librefang-skills]
-    API --> HD[librefang-hands]
-    API --> EX[librefang-extensions]
-    API --> MEM[librefang-memory]
-    API --> WR[librefang-wire]
-    API --> MG[librefang-migrate]
-    API --> TY[librefang-types]
-    API --> TM[librefang-telemetry]
+    Client[HTTP / WS Clients] --> API[librefang-api<br>axum handlers]
+    API --> Kernel[librefang-kernel]
+    API --> Runtime[librefang-runtime]
+    API --> Memory[librefang-memory]
+    API --> Channels[librefang-channels]
+    API --> Skills[librefang-skills]
+    API --> Hands[librefang-hands]
+    API --> Extensions[librefang-extensions]
+    API --> LLM[librefang-llm-drivers]
+    API --> Wire[librefang-wire]
+    API --> Migrate[librefang-migrate]
+    API --> Telemetry[librefang-telemetry]
+    API --> Types[librefang-types]
 ```
-
-The API layer is a thin coordination surface. Nearly all business logic lives in the kernel and domain crates; the API handlers translate HTTP requests into calls against those crates and serialize responses.
 
 ## Key Dependencies and Their Roles
 
-| Dependency | Role |
+| Dependency | Role in the API |
 |---|---|
-| `axum` + `tower` + `tower-http` | HTTP framework, middleware stack, CORS, compression, tracing layers |
-| `utoipa` | OpenAPI 3.x spec generation from handler signatures and types |
-| `schemars` | JSON Schema generation for types (used by utoipa) |
-| `librefang-kernel` | Core domain logic, state management, agent lifecycle |
-| `librefang-runtime` | Process registry, execution runtime |
-| `librefang-channels` | Messaging channel integrations (Telegram, Discord, Slack, etc.) |
-| `librefang-skills` | Skill definitions and execution |
-| `librefang-hands` | Tool/hand system for agent actions |
-| `librefang-extensions` | Extension loading, vault for secrets |
-| `librefang-memory` | Conversation and long-term memory storage |
-| `librefang-wire` | Wire protocol types for inter-service communication |
-| `librefang-migrate` | Database schema migrations |
-| `librefang-telemetry` | Observability infrastructure |
-
-## Authentication and Security
-
-The crate pulls in several cryptography-adjacent crates:
-
-- **`jsonwebtoken`** — JWT token issuance and validation for API authentication.
-- **`argon2`** — Password hashing for user credentials.
-- **`hmac`** + **`sha2`** — HMAC-based request signing or token verification.
-- **`subtle`** — Constant-time comparisons to prevent timing attacks during auth checks.
-- **`governor`** — Rate limiting middleware to protect endpoints from abuse.
+| `axum` / `tower` / `tower-http` | HTTP framework, middleware stack (CORS, compression, tracing, etc.) |
+| `utoipa` | OpenAPI schema generation from handler signatures |
+| `governor` | Request rate limiting |
+| `jsonwebtoken`, `argon2`, `hmac`, `sha2` | Authentication — JWT issuance/verification, password hashing, HMAC signatures |
+| `tokio` / `tokio-stream` | Async runtime and stream utilities for WebSocket handling |
+| `portable-pty` | PTY allocation for interactive terminal sessions over WebSocket |
+| `dashmap` | Concurrent maps for in-process state (active sessions, connections) |
+| `include_dir` | Embeds the React dashboard static assets at compile time |
+| `schemars` | JSON Schema generation for API types (used alongside `utoipa`) |
 
 ## Feature Flags
 
-Features control which channel backends and telemetry capabilities are compiled in.
+The crate uses feature flags extensively to control which communication channels are compiled in, plus an optional telemetry stack. All features are additive.
 
 ### Channel Features
 
-Each `channel-*` feature forwards directly to the corresponding feature in `librefang-channels`. Available channels include:
+Each `channel-*` feature is forwarded directly to the corresponding feature in `librefang-channels`. The supported channels are:
 
 `telegram`, `discord`, `slack`, `matrix`, `email`, `voice`, `webhook`, `whatsapp`, `signal`, `teams`, `mattermost`, `irc`, `google-chat`, `twitch`, `rocketchat`, `zulip`, `xmpp`, `bluesky`, `feishu`, `line`, `mastodon`, `messenger`, `reddit`, `revolt`, `viber`, `flock`, `guilded`, `keybase`, `nextcloud`, `nostr`, `pumble`, `threema`, `twist`, `webex`, `dingtalk`, `discourse`, `gitter`, `gotify`, `linkedin`, `mumble`, `ntfy`, `qq`, `wechat`, `wecom`
 
@@ -68,60 +53,75 @@ Each `channel-*` feature forwards directly to the corresponding feature in `libr
 
 | Feature | Description |
 |---|---|
-| `all-channels` | Enables all 44 channel backends. Included in `default`. |
-| `mini` | Enables 12 core channels (Telegram, Discord, Slack, Matrix, Email, Webhook, WhatsApp, Signal, Teams, Mattermost, IRC, Google Chat). |
-| `telemetry` | Enables OpenTelemetry tracing export and Prometheus metrics. Included in `default`. |
-| `default` | `all-channels` + `telemetry` |
+| `default` | Enables `all-channels` + `telemetry` |
+| `all-channels` | Every channel listed above |
+| `all-channels-no-email` | All channels except `email`. Required for Android targets where `rustls-platform-verifier` lacks `new_with_extra_roots` support. |
+| `mini` | 12 core channels: telegram, discord, slack, matrix, email, webhook, whatsapp, signal, teams, mattermost, irc, google-chat |
+| `telemetry` | OpenTelemetry tracing export + Prometheus metrics endpoint (`opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, `tracing-opentelemetry`, `metrics`, `metrics-exporter-prometheus`) |
 
-To build a minimal binary with only the channels you need:
+### Selecting a Minimal Build
+
+To compile only the channels you need and skip telemetry:
 
 ```toml
-# In a workspace override or direct dependency
+# In the workspace or overriding librefang-api
 [dependencies]
-librefang-api = { path = "...", default-features = false, features = ["channel-telegram", "channel-discord"] }
+librefang-api = { path = "librefang-api", default-features = false, features = [
+    "channel-telegram",
+    "channel-discord",
+] }
 ```
-
-### Telemetry Feature
-
-When enabled, pulls in `opentelemetry`, `opentelemetry-otlp`, `tracing-opentelemetry`, `metrics`, and `metrics-exporter-prometheus`. This adds an OTLP trace exporter and a Prometheus metrics endpoint to the running server.
 
 ## Build Script (`build.rs`)
 
-The build script performs three tasks:
+The build script performs three tasks at compile time:
 
-1. **Dashboard static directory scaffolding** — Ensures `static/react/` exists so the `include_dir!` macro (which embeds the React dashboard at compile time) never fails on fresh clones. The directory is gitignored because actual assets are either built from the dashboard subcrate via `npm run build` or downloaded at runtime to `~/.librefang/dashboard/`. When empty at compile time, the embedded bundle is a no-op and the runtime path is used instead.
+### 1. Static Dashboard Directory Scaffolding
 
-2. **Build metadata injection** — Captures three values and sets them as compile-time environment variables:
+Creates `static/react/` inside the crate root if it doesn't exist. This directory is gitignored and normally populated by building the React dashboard (or downloading release assets). `include_dir!` embeds whatever is present at compile time; when the directory is empty, the runtime falls back to serving assets from `~/.librefang/dashboard/`.
 
-   | Variable | Source | Example |
-   |---|---|---|
-   | `GIT_SHA` | `git rev-parse --short HEAD` | `a3f7c2d` |
-   | `BUILD_DATE` | `date -u +%Y-%m-%d` | `2025-01-15` |
-   | `RUSTC_VERSION` | `rustc --version` | `rustc 1.82.0` |
+### 2. Build Metadata Injection
 
-   These are available in code via `env!("GIT_SHA")`, `env!("BUILD_DATE")`, and `env!("RUSTC_VERSION")`, typically exposed through a `/api/version` or `/api/health` endpoint.
+Three environment variables are emitted and available to the binary via `env!()`:
 
-3. **Platform-specific dependency** — On Unix targets, `rustix` (with `process` feature) is included, likely for privileged process operations like UID/GID management or daemonization.
+| Variable | Source | Example Value |
+|---|---|---|
+| `GIT_SHA` | `git rev-parse --short HEAD` | `a3f9c12` |
+| `BUILD_DATE` | `date -u +%Y-%m-%d` | `2025-01-15` |
+| `RUSTC_VERSION` | `rustc --version` | `rustc 1.82.0` |
 
-## Dashboard Serving Strategy
+If any command fails (e.g., building outside a git repo), the variable defaults to `"unknown"`.
 
-The React dashboard follows a two-tier serving model:
+### Platform-Specific Dependency
 
-1. **Compile-time embed** — `include_dir = "0.7"` embeds the contents of `static/react/` into the binary. If the dashboard was built before the Rust crate, the assets are served directly from memory with zero filesystem dependencies.
+On Unix targets, the crate depends on `rustix` with the `process` feature. This is used for low-level process operations not covered by the standard library.
 
-2. **Runtime fallback** — If the embedded directory is empty (the default for fresh clones), the server falls back to serving from `~/.librefang/dashboard/`. This allows dashboard updates without recompiling the API binary.
+## Authentication and Security
 
-## Integration Points
+The dependency set indicates a multi-layered auth model:
 
-The API is the primary entry point for external consumers:
+- **Password hashing**: `argon2` for secure credential storage
+- **JWT**: `jsonwebtoken` for stateless token-based auth on API endpoints
+- **HMAC/SHA-256**: `hmac` + `sha2` for webhook signature verification and request integrity
+- **Constant-time comparison**: `subtle` for timing-safe equality checks (token comparison, signature validation)
+- **Rate limiting**: `governor` provides per-IP or per-key request throttling
 
-- **Dashboard UI** — Served as static files at the root path.
-- **REST API** — JSON endpoints under `/api/` for CRUD operations on agents, channels, skills, sessions, extensions, and configuration.
-- **WebSocket** — Real-time event streaming for agent output, session updates, and telemetry.
-- **OpenAPI spec** — Auto-generated via `utoipa`, likely served at `/api/docs/openapi.json` with a Swagger UI.
-- **Prometheus metrics** — When the `telemetry` feature is enabled, a `/metrics` endpoint exports runtime metrics.
-- **Terminal/PTY** — `portable-pty` is included, suggesting WebSocket-based terminal sessions for interactive agent debugging.
+## API Surface
+
+The crate exposes both REST and WebSocket endpoints. Based on the dependency set:
+
+- **REST endpoints** — CRUD operations for agent configuration, channel management, extension lifecycle, memory inspection, skill invocation, and LLM driver configuration. Schema documentation is auto-generated via `utoipa`.
+- **WebSocket endpoints** — Real-time event streaming, interactive terminal sessions (via `portable-pty`), and agent output streaming (via `tokio-stream`/`futures`).
+- **Dashboard** — The React frontend is embedded via `include_dir` and served as static files, with fallback to a user-local directory at runtime.
 
 ## Configuration
 
-The crate depends on both `toml` and `toml_edit`, indicating it reads structured TOML configuration files and also provides API endpoints to modify configuration persistently (using `toml_edit` to preserve comments and formatting when writing back).
+The crate uses `toml` and `toml_edit` for reading and modifying persistent configuration files. `toml_edit` preserves formatting and comments when writing back, making it suitable for user-editable config files that the API updates programmatically.
+
+## Migration
+
+`librefang-migrate` is included to run database schema migrations at startup, ensuring the storage layer is up to date before the API begins serving requests.
+
+## Testing
+
+Dev dependencies include `tempfile` for filesystem-based tests, `uuid` for generating test identifiers, and `http-body-util` for low-level HTTP body inspection in integration tests.

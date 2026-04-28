@@ -6,66 +6,52 @@ Memory substrate for the LibreFang Agent OS.
 
 ## Overview
 
-`librefang-memory` provides the persistence and state management layer for LibreFang agents. It abstracts storage operations behind a substrate that other modules can rely on for reading, writing, querying, and managing agent state across restarts and sessions.
+`librefang-memory` provides the persistence and retrieval layer for LibreFang agents. It serves as the "memory" component — responsible for storing, indexing, and recalling agent state, conversation history, and any other data that needs to survive across sessions or be shared between agent components.
 
-The crate acts as a foundational library — higher-level agent logic depends on it, but it does not itself depend on other LibreFang crates beyond `librefang-types`.
+## Purpose
 
-## Role in the System
+An agent operating system needs structured, queryable memory. This module abstracts the storage substrate so that the rest of the system can:
 
-```
-┌──────────────────────────┐
-│    Agent Logic Layer      │
-├──────────────────────────┤
-│  librefang-memory (this)  │
-├──────────────────────────┤
-│    librefang-types        │
-├──────────────────────────┤
-│   SQLite / Filesystem     │
-└──────────────────────────┘
-```
+- **Persist agent state** across restarts and sessions
+- **Recall prior interactions** and context
+- **Store and retrieve typed data** using the shared definitions from `librefang-types`
 
-This module sits between the agent logic and the underlying storage. It is responsible for durable state, working memory, and any structured data the agent needs to persist or recall.
+## Dependencies & What They Indicate
 
-## Key Dependencies and What They Suggest
-
-| Dependency | Purpose in This Module |
+| Dependency | Role |
 |---|---|
-| `rusqlite` | SQLite-backed persistent storage. Likely used for structured queries, indexes, and transactional state management. |
-| `serde` / `serde_json` / `rmp-serde` | Serialization in both JSON and MessagePack formats. Suggests the module handles serialization of arbitrary agent state, possibly with different format choices for different storage contexts. |
-| `sha2` | Cryptographic hashing. Used for content-addressed storage, integrity checks, or deduplication of stored entries. |
-| `uuid` | Unique identifier generation for memory entries, sessions, or transactions. |
-| `chrono` | Timestamps on memory entries, enabling time-based queries and expiration. |
-| `tokio` / `async-trait` | Async runtime support. Storage operations are non-blocking to integrate with the agent's async event loop. |
-| `reqwest` | HTTP client capability. May be used for remote memory backends, syncing state to a server, or fetching external data to cache locally. |
-| `tracing` | Instrumented logging for storage operations, useful for debugging agent behavior. |
-| `thiserror` | Typed error definitions for storage failures, corruption, or query errors. |
+| `rusqlite` | Primary storage backend — SQLite for embedded, file-based persistence |
+| `serde` / `serde_json` / `rmp-serde` | Serialization layer supporting both JSON and MessagePack formats |
+| `librefang-types` | Shared type definitions used across the LibreFang ecosystem |
+| `tokio` | Async runtime integration for non-blocking storage operations |
+| `sha2` | Cryptographic hashing — likely for content-addressable storage or integrity checks |
+| `uuid` | Unique identifiers for memory entries and records |
+| `chrono` | Timestamps for temporal indexing and queries |
+| `reqwest` | HTTP client — suggests optional remote storage or synchronization capability |
+| `tracing` | Structured logging and diagnostics |
+| `thiserror` | Ergonomic error type definitions |
+| `async-trait` | Async trait support for defining storage backends as pluggable interfaces |
 
 ## Architecture
 
-The module likely exposes one or more async traits or structs that represent a memory store. Consumers interact with these abstractions rather than raw SQL or file I/O.
+```mermaid
+graph TD
+    A[Agent Components] -->|read/write| M[librefang-memory]
+    M -->|persists to| S[SQLite Database]
+    M -->|serializes via| SE[serde / rmp-serde]
+    M -->|hashes with| H[sha2]
+    M -->|types from| T[librefang-types]
+    M -.->|optional sync| R[Remote Storage via reqwest]
+```
 
-### Expected Capabilities
-
-Based on the dependency profile:
-
-- **Key-value or document storage** backed by SQLite, with serialization handled transparently.
-- **Content-addressed entries** using SHA-2 hashing for deduplication or integrity verification.
-- **Time-indexed records** via `chrono` timestamps, supporting queries like "most recent" or "all entries since X."
-- **UUID-tagged entries** for unique identification across distributed or multi-agent scenarios.
-- **Error handling** with structured error types rather than panics or raw `Result<T, Box<dyn Error>>`.
+The module sits between agent components and the underlying storage. All memory operations go through this layer, which handles serialization, indexing, and retrieval.
 
 ## Integration Points
 
-This crate depends on `librefang-types` for shared type definitions — likely the shapes of memory entries, agent identifiers, or configuration structs that flow between modules.
+- **`librefang-types`** — This module consumes shared type definitions (agent messages, state structures, etc.) rather than defining its own, ensuring consistency across the system.
+- **Agent components** — Other modules in LibreFang read from and write to memory through the APIs this crate exposes.
+- **Filesystem** — SQLite databases are stored on disk, with `tempfile` used in tests for isolated, ephemeral storage.
 
-No other LibreFang crates depend on this module at the code level based on available call graph data, but at runtime, any module that needs durable state would bring it in as a dependency.
+## Testing
 
-## Development
-
-Run tests with:
-
-```bash
-cargo test -p librefang-memory
-```
-
-The `tempfile` dev-dependency is used in tests to create isolated temporary databases, ensuring tests don't pollute the filesystem or interfere with each other.
+The `tempfile` dev-dependency indicates that tests create isolated temporary databases. This ensures test runs are repeatable and don't pollute the development environment with leftover state files.

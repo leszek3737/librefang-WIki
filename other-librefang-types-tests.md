@@ -1,14 +1,17 @@
 # Other — librefang-types-tests
 
-# librefang-types-tests
+# librefang-types — Integration Tests
 
-Integration tests for the `librefang-types` crate. Two concerns live here: **round-trip contract tests** that lock the dashboard's TOML serializer to the kernel's deserializer, and **schema-dump diagnostics** for eyeballing `schemars`-generated JSON Schema output.
+## Purpose
 
-## Why these tests exist
+This module contains cross-boundary integration tests that guard against drift between two independent implementations of the same serialization contract:
 
-The dashboard (TypeScript) produces TOML via a visual agent-editor form. The kernel (Rust) reads that TOML into `AgentManifest`. If either side renames a field, changes an enum variant, or alters defaulting behavior, agents silently break at runtime. These tests catch that drift at build time by parsing the *exact* TOML the dashboard's serializer would emit and asserting the resulting Rust structs.
+1. **The dashboard's TypeScript serializer** (`crates/librefang-api/dashboard/src/lib/agentManifest.ts`) — produces TOML from a visual form editor in the browser.
+2. **The kernel's Rust deserializer** (`librefang_types::agent::AgentManifest`) — consumes that TOML on the server side.
 
-The schema-dump tests serve a different purpose: they're a low-friction way to inspect what `schemars` produces for key config types (`BudgetConfig`, `VaultConfig`, `KernelConfig`, `ResponseFormat`) without wiring up a full HTTP endpoint.
+Because these two code paths live in different languages and crates, there is no compile-time guarantee they stay in sync. The tests here encode the exact TOML the dashboard emits and assert the Rust side parses it correctly. Any field rename, type change, or structural shift will cause a build failure.
+
+A secondary set of tests exercises the `schemars`-generated JSON Schema output for key configuration types, serving as a live reference and sanity check for schema completeness.
 
 ---
 
@@ -16,66 +19,80 @@ The schema-dump tests serve a different purpose: they're a low-friction way to i
 
 ### `agent_form_roundtrip.rs`
 
-Mirror of the serializer rules in `crates/librefang-api/dashboard/src/lib/agentManifest.ts`. Each test constructs a TOML string matching what the dashboard form emits, deserializes it into `AgentManifest`, and asserts field values.
+All tests in this file follow the same pattern: embed a TOML literal matching dashboard output, deserialize it into an `AgentManifest`, and assert specific field values.
+
+#### Test coverage by complexity tier
 
 | Test | What it covers |
-|---|---|
-| `parses_form_minimum_viable_output` | Bare-minimum manifest: name, version, module, and a model block with provider + model name. |
-| `parses_form_full_output_with_capabilities_and_resources` | All basic sections populated: description, tags, skills, model options (temperature, max_tokens, system_prompt), resource quotas, and capabilities (network, shell, agent_spawn). |
-| `parses_form_with_advanced_sections` | Every advanced section filled: priority, session_mode, web_search_augmentation, schedule, exec_policy, thinking budget, autonomous config, routing tiers, fallback_models (array-of-tables), context_injection, and extended capability globs (memory_read, memory_write, agent_message, ofp_connect). |
-| `parses_form_response_format_json_schema` | Inline `ResponseFormat::JsonSchema` variant with name, schema, and strict flag. Validates that the tagged-enum TOML representation round-trips correctly. |
-| `omitting_optional_sections_uses_defaults` | Manifest with no resources or capabilities sections. Asserts that `ResourceQuota` and `ManifestCapabilities` fields fall back to their defaults (empty vecs, `None` for optional limits, `false` for booleans). |
+|------|---------------|
+| `parses_form_minimum_viable_output` | Bare-minimum manifest: `name`, `version`, `module`, and a `[model]` table with `provider` and `model`. Everything else omitted. |
+| `parses_form_full_output_with_capabilities_and_resources` | Mid-complexity manifest adding `description`, `tags`, `skills`, model tuning (`temperature`, `max_tokens`, `system_prompt`), `resources` quotas, and `capabilities` (network allowlist, shell commands, `agent_spawn`). |
+| `parses_form_with_advanced_sections` | Full-complexity manifest exercising every optional section: `priority`, `session_mode`, `web_search_augmentation`, `schedule`, `exec_policy`, `thinking`, `autonomous`, `routing`, `fallback_models`, and `context_injection`. |
+| `parses_form_response_format_json_schema` | The `response_format` field with the `JsonSchema` variant, including inline schema and `strict` flag. Validates tagged-enum deserialization. |
+| `omitting_optional_sections_uses_defaults` | Confirms that omitting `[resources]` and `[capabilities]` tables entirely produces sensible defaults (empty vectors, `false` booleans, `None` for optional quotas). |
 
-**Key types validated across these tests:**
+#### How to extend
 
-- `AgentManifest` — top-level config struct
-- `Priority` — enum (e.g. `High`)
-- `SessionMode` — enum (e.g. `New`)
-- `ResponseFormat::JsonSchema` — tagged enum variant carrying `serde_json::Value`
-- Optional advanced sections: `thinking`, `autonomous`, `routing` — each deserializes as `Option<T>`, so their absence must produce `None`
+When the dashboard form gains a new field or section:
+
+1. Update the TypeScript serializer in `agentManifest.ts`.
+2. Add or modify a TOML literal in the appropriate test here to mirror the new output.
+3. Assert the new field on the parsed `AgentManifest` struct.
+4. Run `cargo test -p librefang-types --test agent_form_roundtrip`.
+
+If the Rust struct hasn't been updated yet, the test will fail to compile or panic on a missing/wrong field — which is exactly the signal you want.
+
+---
 
 ### `schemars_poc.rs`
 
-Run with `--nocapture` to see output:
+Diagnostic tests that print `schemars`-generated JSON Schema (Draft 7) to stdout. These are **not** assertion-heavy — they exist for developer inspection during schema migration.
+
+Run with visible output:
 
 ```bash
 cargo test -p librefang-types --test schemars_poc -- --nocapture
 ```
 
-| Test | What it dumps |
-|---|---|
-| `dump_budget_config_schema` | `BudgetConfig` — straightforward struct, baseline for size comparison. |
-| `dump_vault_config_schema` | `VaultConfig` — contains `Option<PathBuf>`, useful for checking how filesystem paths render in JSON Schema. |
-| `full_kernel_config_schema_generates` | `KernelConfig` — end-to-end sanity check. Asserts >50 top-level properties and >50 nested definitions, confirming the full config surface is representable. |
-| `dump_response_format_schema` | `ResponseFormat` — tagged enum with a variant carrying `serde_json::Value`. This is a high-risk point for schema fidelity. |
+#### Tests
 
-These are not strict pass/fail contract tests (except `full_kernel_config_schema_generates`, which asserts minimum field counts). They exist for developer inspection during schema evolution.
+| Test | Type under schema | Notes |
+|------|-------------------|-------|
+| `dump_budget_config_schema` | `BudgetConfig` | Baseline struct. |
+| `dump_vault_config_schema` | `VaultConfig` | Contains `Option<PathBuf>` — verifies filesystem path rendering. |
+| `full_kernel_config_schema_generates` | `KernelConfig` | End-to-end sanity: asserts >50 top-level properties and >50 definitions. Catches regressions where the schema generation silently drops fields. |
+| `dump_response_format_schema` | `ResponseFormat` | Tagged enum carrying `serde_json::Value` — a known risk point for schema correctness. |
+
+These tests serve as a bridge between the hand-written JSON Schema currently used by the dashboard and the eventual goal of deriving schemas entirely from Rust types via `schemars`.
 
 ---
 
-## Relationship to the codebase
+## Relationship to the Rest of the Codebase
 
-```
-Dashboard (TS)                 Kernel (Rust)
-┌──────────────────┐           ┌─────────────────────┐
-│ agentManifest.ts  │──TOML──▶│ AgentManifest        │
-│ (serializer)      │          │ (serde deserializer) │
-└──────────────────┘           └─────────────────────┘
-        │                              │
-        └──── contract tested by ──────┘
-             agent_form_roundtrip.rs
+```mermaid
+graph LR
+    A[Dashboard TypeScript<br>agentManifest.ts] -->|emits TOML| B[agent_form_roundtrip<br>test literals]
+    B -->|parses via| C[librefang_types::<br>AgentManifest]
+    C -->|used by| D[Kernel runtime]
+    C -->|generates schema via| E[schemars]
+    E -->|dumped by| F[schemars_poc<br>test output]
 ```
 
-- **Upstream dependency**: `librefang-types` provides the `AgentManifest`, `Priority`, `SessionMode`, `ResponseFormat`, and all supporting structs.
-- **Cross-repo contract**: The TOML strings in these tests must be kept in sync with `agentManifest.ts`. If the dashboard serializer changes, the corresponding test here should be updated (or should fail, signaling the break).
-- **No outbound calls**: These tests are pure deserialization + assertion. No network, no filesystem, no database.
+- **Upstream dependency**: `librefang_types` — the tests import `AgentManifest`, `Priority`, `SessionMode`, `ResponseFormat`, and config structs from this crate.
+- **Contract counterpart**: The TypeScript file `agentManifest.ts` is the other party in the serialization contract. Changes there must be mirrored here.
+- **No outgoing calls**: These tests are self-contained; they deserialize in-memory strings and assert on the resulting structs. No filesystem, network, or database interaction.
 
-## Adding a new round-trip test
+---
 
-When the dashboard form gains a new field or section:
+## Running
 
-1. Add a test case (or extend an existing one) with the exact TOML the dashboard will emit.
-2. Assert the deserialized field values and any defaulting behavior.
-3. If the field uses a new enum variant or struct, verify it appears correctly in the parsed output.
+```bash
+# All integration tests in this crate
+cargo test -p librefang-types
 
-For schema work, add a `dump_*` test to `schemars_poc.rs` and inspect the output. If the type is already covered by `KernelConfig`, the `full_kernel_config_schema_generates` test will pick up new definitions automatically.
+# Only the round-trip tests
+cargo test -p librefang-types --test agent_form_roundtrip
+
+# Schema dumps with visible output
+cargo test -p librefang-types --test schemars_poc -- --nocapture
+```

@@ -2,7 +2,7 @@
 
 # librefang-cli
 
-The command-line interface for LibreFang Agent OS. Produces the `librefang` binary, which serves as the primary entry point for running agents, managing configurations, performing migrations, and interacting with the system's skill and memory subsystems.
+The command-line interface for LibreFang Agent OS. This crate produces the `librefang` binary — the primary way operators interact with the agent system. It acts as the composition root, pulling together the kernel, API, channels, skills, memory, extensions, and runtime into a single executable.
 
 ## Architecture
 
@@ -12,105 +12,116 @@ graph TD
     CLI --> API[librefang-api]
     CLI --> Channels[librefang-channels]
     CLI --> Runtime[librefang-runtime]
-    CLI --> Skills[librefang-skills]
     CLI --> Memory[librefang-memory]
+    CLI --> Skills[librefang-skills]
     CLI --> Extensions[librefang-extensions]
     CLI --> Migrate[librefang-migrate]
     CLI --> Types[librefang-types]
-    CLI --> TUI[ratatui TUI]
-    CLI --> Telemetry[OpenTelemetry]
+    API --> Types
+    Channels --> Types
+    Kernel --> Types
 ```
 
-The CLI aggregates nearly every library crate in the workspace. It is a thick frontend: argument parsing, configuration loading, telemetry setup, and orchestration all happen here before delegating to the underlying libraries.
+The CLI itself contains minimal business logic. Its job is wiring: parsing command-line arguments, loading configuration, initializing subsystems, and delegating to the appropriate library crate.
 
 ## Feature Flags
 
-| Feature | Default | Effect |
-|---------|---------|--------|
-| `default` | ✓ | Enables `all-channels` and `telemetry` |
-| `all-channels` | ✓ (via default) | Activates all channel backends in `librefang-api` |
-| `mini` | ✗ | Minimal build using `librefang-api/mini` — only essential channel support |
-| `telemetry` | ✓ (via default) | Enables OpenTelemetry tracing exports via `opentelemetry`, `opentelemetry_sdk`, and `tracing-opentelemetry` |
+Features control which communication channels and optional subsystems are compiled in. They map directly to features in `librefang-api` and `librefang-channels`.
 
-To build a slim binary with no telemetry and minimal channel support:
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `default` | ✓ | Enables all channels plus telemetry |
+| `all-channels` | — | All communication channels |
+| `mini` | — | Minimal channel subset for constrained environments |
+| `android` | — | All channels except email (avoids a rustls-platform-verifier incompatibility on Android) |
+| `telemetry` | via default | OpenTelemetry tracing export via `tracing-opentelemetry` |
+
+The Android exclusion exists because `rustls-connector` 0.23.0 combined with `rustls-platform-verifier` 0.7.0 does not implement `Verifier::new_with_extra_roots` on Android targets.
+
+To build a minimal binary:
 
 ```bash
-cargo build -p librefang-cli --no-default-features --features mini
+cargo build --package librefang-cli --no-default-features --features mini
 ```
 
 ## Build Script (`build.rs`)
 
-The build script performs four tasks at compile time:
+The build script runs three tasks at compile time:
 
-1. **Git hooks configuration** — Runs `git config core.hooksPath scripts/hooks` so that all developers share the same hook scripts from the repository on their first build. Failures are silently ignored (e.g., outside a git checkout).
+1. **Git hooks configuration** — Sets `core.hooksPath` to `scripts/hooks` so all developers share the same hooks automatically on first build.
 
-2. **Git commit hash** — Captures the short SHA via `git rev-parse --short HEAD` and exposes it as the `GIT_SHA` environment variable, embedded into the binary for `--version` output.
+2. **Version metadata** — Injects three environment variables available at runtime via `env!()`:
+   - `GIT_SHA` — Short commit hash (e.g., `a3f7c21`), or `"unknown"` outside a git tree.
+   - `BUILD_DATE` — UTC date in `YYYY-MM-DD` format.
+   - `RUSTC_VERSION` — Full rustc version string.
 
-3. **Build date** — Captures the UTC date via `date -u +%Y-%m-%d` and embeds it as `BUILD_DATE`.
+These are typically displayed in `--version` output or diagnostic logs.
 
-4. **Rustc version** — Captures `rustc --version` output and embeds it as `RUSTC_VERSION`.
-
-All three embedded values fall back to `"unknown"` when the commands fail (e.g., building from a tarball without git installed).
-
-These values are accessed in source via `env!("GIT_SHA")`, `env!("BUILD_DATE")`, and `env!("RUSTC_VERSION")`.
-
-## Key Dependencies and Their Roles
+## Key Dependencies
 
 ### CLI Framework
-- **clap** / **clap_complete** — Argument parsing and shell completion generation. The CLI uses the derive pattern; subcommands map to the major functional areas (agent lifecycle, migrations, configuration, etc.).
+- **clap** / **clap_complete** — Argument parsing and shell completion generation.
 
-### Terminal Output
-- **ratatui** — Full terminal UI rendering for interactive modes (e.g., agent monitoring dashboards, conversation views).
-- **colored** — Colored stdout/stderr output for status messages and logs.
+### TUI
+- **ratatui** — Terminal user interface rendering. Used for interactive dashboards or real-time agent monitoring.
 
 ### Async Runtime
-- **tokio** — The async runtime driving the agent loop, channel listeners, and API server.
+- **tokio** — Async runtime. The binary uses the multi-threaded runtime.
+- **tikv-jemallocator** (non-MSVC only) — Replaces the system allocator for improved performance on Linux/macOS. Disabled with `disable_initial_exec_tls` to avoid issues in certain linking contexts.
 
-### Observability
-- **tracing** / **tracing-subscriber** — Structured logging throughout the application.
-- **opentelemetry** / **opentelemetry_sdk** / **tracing-opentelemetry** *(optional, via `telemetry` feature)* — Export traces to an OpenTelemetry-compatible backend.
-
-### Internationalization
-- **fluent** / **unic-langid** — Localization framework for user-facing CLI messages. Translation files are loaded at runtime based on the system locale.
-
-### Storage
-- **rusqlite** — Direct SQLite access for local databases (agent state, memory stores).
-- **toml** / **toml_edit** — Reading and programmatically editing TOML configuration files while preserving formatting and comments.
+### Storage & Data
+- **rusqlite** — Embedded SQLite for local state persistence.
+- **librefang-memory** — Agent memory subsystem.
+- **librefang-migrate** — Database migration management.
 
 ### Networking
-- **reqwest** *(blocking feature)* — Synchronous HTTP client for operations like registration, update checks, or downloading skill packages where async isn't necessary.
-- **rustls** — TLS backend for secure connections.
+- **reqwest** (blocking feature) — Used for synchronous HTTP calls during setup or bootstrap operations.
+- **rustls** — TLS backend for secure channel communication.
 
-### System
-- **libc** — Low-level system calls (signal handling, process management).
-- **tikv-jemallocator** *(non-MSVC targets only)* — Replaces the system allocator for improved performance on Linux/macOS.
-- **open** — Opens URLs or files in the user's default application (e.g., opening a dashboard in the browser).
-- **zeroize** — Secure memory zeroing for sensitive data (API keys, tokens).
+### Observability
+- **tracing** / **tracing-subscriber** — Structured logging.
+- **opentelemetry** / **tracing-opentelemetry** (optional) — Distributed trace export when the `telemetry` feature is enabled.
 
-## Memory Allocator
+### Localization
+- **fluent** / **unic-langid** — Internationalization framework for user-facing messages.
 
-On non-Windows targets, the binary uses tikv-jemallocator with `disable_initial_exec_tls` to avoid issues with `dlopen`. This is configured in the binary's entry point, not in the library crates.
+### Configuration
+- **toml** / **toml_edit** — Reading and programmatically modifying TOML config files. `toml_edit` preserves formatting and comments when writing back.
+- **dirs** — Standard OS directories for config/cache/data paths.
 
-## Configuration Loading
+## Crate Relationships
 
-The CLI reads configuration from the standard XDG config directory (via the **dirs** crate), typically `~/.config/librefang/`. Configuration is TOML-based, loaded and validated through `librefang-types`, and hot-reloadable in long-running processes via **arc-swap**.
+The CLI sits at the top of the dependency tree. It depends on every other LibreFang crate but nothing depends on it. This is intentional — all reusable logic lives in library crates, keeping the binary thin and testable.
 
-## Relationship to Other Crates
+| Crate | Role in CLI |
+|-------|-------------|
+| `librefang-kernel` | Core agent lifecycle and orchestration |
+| `librefang-api` | HTTP/WebSocket API surface |
+| `librefang-channels` | Communication channel implementations |
+| `librefang-runtime` | Process registry and runtime management |
+| `librefang-skills` | Agent capability definitions |
+| `librefang-extensions` | Extension loading and management |
+| `librefang-memory` | Persistent memory and context |
+| `librefang-migrate` | Database schema migrations at startup |
+| `librefang-types` | Shared type definitions |
 
-| Crate | How the CLI Uses It |
-|-------|-------------------|
-| `librefang-kernel` | Core agent lifecycle management and orchestration |
-| `librefang-api` | HTTP/WebSocket API server for external control |
-| `librefang-channels` | Channel backends for communicating with LLM providers and external services |
-| `librefang-runtime` | Process registry and runtime execution environment |
-| `librefang-skills` | Skill discovery, loading, and execution |
-| `librefang-extensions` | Extension system for plugins and addons |
-| `librefang-memory` | Agent memory storage and retrieval (short-term, long-term, episodic) |
-| `librefang-migrate` | Database schema migrations on startup |
-| `librefang-types` | Shared types, configuration structs, error types |
+## Building
 
-## Development Notes
+Standard Cargo build. The binary name is `librefang`:
 
-- The binary entry point is `src/main.rs`. It initializes the tokio runtime, sets up tracing subscribers, loads configuration, runs pending migrations via `librefang-migrate`, and then dispatches to the appropriate subcommand handler.
-- When adding a new subcommand, define it in the clap App derive structure and implement the handler in the appropriate module within `src/`.
-- Shell completions can be generated at runtime via the `clap_complete` integration — users can source completions for their shell without installing extra tooling.
+```bash
+# Full build with all features
+cargo build --package librefang-cli
+
+# Release build
+cargo build --release --package librefang-cli
+
+# Cross-compile for Android (NDK required)
+cargo build --target aarch64-linux-android --no-default-features --features android
+```
+
+The resulting binary is at `target/debug/librefang` or `target/release/librefang`.
+
+## Testing
+
+Dev-dependencies include `tempfile` for tests that need isolated filesystem operations. Tests run via `cargo test --package librefang-cli`.
