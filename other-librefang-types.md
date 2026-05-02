@@ -2,93 +2,118 @@
 
 # librefang-types
 
-Core type definitions and traits shared across the LibreFang Agent OS.
+Core type definitions, traits, and shared data structures for the LibreFang Agent OS.
 
 ## Purpose
 
-This crate is the foundational type library for LibreFang. It contains no business logic or runtime behavior — only data structures, error types, trait definitions, and serialization helpers that other crates in the workspace depend on. Every other module in LibreFang references this crate for shared vocabulary.
+This crate acts as the shared vocabulary of the entire LibreFang system. It defines the data structures, enums, traits, error types, and configuration schemas that all other crates consume. It contains **no business logic, no I/O, and no side effects** — purely type definitions and their serialization/deserialization support.
 
-Because it has no incoming or outgoing call edges and no execution flows, it is a pure leaf dependency in the compile graph. It can be reviewed, tested, and versioned independently of any agent runtime.
+Because every other crate in the workspace depends on `librefang-types`, changes here have wide-reaching impact. Treat it as a stable contract layer.
 
-## Dependency Rationale
+## Position in the Architecture
 
-The dependencies reveal the domains this crate covers:
+```mermaid
+graph TD
+    A[librefang-agent] --> T[librefang-types]
+    B[librefang-comms] --> T
+    C[librefang-crypto] --> T
+    D[other workspace crates] --> T
+    T --> S[serde / serde_json]
+    T --> SC[schemars]
+```
 
-| Dependency | Purpose |
-|---|---|
-| `serde`, `serde_json`, `toml` | Serialization formats for messages, config, and persistence |
-| `chrono`, `uuid` | Timestamps and unique identifiers for events and agents |
-| `thiserror` | Ergonomic error type derivation |
-| `ed25519-dalek`, `sha2`, `hex`, `zeroize` | Cryptographic types — Ed25519 keys, SHA digests, secure memory handling |
-| `fluent`, `unic-langid` | Internationalization types and language identifiers |
-| `regex-lite` | Pattern types for validation rules |
-| `schemars` | JSON Schema generation from Rust types (enables `chrono` and `uuid1` features so generated schemas understand those types) |
-| `async-trait` | Async trait definitions for plugin interfaces or transport abstractions |
-| `dirs` | Standard directory path constants |
-| `tracing` | Span/event types for structured logging |
+All workspace crates import from this module. It depends only on external libraries, never on sibling crates.
 
-Dev dependencies (`rmp-serde`, `tempfile`) support unit tests that verify serialization round-trips through MessagePack and temporary file I/O.
+## Domain Areas
 
-## Type Domains
-
-Based on the dependency set, this crate defines types across these domains:
+The types in this crate are organized around several domains, each informed by its dependencies.
 
 ### Identity and Cryptography
 
-Types for Ed25519 key pairs, public keys, signatures, and SHA-256 digests. The `zeroize` dependency ensures secret key material can be securely cleared from memory. These types wrap `ed25519-dalek` primitives with serde support so they can be transmitted and stored.
+Dependencies: `ed25519-dalek`, `sha2`, `hex`, `zeroize`
 
-### Messaging and Events
-
-Request/response envelopes, event payloads, and message headers using `uuid` for correlation IDs and `chrono` for timestamps. All message types derive `Serialize` and `Deserialize`.
+Defines types related to agent identity, key material, and signature verification. Key types likely include agent IDs, public/private key wrappers, and signature structs. The `zeroize` dependency indicates that secret key material is securely cleared from memory when dropped.
 
 ### Configuration
 
-Structured config types parsed from TOML files. The `dirs` crate provides standard paths (config dir, data dir) as constants or helper functions.
+Dependencies: `toml`, `dirs`, `serde`
 
-### Error Handling
+Configuration structs that deserialize from TOML files. These define the agent's runtime settings, connection parameters, and feature flags. The `dirs` crate provides platform-standard config directory paths.
 
-A hierarchy of error types using `thiserror` — covering serialization failures, crypto errors, validation errors, and I/O errors. These are designed to be composable so consuming crates can use `From` conversions.
+### Messaging and Protocol
 
-### Localization
+Dependencies: `serde`, `serde_json`, `chrono`, `uuid`
 
-Types for language identifiers (`unic-langid`) and Fluent localization resources. These allow the agent OS to produce localized status messages and error descriptions.
+Message envelopes, request/response types, and protocol headers shared between agents and the control plane. Timestamps (`chrono`) and correlation IDs (`uuid`) are first-class citizens in these types.
+
+### Internationalization
+
+Dependencies: `fluent`, `unic-langid`
+
+Language identifiers and localized string types. The agent supports multiple languages for status messages, error descriptions, and user-facing output.
+
+### Error Types
+
+Dependencies: `thiserror`
+
+Domain-specific error enums with `std::error::Error` implementations. These are the canonical error types returned across crate boundaries, enabling consistent error handling without coupling crates to each other's internals.
+
+### Trait Definitions
+
+Dependencies: `async-trait`
+
+Shared async traits that define the interfaces components must implement. These enable dependency injection and testability across crates — for example, a transport trait, a storage trait, or a key provider trait.
 
 ### Schema Generation
 
-Types annotated with `schemars` derive macros so JSON Schemas can be auto-generated. This is useful for API documentation, validation, and interop with external tooling.
+Dependency: `schemars` (with `chrono` and `uuid1` features)
 
-## Traits
+All serializable types derive `JsonSchema`, enabling automatic JSON Schema generation. This supports configuration validation, API documentation, and external tooling integration.
 
-The `async-trait` dependency indicates async trait definitions. These likely define interfaces that agent plugins or transport backends must implement, such as:
+## Usage
 
-- Message send/receive contracts
-- Authentication or key exchange protocols
-- Plugin lifecycle hooks
+Add to your crate's `Cargo.toml`:
 
-These traits live in the types crate so that implementations and consumers both depend on the same abstraction without creating circular dependencies.
-
-## Usage in the Workspace
-
-```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  agent-bin   │────▶│  librefang-  │────▶│  librefang-  │
-│              │     │  runtime     │     │  types       │
-└──────────────┘     └──────────────┘     └──────────────┘
-┌──────────────┐     ┌──────────────┐            ▲
-│  librefang-  │────▶│  librefang-  │────────────┘
-│  crypto      │     │  transport   │
-└──────────────┘     └──────────────┘
+```toml
+[dependencies]
+librefang-types = { path = "../librefang-types" }
 ```
 
-Every other crate in the workspace depends on `librefang-types` but `librefang-types` depends on nothing within the workspace. This unidirectional dependency graph keeps the type layer stable and avoids circular imports.
+Import types as needed:
+
+```rust
+use librefang_types::config::AgentConfig;
+use librefang_types::error::AgentError;
+use librefang_types::identity::AgentId;
+```
 
 ## Conventions
 
-- All public types derive `Serialize`, `Deserialize`, `Debug`, and `Clone` unless there is a specific reason not to (e.g., secret key types omit `Debug`).
-- Error types implement `std::error::Error` and `Display` via `thiserror`.
-- Types that are part of a public API surface derive `JsonSchema` from `schemars`.
-- Secret-bearing structures use `zeroize::Zeroize` on drop.
+| Convention | Reason |
+|---|---|
+| All serializable types derive `Serialize`, `Deserialize`, and `JsonSchema` | Consistency across wire formats and schema generation |
+| Error types use `thiserror` derive macros | Ergonomic, zero-cost error definitions |
+| Secret-bearing types implement `Zeroize` | Prevent key material from lingering in memory |
+| Enums use `#[serde(rename_all = "snake_case")]` | Stable, consistent JSON/TOML representation |
 
 ## Testing
 
-Tests focus on serialization round-trips (JSON, TOML, and MessagePack via `rmp-serde`) and schema generation correctness. The `tempfile` dev dependency supports tests that verify config file parsing from disk.
+Dev-dependencies include `rmp-serde` (MessagePack serialization) and `tempfile`, suggesting tests verify that types round-trip correctly through multiple serialization formats and that file-based config loading behaves as expected.
+
+Run tests from the workspace root:
+
+```bash
+cargo test -p librefang-types
+```
+
+## When to Modify This Crate
+
+**Add to this crate when:**
+- A new data structure is shared between two or more workspace crates
+- A new trait defines a cross-crate interface
+- A new error variant needs to be propagated across crate boundaries
+
+**Do not add to this crate:**
+- Business logic or stateful operations
+- I/O, networking, or filesystem access (beyond type definitions)
+- Crate-specific helpers that only one consumer needs

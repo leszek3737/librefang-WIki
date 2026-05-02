@@ -6,40 +6,85 @@ OpenTelemetry + Prometheus metrics instrumentation for LibreFang.
 
 ## Overview
 
-`librefang-telemetry` is a utility crate that provides observability primitives for the LibreFang project. It builds on the [`metrics`](https://docs.rs/metrics) facade to define domain-specific counters, gauges, and histograms that other crates in the workspace record during runtime.
+`librefang-telemetry` provides the metrics layer for the LibreFang system. It is a thin library crate that defines the application-level metrics used throughout the codebase — counters, gauges, histograms, and labeled instruments — using the [`metrics`](https://docs.rs/metrics) facade crate.
+
+Because it depends on the `metrics` facade rather than a concrete exporter, the actual backend (Prometheus, OpenTelemetry, etc.) is selected at the binary level. This crate's job is to **declare** what gets measured; the application binary wires up the exporter.
 
 ## Dependencies
 
-| Dependency | Purpose |
+| Crate | Purpose |
 |---|---|
-| `metrics` (workspace) | The `metrics` facade crate — provides the `counter!`, `gauge!`, `histogram!`, and `describe_*!` macros used to define and emit metrics. |
-| `librefang-types` | Shared domain types. Telemetry labels and metric dimensions reference types defined here (e.g., game identifiers, player states). |
+| `metrics` (workspace) | Metrics facade — provides macros like `counter!`, `gauge!`, `histogram!`, and the `Metrics` trait for custom instrumentation |
+| `librefang-types` | Shared domain types used as labels or keys in metrics (e.g., game identifiers, session types) |
+
+## Architecture
+
+```mermaid
+graph LR
+    A[librefang-telemetry] -->|defines instruments| B["metrics facade (macros)"]
+    A -->|uses types as labels| C[librefang-types]
+    D[Application Binary] -->|depends on| A
+    D -->|wires exporter| E["metrics-exporter-prometheus / opentelemetry"]
+    B -.->|dispatches to| E
+```
+
+The crate itself has no runtime behavior. It contains no `main`, no async runtime, and no side effects. It exists solely to:
+
+1. **Centralize metric definitions** so that metric names, labels, and units are consistent across all LibreFang components.
+2. **Depend on `librefang-types`** so that domain types can be used as metric labels without duplicating definitions.
+
+## Usage
+
+Other crates in the workspace import `librefang-telemetry` and call into the `metrics` macros it exposes or wraps. The concrete exporter is configured in the final binary (e.g., `librefang-server`).
+
+### Wiring up the exporter (binary level)
+
+The binary crate selects and installs a metrics exporter. For example, with a Prometheus exporter:
+
+```rust
+// In the application binary — not in this crate
+use metrics_exporter_prometheus::PrometheusBuilder;
+
+let recorder = PrometheusBuilder::new().build_recorder();
+metrics::set_boxed_recorder(Box::new(recorder)).unwrap();
+```
+
+### Recording metrics (library level)
+
+Components throughout the codebase call the `metrics` macros directly or via helpers defined in this crate:
+
+```rust
+use metrics::counter;
+
+counter!("connections_total", "protocol" => "tcp").increment(1);
+```
+
+Because `librefang-telemetry` centralizes the metric naming conventions, prefer importing from this crate when it re-exports or wraps the `metrics` macros, ensuring namespacing stays consistent.
+
+## Metric Naming Conventions
+
+All metrics in LibreFang should follow these conventions to ensure uniformity:
+
+- **Prefix**: Metrics are prefixed with a namespace (e.g., `librefang_`) to avoid collisions when exported.
+- **Suffixes**: Use standard suffixes — `_total` for counters, `_seconds` for time-based histograms, `_bytes` for size-based instruments.
+- **Labels**: Use types from `librefang-types` where applicable to keep label values consistent and type-safe.
 
 ## Role in the Workspace
 
-This crate sits alongside `librefang-types` as a leaf dependency: other workspace crates depend on it, but it does not depend on any application or server crate. The dependency direction is:
+This crate sits in the "other" category — it is not a service or a core domain crate. It is a shared utility that any crate needing observability can depend on without pulling in a concrete metrics backend.
 
-```
-librefang-server  ──►  librefang-telemetry  ──►  librefang-types
-librefang-game    ──►  librefang-telemetry  ──►  librefang-types
-       ...                (records metrics)        (shared types)
-```
+| Aspect | Detail |
+|---|---|
+| **Layer** | Cross-cutting / infrastructure |
+| **Depends on** | `librefang-types`, `metrics` |
+| **Depended on by** | Any workspace crate that emits metrics |
+| **Runtime** | None — compile-time definitions only |
 
-Other crates call into `librefang-telemetry` at key points in their execution (connection handling, game events, errors) to record measurements. This crate itself makes no outgoing calls to other workspace modules.
+## Contributing
 
-## Usage Pattern
+When adding new metrics:
 
-Consumers import this crate and call its metric-registration functions at startup (to describe and initialize metrics), then use the `metrics` macros or helper functions throughout their code paths to emit data points:
-
-```rust
-// At application startup — registers and describes metrics
-librefang_telemetry::install();
-
-// During runtime — record a measurement
-counter!("librefang_connections_total", "protocol" => "tcp").increment(1);
-```
-
-## Notes
-
-- This crate does **not** configure an exporter. The choice of Prometheus endpoint, OpenTelemetry push/pull, or console output is left to the final binary crate, which pulls in the appropriate `metrics-exporter-*` implementation.
-- Because the `metrics` crate uses a global receiver, calls made before an exporter is installed are no-ops — tests and benchmarks can run without any telemetry backend.
+1. Add the metric definition in this crate to keep naming centralized.
+2. Use types from `librefang-types` for labels where possible.
+3. Document the metric's purpose, unit, and expected labels.
+4. Do **not** add a dependency on a specific exporter in this crate — that belongs in the binary.

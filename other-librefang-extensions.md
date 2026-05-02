@@ -2,134 +2,114 @@
 
 # librefang-extensions
 
-Extension and integration system for LibreFang. Provides three major capabilities:
+Extension and integration system for LibreFang, providing three core capabilities: one-click MCP (Model Context Protocol) server setup, a secure credential vault, and OAuth2 PKCE authentication flows.
 
-- **One-click MCP server setup** — automated configuration and lifecycle management for MCP (Model Context Protocol) servers
-- **Credential vault** — encrypted storage with OS keyring integration and a portable AES-256-GCM file-based fallback
-- **OAuth2 PKCE** — Authorization Code Flow with PKCE for secure third-party authentication
+## Purpose
+
+This crate centralizes all "external-facing" integration concerns that LibreFang needs to interact with third-party services and tooling. Rather than scattering credential management, server provisioning, and auth flows across the codebase, `librefang-extensions` provides a unified, well-tested surface for:
+
+- **Storing and retrieving secrets** through an OS-native keyring with a transparent encrypted-file fallback.
+- **Bootstrapping MCP servers** with minimal user interaction ("one-click" setup).
+- **Completing OAuth2 authorization code flows with PKCE**, handling the cryptographic challenge construction and token exchange.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[librefang-extensions] --> B[MCP Server Setup]
-    A --> C[Credential Vault]
-    A --> D[OAuth2 PKCE]
-    C --> E{OS Keyring Available?}
-    E -->|Yes| F[keyring crate<br>libsecret / Keychain / Credential Manager]
-    E -->|No| G[AES-256-GCM File Store]
-    G --> H[Argon2 KDF]
-    G --> I[Encrypted file on disk]
-    D --> J[Axum callback server]
-    D --> K[reqwest HTTP client]
+    subgraph librefang-extensions
+        Vault[Credential Vault]
+        MCP[MCP Server Setup]
+        OAuth[OAuth2 PKCE]
+    end
+
+    Vault -->|encrypted at rest| FileStore[File-based Store]
+    Vault -->|when available| OSKeyring[OS Keyring]
+    Vault -->|key derivation| Argon2["Argon2 → AES-256-GCM"]
+    OSKeyring -.->|libsecret / Keychain / Credential Manager| Platform[Platform Backend]
+
+    OAuth -->|PKCE challenge| SHA256[SHA-256 + Base64url]
+    OAuth -->|token exchange| HTTP[reqwest HTTP Client]
+
+    MCP --> Types[librefang-types]
+    Vault --> Types
+    OAuth --> Types
 ```
+
+All three subsystems depend on `librefang-types` for shared data structures and error types, keeping the interface consistent with the rest of the LibreFang ecosystem.
 
 ## Key Components
 
 ### Credential Vault
 
-Secure storage for sensitive credentials (API keys, tokens, certificates).
+The vault (`vault.rs`) provides secure, persistent storage for tokens, API keys, and other secrets. It uses a dual-backend strategy:
 
-**Backend selection is automatic and transparent:**
+1. **OS Keyring** (preferred) — When compiled for a supported target, secrets are stored in the platform's native credential store:
+   - **macOS**: Keychain
+   - **Windows**: Credential Manager
+   - **Linux (glibc)**: libsecret
 
-| Platform | Primary Backend | Fallback |
-|----------|----------------|----------|
-| Linux (glibc) | OS keyring via `libsecret` | AES-256-GCM file |
-| macOS | macOS Keychain | AES-256-GCM file |
-| Windows | Windows Credential Manager | AES-256-GCM file |
-| Linux (musl) | *not available* | AES-256-GCM file |
-| Android | *not available* | AES-256-GCM file |
+2. **AES-256-GCM File Store** (fallback) — When no OS keyring backend is available (e.g., musl-static or Android cross builds), the vault transparently falls back to an encrypted file stored on disk.
 
-The vault implementation lives in `vault.rs`. The `os_keyring` helper attempts to create a `keyring::Entry` at compile time based on target configuration. When the `keyring` crate is not compiled in (musl-static or Android cross builds), the vault seamlessly falls back to the file-based store — no code changes required.
+**Key derivation**: Master keys are derived from a user-provided passphrase using Argon2, then used to encrypt individual entries with AES-256-GCM. The `zeroize` crate ensures key material is cleared from memory after use.
 
-**Encryption details for the file-based store:**
-
-- **KDF:** Argon2 for deriving encryption keys from master passwords
-- **Encryption:** AES-256-GCM with random nonces per operation
-- **Memory safety:** `zeroize` is used to clear sensitive key material from memory after use
-
-### OAuth2 PKCE
-
-Implements the Authorization Code Flow with Proof Key for Code Exchange (PKCE), suitable for public clients that cannot securely store a client secret.
-
-Key implementation details drawn from dependencies:
-
-- **`axum`** — spawns a temporary local HTTP server to receive the OAuth2 callback with the authorization code
-- **`reqwest`** — makes the token exchange request to the provider's token endpoint
-- **`sha2` + `base64`** — generates the `code_verifier` (cryptographic random) and `code_challenge` (SHA-256 hash, base64url-encoded) per RFC 7636
-- **`rand`** — cryptographically secure random generation for `code_verifier` and state parameters
+**Concurrent access**: The vault uses `DashMap` for lock-free concurrent reads and writes, safe for use across async tasks.
 
 ### MCP Server Setup
 
-One-click setup for MCP server instances. Uses `toml` for reading/writing server configuration files and `dashmap` for thread-safe concurrent access to server state during setup and teardown.
+One-click provisioning of MCP (Model Context Protocol) servers. Handles server configuration discovery, setup orchestration, and integration with LibreFang's runtime. Configuration is serialized via `serde_json` and/or `toml` depending on the server's expected format.
 
-## Dependencies
+### OAuth2 PKCE
 
-### Core
+Implements the OAuth2 Authorization Code flow with Proof Key for Code Exchange (RFC 7636):
 
-| Crate | Purpose |
-|-------|---------|
-| `librefang-types` | Shared type definitions across LibreFang crates |
-| `serde` / `serde_json` / `toml` | Serialization of configurations, credentials, and server state |
-| `thiserror` | Ergonomic error types |
-| `tracing` | Structured logging |
-| `chrono` | Timestamp handling for tokens and credentials |
-| `dashmap` | Lock-free concurrent map for runtime server state |
-| `tokio` | Async runtime primitives |
-| `dirs` | Platform-specific config/data directory resolution |
+1. Generates a cryptographically random code verifier using `rand`.
+2. Derives the code challenge via SHA-256 hash and Base64url encoding (`sha2` + `base64`).
+3. Spins up a local HTTP listener using `axum` to capture the authorization callback.
+4. Exchanges the authorization code for tokens via `reqwest`, authenticating the request with the PKCE code verifier.
+5. Stores the resulting tokens in the credential vault.
 
-### Networking & TLS
+HMAC is available for token signature verification where needed, with constant-time comparison via `subtle` to prevent timing attacks.
 
-| Crate | Purpose |
-|-------|---------|
-| `reqwest` | HTTP client for OAuth2 token exchange and MCP communication |
-| `rustls` | TLS implementation (no OpenSSL dependency) |
-| `webpki-roots` / `rustls-native-certs` | CA certificate bundles for TLS verification |
-| `axum` | Lightweight HTTP server for OAuth2 redirect callback |
+## Platform Considerations
 
-### Cryptography & Security
-
-| Crate | Purpose |
-|-------|---------|
-| `aes-gcm` | AES-256-GCM authenticated encryption for the file-based vault |
-| `argon2` | Key derivation from master passwords |
-| `sha2` | SHA-256 hashing (PKCE code challenge, integrity checks) |
-| `rand` | CSPRNG for nonces, verifiers, and salts |
-| `zeroize` | Secure memory clearing for keys and credentials |
-| `base64` | Base64url encoding for PKCE and storage formats |
-
-### Platform Keyring (target-gated)
+The OS keyring dependency is **target-gated** to avoid build failures on platforms without a usable backend:
 
 ```toml
-# Only compiled on: Linux (glibc), macOS, Windows
-# Excluded on: musl targets, Android
+[target.'cfg(any(
+    all(target_os = "linux", not(target_env = "musl")),
+    target_os = "macos",
+    target_os = "windows"
+))'.dependencies]
 keyring = { workspace = true }
 ```
 
-This target gating prevents build failures on platforms where `libsecret`'s C FFI (`libdbus-sys`) is unavailable. The vault code handles the absence at runtime without any feature flags or configuration from the consumer.
+| Target | OS Keyring | Fallback |
+|---|---|---|
+| Linux (glibc) | libsecret | — |
+| Linux (musl) | *not compiled* | AES-256-GCM file |
+| macOS | Keychain | — |
+| Windows | Credential Manager | — |
+| Android | *not compiled* | AES-256-GCM file |
+
+The vault detects at compile time which backends are available and selects automatically — no feature flags or runtime configuration needed.
+
+## TLS
+
+Outbound HTTP requests (token exchange, MCP server communication) use `reqwest` backed by `rustls` with both `webpki-roots` and `rustls-native-certs` for certificate verification, ensuring compatibility across environments without depending on OpenSSL.
 
 ## Integration with LibreFang
 
-`librefang-extensions` sits alongside the core LibreFang crates:
+```
+librefang-types       ← shared types, error definitions
+librefang-extensions  ← this crate
+librefang-runtime     ← used in dev-dependencies for integration tests
+```
 
-- Depends on **`librefang-types`** for shared data structures and error types
-- Provides extension/integration capabilities consumed by the application layer
-- In tests, depends on **`librefang-runtime`** (`dev-dependencies`) for integration test scenarios
+Other LibreFang crates consume this module's public API to:
+- Retrieve stored credentials when connecting to services.
+- Provision MCP servers during workspace setup.
+- Kick off OAuth2 flows when a user authorizes a third-party integration.
 
 ## Testing
 
-The crate uses:
-
-- **`tempfile`** — isolated temporary directories for vault file storage tests, ensuring no side effects on the developer's system
-- **`serial_test`** — serializes tests that may conflict with shared resources (OS keyring, temporary files, callback server ports)
-- **`librefang-runtime`** (dev-only) — provides runtime infrastructure for integration tests
-
-Run the test suite:
-
-```bash
-cargo test -p librefang-extensions
-```
-
-## Cross-Compilation Notes
-
-When cross-compiling for musl-static targets or Android, the `keyring` dependency is automatically excluded. The vault will always use the file-based AES-256-GCM backend on these targets. No feature flags or environment variables need to be set — this is handled entirely by Cargo's target-specific dependency resolution via `cfg(...)` predicates in `Cargo.toml`.
+The crate uses `tempfile` for isolated vault tests and `serial_test` to prevent parallel test interference with shared resources (filesystem, keyring). Integration tests pull in `librefang-runtime` to verify end-to-end flows.

@@ -2,63 +2,61 @@
 
 # librefang-llm-driver
 
-LLM driver abstraction layer for LibreFang. This crate defines the trait interface and shared data types that concrete LLM provider implementations must satisfy.
+LLM driver trait and shared types for LibreFang.
 
 ## Purpose
 
-This crate serves as a **trait-only abstraction boundary** between LibreFang's core logic and any specific LLM backend. It exists so that the rest of the codebase can program against a generic driver interface without coupling to a particular provider's API, request format, or SDK.
+This crate defines the abstraction layer through which the rest of the LibreFang codebase interacts with large language models. Rather than coupling the application directly to any specific LLM provider, `librefang-llm-driver` exposes a provider-agnostic trait (or set of traits) along with the shared types that callers and implementors rely on — request/response structures, configuration types, and error definitions.
+
+Concrete implementations (e.g., an OpenAI driver, a local-model driver) depend on this crate and fill in the trait with provider-specific HTTP calls, token handling, and so on. Downstream crates that *consume* LLM capabilities depend only on this abstraction, making it straightforward to swap or mock providers.
+
+## Dependencies
+
+| Dependency | Role in this crate |
+|---|---|
+| `librefang-types` | Shared domain types (game concepts, prompts, etc.) that the LLM driver may reference |
+| `async-trait` | Enables async methods in trait definitions |
+| `serde` / `serde_json` | Serialization of requests to and deserialization of responses from LLM providers |
+| `thiserror` | Derive `Error` for the driver-specific error enum |
+| `tokio` | Async runtime primitives used by the trait's async methods |
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[LibreFang Core] -->|depends on| B[librefang-llm-driver]
-    B -->|defines trait| C[LlmDriver]
-    D[Provider A impl] -->|implements| C
-    E[Provider B impl] -->|implements| C
-    B -->|uses types from| F[librefang-types]
+    A[librefang-types] --> B[librefang-llm-driver]
+    B --> C[Provider Implementation A]
+    B --> D[Provider Implementation B]
+    C --> E[Application / Game Server]
+    D --> E
 ```
 
-The crate itself contains **no concrete implementations** and performs **no outbound calls**. It is purely a contract: types, error definitions, and an async trait that downstream provider crates fulfill.
-
-## Key Dependencies
-
-| Crate | Role |
-|---|---|
-| `async-trait` | Enables async methods in the driver trait definition |
-| `serde` / `serde_json` | Serialization for shared request/response types |
-| `thiserror` | Derive-based error types for driver failures |
-| `librefang-types` | Reuses domain types from the broader LibreFang type system |
-| `tokio` | Async runtime primitives needed by trait signatures |
+The crate sits between the domain types (`librefang-types`) and one or more concrete provider crates. The application holds a trait object and dispatches calls without knowing which provider backs it.
 
 ## What This Crate Provides
 
-### Driver Trait
+### Driver trait
 
-An async trait (built with `async-trait`) representing the contract for an LLM backend. Any provider-specific crate implements this trait to integrate with LibreFang. The trait methods define the operations the core system needs from an LLM — typically prompt submission and response retrieval.
+An async trait that represents the capability to prompt an LLM and receive a structured or unstructured response. Callers use this trait as the boundary; implementors satisfy it with provider-specific logic.
 
-### Shared Types
+### Request and response types
 
-Common data structures for LLM interactions: request shapes, response shapes, configuration parameters, and any intermediate types that both the core system and provider implementations need to agree on. These are annotated with `serde` derives to support serialization.
+Shared data structures that normalize how prompts are composed and how completions are represented, independent of any single provider's wire format.
 
-### Error Types
+### Error type
 
-A structured error enum (via `thiserror`) capturing the failure modes common across LLM drivers — for example, network errors, rate limiting, malformed responses, or authentication failures. Provider implementations map their specific errors into these shared variants.
+A consolidated error enum (derived via `thiserror`) that captures the failure modes common across LLM providers — network errors, rate-limit responses, deserialization failures, and similar. Provider crates wrap their specific errors into these variants so that consumers handle a single, uniform error type.
 
-## Relationship to Other Crates
+## How It Connects to the Codebase
 
-- **Depends on `librefang-types`**: Imports and reuses domain-level types rather than duplicating definitions.
-- **Implemented by provider crates**: Any crate that wraps a specific LLM API depends on `librefang-llm-driver` and provides a concrete trait implementation.
-- **Consumed by core**: The main LibreFang application accepts a boxed trait object and calls through the abstraction.
+- **Upstream**: `librefang-types` supplies the domain vocabulary. The driver trait may accept or return types defined there (for example, structured game-state objects the LLM should reason about).
+- **Downstream**: Concrete provider crates implement the trait and are selected at application startup (via feature flags, configuration, or runtime plugin selection). The game server or other consumers accept a `dyn LlmDriver` (or similar) and remain decoupled from the backing service.
 
-## Adding a New LLM Provider
-
-To integrate a new backend:
+## Adding a New Provider
 
 1. Create a new crate (or module) that depends on `librefang-llm-driver`.
-2. Define a struct holding provider-specific configuration and any client state.
-3. Implement the driver trait for that struct.
-4. Map provider-specific errors into the shared error types defined here.
-5. Register the implementation with the core system at startup.
+2. Implement the driver trait, translating the generic request types into the provider's HTTP API format.
+3. Map provider-specific errors into the crate's error enum.
+4. Register the provider in the application's startup/configuration logic.
 
-Because the trait is async and the error types are standardized, swapping or layering providers requires no changes to downstream consumers.
+Because the trait and shared types live here, no changes to downstream consumers are required when a new provider is added.

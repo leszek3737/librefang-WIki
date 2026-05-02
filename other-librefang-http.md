@@ -2,54 +2,58 @@
 
 # librefang-http
 
-Shared HTTP client builder providing centralized proxy configuration and TLS certificate handling for the LibreFang project.
+Shared HTTP client builder providing a pre-configured `reqwest` client with proxy support and TLS certificate fallback logic for the LibreFang project.
 
 ## Purpose
 
-This crate encapsulates the construction of `reqwest::Client` instances so that every component in LibreFang performs HTTP requests with consistent TLS behavior and proxy settings. Rather than each crate independently configuring its own HTTP client, they delegate to this library to avoid duplicating certificate-loading logic and proxy environment handling.
+Rather than each crate in the workspace constructing its own `reqwest::Client` with ad-hoc TLS and proxy configuration, this module centralizes that logic into a single reusable builder. Any workspace member that needs to make outbound HTTP requests should depend on this crate and use the client it produces.
+
+## Key Design Decisions
+
+### Pure-Rust TLS via rustls
+
+This module uses **rustls** instead of native-tls/openssl. This means:
+
+- No system OpenSSL dependency — simpler cross-compilation and static builds.
+- Certificate verification is handled entirely in Rust.
+
+### Dual Certificate Loading (Fallback Strategy)
+
+The module depends on both `webpki-roots` and `rustls-native-certs`, which enables a fallback strategy for TLS root certificates:
+
+1. **Attempt to load native system certificates** via `rustls-native-certs` — these are the CA certificates installed on the host OS (e.g., `/etc/ssl/certs` on Linux, the Windows certificate store, or the Keychain on macOS).
+2. **Fall back to Mozilla's WebPKI root bundle** via `webpki-roots` if native certificate loading fails or produces an empty set — this ensures the client works in minimal environments (scratch containers, minimal Docker images) where no system CA store is present.
+
+### Proxy Support
+
+The underlying `reqwest` client is configured to respect standard proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, etc.) through reqwest's built-in proxy handling. This allows the operator to route LibreFang's outbound HTTP traffic through a corporate proxy or network egress point without code changes.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[Consumer crate] -->|calls builder| B[librefang-http]
-    B -->|constructs| C[reqwest::Client]
-    B -->|loads certs via| D[rustls-native-certs]
-    B -->|falls back to| E[webpki-roots]
-    B -->|uses| F[rustls]
-    B -->|reads types from| G[librefang-types]
+    A[Calling crate] -->|requests client| B[librefang-http]
+    B -->|builds| C[reqwest::Client]
+    B -->|configures TLS with| D[rustls]
+    D -->|try first| E[rustls-native-certs]
+    E -->|empty or error| F[webpki-roots fallback]
+    C -->|respects| G[Proxy env vars]
+    A -->|uses client for| H[Outbound HTTP requests]
 ```
 
-## Key Responsibilities
-
-### TLS Certificate Resolution
-
-The crate uses **rustls** as its TLS backend (not native TLS) and applies a two-tier certificate loading strategy:
-
-1. **System certificate store** — via `rustls-native-certs`. Loads the operating system's trusted root certificates (e.g., `/etc/ssl/certs` on Linux, the Windows certificate store, or Keychain on macOS).
-2. **Bundled Mozilla roots** — via `webpki-roots`. If system certificate loading fails or produces no valid roots, the crate falls back to Mozilla's curated root certificate bundle compiled into the binary.
-
-This ensures the application works reliably across environments — from standard desktop/server setups where system certs are available, to minimal containers where they may not be present.
-
-### Proxy Support
-
-The builder configures the `reqwest` client to respect standard proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, etc.) through reqwest's built-in proxy handling.
-
-### Shared Type Integration
-
-The crate depends on `librefang-types` to accept any configuration structures or error types that are shared across the project, keeping the builder API consistent with the rest of the codebase.
-
-## Dependencies
+## Dependency Interactions
 
 | Dependency | Role |
 |---|---|
-| `reqwest` | HTTP client construction and request execution |
-| `rustls` | Pure-Rust TLS implementation |
-| `rustls-native-certs` | Loads root certificates from the OS trust store |
-| `webpki-roots` | Bundled Mozilla root certificates as a fallback |
-| `tracing` | Structured logging of certificate loading and client build events |
-| `librefang-types` | Shared configuration and error types |
+| `librefang-types` | Shares type definitions across the workspace; this module may reference configuration types or error types defined there. |
+| `reqwest` | The underlying HTTP client. This module configures and exposes a `reqwest::Client` (or `ClientBuilder`) for consumers. |
+| `rustls` | Provides the `ClientConfig` used to construct a TLS backend for reqwest. |
+| `rustls-native-certs` | Loads the host system's root CA certificates into the rustls configuration. |
+| `webpki-roots` | Ships Mozilla's curated root CA bundle as a static fallback. |
+| `tracing` | Emits structured log events (e.g., warnings when native cert loading fails and fallback is activated). |
 
 ## Usage by Other Crates
 
-Consumer crates depend on `librefang-http` and call into it to obtain a preconfigured `reqwest::Client`. This avoids each consumer needing to independently manage TLS root stores or proxy settings. The `tracing` instrumentation inside this crate means certificate loading issues and build failures are visible in whatever tracing subscriber the application configures.
+Consumers add this crate as a dependency and call its builder/client constructor to obtain a ready-to-use `reqwest::Client`. The returned client comes pre-configured with appropriate TLS roots and proxy awareness, so callers simply use standard reqwest methods (`get`, `post`, etc.) without worrying about transport-layer setup.
+
+No execution flows were detected originating from or terminating in this module — it is a pure utility library that produces a configured client and returns it to the caller. All request execution happens in the consuming crate.

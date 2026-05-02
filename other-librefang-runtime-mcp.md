@@ -2,63 +2,62 @@
 
 # librefang-runtime-mcp
 
-MCP (Model Context Protocol) client for the LibreFang runtime.
+MCP (Model Context Protocol) client for the LibreFang runtime. This crate provides integration with MCP-compatible services, enabling the runtime to communicate with model context servers for AI-assisted operations.
 
 ## Purpose
 
-This crate provides an MCP client that enables the LibreFang runtime to communicate with MCP-compatible tool servers. MCP is a standardized protocol that allows AI models to discover and invoke external tools, access resources, and receive structured prompts. By integrating an MCP client, the runtime can extend its capabilities dynamically by connecting to external tool providers.
+This module acts as the bridge between the LibreFang runtime and external MCP services. It handles connection management, request serialization, and response parsing for Model Context Protocol interactions.
 
-## Architecture
-
-```mermaid
-graph LR
-    A[LibreFang Runtime] --> B[librefang-runtime-mcp]
-    B --> C[rmcp]
-    B --> D[librefang-http]
-    B --> E[librefang-types]
-    C --> F[MCP Tool Servers]
-    D --> G[reqwest]
-```
-
-The module sits between the LibreFang runtime core and external MCP servers, using the `rmcp` crate as the underlying protocol implementation. It relies on `librefang-http` for consistent HTTP transport configuration and `librefang-types` for shared type definitions.
-
-## Dependencies and Their Roles
+## Dependencies & Their Roles
 
 ### Internal Crates
 
 | Crate | Role |
 |---|---|
-| `librefang-types` | Shared type definitions used across the LibreFang workspace |
-| `librefang-http` | HTTP client construction and configuration, ensuring consistent transport behavior across the project |
+| `librefang-types` | Shared type definitions used across the project |
+| `librefang-http` | HTTP client infrastructure for making requests to MCP endpoints |
 
 ### External Crates
 
 | Crate | Role |
 |---|---|
-| `rmcp` | Core MCP protocol implementation — handles message framing, tool discovery, and invocation semantics |
-| `reqwest` | Underlying HTTP client used to communicate with MCP servers |
+| `rmcp` | Rust MCP client library — core protocol implementation |
+| `reqwest` | Underlying HTTP client used for transport |
 | `tokio` | Async runtime for non-blocking I/O |
-| `serde` / `serde_json` | Serialization of MCP request/response payloads |
-| `sha2` / `base64` | Cryptographic hashing and encoding, likely used for message integrity or authentication with MCP servers |
-| `url` | URL parsing and construction for MCP server endpoints |
-| `rand` | Random number generation, likely for nonce or session identifier creation |
-| `arc-swap` | Lock-free atomic swapping of shared state — used for hot-reloading or updating MCP client configuration without disrupting active connections |
-| `async-trait` | Async trait definitions for trait objects |
-| `http` | Low-level HTTP types (request/response parts, header maps) |
-| `tracing` | Structured logging and diagnostics |
+| `serde` / `serde_json` | Serialization and deserialization of MCP messages |
+| `http` | Low-level HTTP types (request/response builders, headers) |
+| `async-trait` | Async trait definitions for MCP client abstractions |
+| `thiserror` | Derived error types for protocol and transport failures |
+| `base64` / `sha2` | Encoding and hashing — likely used for authentication or payload verification |
+| `url` | URL parsing and construction for MCP endpoints |
+| `rand` | Random number generation — likely for nonce or session identifier creation |
+| `arc-swap` | Atomic swapping of shared state — enables live reconfiguration of MCP connections without service interruption |
+| `tracing` | Structured logging throughout the client lifecycle |
+
+## Architecture
+
+```mermaid
+graph TD
+    A[LibreFang Runtime] -->|calls| B[librefang-runtime-mcp]
+    B -->|HTTP transport| C[librefang-http]
+    B -->|protocol logic| D[rmcp]
+    B -->|types| E[librefang-types]
+    B -->|MCP Server| F[External MCP Service]
+    C -->|underlying requests| F
+```
+
+The module wraps `rmcp` with LibreFang-specific configuration and error handling. `librefang-http` provides the transport layer, while `rmcp` handles the MCP protocol semantics.
+
+## Key Design Decisions
+
+**`arc-swap` for live reconfiguration.** MCP connection details (endpoints, authentication tokens, configuration) can be updated at runtime without requiring a restart. `arc-swap` provides lock-free atomic swaps of the shared client configuration.
+
+**Authentication via `base64` + `sha2`.** MCP endpoints likely require authenticated requests. These crates support encoding credentials and computing request signatures or token hashes.
+
+**Separation of transport and protocol.** HTTP-level concerns live in `librefang-http`, while MCP message formatting, method dispatch, and response parsing belong here. This keeps each crate focused and testable in isolation.
 
 ## Integration Points
 
-This crate is consumed by the LibreFang runtime to:
+This crate is consumed by other LibreFang runtime components that need to query or interact with MCP-compatible AI services. It does not depend on higher-level LibreFang modules, keeping it a leaf dependency in the crate graph.
 
-1. **Discover tools** — Query MCP servers for available tools and their schemas.
-2. **Invoke tools** — Send structured invocation requests and return results to the runtime.
-3. **Manage connections** — Maintain and potentially rotate connections to one or more MCP servers using thread-safe state (`arc-swap`).
-
-## Security Considerations
-
-The inclusion of `sha2` and `base64` suggests this module may implement message authentication or integrity checks when communicating with MCP servers. The `rand` crate likely supports generation of cryptographic nonces for such flows. Developers modifying this crate should ensure any authentication logic remains constant-time where comparison is involved.
-
-## Workspace Configuration
-
-This crate is part of the LibreFang workspace and inherits its `version`, `edition`, and `license` from the workspace root. All workspace-level dependency versions are managed centrally.
+No inbound or outbound call edges were detected in static analysis, suggesting the module exposes a library API (traits, structs, functions) rather than driving its own execution flow. The consuming runtime component is responsible for instantiation and lifecycle management.

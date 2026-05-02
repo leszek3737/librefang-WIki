@@ -2,97 +2,117 @@
 
 # librefang-types — Integration Tests
 
-## Purpose
+## Overview
 
-This module contains cross-boundary integration tests that guard against drift between two independent implementations of the same serialization contract:
+This directory contains three integration test suites that guard against serialization and configuration drift across the system. Together they form a continuous-intigration safety net that catches three specific bug classes:
 
-1. **The dashboard's TypeScript serializer** (`crates/librefang-api/dashboard/src/lib/agentManifest.ts`) — produces TOML from a visual form editor in the browser.
-2. **The kernel's Rust deserializer** (`librefang_types::agent::AgentManifest`) — consumes that TOML on the server side.
-
-Because these two code paths live in different languages and crates, there is no compile-time guarantee they stay in sync. The tests here encode the exact TOML the dashboard emits and assert the Rust side parses it correctly. Any field rename, type change, or structural shift will cause a build failure.
-
-A secondary set of tests exercises the `schemars`-generated JSON Schema output for key configuration types, serving as a live reference and sanity check for schema completeness.
-
----
+1. **Dashboard ↔ kernel TOML drift** — the visual editor in the dashboard emits TOML that the kernel must parse without error.
+2. **`Default` impl vs. `#[serde(default)]` drift** — a manual `Default` implementation that omits a field will silently disagree with serde's per-field defaulting (issue #3404).
+3. **Schema generation regressions** — `schemars` must produce valid, sufficiently large JSON Schema for core config types.
 
 ## Test Files
 
 ### `agent_form_roundtrip.rs`
 
-All tests in this file follow the same pattern: embed a TOML literal matching dashboard output, deserialize it into an `AgentManifest`, and assert specific field values.
+**Purpose:** Ensures the TOML emitted by the dashboard's agent manifest visual editor (implemented in `agentManifest.ts`) can be round-tripped through the kernel's `AgentManifest` deserializer.
 
-#### Test coverage by complexity tier
+**Why it exists:** The dashboard serializer and the kernel deserializer are maintained in different languages. A renamed field, changed enum variant, or new required field in one place without updating the other causes runtime parse failures. These tests lock the contract at build time.
+
+**Test cases:**
 
 | Test | What it covers |
-|------|---------------|
-| `parses_form_minimum_viable_output` | Bare-minimum manifest: `name`, `version`, `module`, and a `[model]` table with `provider` and `model`. Everything else omitted. |
-| `parses_form_full_output_with_capabilities_and_resources` | Mid-complexity manifest adding `description`, `tags`, `skills`, model tuning (`temperature`, `max_tokens`, `system_prompt`), `resources` quotas, and `capabilities` (network allowlist, shell commands, `agent_spawn`). |
-| `parses_form_with_advanced_sections` | Full-complexity manifest exercising every optional section: `priority`, `session_mode`, `web_search_augmentation`, `schedule`, `exec_policy`, `thinking`, `autonomous`, `routing`, `fallback_models`, and `context_injection`. |
-| `parses_form_response_format_json_schema` | The `response_format` field with the `JsonSchema` variant, including inline schema and `strict` flag. Validates tagged-enum deserialization. |
-| `omitting_optional_sections_uses_defaults` | Confirms that omitting `[resources]` and `[capabilities]` tables entirely produces sensible defaults (empty vectors, `false` booleans, `None` for optional quotas). |
+|------|----------------|
+| `parses_form_minimum_viable_output` | Bare-minimum manifest: `name`, `version`, `module`, and a `[model]` section with `provider` and `model`. |
+| `parses_form_full_output_with_capabilities_and_resources` | All common sections populated: `tags`, `skills`, model tuning (`temperature`, `max_tokens`), `resources` quotas, and `capabilities` (network, shell, `agent_spawn`). |
+| `parses_form_with_advanced_sections` | Every advanced section filled: priority, session mode, web search augmentation, schedule, exec policy, thinking budget, autonomous settings, routing tiers, fallback models, context injection. Also verifies enum parsing (`Priority::High`, `SessionMode::New`). |
+| `parses_form_response_format_json_schema` | Inline TOML table for `response_format` with `JsonSchema` variant, including `strict = true`. |
+| `omitting_optional_sections_uses_defaults` | Confirms that leaving out `resources` and `capabilities` falls back to empty/zero defaults (e.g., `network` is empty, `agent_spawn` is false, `max_llm_tokens_per_hour` is `None`). |
 
-#### How to extend
+**Key type:** `librefang_types::agent::AgentManifest`
 
-When the dashboard form gains a new field or section:
+### `config_default_roundtrip.rs`
 
-1. Update the TypeScript serializer in `agentManifest.ts`.
-2. Add or modify a TOML literal in the appropriate test here to mirror the new output.
-3. Assert the new field on the parsed `AgentManifest` struct.
-4. Run `cargo test -p librefang-types --test agent_form_roundtrip`.
+**Purpose:** Regression guard for [issue #3404](#). When a new field is added with `#[serde(default)]` but the developer forgets to add it to the manual `Default` impl (or vice versa), the two sources of "default" silently diverge. These tests catch that drift.
 
-If the Rust struct hasn't been updated yet, the test will fail to compile or panic on a missing/wrong field — which is exactly the signal you want.
+**Mechanism:**
 
----
+```
+assert_default_roundtrip::<T>("T")
+```
+
+For each config type `T`, the helper performs two checks:
+
+1. **Empty-TOML agreement:** `T::default()` serialized to TOML must equal an empty TOML document deserialized into `T` and re-serialized. If they differ, a field has `#[serde(default)]` returning one value while the `Default` impl produces another.
+2. **Round-trip idempotency:** `T::default()` → serialize to TOML → deserialize back → serialize again must produce identical TOML.
+
+Equality is checked by comparing serialized TOML strings rather than requiring `PartialEq` on every config struct, which would cascade through the entire nested tree.
+
+**Helper functions:**
+
+- `assert_default_roundtrip::<T>(label)` — common case; both sources must agree on every field.
+- `assert_default_roundtrip_with::<T>(label, normalize)` — for types with a known legitimate divergence. The `normalize` closure adjusts the divergent field before comparison, while every other field is still checked exactly.
+
+**Types with known divergences:**
+
+| Type | Divergent field | Reason |
+|------|----------------|--------|
+| `KernelConfig` | `config_version` | `Default` sets current `CONFIG_VERSION` (2); serde's `default_config_version()` returns `1` as a migration tripwire for legacy on-disk configs. |
+| `ChannelsConfig` | `file_download_max_bytes` | `#[derive(Default)]` gives `0`; serde helper `default_file_download_max_bytes` returns 50 MiB. Flagged as a known bug requiring triage. |
+
+**Covered types** (all other tests use `assert_default_roundtrip` without normalization):
+
+`QueueConfig`, `QueueConcurrencyConfig`, `BudgetConfig`, `SessionConfig`, `CompactionTomlConfig`, `TaskBoardConfig`, `TriggersConfig`, `WebhookTriggerConfig`, `WebConfig`, `WebFetchConfig`, `BrowserConfig`, `BraveSearchConfig`, `TavilySearchConfig`, `PerplexitySearchConfig`, `JinaSearchConfig`, `ReloadConfig`, `RateLimitConfig`, `SkillsConfig`, `ExtensionsConfig`, `VaultConfig`, `AutoReplyConfig`, `InboxConfig`, `TelemetryConfig`, `PromptIntelligenceConfig`, `CanvasConfig`, `ThinkingConfig`, `ContextEngineTomlConfig`, `ExternalAuthConfig`, `AuditConfig`, `PrivacyConfig`, `HealthCheckConfig`, `HeartbeatTomlConfig`, `AutoDreamConfig`, `RegistryConfig`, `MemoryConfig`, `MemoryDecayConfig`, `ChunkConfig`, `NetworkConfig`, `TtsConfig`, `DockerSandboxConfig`, `PairingConfig`, `SanitizeConfig`, `ParallelToolsConfig`, `TerminalConfig`, `VoiceConfig`, `LinkedInConfig`, `AgentManifest`, `BroadcastConfig`.
 
 ### `schemars_poc.rs`
 
-Diagnostic tests that print `schemars`-generated JSON Schema (Draft 7) to stdout. These are **not** assertion-heavy — they exist for developer inspection during schema migration.
+**Purpose:** Proof-of-concept diagnostics that dump `schemars`-generated JSON Schema (draft-07) for representative config types. These are visual-check tests, not automated assertions (except for `KernelConfig`).
 
-Run with visible output:
+Run with `--nocapture` to see output:
 
 ```bash
 cargo test -p librefang-types --test schemars_poc -- --nocapture
 ```
 
-#### Tests
+| Test | What it checks |
+|------|---------------|
+| `dump_budget_config_schema` | Prints the schema for `BudgetConfig`. |
+| `dump_vault_config_schema` | Tests `Option<PathBuf>` rendering — how schemars handles filesystem path types. |
+| `full_kernel_config_schema_generates` | Asserts the full `KernelConfig` schema has >50 top-level properties and >50 nested definitions. Validates that the schema is well-formed JSON. |
+| `dump_response_format_schema` | Tagged enum carrying `serde_json::Value` — a high-risk edge case for schema correctness. |
 
-| Test | Type under schema | Notes |
-|------|-------------------|-------|
-| `dump_budget_config_schema` | `BudgetConfig` | Baseline struct. |
-| `dump_vault_config_schema` | `VaultConfig` | Contains `Option<PathBuf>` — verifies filesystem path rendering. |
-| `full_kernel_config_schema_generates` | `KernelConfig` | End-to-end sanity: asserts >50 top-level properties and >50 definitions. Catches regressions where the schema generation silently drops fields. |
-| `dump_response_format_schema` | `ResponseFormat` | Tagged enum carrying `serde_json::Value` — a known risk point for schema correctness. |
-
-These tests serve as a bridge between the hand-written JSON Schema currently used by the dashboard and the eventual goal of deriving schemas entirely from Rust types via `schemars`.
-
----
-
-## Relationship to the Rest of the Codebase
+## Architecture
 
 ```mermaid
-graph LR
-    A[Dashboard TypeScript<br>agentManifest.ts] -->|emits TOML| B[agent_form_roundtrip<br>test literals]
-    B -->|parses via| C[librefang_types::<br>AgentManifest]
-    C -->|used by| D[Kernel runtime]
-    C -->|generates schema via| E[schemars]
-    E -->|dumped by| F[schemars_poc<br>test output]
+graph TD
+    subgraph "Dashboard (TypeScript)"
+        A[agentManifest.ts<br/>TOML serializer]
+    end
+
+    subgraph "librefang-types (Rust)"
+        B[AgentManifest<br/>TOML deserializer]
+        C[Config structs<br/>Default + serde]
+        D[schemars<br/>JSON Schema gen]
+    end
+
+    A -- "TOML output" --> B
+    C -- "T::default() vs empty TOML" --> E[config_default_roundtrip.rs]
+    C -- "schema_for! T" --> F[schemars_poc.rs]
+    B -- "parse verification" --> G[agent_form_roundtrip.rs]
 ```
 
-- **Upstream dependency**: `librefang_types` — the tests import `AgentManifest`, `Priority`, `SessionMode`, `ResponseFormat`, and config structs from this crate.
-- **Contract counterpart**: The TypeScript file `agentManifest.ts` is the other party in the serialization contract. Changes there must be mirrored here.
-- **No outgoing calls**: These tests are self-contained; they deserialize in-memory strings and assert on the resulting structs. No filesystem, network, or database interaction.
+## Adding a New Config Type to Tests
 
----
+**For `config_default_roundtrip.rs`:** Add a new test function:
 
-## Running
-
-```bash
-# All integration tests in this crate
-cargo test -p librefang-types
-
-# Only the round-trip tests
-cargo test -p librefang-types --test agent_form_roundtrip
-
-# Schema dumps with visible output
-cargo test -p librefang-types --test schemars_poc -- --nocapture
+```rust
+#[test]
+fn my_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<MyConfig>("MyConfig");
+}
 ```
+
+If the type has a known legitimate divergence (like a migration version field), use `assert_default_roundtrip_with` and pass a normalization closure that copies the canonical value.
+
+**For `agent_form_roundtrip.rs`:** Add a new test only if the dashboard form gains new TOML sections or changes serialization behavior. Mirror the exact TOML the TypeScript serializer emits.
+
+**For `schemars_poc.rs`:** Add a new dump test if the type introduces a novel schema pattern (e.g., new generic wrapper, custom `JsonSchema` impl) that needs visual verification.

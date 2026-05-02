@@ -2,67 +2,104 @@
 
 # librefang-llm-drivers
 
-Concrete LLM provider drivers implementing the `librefang-llm-driver` trait. Each driver encapsulates the API specifics, authentication, and request/response handling for a particular LLM provider (Anthropic, OpenAI, Gemini, etc.).
+Concrete LLM provider drivers implementing the `librefang-llm-driver` trait. Each driver encapsulates the HTTP communication, authentication, request formatting, and response parsing required to interact with a specific LLM provider's API.
+
+## Purpose
+
+This crate serves as the bridge between Librefang's generic LLM abstraction layer (`librefang-llm-driver`) and the actual provider APIs. It ships ready-to-use driver implementations for providers such as **Anthropic**, **OpenAI**, and **Google Gemini**, handling the idiosyncrasies of each provider's wire format, authentication scheme, and error semantics.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[librefang-llm-driver] -->|trait LlmDriver| B[librefang-llm-drivers]
-    B --> C[Anthropic Driver]
-    B --> D[OpenAI Driver]
-    B --> E[Gemini Driver]
-    B --> F[...other providers]
-    B -->|HTTP requests| G[librefang-http]
-    B -->|OAuth flows| H[librefang-runtime-oauth]
-    B -->|shared types| I[librefang-types]
+    A[librefang-llm-driver] -->|"defines trait"| B[librefang-llm-drivers]
+    B -->|uses| C[librefang-types]
+    B -->|uses| D[librefang-http]
+    B -->|uses| E[librefang-runtime-oauth]
+    B -->|"HTTP calls"| F[Provider APIs]
+    
+    subgraph Drivers
+        G[Anthropic Driver]
+        H[OpenAI Driver]
+        I[Gemini Driver]
+    end
+    
+    B --- G
+    B --- H
+    B --- I
 ```
 
-All drivers share a common interface defined in `librefang-llm-driver`, allowing the rest of the codebase to interact with any LLM provider without knowing the specifics of its API.
+## Key Dependencies
 
-## Key Dependencies and Their Roles
-
-| Dependency | Purpose |
+| Dependency | Role |
 |---|---|
-| `librefang-llm-driver` | Provides the trait (`LlmDriver` or similar) that each concrete driver implements |
-| `librefang-http` | Shared HTTP client configuration, request building, and response handling |
-| `librefang-runtime-oauth` | OAuth token acquisition and refresh for providers that require it (e.g., Gemini via Google Cloud credentials) |
-| `librefang-types` | Shared domain types — model identifiers, message structures, completion responses, error types |
-| `reqwest` | Underlying HTTP client used to call provider APIs |
-| `serde` / `serde_json` | Serialization of request payloads and deserialization of provider-specific JSON responses |
-| `dashmap` | Concurrent hashmap used for thread-safe caching (likely token/credential caching) |
-| `sha2` / `base64` | Cryptographic hashing and encoding — used in request signing or key derivation |
-| `zeroize` | Secure memory clearing for sensitive credentials after use |
-| `dirs` | Resolution of platform-specific config/cache directories for credential storage |
+| `librefang-llm-driver` | Defines the trait (`LlmDriver` or similar) that each concrete driver implements |
+| `librefang-types` | Shared domain types — request/response models, error types, configuration structs |
+| `librefang-http` | Shared HTTP client utilities, middleware, or request building helpers |
+| `librefang-runtime-oauth` | OAuth token acquisition and refresh, used by providers that require OAuth (e.g., Gemini via Google credentials) |
+| `reqwest` | Underlying HTTP client for making API calls to provider endpoints |
+| `async-trait` | Enables async methods in the driver trait implementation |
+| `dashmap` | Concurrent hashmap used for thread-safe caching (e.g., token caches, response memoization) |
+| `sha2` / `zeroize` | Secure hashing and memory zeroing for credential handling |
+| `base64` | Encoding for API keys and payload construction |
 
 ## How Drivers Work
 
 Each driver follows the same general pattern:
 
-1. **Configuration** — The driver is constructed with provider-specific configuration (API key, base URL, default model, etc.).
+1. **Configuration** — Accept provider-specific configuration (API key, base URL, model name, etc.) at construction time.
+2. **Authentication** — Attach credentials to outgoing requests. For OpenAI and Anthropic, this is typically an `Authorization` header with an API key. For Gemini, OAuth tokens are obtained and refreshed via `librefang-runtime-oauth`.
+3. **Request Formatting** — Translate the generic `librefang-types` request model into the provider's expected JSON payload format, including any provider-specific parameters.
+4. **HTTP Dispatch** — Send the request using `reqwest` (often through `librefang-http` helpers for retries, timeouts, and middleware).
+5. **Response Parsing** — Deserialize the provider's JSON response into `librefang-types` response models, normalizing away provider-specific field names and structures.
+6. **Error Handling** — Map provider-specific error responses (rate limits, auth failures, server errors) into the shared error types from `librefang-types`.
 
-2. **Authentication** — Depending on the provider, the driver either attaches a static API key to requests or uses `librefang-runtime-oauth` to obtain and refresh OAuth tokens. Credentials are held in memory with `zeroize`-protected types where sensitivity demands it, and may be cached in a `DashMap` to avoid redundant auth round-trips.
+## Adding a New Provider Driver
 
-3. **Request Construction** — The driver translates the generic input types from `librefang-types` into the provider's expected JSON format using `serde`. Provider-specific quirks (e.g., Anthropic's `messages` format vs. OpenAI's `chat.completions` endpoint) are handled here.
+To add support for a new LLM provider:
 
-4. **HTTP Call** — Requests are dispatched through `librefang-http` / `reqwest`. The driver manages retries, timeouts, and rate-limit handling as appropriate for each provider.
+1. Create a new module file (e.g., `src/newprovider.rs`).
+2. Define a struct holding the provider's configuration and any runtime state (token caches, HTTP client handle).
+3. Implement the driver trait from `librefang-llm-driver` for your struct.
+4. Handle authentication — use a static API key header, or integrate with `librefang-runtime-oauth` if the provider uses OAuth.
+5. Implement request serialization and response deserialization, mapping to/from `librefang-types`.
+6. Register the driver in any factory or registry module so it can be instantiated by name.
 
-5. **Response Parsing** — Provider-specific JSON responses are deserialized into the shared response types from `librefang-types`, normalizing differences across APIs into a uniform shape.
+### Example Skeleton
 
-6. **Error Handling** — Provider-specific error responses are mapped into the common error types defined in `librefang-types`.
+```rust
+use async_trait::async_trait;
+use librefang_llm_driver::LlmDriver; // adjust to actual trait name
+use librefang_types::{LlmRequest, LlmResponse, LlmError};
 
-## Relationship to the Rest of the Codebase
+pub struct NewProviderDriver {
+    api_key: String,
+    client: reqwest::Client,
+}
 
-This module is a **pure consumer** of the trait defined in `librefang-llm-driver`. Downstream code (e.g., orchestration layers, evaluation pipelines) depends only on the trait, selecting a concrete driver at runtime based on configuration. This separation means:
+#[async_trait]
+impl LlmDriver for NewProviderDriver {
+    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
+        // 1. Build provider-specific HTTP request
+        // 2. Send via self.client
+        // 3. Parse response into LlmResponse
+        todo!()
+    }
+}
+```
 
-- Adding a new LLM provider requires only a new driver module here, implementing the existing trait.
-- The rest of the codebase remains agnostic to provider specifics.
-- Drivers can be tested in isolation using mocked HTTP responses.
+## Security Considerations
 
-## Credential Security
+- **Credential zeroing**: The `zeroize` dependency ensures sensitive data (API keys, tokens) can be securely erased from memory when dropped.
+- **OAuth token caching**: Tokens obtained via `librefang-runtime-oauth` are stored in a `DashMap` for concurrent access, and should be refreshed proactively before expiry.
+- **No credential logging**: The `tracing` integration should be configured to never log full API keys or tokens. Drivers should redact sensitive headers in trace output.
 
-Given the dependency on `zeroize` and `sha2`, this module takes care to:
+## Testing
 
-- Clear sensitive credentials (API keys, OAuth tokens) from memory when they are no longer needed.
-- Avoid logging raw credentials via `tracing`.
-- Store cached credentials in platform-appropriate directories resolved through `dirs`, never hardcoding paths.
+The `dev-dependencies` indicate the testing strategy:
+
+- **`wiremock`** — Mock HTTP servers for integration testing against simulated provider APIs. Each driver should have wiremock-based tests that verify request formatting, response parsing, and error handling without hitting real endpoints.
+- **`serial_test`** — Serializes tests that share state (e.g., credential files, environment variables), preventing race conditions in concurrent test runs.
+- **`tempfile`** — Creates temporary directories and files for tests that involve credential storage or file-based configuration.
+
+Tests are typically organized per driver, with a shared wiremock setup that stubs the provider's API endpoints.
