@@ -2,144 +2,126 @@
 
 # librefang-cli
 
-The command-line interface and primary binary distribution for the LibreFang Agent OS. This crate produces the `librefang` executable, which serves as the entry point for running agents, managing configurations, and interacting with the system.
+The command-line interface for the LibreFang Agent OS. This crate produces the `librefang` binary, which serves as both the daemon launcher and the primary administrative tool for interacting with agents, channels, skills, and the runtime environment.
 
-## Overview
+## Architecture Overview
 
-`librefang-cli` is a thin orchestration layer that wires together the domain crates of the LibreFang ecosystem. It does not implement business logic itself — instead, it handles:
+The CLI operates in one of two modes depending on whether a daemon is already running:
 
-- CLI argument parsing (via `clap`)
-- Configuration file discovery and loading
-- Feature-gated channel adapter selection
-- Build metadata embedding (git SHA, build date, compiler version)
-- Optional OpenTelemetry telemetry initialization
-- Terminal UI rendering (via `ratatui`)
-
-## Binary
-
-The produced binary is named **`librefang`**, built from `src/main.rs`.
-
-```toml
-[[bin]]
-name = "librefang"
-path = "src/main.rs"
-```
-
-## Dependency Graph
-
-The CLI sits at the top of the crate dependency tree, pulling in every domain module:
+- **Daemon mode**: When `librefang start` has been run, subsequent CLI invocations communicate with the running daemon over HTTP at `http://127.0.0.1:4545` (default). Commands are dispatched remotely via `reqwest`.
+- **Standalone mode**: When no daemon is detected, commands boot an in-process kernel for single-shot operation. This means most `librefang` subcommands work without a running server.
 
 ```mermaid
 graph TD
-    CLI[librefang-cli] --> API[librefang-api]
-    CLI --> KERNEL[librefang-kernel]
-    CLI --> RUNTIME[librefang-runtime]
-    CLI --> CHANNELS[librefang-channels]
-    CLI --> SKILLS[librefang-skills]
-    CLI --> EXTENSIONS[librefang-extensions]
-    CLI --> MEMORY[librefang-memory]
-    CLI --> MIGRATE[librefang-migrate]
-    CLI --> TYPES[librefang-types]
-    API --> CHANNELS
-    API --> KERNEL
-    API --> RUNTIME
+    A[librefang binary] --> B{Daemon running?}
+    B -->|Yes| C[HTTP client → 127.0.0.1:4545]
+    B -->|No| D[In-process kernel boot]
+    C --> E[Remote execution]
+    D --> F[Single-shot execution]
+    E --> G[librefang-api / librefang-kernel]
+    F --> G
 ```
+
+## Build-Time Metadata
+
+The `build.rs` script injects three environment variables at compile time:
+
+| Variable | Source | Example |
+|---|---|---|
+| `GIT_SHA` | `git rev-parse --short HEAD` | `a3f8c12` |
+| `BUILD_DATE` | `date -u +%Y-%m-%d` | `2025-01-15` |
+| `RUSTC_VERSION` | `rustc --version` | `rustc 1.82.0` |
+
+These are accessible via `env!("GIT_SHA")`, `env!("BUILD_DATE")`, and `env!("RUSTC_VERSION")` in the binary, and are used in version output, diagnostic commands (`librefang doctor`), and telemetry.
 
 ## Feature Flags
 
-Feature flags control which channel adapters and optional subsystems are compiled into the binary. This exists primarily to keep developer iteration fast — heavy dependencies like `matrix-sdk-crypto`, `lettre`, `imap`, `rumqttc`, and `nostr-sdk` are excluded by default.
+Feature flags control which channel adapters and optional subsystems are compiled into the binary. This is the primary mechanism for reducing compile times during development.
 
-| Feature | Description |
-|---|---|
-| `default` | Enables `core-channels` (Telegram, Discord, Slack, webhook, ntfy) + `telemetry`. This is what you get with a plain `cargo build`. |
-| `all-channels` | Enables every channel adapter. Used by release CI to produce full binaries. Does **not** imply `telemetry` on its own. |
-| `mini` | Minimal channel set for resource-constrained environments. |
-| `android` | All channels except email, due to a `rustls-connector` + `rustls-platform-verifier` incompatibility on Android (`Verifier::new_with_extra_roots` not implemented). |
-| `telemetry` | Enables OpenTelemetry tracing exporters. Pulls in `opentelemetry`, `opentelemetry_sdk`, and `tracing-opentelemetry`. |
+### Default features
 
-### Build Commands for Common Scenarios
+```
+default = ["librefang-api/core-channels", "telemetry"]
+```
+
+Compiles with core channel adapters (Telegram, Discord, Slack, Webhook, Ntfy) and telemetry enabled. This is sufficient for most development workflows.
+
+### Full feature set
+
+| Feature | Includes | Use case |
+|---|---|---|
+| `all-channels` | All ~25 channel adapters | Release binaries, full installs |
+| `mini` | Minimal adapter set | Testing, constrained environments |
+| `android` | All channels except email | Android builds (see compatibility note below) |
+| `telemetry` | OpenTelemetry + tracing integration | Production observability |
+
+### Build commands for common scenarios
 
 ```bash
-# Fast developer build (core channels only, ~30s cold)
+# Fast developer build (core channels only)
 cargo build -p librefang-cli
 
-# Release binary with all channels (used by CI)
+# Full release binary (all channels + telemetry from defaults)
 cargo build -p librefang-cli --release --features all-channels
 
-# Minimal footprint build
+# Minimal build for testing
 cargo build -p librefang-cli --no-default-features --features mini
-
-# Android target (no email channel)
-cargo build -p librefang-cli --target aarch64-linux-android --no-default-features --features android
 
 # All channels without telemetry (explicit opt-out)
 cargo build -p librefang-cli --no-default-features --features all-channels
 ```
 
-> **Note:** If you build with `--no-default-features --features all-channels`, telemetry is disabled because `all-channels` does not include it. Add `telemetry` explicitly if you need both.
+> **Note**: `all-channels` does not implicitly enable `telemetry`. Release CI builds with `--features all-channels` without `--no-default-features`, so the default `telemetry` feature remains active. If you use `--no-default-features --features all-channels`, add `telemetry` explicitly to retain observability.
 
-## Build Script (`build.rs`)
+### Android compatibility
 
-The build script captures environment metadata at compile time and injects it via `cargo:rustc-env` directives. These are accessible at runtime via `env!()` macros:
+The `android` feature excludes the email channel due to an incompatibility between `rustls-connector` 0.23.0 and `rustls-platform-verifier` 0.7.0 — specifically, `Verifier::new_with_extra_roots` is not implemented for the Android platform. This avoids a compile failure when targeting Android.
 
-| Environment Variable | Source | Example Value |
-|---|---|---|
-| `GIT_SHA` | `git rev-parse --short HEAD` | `a1b2c3d` |
-| `BUILD_DATE` | `date -u +%Y-%m-%d` | `2025-01-15` |
-| `RUSTC_VERSION` | `rustc --version` | `rustc 1.82.0` |
+## Key Commands
 
-All three gracefully fall back to `"unknown"` if the command fails (e.g., building from a tarball without git).
-
-Usage in source code:
-```rust
-let version = format!(
-    "{} ({} {})",
-    env!("CARGO_PKG_VERSION"),
-    env!("GIT_SHA"),
-    env!("BUILD_DATE"),
-);
-```
-
-## Memory Allocator
-
-On non-MSVC targets (Linux, macOS, BSD), the binary uses **tikv-jemallocator** with `disable_initial_exec_tls` enabled:
-
-```rust
-#[cfg(not(target_env = "msvc"))]
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-```
-
-This is defined as a workspace dependency and linked automatically via the `Cargo.toml` dependency on `tikv-jemallocator`.
-
-## Key External Dependencies
-
-| Crate | Purpose |
+| Command | Description |
 |---|---|
-| `clap` | CLI argument parsing and shell completion generation |
-| `clap_complete` | Shell completion scripts (bash, zsh, fish, etc.) |
-| `ratatui` | Terminal UI framework for interactive views |
-| `tracing` / `tracing-subscriber` | Structured logging and trace collection |
-| `colored` | Colored terminal output |
-| `toml` / `toml_edit` | Configuration file reading and writing |
-| `fluent` / `unic-langid` | Internationalization (i18n) support |
-| `open` | Open URLs/files in the system default application |
-| `zeroize` | Secure memory zeroing for sensitive data |
+| `librefang start` | Start the daemon (HTTP API + dashboard) |
+| `librefang init` | Write a starter config to `~/.librefang/config.toml` |
+| `librefang agent <subcommand>` | Spawn, list, or message agents |
+| `librefang doctor` | Diagnose the local environment and configuration |
+| `librefang help` | Full command catalog |
 
-## Connection to Other Modules
+All subcommands support `--help` for detailed usage information.
 
-The CLI is the assembly point. It does not define data types, channel logic, or runtime behavior — it delegates:
+## Dependencies and Crate Relationships
 
-- **`librefang-api`** — HTTP server startup, routing, and the channel feature flags that propagate through the dependency tree
-- **`librefang-kernel`** — Core agent logic and lifecycle management
-- **`librefang-runtime`** — Process registry and execution environment
-- **`librefang-channels`** — Channel adapter implementations (Telegram, Discord, Matrix, etc.)
-- **`librefang-skills`** — Skill/plugin loading and execution
-- **`librefang-extensions`** — Extension system
-- **`librefang-memory`** — Persistent agent memory
-- **`librefang-migrate`** — Database migration runner
-- **`librefang-types`** — Shared type definitions
+The CLI sits at the top of the dependency graph, pulling in nearly every workspace crate to assemble a complete runtime:
 
-## Contributing
+```
+librefang-cli
+├── librefang-types        # Shared type definitions
+├── librefang-kernel       # Core agent kernel (in-process mode)
+├── librefang-api          # HTTP API layer, channel feature gates
+├── librefang-channels     # Channel adapter implementations
+├── librefang-migrate      # Database migrations
+├── librefang-skills       # Agent skill system
+├── librefang-extensions   # Extension loading
+├── librefang-memory       # Agent memory / context management
+├── librefang-runtime      # Process registry, runtime utilities
+├── clap / clap_complete   # CLI argument parsing, shell completions
+├── tokio                  # Async runtime
+├── tracing-*              # Structured logging and diagnostics
+├── reqwest (blocking)     # HTTP client for daemon communication
+├── ratatui                # Terminal UI framework
+└── opentelemetry*         # Optional telemetry export (feature-gated)
+```
 
-When adding a new dependency or channel adapter, consider whether it should be behind a feature flag. Heavy or platform-specific dependencies (crypto libraries, async runtimes for specific protocols, native TLS stacks) should be gated to avoid slowing down the default developer build.
+### Global allocator
+
+On non-MSVC targets (`cfg(not(target_env = "msvc"))`), the binary uses `tikv-jemallocator` with `disable_initial_exec_tls` as the global allocator. This provides better performance for the allocation-heavy workloads typical of agent orchestration.
+
+## Configuration
+
+The CLI expects configuration at `~/.librefang/config.toml`. Running `librefang init` generates a starter file. Configuration is read using the `toml` and `toml_edit` crates — the latter enables programmatic config modification from within the tool.
+
+Localization is handled via the `fluent` and `unic-langid` crates, supporting internationalized CLI output.
+
+## Shell Completions
+
+The `clap_complete` dependency enables shell completion generation. Completions are typically generated via a built-in subcommand (e.g., `librefang completions <shell>`) — consult `librefang help` for the exact invocation.

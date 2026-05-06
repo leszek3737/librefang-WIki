@@ -1,224 +1,284 @@
 # API Server
 
-# Channel Bridge (`channel_bridge.rs`)
+# API Server — Channel Bridge
 
-The channel bridge is the glue layer between the LibreFang kernel (the core agent runtime) and the outside world. It translates kernel operations — sending messages, streaming tokens, managing sessions — into calls that channel adapters (Telegram, Discord, Slack, WhatsApp, and 30+ others) can consume, and it shields end users from leaking raw technical details like stack traces, internal tool-call JSON, or driver error codes.
+The channel bridge is the wiring layer that connects the LibreFang kernel to external messaging platforms (Telegram, Discord, Slack, WhatsApp, and 40+ others). It translates kernel responses into channel-appropriate messages and insulates end users from internal error details, leaked tool calls, and other LLM artifacts.
 
-## Architecture
+## Architecture Overview
 
 ```mermaid
 graph LR
     subgraph "Channel Adapters"
-        A[Telegram]
-        B[Discord]
-        C[Slack]
-        D[WhatsApp]
-        E[...30+ more]
+        TG[Telegram]
+        DC[Discord]
+        SL[Slack]
+        WA[WhatsApp]
+        DOT["... 40+ more"]
     end
+    BM[BridgeManager]
+    KBA[KernelBridgeAdapter]
+    K[LibreFangKernel]
+    SB[Streaming Bridge]
 
-    subgraph "Bridge Layer"
-        F[BridgeManager]
-        G[KernelBridgeAdapter<br/>implements ChannelBridgeHandle]
-        H[Streaming Text Bridge]
-        I[Content Filters]
-    end
-
-    subgraph "Kernel"
-        J[LibreFangKernel]
-        K[Agent Registry]
-        L[Agent Loop / LLM Drivers]
-    end
-
-    A --> F
-    B --> F
-    C --> F
-    D --> F
-    E --> F
-    F --> G
-    G --> J
-    H --> I
-    L -->|StreamEvent| H
-    H -->|filtered text| F
-    J --> K
+    TG --> BM
+    DC --> BM
+    SL --> BM
+    WA --> BM
+    DOT --> BM
+    BM --> KBA
+    KBA --> K
+    KBA --> SB
+    SB -->|mpsc::Receiver&lt;String&gt;| BM
 ```
 
-The daemon calls `start_channel_bridge()` at boot. That function reads the `ChannelsConfig`, instantiates every adapter whose feature flag is enabled and whose credentials are present, wraps the kernel in `KernelBridgeAdapter`, and hands everything to `BridgeManager` which runs the adapters' event loops.
+The daemon calls `start_channel_bridge()` at startup. This function reads the kernel's `ChannelsConfig`, instantiates an adapter for every configured+enabled channel, and hands them all to a `BridgeManager`. The manager routes inbound messages to the kernel and outbound responses back to the correct channel.
 
-## Key Components
+`KernelBridgeAdapter` wraps `Arc<LibreFangKernel>` and implements the `ChannelBridgeHandle` trait — the contract that `BridgeManager` uses to interact with the kernel without depending on kernel internals.
 
-### `KernelBridgeAdapter`
+## Entry Points
 
-A thin wrapper around `Arc<LibreFangKernel>` that implements the `ChannelBridgeHandle` trait defined in `librefang_channels::bridge`. It is the single point where channel adapters touch the kernel.
+### `start_channel_bridge(kernel) -> (Option<BridgeManager>, Router)`
 
-**Core messaging methods:**
+Called by the daemon once during startup. Returns:
+
+- `Some(BridgeManager)` if at least one channel was successfully started, `None` otherwise.
+- An `axum::Router` containing webhook routes for channels that receive messages via HTTP callbacks (Feishu, Teams, DingTalk, etc.). This router should be mounted under `/channels` on the main API server.
+
+### `start_channel_bridge_with_config(kernel, config) -> (Option<BridgeManager>, Vec<String>, Router)`
+
+Used by hot-reload. Accepts an explicit `ChannelsConfig` rather than reading from the kernel's current config. Also returns a `Vec<String>` of started channel names.
+
+## KernelBridgeAdapter
+
+The central struct implementing `ChannelBridgeHandle`. Every method delegates to `LibreFangKernel` and formats the result for channel delivery.
+
+### Message Sending Methods
 
 | Method | Purpose |
-|--------|---------|
-| `send_message` | Non-streaming turn. Returns the agent's full response. Returns empty string for silent/NO_REPLY turns. |
-| `send_message_streaming` | Streaming turn. Returns an `mpsc::Receiver<String>` of filtered text chunks. |
-| `send_message_streaming_with_sender` | Same, but carries `SenderContext` (is_group, sender identity). |
-| `send_message_streaming_with_sender_status` | Streaming with a `oneshot::Receiver<Result<(), String>>` for the kernel's terminal status — used by adapters that need lifecycle reactions and accurate delivery metrics. |
-| `send_message_with_blocks` | Handles multimodal input (images, files) by extracting text for memory/logging and passing `ContentBlock`s to the kernel. |
-| `send_message_ephemeral` | Sends a message that is excluded from session history. |
-| `send_channel_push` | Pushes a message outbound to a specific channel/recipient — used by cron delivery and workflow outputs. |
+|---|---|
+| `send_message` | Basic text send. Returns empty string for silent/NO_REPLY responses. |
+| `send_message_with_sender` | Text send with `SenderContext` (includes `is_group` flag). |
+| `send_message_with_blocks` | Multi-modal send (text + images). Extracts text from content blocks for memory/logging. |
+| `send_message_with_blocks_and_sender` | Blocks + sender context combined. |
+| `send_message_ephemeral` | Sends a message that won't be persisted in conversation history. |
+| `send_message_streaming` | Returns `mpsc::Receiver<String>` for real-time text delivery. |
+| `send_message_streaming_with_sender` | Streaming with sender context (group/DM awareness). |
+| `send_message_streaming_with_sender_status` | Streaming with sender context **and** a oneshot channel that resolves to the kernel's final `Result`. Used for accurate delivery tracking and lifecycle reactions. |
 
-**Administrative methods** (all return human-readable text for channel `/commands`):
+All methods return `Ok("")` when the agent chooses silence (`result.silent == true`), preventing literal "NO_REPLY" text from reaching users.
 
-- `list_agents`, `find_agent_by_name`, `spawn_agent_by_name`
-- `list_models_text`, `list_providers_text`, `list_models_by_provider`
-- `list_skills_text`, `list_hands_text`
-- `list_workflows_text`, `run_workflow_text`
-- `list_triggers_text`, `create_trigger_text`, `delete_trigger_text`
-- `list_schedules_text`, `manage_schedule_text` (add/del/run)
-- `list_approvals_text`, `resolve_approval_text`
-- `budget_text`, `session_usage`
-- `reset_session`, `reboot_session`, `compact_session`
-- `set_model`, `stop_run`
-- `uptime_info`, `peers_text`, `a2a_agents_text`
+### Agent Management
 
-### Streaming Text Bridge
+| Method | Purpose |
+|---|---|
+| `find_agent_by_name` | Look up an `AgentId` by display name. |
+| `list_agents` | List all non-hand agents. |
+| `spawn_agent_by_name` | Load an `agent.toml` manifest from `~/.librefang/workspaces/agents/{name}/` and spawn it. |
+| `get_agent_group_trigger_patterns` | Returns regex patterns from agent manifest's `channel_overrides.group_trigger_patterns`. |
 
-`start_stream_text_bridge_with_status` spawns two concurrent tasks:
+### Session Control
 
-1. **Bridge task** — reads `StreamEvent`s from the kernel, buffers text per iteration, applies content filters, and forwards clean text through an `mpsc::Sender<String>`.
-2. **Status task** — awaits the kernel's `JoinHandle`, then sends a sanitized error message through the text channel if the kernel failed, and reports terminal status through a `oneshot` channel.
+| Method | Purpose |
+|---|---|
+| `reset_session` | Clear chat history. |
+| `reboot_session` | Clear full context (stronger than reset). |
+| `compact_session` | Summarize and compress context to free token budget. |
+| `set_model` | Switch agent's active model at runtime. With empty arg, shows current model. |
+| `stop_run` | Cancel an in-progress agent turn. |
+| `session_usage` | Report token counts and estimated cost for current session. |
+| `set_thinking` | Toggle extended thinking (stored preference, model-dependent). |
 
-The streaming bridge is where most of the user-facing intelligence lives. It handles:
+### Automation
 
-- **Iteration buffering**: Text is held until `ContentComplete` fires, then flushed only if it passes the tool-call filter.
-- **Tool progress markers**: `🔧 Tool Name` lines injected when `show_progress` is true. Duplicate tool invocations within a single iteration are collapsed into one marker.
-- **Tool failure markers**: `⚠️ Tool Name failed` (localized via `tr_progress_failed`).
-- **Context warnings**: `⚠️ Context window trimmed` surfaced inline when the kernel emits a `context_warning` phase change.
-- **Timeout partial output**: When the kernel hits the inactivity timer after producing partial output, a `[Task timed out. The output above may be incomplete.]` footer is appended and status is reported as `Ok(())` (soft success) to avoid a false ❌ lifecycle reaction.
+| Method | Purpose |
+|---|---|
+| `list_workflows_text` | Human-readable workflow listing. |
+| `run_workflow_text` | Execute a workflow by name with input text. |
+| `list_triggers_text` / `create_trigger_text` / `delete_trigger_text` | CRUD for event triggers. |
+| `list_schedules_text` / `manage_schedule_text` | List and manage cron jobs (add/del/run). |
+| `list_approvals_text` / `resolve_approval_text` | View and approve/reject pending tool approvals with optional TOTP. |
 
-### Content Filtering
+### Observability & Configuration
 
-The bridge applies three layers of filtering before text reaches a channel:
+| Method | Purpose |
+|---|---|
+| `uptime_info` | Uptime duration and active agent count. |
+| `list_models_text` / `list_providers_text` | Model and provider catalogs grouped by provider. |
+| `list_skills_text` | Installed skills with runtime type and tool count. |
+| `list_hands_text` | Available hand definitions and active instances. |
+| `budget_text` | Hourly/daily/monthly spend against configured limits. |
+| `peers_text` | Connected OFP peer network nodes. |
+| `a2a_agents_text` | Discovered external A2A (agent-to-agent) endpoints. |
+| `channel_overrides` | Channel-type-specific overrides (debounce timing, trigger patterns, etc.). Merges agent routing aliases into `group_trigger_patterns` so bot nicknames trigger responses without @mentions. |
+| `agent_channel_overrides` | Per-agent channel overrides from agent manifest. |
 
-#### 1. Tool-call leak detection (`looks_like_tool_call`)
+### Other
 
-Some LLM providers emit tool calls as plain text instead of using the proper tool_use API. The `agent_loop` module recovers these into structured calls, but the text stream would still contain the raw JSON if not filtered.
+| Method | Purpose |
+|---|---|
+| `authorize_channel_user` | RBAC check for chat/spawn/kill/install_skill actions. |
+| `record_delivery` | Track delivery success/failure and persist last-channel for cron `CronDelivery::LastChannel`. |
+| `check_auto_reply` | Check if auto-reply rules fire for a given message and execute if so. |
+| `subscribe_events` | Subscribe to the kernel event bus for SSE/dashboard delivery. |
+| `record_consumer_lag` | Report event consumer backlog to the event bus. |
+| `classify_reply_intent` | One-shot LLM call to determine if a group message is directed at the bot. Fail-open: on error, assumes REPLY. |
+| `send_channel_push` | Proactively push a message to a specific channel recipient (used by cron delivery). |
+| `channels_download_dir` / `channels_download_max_bytes` | File download configuration for channels that receive attachments. |
 
-Detection patterns (applied at `ContentComplete`):
+## Streaming Bridge
 
-| Pattern | Example |
-|---------|---------|
-| Start-of-text JSON array | `[{...` |
-| `functions.` prefix | `functions.web_search(...)` |
-| XML-style tool tags | `<function=...>`, `<tool>`, `[TOOL_CALL]` |
-| Gemini-style separators | `ardia` (U+FF62) |
-| Markdown code blocks with tool JSON | ````name\n{"name":"..."}``` |
-| Backtick-wrapped tool JSON | `` `name {"name":"..."}` `` |
-| Bare JSON objects with tool-call shape | `{"name":"web_search","arguments":{...}}` |
+The streaming bridge (`start_stream_text_bridge` / `start_stream_text_bridge_with_status`) converts the kernel's `StreamEvent` channel into a simple `mpsc::Receiver<String>` that channel adapters can consume for real-time message delivery.
 
-Long text (>2000 chars) only matches start-of-text patterns, because natural language that *discusses* tools legitimately contains tool-call-like substrings.
+### Event Processing
 
-Supporting functions:
-- `contains_bare_json_tool_call` — scans for `{...}` spans and checks if they parse as tool-call objects.
-- `find_json_object_end` — tracks brace depth and string escapes to find balanced JSON boundaries.
-- `looks_like_tool_call_object` — validates that a JSON object has a `name`/`function`/`tool` field with tool-name characters and an `arguments`/`parameters`/`args`/`input` field.
-- `looks_like_tool_name` — allows alphanumeric, `_`, `-`, `.`, `:`, `/`.
+```mermaid
+graph TD
+    SE[StreamEvent] --> TD[TextDelta]
+    SE --> CC[ContentComplete]
+    SE --> TUS[ToolUseStart]
+    SE --> TER[ToolExecutionResult]
+    SE --> PC[PhaseChange]
+    
+    TD --> BUF[Append to iteration buffer]
+    CC --> FLUSH{Flush buffer}
+    FLUSH -->|saw tool use| DROP1[Drop]
+    FLUSH -->|looks like tool call| DROP2[Drop + warn]
+    FLUSH -->|silent response| DROP3[Drop]
+    FLUSH -->|clean text| SEND[Send to channel]
+    TUS --> PROG["Emit 🔧 ToolName"]
+    TER -->|is_error| FAIL["Emit ⚠️ ToolName failed"]
+    PC -->|context_warning| WARN["Emit ⚠️ warning"]
+```
 
-#### 2. Silent response suppression
+Key behaviors:
 
-Text matching `NO_REPLY` or `[no reply needed]` sentinels (detected by `librefang_runtime::silent_response::is_silent_response`) is silently dropped so the channel adapter skips sending anything.
+1. **Iteration buffering.** Text deltas accumulate per iteration. Only at `ContentComplete` does the bridge decide whether to forward or suppress the buffered text.
 
-#### 3. Error sanitization (`sanitize_channel_error`)
+2. **Tool call suppression.** If `ToolUseStart` was seen in the current iteration, all text is dropped (it's the provider echoing the tool call as content). The bridge also applies heuristic detection for providers that emit tool calls as plain text.
 
-All kernel/driver errors pass through this function before reaching users:
+3. **Progress markers.** When `show_progress` is `true` (controlled by `AgentManifest.show_progress`), the bridge emits `🔧 ToolName` on tool invocation and `⚠️ ToolName failed` on tool errors. Tool names are prettified (`web_search` → `Web Search`). Duplicate tool names within a single iteration are collapsed; the set resets at each `ContentComplete`.
 
-| Error pattern | User-facing message |
-|---------------|-------------------|
-| Timeout / inactivity | "The task timed out due to inactivity. Try breaking it into smaller steps." |
-| Rate limit / 429 / quota | "I've hit my usage limit and need to rest. I'll be back soon!" |
-| Auth / 401 | "I'm having trouble with my credentials. Please let the admin know." |
-| Content filter / safety | "I can't help with that — the request was blocked by the model's safety filter." |
-| Driver crash / exit code | "Sorry, something went wrong on my end. Please try again in a moment." |
-| Other | "Something went wrong: please try again. (ref: {first 80 chars})" |
+4. **Context warnings.** `PhaseChange` events with `phase == "context_warning"` are surfaced to the user so they know quality may degrade and can run `/reset` or `/compact`.
 
-Group chats suppress **all** error messages to avoid leaking any technical detail publicly.
+5. **Error handling.** When the kernel task fails:
+   - **Timeouts with partial output** are treated as soft success (status = `Ok(())`), appending a `[Task timed out. The output above may be incomplete.]` marker.
+   - **Group chats** suppress all error messages to avoid leaking technical details.
+   - **DMs** show sanitized errors via `sanitize_channel_error()`, with special handling for rate-limit messages that include reset times.
 
-### Channel Adapter Startup
+6. **Language-aware failure text.** The `tr_progress_failed()` function returns localized "failed" suffixes for progress lines (zh-CN, es, ja, de, fr, with English fallback).
 
-`start_channel_bridge_with_config` is the main entry point. It:
+### Status Channel
 
-1. Checks each channel config field against the compiled feature flags. Configured channels whose feature is not enabled emit a warning and are skipped.
-2. Creates a `KernelBridgeAdapter` wrapping the kernel.
-3. Instantiates adapters for each configured channel, reading tokens from environment variables via `read_token`.
-4. Collects all adapters into a `Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)>` — adapter, default_agent_name, account_id.
-5. Returns `(Option<BridgeManager>, Vec<String>, axum::Router)` where the router contains webhook routes for webhook-based channels (Feishu, Teams, LINE, etc.).
+`start_stream_text_bridge_with_status` additionally returns a `oneshot::Receiver<Result<(), String>>` that resolves after the text stream has fully drained. The adapter uses this to:
+- Drive proper lifecycle reactions (✅ vs ❌ in the channel UI)
+- Record accurate `record_delivery` metrics
+- Honor `suppress_error_responses` for public-feed adapters
 
-**Multi-account support**: Many channel configs are `Vec<ChannelConfig>` — each entry can have a different `account_id`, `default_agent`, and token. The bridge instantiates a separate adapter for each.
+Timeout-with-partial-output reports `Ok(())` to preserve the pre-V2 UX where these turns were treated as successful.
 
-**Sidecar channels**: Channels defined in `sidecar_channels` config are loaded separately via `SidecarAdapter` and are not feature-gated.
+## Tool Call Detection
 
-### Reply Intent Classification (`classify_reply_intent`)
+Some LLM providers emit tool calls as plain text instead of using proper tool_use APIs. The bridge filters these out to prevent raw JSON or function-call syntax from reaching end users on messaging platforms.
 
-For group chats where the bot shouldn't respond to every message, the bridge can run an LLM-based classifier. It constructs a prompt asking the model to output `REPLY` or `NO_REPLY`, then:
+### Detection Heuristics
 
-- Sanitizes both `message_text` and `sender_name` (user-editable on most platforms) to reduce prompt injection surface — strips backticks, brackets, newlines, and truncates.
-- Includes bot name and aliases from agent manifest `routing.aliases` / `routing.weak_aliases`.
-- Fails open: if the LLM call errors, the message is treated as `REPLY`.
+`looks_like_tool_call(text)` applies a layered approach:
 
-### Authorization (`authorize_channel_user`)
+1. **Start-of-text patterns** (always checked, regardless of length):
+   - `[{`, `functions.`, `{"type":"function"`, `{"tool_calls":`, `{"tool_calls" :`
+   - Array starting with `[` containing `'type': 'text'`
 
-When the RBAC auth manager is enabled, channel actions are gated:
+2. **Contains-based patterns** (only for text ≤ 2000 chars):
+   - XML tags: `<function=`, `<function>`, `<function `, `<tool>`, `[TOOL_CALL]`
+   - Special token: ` tantos` (Claude-style)
+   - Markdown/backtick-wrapped tool calls
 
-| Action string | `auth::Action` |
-|---------------|----------------|
-| `chat` | `ChatWithAgent` |
-| `spawn` | `SpawnAgent` |
-| `kill` | `KillAgent` |
-| `install_skill` | `InstallSkill` |
+3. **Structural JSON detection** (`contains_bare_json_tool_call`):
+   - Scans for `{...}` objects
+   - Parses each as JSON and checks for tool-call shape: has a `name`/`function`/`tool` field that looks like a tool name, plus `arguments`/`parameters`/`args`/`input` with valid JSON content.
 
-The auth manager maps `(channel_type, platform_id)` to an internal user ID, then checks the action against that user's permissions.
+4. **Named JSON detection** (`looks_like_named_json_tool_call`):
+   - Looks for `toolName{...}` patterns (name followed by JSON object)
+   - Used inside markdown code blocks and backtick spans
 
-### Approval Workflow (`resolve_approval_text`)
+The 2000-char threshold for deep heuristics prevents false positives on long responses that naturally discuss tools (e.g., explaining how `agent_send` works).
 
-When an agent requests a gated tool (e.g., file deletion, shell execution), the approval must be resolved through the channel. The bridge:
+## Error Sanitization
 
-1. Looks up the pending approval by ID prefix.
-2. If the tool requires TOTP:
-   - Checks lockout status first (`is_totp_locked_out`).
-   - Validates TOTP codes with replay protection (`is_totp_code_used` / `record_totp_code_used`).
-   - Validates recovery codes via atomic redemption (`vault_redeem_recovery_code`) to prevent concurrent double-use.
-   - Records failures atomically (`check_and_record_totp_failure`) — fail-secure: if the DB is wedged, the user is locked out rather than granted unlimited tries.
-3. Calls `kernel.approvals().resolve()` with the decision and TOTP verification status.
+`sanitize_channel_error()` maps internal error strings to user-friendly messages:
 
-### Delivery Tracking (`record_delivery`)
+| Error Pattern | User Message |
+|---|---|
+| `timed out`, `inactivity` | "The task timed out due to inactivity. Try breaking it into smaller steps." |
+| `rate limit`, `429`, `quota`, `too many requests`, `resource exhausted` | "I've hit my usage limit and need to rest. I'll be back soon!" |
+| `auth`, `not logged in`, `401` | "I'm having trouble with my credentials. Please let the admin know." |
+| `content filtered by provider`, `content_filter` | "I can't help with that — the request was blocked by the model's safety filter." |
+| `exited with code`, `llm driver` | "Sorry, something went wrong on my end. Please try again in a moment." |
+| (fallback) | "Something went wrong: please try again. (ref: {first 80 chars})" |
 
-After a channel adapter sends a response, it calls back with success/failure. The bridge:
+## Channel Adapter Feature Flags
 
-- Records the delivery receipt via `kernel.delivery().record()` for metrics.
-- On success, persists the last channel + recipient + thread_id to `delivery.last_channel` in structured memory, so cron jobs with `CronDelivery::LastChannel` can target the right destination after restarts.
+Each channel adapter is behind a Cargo feature flag (`channel-telegram`, `channel-discord`, etc.). The bridge emits a warning at startup when a channel is configured in `ChannelsConfig` but its feature is not enabled.
 
-### Channel Overrides
+### Multi-Account Support
 
-`channel_overrides` resolves per-channel configuration (trigger patterns, default agents) by looking up the channel config entry matching the given `channel_type` and optional `account_id`. It also merges routing aliases from the default agent's manifest into `group_trigger_patterns`, with proper regex escaping and ASCII-aware word boundary handling.
+Most channels support multiple accounts (e.g., two Telegram bots). Configuration is an array; the bridge iterates and creates one adapter per entry. Each adapter is tagged with an `account_id` for routing and override resolution.
 
-### Utility Functions
+### Adapter Construction Pattern
 
-- **`prettify_tool_name`**: Converts `web_search_v2` → "Web Search V2", `MCP_call` → "MCP Call" (preserves existing uppercase after the first character).
-- **`tr_progress_failed`**: Returns the localized word for "failed" in tool-failure progress lines (supports zh-CN, es, ja, de, fr, en).
-- **`parse_trigger_pattern`**: Converts chat-friendly pattern strings (`lifecycle`, `spawned:name`, `memory:key`, `match:text`, `all`) into `TriggerPattern` enums.
+Adapters follow a builder pattern:
 
-## Error Handling Strategy
+```rust
+// Simplified example
+let adapter = TelegramAdapter::new(token, allowed_users, poll_interval, api_url)
+    .with_account_id(account_id)
+    .with_thread_routes(thread_routes)
+    .with_backoff(initial_backoff_secs, max_backoff_secs);
+```
 
-The bridge implements a layered error strategy:
+Common builder methods:
+- `.with_account_id(id)` — Tag for multi-account routing
+- `.with_backoff(initial, max)` — Exponential backoff for connection errors
+- `.with_clear_done_reaction(bool)` — Channel-specific behavior (Telegram)
 
-1. **Kernel errors** are caught by the status task, sanitized via `sanitize_channel_error`, and appended to the text stream as a final message.
-2. **Group vs DM**: In group chats, all error messages are suppressed to prevent leaking technical details publicly. In DMs, rate-limit messages with reset times are shown verbatim when they contain actionable information.
-3. **Timeout with partial output** is treated as soft success (`Ok(())`) — the user already saw streamed content, so flipping to an error state would be a UX regression.
-4. **Kernel panics** produce a generic "something went wrong" message and are reported as `Err` in the status channel.
+### Webhook-Based Channels
 
-## Feature Flags
+Channels like Feishu, Teams, DingTalk, LINE, Viber, and Messenger receive messages via HTTP webhooks. Their adapters register routes on the returned `axum::Router`, which must be mounted on the API server.
 
-Every channel adapter is behind a Cargo feature flag (`channel-telegram`, `channel-discord`, etc.). At compile time, only adapters whose features are enabled are included. At runtime, the `check_channel!` macro emits a warning for any channel that is configured in `config.toml` but whose feature was not compiled in. This ensures the binary can be slimmed down to only the channels actually needed.
+### Polling Channels
 
-## Adding a New Channel Adapter
+Channels like Telegram (in long-poll mode), IRC, and Matrix actively poll or maintain persistent connections. These adapters run their own background tasks managed by `BridgeManager`.
 
-1. Create the adapter in `librefang-channels` implementing `ChannelAdapter`.
-2. Add a `channel-<name>` feature flag to `Cargo.toml`.
-3. Add the config struct to `ChannelsConfig` in `librefang-types`.
-4. Add a `#[cfg(feature = "channel-<name>")]` import block and instantiation block in `start_channel_bridge_with_config`, following the existing pattern (read token, build adapter, push to `adapters` vec).
-5. Add the channel name to the `channel_overrides` match statement.
+### Special Cases
+
+- **WhatsApp**: Supports both Cloud API mode (access token) and Web/QR gateway mode (gateway URL). Either is sufficient to start.
+- **WeChat**: Requires a bot token obtained via dashboard QR login. Skipped gracefully with a warning if no token is available.
+- **WeCom**: Supports WebSocket mode and Callback mode. Callback mode requires optional `token` and `encoding_aes_key` for signature verification.
+- **Teams**: When `signature_required = true`, the adapter refuses to start if the security token is missing or invalid base64, preventing unsigned webhook acceptance.
+- **Signal**: Constructed via `SignalAdapter::with_options()` with explicit API URL, phone number, and optional API key.
+
+## Approval Flow with TOTP
+
+The `resolve_approval_text` method handles tool approval/rejection via channel commands (e.g., `/approve <id> <totp-code>`). The flow:
+
+1. Match pending approval by ID prefix (first 8 chars shown to users).
+2. If the tool requires TOTP (per `policy().tool_requires_totp()`):
+   - **Recovery code path**: Atomically redeems via `kernel.vault_redeem_recovery_code()` to prevent double-use races (#3560, #3943).
+   - **TOTP code path**: Checks replay via `is_totp_code_used()` (#3952), verifies against vault secret, then records consumption.
+   - **Lockout**: Uses `check_and_record_totp_failure()` for atomic lockout check + failure recording (#3584). Fail-secure: DB errors result in lockout, not unlimited tries.
+3. Calls `approvals().resolve()` with the decision and TOTP verification status.
+
+## Reply Intent Classification
+
+`classify_reply_intent()` determines whether a group-chat message is directed at the bot. It:
+
+1. Sanitizes inputs (truncates message to 500 chars, sender name to 64 chars, strips backticks, brackets, newlines).
+2. Constructs a classifier prompt that includes bot identity (name + aliases from agent manifest routing metadata).
+3. Makes a one-shot LLM call. If the response contains "NO_REPLY", the message is ignored.
+4. **Fails open**: any error or non-"NO_REPLY" response triggers a reply.
+
+## Re-exported Types
+
+### `approval.rs`
+
+Re-exports `ApprovalManager` from `librefang_kernel::approval`. API route modules should import from this re-export rather than reaching into the kernel's internal module path directly (Issue #3744). The underlying type is constructed and owned by the kernel; API routes only call associated functions on it (e.g., the static `verify_totp_code_with_issuer`).

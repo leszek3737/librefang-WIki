@@ -2,90 +2,85 @@
 
 # librefang-kernel-handle Tests
 
-Integration tests that verify the **default method implementations** on the `KernelHandle` trait. The `KernelHandle` trait provides default behaviors for convenience methods, approval flows, ACLs, cron scheduling, and configuration — these tests ensure those defaults remain stable and correct.
+## Purpose
 
-## Test Organization
+This module contains integration tests for `librefang-kernel-handle`'s **default trait method implementations**. The kernel handle defines a large surface of traits (`AgentControl`, `MemoryAccess`, `TaskQueue`, `ChannelSender`, etc.) where many methods have default implementations. These tests verify that those defaults behave correctly — delegating to the right underlying methods, returning the expected sentinel values, and maintaining zero-copy guarantees where performance matters.
 
-Three test files, each covering a distinct category of default behavior:
+## Test Files
 
-| File | Focus |
-|---|---|
-| `defaults_approval.rs` | Approval gating defaults (auto-approve, no denials) |
-| `defaults_delegation.rs` | Delegation from convenience methods to core trait methods |
-| `defaults_returns.rs` | Default return values for ACL, cron, timeout, workspace config |
+### `defaults_approval.rs` — Approval & Tool Policy Defaults
 
-## Testing Strategy
+Validates that implementors who leave `ApprovalGate` and `ToolPolicy` at their defaults get permissive behavior:
 
-All three files share the same approach: implement `KernelHandle` with minimal stubs for the **required** methods, then call the **provided (default)** methods and assert their behavior. This proves the trait's default implementations work independently of any real kernel backend.
+| Test | Behavior Verified |
+|------|-------------------|
+| `test_request_approval_default_auto_approves` | `request_approval()` returns `ApprovalDecision::Approved` without prompting |
+| `test_is_tool_denied_with_context_default_false` | `is_tool_denied_with_context()` returns `false` regardless of tool/sender/channel |
+| `test_requires_approval_default_false` | `requires_approval()` returns `false` for any tool name |
 
-A typical stub struct (e.g., `NoopKernelHandle`) returns `Err("not implemented")` or empty collections for every required method, since the tests never invoke those paths directly.
+The `NoopKernelHandle` stub implements every required method to return errors, proving the default methods on `ApprovalGate` and `ToolPolicy` never call into the underlying trait — they have fully self-contained default logic.
 
-## Approval Defaults (`defaults_approval.rs`)
+### `defaults_delegation.rs` — Delegation Patterns
 
-Uses `NoopKernelHandle` to verify that when no approval policy is configured, the system is permissive:
+Tests that convenience methods on traits correctly delegate to their underlying core methods. Each test uses an `AtomicBool` flag inside a tracking struct to prove the delegation actually occurs:
 
-| Test | Method | Expected Default |
-|---|---|---|
-| `test_request_approval_default_auto_approves` | `request_approval(agent_id, tool, summary, None)` | `Ok(ApprovalDecision::Approved)` |
-| `test_is_tool_denied_with_context_default_false` | `is_tool_denied_with_context(tool, sender, channel)` | `false` |
-| `test_requires_approval_default_false` | `requires_approval(tool)` | `false` |
+| Default Method | Delegates To | Tracking Struct |
+|----------------|-------------|-----------------|
+| `send_to_agent_as(agent, msg, parent)` | `send_to_agent(agent, msg)` | `TrackingSendHandle` |
+| `spawn_agent_checked(toml, parent, allowed)` | `spawn_agent(toml, parent)` | `TrackingSpawnHandle` |
+| `requires_approval_with_context(tool, sender, channel)` | `requires_approval(tool)` | `TrackingApprovalHandle` |
 
-These defaults mean that a bare `KernelHandle` implementation without overridden approval methods will allow all tool usage without human-in-the-loop gating.
+The `TrackingApprovalHandle` is notable because it overrides `requires_approval` from `ApprovalGate` (which is normally a default impl) to set its flag, while still using the default `requires_approval_with_context`. This confirms the default context-aware method calls into the simpler method.
 
-## Delegation Defaults (`defaults_delegation.rs`)
+### `defaults_returns.rs` — Default Return Values
 
-Verifies that convenience methods on the trait delegate to the correct core methods. Each test uses an `AtomicBool` flag inside the stub struct to confirm the underlying method was actually called.
+Tests that default implementations return sensible sentinel values for operational configuration methods:
+
+| Test | Default Value |
+|------|--------------|
+| `test_resolve_user_tool_decision_default_allow` | `UserToolGate::Allow` |
+| `test_memory_acl_for_sender_default_none` | `None` (no ACL restrictions) |
+| `test_cron_defaults_return_errors` | `KernelOpError::Unavailable("Cron scheduler")` for `cron_create`, `cron_list`, `cron_cancel` |
+| `test_tool_timeout_defaults` | `120` seconds for both `tool_timeout_secs()` and `tool_timeout_secs_for(tool)` |
+| `test_max_agent_call_depth_default` | `5` |
+| `test_workspace_prefix_defaults_empty` | Empty vec for `readonly_workspace_prefixes` and `named_workspace_prefixes` |
+
+The cron test (`#3541`) specifically validates that the error is a typed `KernelOpError::Unavailable` variant rather than a generic string, allowing callers to match on the variant directly while still producing `"Cron scheduler not available"` in `Display` output.
+
+### `send_channel_file_data_zero_copy.rs` — Zero-Copy Regression (Issue #3553)
+
+A regression test ensuring that `ChannelSender::send_channel_file_data` accepts `bytes::Bytes` and that cloning the buffer is a refcount bump, not a heap allocation. This matters because channel adapters (retry logic, metering, fan-out) clone the buffer at call boundaries.
+
+Three tests:
+
+1. **`cloning_bytes_shares_underlying_allocation`** — Constructs a 10 MiB `Bytes`, clones it three times, asserts all four values share the same pointer address.
+
+2. **`send_channel_file_data_does_not_copy_buffer`** — The `CapturingFileKernel` stub records the pointer address and length inside `send_channel_file_data`. The test clones `Bytes` at the call site (simulating a wrapper layer) and asserts the kernel sees the same allocation.
+
+3. **`vec_to_bytes_round_trip_is_zero_copy_for_unique_bytes`** — Validates that `Vec::from(Bytes)` is O(1) when the `Bytes` uniquely owns its allocation, pinning the `bytes` 1.x vtable `into_vec` behavior.
+
+## Test Architecture
+
+Every test file follows the same pattern to create a valid kernel handle stub:
 
 ```mermaid
-flowchart LR
-    A["send_to_agent_as()"] -->|delegates to| B["send_to_agent()"]
-    C["spawn_agent_checked()"] -->|delegates to| D["spawn_agent()"]
-    E["requires_approval_with_context()"] -->|delegates to| F["requires_approval()"]
+graph TD
+    A[Define stub struct] --> B[impl AgentControl]
+    B --> C[impl MemoryAccess]
+    C --> D[impl TaskQueue]
+    D --> E[impl EventBus]
+    E --> F[impl KnowledgeGraph]
+    F --> G[impl remaining traits<br/>CronControl, ApprovalGate,<br/>HandsControl, A2ARegistry,<br/>ChannelSender, PromptStore,<br/>WorkflowRunner, GoalControl, ToolPolicy]
+    G --> H[Write tests against<br/>default methods]
 ```
 
-| Test | Stub Struct | Delegation Verified |
-|---|---|---|
-| `test_send_to_agent_as_delegates_to_send_to_agent` | `TrackingSendHandle` | `send_to_agent_as` → `send_to_agent` |
-| `test_spawn_agent_checked_delegates_to_spawn_agent` | `TrackingSpawnHandle` | `spawn_agent_checked` → `spawn_agent` |
-| `test_requires_approval_with_context_delegates_to_requires_approval` | `TrackingApprovalHandle` | `requires_approval_with_context` → `requires_approval` |
+The required traits (`AgentControl`, `MemoryAccess`, `TaskQueue`, `EventBus`, `KnowledgeGraph`) demand method bodies. The marker/default-only traits (`CronControl`, `ApprovalGate`, `HandsControl`, `A2ARegistry`, `ChannelSender`, `PromptStore`, `WorkflowRunner`, `GoalControl`, `ToolPolicy`) use empty `impl` blocks in most tests, relying entirely on default methods.
 
-The delegation pattern is important: implementors only need to override the core method (`send_to_agent`, `spawn_agent`, `requires_approval`), and the context-aware variant (`send_to_agent_as`, `spawn_agent_checked`, `requires_approval_with_context`) automatically picks up the behavior. This keeps the trait implementation surface small.
+## Conventions for Adding Tests
 
-## Return Value Defaults (`defaults_returns.rs`)
+When adding a new default method to a kernel handle trait, add a corresponding test here:
 
-Tests the remaining default implementations using `NoopKernelHandle`:
-
-### User Policy and ACL
-
-| Test | Method | Expected Default |
-|---|---|---|
-| `test_resolve_user_tool_decision_default_allow` | `resolve_user_tool_decision(tool, sender, channel)` | `UserToolGate::Allow` |
-| `test_memory_acl_for_sender_default_none` | `memory_acl_for_sender(sender, channel)` | `None` |
-
-### Cron Scheduling
-
-`test_cron_defaults_return_errors` confirms all three cron methods return an error containing `"Cron scheduler not available"`:
-
-- `cron_create(agent, config)` → `Err`
-- `cron_list(agent)` → `Err`
-- `cron_cancel(job_id)` → `Err`
-
-This ensures that implementors who don't override cron methods get a clear, descriptive error rather than a panic or silent failure.
-
-### Configuration Constants
-
-| Test | Method | Expected Default |
-|---|---|---|
-| `test_tool_timeout_defaults` | `tool_timeout_secs()` / `tool_timeout_secs_for(tool)` | `120` seconds |
-| `test_max_agent_call_depth_default` | `max_agent_call_depth()` | `5` |
-| `test_workspace_prefix_defaults_empty` | `readonly_workspace_prefixes(agent)` / `named_workspace_prefixes(agent)` | Empty `Vec` |
-
-## Relationship to `KernelHandle`
-
-These tests live in the `librefang-kernel-handle` crate's test directory because they exercise the **trait's default method bodies** — not any particular concrete implementation. The Rust trait system allows default method definitions that call other (required) trait methods. This test suite locks in the contract for those defaults.
-
-When adding a new default method to `KernelHandle`, add a corresponding test here following the existing pattern:
-
-1. Either reuse `NoopKernelHandle` (if the test only checks a return value) or create a new tracking struct with `AtomicBool` flags (if the test verifies delegation).
-2. Implement all required `KernelHandle` methods with stubs.
-3. Assert the default method's behavior.
+1. **Find or create** a `NoopKernelHandle` (or tracking variant) in the appropriate test file.
+2. **Import** the new return type from `librefang_types` if needed.
+3. **Assert** the default return value or delegation behavior.
+4. For delegation tests, use `AtomicBool` flags (with `Ordering::SeqCst`) to prove the underlying method is called — do not rely on side-effect observation.

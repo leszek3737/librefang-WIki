@@ -1,364 +1,188 @@
 # Hands System
 
-# Hands System
+# LibreFang Hands — Autonomous Capability Packages
 
-Autonomous capability packages that work for you in the background. A Hand bundles one or more agent configurations with requirements, settings, and dashboard metrics into a deployable unit activated from a marketplace.
+A **Hand** is a pre-built, domain-complete agent configuration that users activate from a marketplace. Unlike regular agents (where you chat with them), Hands work for you — you check in on them periodically. A video-clip Hand autonomously watches a folder and produces clips; a security Hand monitors logs and alerts you.
 
-Unlike regular agents (which you chat with interactively), Hands run autonomously — you check in on their progress rather than driving them turn-by-turn.
+The Hands system is split across two files:
 
-## Architecture
+| File | Responsibility |
+|---|---|
+| `lib.rs` | Core types — `HandDefinition`, `HandInstance`, parsing, settings resolution |
+| `registry.rs` | `HandRegistry` — install, activate, persist, reload, requirements checking |
+
+## Architecture Overview
 
 ```mermaid
 graph TD
-    subgraph "Disk"
-        HT["HAND.toml"]
-        SK["SKILL.md / SKILL-{role}.md"]
-        SD["hand_state.json"]
-        AT["agent.toml<br/>(base template)"]
+    subgraph "HAND.toml on Disk"
+        HT[HAND.toml]
+        SK[SKILL.md]
+        AS[SKILL-role.md]
     end
 
-    subgraph "Registry (HandRegistry)"
-        DM["definitions<br/>DashMap&lt;id, HandDefinition&gt;"]
-        IM["instances<br/>DashMap&lt;uuid, HandInstance&gt;"]
-        AI["agent_index<br/>DashMap&lt;agent_id, uuid&gt;"]
-        AX["active_index<br/>DashMap&lt;hand_id, uuid&gt;"]
+    subgraph "Registry"
+        DEF[definitions<br/>DashMap&lt;id, HandDefinition&gt;]
+        INST[instances<br/>DashMap&lt;uuid, HandInstance&gt;]
+        AIDX[agent_index<br/>agent_id → instance_id]
+        HIDX[active_index<br/>hand_id → instance_id]
     end
 
-    HT -->|parse| DM
-    SK -->|attach| DM
-    AT -->|base resolution| DM
-    DM -->|activate| IM
-    IM -->|set_agents| AI
-    IM -->|track| AX
-    IM -->|persist_state| SD
-    SD -->|load_state| IM
+    subgraph "Persistence"
+        STATE[hand_state.json]
+    end
+
+    subgraph "Consumers"
+        K[Kernel<br/>spawns/kills agents]
+        API[HTTP API<br/>CRUD + settings]
+        ROUTER[Router<br/>keyword matching]
+    end
+
+    HT -->|parse| DEF
+    SK -->|skill_content| DEF
+    AS -->|agent_skill_content| DEF
+    DEF -->|activate| INST
+    INST --> AIDX
+    INST --> HIDX
+    INST -->|persist_state| STATE
+    STATE -->|load_state| INST
+    INST --> K
+    DEF --> API
+    DEF --> ROUTER
 ```
 
 ## Core Types
 
 ### `HandDefinition`
 
-The static blueprint parsed from a `HAND.toml` file. Stored in the registry keyed by `id`. Contains:
+The parsed representation of a `HAND.toml` file. Contains everything the system needs to know about a hand *before* it's activated:
 
-| Field | Purpose |
-|-------|---------|
-| `id` / `version` / `name` / `description` | Identity and display |
-| `category` | Marketplace grouping (`Content`, `Security`, `Development`, etc.) |
-| `agents` | `BTreeMap<role, HandAgentManifest>` — one or more agent configs |
-| `tools` / `skills` / `mcp_servers` / `allowed_plugins` | Capability allowlists |
-| `requires` | Prerequisites checked before activation |
-| `settings` | User-configurable options shown in the activation modal |
-| `dashboard` | Metrics schema for the hand's dashboard view |
-| `routing` | Keywords for deterministic hand selection |
-| `i18n` | Localized strings keyed by language code |
-| `skill_content` / `agent_skill_content` | Bundled skill markdown (populated at load, not in TOML) |
+- **Identity**: `id`, `version`, `name`, `description`, `category`, `icon`
+- **Agent manifests**: `agents` — a `BTreeMap<String, HandAgentManifest>` keyed by role name. Single-agent hands are stored as `{"main": ...}`.
+- **Requirements**: `requires` — binaries, env vars, API keys that must be present
+- **Settings**: `settings` — user-configurable options shown in the activation modal
+- **Dashboard**: `dashboard` — metric definitions read from agent memory at runtime
+- **Routing**: `routing` — keywords for deterministic hand selection
+- **Localization**: `i18n` — translated strings keyed by language code
 
-Access the coordinator agent (the one that receives user messages) via `coordinator()`, which returns the agent explicitly marked `coordinator = true`, falling back to the first entry sorted by role name.
+#### Agent Configuration Formats
 
-### `HandInstance`
+A `HAND.toml` supports two formats for defining agents:
 
-A running realization of a `HandDefinition`. Tracks runtime state:
-
-- `instance_id` (`Uuid`) — unique per activation
-- `status` — `Active`, `Paused`, `Error(String)`, or `Inactive`
-- `agent_ids` — `BTreeMap<role, AgentId>` populated after the kernel spawns agents
-- `coordinator_role` — which role receives user messages
-- `config` — user-provided setting overrides
-- `agent_runtime_overrides` — per-role model/provider overrides from the dashboard
-- `activated_at` / `updated_at` — timestamps preserved across restarts
-
-Backward-compatible accessors `agent_id()` and `agent_name()` delegate to the coordinator role.
-
-### `HandAgentManifest`
-
-Wraps an `AgentManifest` with hand-specific fields:
-
-- `coordinator: bool` — marks the entry point agent
-- `invoke_hint: Option<String>` — injected into the coordinator's system prompt for dispatch
-- `base: Option<String>` — references a shared agent template for reuse
-
-## HAND.toml Format
-
-Two agent layout formats are supported. The parser auto-detects which one is in use.
-
-### Single-Agent (Legacy)
-
+**Single-agent** (`[agent]`):
 ```toml
-id = "clip"
-name = "Clip Hand"
-description = "Autonomous video clipping"
-category = "content"
-icon = "🎬"
-tools = ["shell_exec"]
-
 [agent]
 name = "clip-agent"
-description = "Finds and clips video segments"
-system_prompt = "You are a video clipping assistant."
+system_prompt = "You produce video clips."
 
-[dashboard]
-metrics = []
+[agent.model]
+provider = "anthropic"
+model = "some-model"
 ```
 
-Parsed into `agents: { "main": HandAgentManifest { coordinator: true, ... } }`.
-
-### Multi-Agent
-
+**Multi-agent** (`[agents.<role>]`):
 ```toml
-id = "research"
-version = "2.0.0"
-name = "Research Hand"
-description = "Multi-agent research pipeline"
-category = "content"
-tools = []
-
 [agents.planner]
 coordinator = true
 invoke_hint = "Use planner for task decomposition"
 name = "planner-agent"
-description = "Plans research tasks"
-system_prompt = "You plan research."
+
+[agents.planner.model]
+provider = "anthropic"
+system_prompt = "You plan research tasks."
 
 [agents.analyst]
 name = "analyst-agent"
-description = "Analyzes data"
+
+[agents.analyst.model]
 provider = "groq"
 model = "llama-3.3-70b-versatile"
 system_prompt = "You analyze data."
-
-[dashboard]
-metrics = []
 ```
 
-### Agent Configuration Formats
+The coordinator is the agent that receives user messages. If no agent is explicitly marked `coordinator = true`, the first agent by role name (BTreeMap order) becomes the coordinator. Access it via `HandDefinition::coordinator()`.
 
-Each agent entry supports two TOML shapes:
+#### Template Reuse with `base`
 
-**Flat format** (legacy, top-level model fields):
-```toml
-[agents.worker]
-name = "worker"
-provider = "anthropic"
-model = "some-model"
-system_prompt = "..."
-max_tokens = 4096
-temperature = 0.7
-```
-
-**Nested format** (new, explicit `[model]` sub-table):
-```toml
-[agents.worker]
-name = "worker"
-
-[agents.worker.model]
-provider = "anthropic"
-model = "some-model"
-system_prompt = "..."
-max_tokens = 4096
-temperature = 0.7
-```
-
-The parser tries nested first, then falls back to flat. Both produce the same `AgentManifest`.
-
-### Base Template References
-
-Agents in multi-agent format can reference a shared template from the agents registry:
+Multi-agent entries can reference a shared agent template from the agents registry:
 
 ```toml
 [agents.writer]
-coordinator = true
-base = "my-writer"           # loads from {agents_dir}/my-writer/agent.toml
+base = "my-writer"           # loads agents/my-writer/agent.toml
+name = "blog-writer"          # overrides base name
 
 [agents.writer.model]
-system_prompt = "You are a blog post writer."  # overrides the template's prompt
+system_prompt = "You write blog posts."  # overrides base prompt
 ```
 
-Resolution uses `deep_merge_toml` — hand fields override base template fields recursively. Scalars and arrays in the overlay replace base values; tables merge recursively. Template names are validated against path traversal (no `..`, `/`, or `\`).
+The `base` field triggers filesystem I/O — the template is loaded and the hand's inline fields are deep-merged on top (hand wins on conflicts). This requires `agents_dir` to be provided during parsing (done automatically by `parse_hand_toml_with_agents_dir`). Path traversal is blocked: template names must be simple directory names without `..`, `/`, or `\`.
 
-The sentinel values `"default"` for `provider` and `model` defer resolution to the user's global configuration at driver-build time, so a hand that omits these fields respects the system default rather than pinning to whatever the author baked in.
+#### Legacy Flat Format
 
-### Wrapped Format
+Older `HAND.toml` files use flat fields at the `[agent]` level (`provider`, `model`, `system_prompt`, etc. as siblings). The parser auto-detects this format via `normalize_flat_to_nested` and converts it to the nested `[model]` structure before merging or deserializing.
 
-Hands can also be authored with all fields nested under a `[hand]` section. The parser tries the flat format first and falls back to the wrapped format transparently.
+### `HandInstance`
 
-## HandRegistry
+A running instance of a hand — the bridge between a definition and its spawned agents:
 
-Thread-safe registry using lock-free `DashMap` collections with two `Mutex` guards for serializing activation and persistence.
+| Field | Purpose |
+|---|---|
+| `instance_id` | Unique `Uuid` — regenerated on fresh activate, preserved on restart recovery |
+| `hand_id` | Links back to the `HandDefinition` |
+| `status` | `Active`, `Paused`, `Error(String)`, or `Inactive` |
+| `agent_ids` | `BTreeMap<role, AgentId>` — populated by the kernel after spawning |
+| `coordinator_role` | Which role receives user messages (persisted explicitly) |
+| `config` | User-provided configuration overrides |
+| `agent_runtime_overrides` | Per-role model/provider overrides from dashboard editing |
+| `activated_at` / `updated_at` | Timestamps preserved across restarts |
 
-### Storage Layout
+**Coordinator resolution** follows this priority:
+1. Explicit `coordinator_role` that matches an existing `agent_ids` key
+2. The sole entry if there's exactly one agent
+3. The role named `"main"`
+4. The first entry by BTreeMap order
 
-```
-home_dir/
-├── registry/
-│   ├── hands/           # read-only, from shared tarball (reset on sync)
-│   │   ├── clip/
-│   │   │   ├── HAND.toml
-│   │   │   ├── SKILL.md
-│   │   │   └── SKILL-pm.md
-│   │   └── research/
-│   │       └── HAND.toml
-│   └── agents/          # base templates for `base = "..."` references
-│       └── my-writer/
-│           └── agent.toml
-├── workspaces/          # user-installed hands (survive sync)
-│   └── custom-hand/
-│       ├── HAND.toml
-│       └── SKILL.md
-└── hand_state.json      # persisted active instances
-```
+### Settings System
 
-`reload_from_disk` scans both `registry/hands/` and `workspaces/`, with registry entries taking precedence on ID collisions.
+Hands declare configurable settings that are shown in the activation modal. Three setting types are supported:
 
-### Install Methods
+| Type | Behavior |
+|---|---|
+| `Select` | User picks from predefined options. Selected option's `provider_env` is collected for the agent's environment. |
+| `Toggle` | Boolean switch (`"true"`/`"false"`). |
+| `Text` | Freeform input. When `env_var` is set, the value is exposed as an environment variable. |
 
-| Method | Base Templates | Persisted to Disk | Use Case |
-|--------|---------------|-------------------|----------|
-| `install_from_path` | ✅ | No | Loading from registry scan |
-| `install_from_content` | ❌ | No | API install without persistence |
-| `install_from_content_persisted` | ✅ | Yes (`workspaces/{id}/`) | Dashboard "install from content" |
+**`resolve_settings`** converts a user's config choices into:
+- A `prompt_block` (markdown appended to the system prompt)
+- A list of `env_vars` the agent subprocess needs
 
-`install_from_content` explicitly rejects hands that use `base` references because it has no filesystem access for template resolution.
+### Requirements System
 
-### Uninstall
+Each requirement declares what must be satisfied before a hand can work:
 
-`uninstall_hand` removes a hand from memory and deletes its `workspaces/{id}/` directory. It refuses to:
-- Remove built-in hands (those only in `registry/hands/`) — they'd reappear on next sync
-- Remove hands with active instances — deactivate first
+| `requirement_type` | `check_value` | Check logic |
+|---|---|---|
+| `Binary` | Binary name (e.g. `"ffmpeg"`) | `which` lookup on PATH. Special cases: `python3` runs the binary and checks version output; `chromium` tries multiple binary names and known paths. |
+| `EnvVar` / `ApiKey` | Env var name | Non-empty value check |
+| `AnyEnvVar` | Comma-separated env var names | At least one must be set |
 
-### Activation Flow
+Requirements can be marked `optional = true` — these don't block activation but cause a "degraded" status when unmet. Each requirement can carry platform-specific `HandInstallInfo` with install commands for macOS, Windows, and Linux.
 
-1. Kernel calls `activate(hand_id, config)` → creates a `HandInstance` with `Active` status
-2. Kernel spawns agents, then calls `set_agents(instance_id, agent_ids, coordinator_role)`
-3. Instance is tracked in `active_index` for O(1) "is this hand active?" lookups
+### Routing
 
-The `activate_lock` mutex serializes the check-then-insert to prevent concurrent requests from both passing the "already active" guard.
+`HandRouting` provides keywords for deterministic hand selection:
+- `aliases` — strong signals (score ×3)
+- `weak_aliases` — supporting signals (score ×1)
 
-For daemon restart recovery, `activate_with_id` accepts a preserved `instance_id` and original timestamps so deterministic agent IDs remain stable.
+Keywords are English-only; cross-lingual matching uses semantic embedding fallback.
 
-### Agent Lookup
+### Localization (i18n)
 
-`find_by_agent(agent_id)` uses the `agent_index` reverse map (`agent_id → instance_id`) for O(1) resolution, avoiding linear scans across all instances.
-
-## State Persistence
-
-Active and paused instances survive daemon restarts via `hand_state.json`.
-
-### Version History
-
-| Version | Changes |
-|---------|---------|
-| v1 | Bare JSON array, single `agent_id` |
-| v2 | `{ version, instances }` wrapper |
-| v3 | Multi-agent: `agent_ids` map + `coordinator_role` |
-| v4 | `activated_at` / `updated_at` timestamps |
-| v5 (current) | `agent_runtime_overrides` per-role map |
-
-### Forward/Backward Compatibility
-
-- **Loading older state**: v5 daemon reads v1–v4 files. Legacy `config.__model_overrides__` blobs are migrated into `agent_runtime_overrides` without clobbering existing v5 overrides.
-- **Downgrading**: a v4 daemon loading a v5 file silently drops `agent_runtime_overrides` (serialized with `skip_serializing_if = "is_empty"`). Users must re-apply dashboard overrides after a downgrade.
-
-### Atomic Writes
-
-`atomic_write_json` writes to a temp file, `sync_all`s, then `rename`s into place. On Unix, the parent directory is also fsynced so the directory entry update is durable across power loss. This prevents the orphan-GC path from treating a post-crash missing state file as "first boot".
-
-Errored and inactive instances are skipped during load; only `Active` and `Paused` are restored.
-
-## Requirements
-
-Each hand declares prerequisites in `[[requires]]` that must be satisfied before activation.
-
-### Requirement Types
-
-| Type | Check | Example |
-|------|-------|---------|
-| `Binary` | Binary exists on PATH and is executable | `ffmpeg`, `chromium` |
-| `EnvVar` | Environment variable is set and non-empty | `HOME` |
-| `ApiKey` | Same as EnvVar (semantic distinction) | `OPENAI_API_KEY` |
-| `AnyEnvVar` | Comma-separated list; any one set suffices | `GROQ_API_KEY,OPENAI_API_KEY` |
-
-Requirements can be marked `optional = true` — these don't block activation. A hand with unmet optional requirements is reported as "degraded" in readiness checks.
-
-### Special Cases
-
-- **`python3`**: Actually runs `python3 --version` / `python --version` and checks for "Python 3" in output, to avoid false positives from Windows Store shims. Result is cached for the process lifetime via `OnceLock`.
-- **`chromium`**: Checks multiple binary names (`chromium-browser`, `google-chrome`, etc.), `CHROME_PATH` env var, and macOS `.app` bundle paths.
-
-### Install Info
-
-Each requirement can carry platform-specific install instructions (`HandInstallInfo`):
-
-```toml
-[[requires]]
-key = "ffmpeg"
-label = "FFmpeg must be installed"
-requirement_type = "binary"
-check_value = "ffmpeg"
-description = "FFmpeg is the core video processing engine."
-
-[requires.install]
-macos = "brew install ffmpeg"
-windows = "winget install Gyan.FFmpeg"
-linux_apt = "sudo apt install ffmpeg"
-manual_url = "https://ffmpeg.org/download.html"
-estimated_time = "2-5 min"
-steps = [
-    "Install via your package manager",
-    "Verify with: ffmpeg -version",
-]
-```
-
-## Settings
-
-Hands declare configurable options shown in the activation modal. Three control types are supported:
-
-- **`Select`** — dropdown with predefined options. Each option can declare `provider_env` or `binary` for availability badges.
-- **`Toggle`** — on/off switch.
-- **`Text`** — freeform text input. Can declare `env_var` to expose the value as an environment variable.
-
-### Resolution
-
-`resolve_settings(settings, config)` produces:
-
-- `prompt_block` — markdown appended to the system prompt (e.g. `## User Configuration\n- STT: Groq (groq)`)
-- `env_vars` — list of env var names the agent's subprocess should receive
-
-Only the selected option's `provider_env` is collected, so switching providers doesn't leak unrelated API keys.
-
-### Availability Checking
-
-`check_settings_availability` tests each option's `provider_env` and `binary` at runtime, returning per-option `available: bool` so the UI can show "Ready" badges. Labels and descriptions are localized when a `lang` parameter is provided.
-
-## Runtime Overrides
-
-`HandAgentRuntimeOverride` captures per-role model configuration changes made from the dashboard after activation:
-
-```rust
-pub struct HandAgentRuntimeOverride {
-    pub model: Option<String>,
-    pub provider: Option<String>,
-    pub api_key_env: Option<Option<String>>,
-    pub base_url: Option<Option<String>>,
-    pub max_tokens: Option<u32>,
-    pub temperature: Option<f32>,
-    pub web_search_augmentation: Option<WebSearchAugmentationMode>,
-}
-```
-
-Three mutation patterns:
-- `update_agent_runtime_override` — replaces the entire override
-- `merge_agent_runtime_override` — merges new fields onto existing (new wins, `Option::or` fallback)
-- `restore_agent_runtime_override` — set or clear a specific role's override
-
-These survive daemon restarts via the v5 persistence format.
-
-## Localization (i18n)
-
-Hands can declare translations under `[i18n.{lang}]`:
+Hands can include `[i18n.<lang>]` sections that override display strings:
 
 ```toml
 [i18n.zh]
-name = "线索生成 Hand"
+name = "线索生成"
 description = "自主线索生成"
 
 [i18n.zh.agents.main]
@@ -366,37 +190,115 @@ name = "主协调器"
 
 [i18n.zh.settings.target_industry]
 label = "目标行业"
-description = "聚焦的行业领域"
 ```
 
-All fields are optional — untranslated strings fall back to English defaults. The `i18n` map is keyed by language code (e.g., `"zh"`, `"ja"`).
+All i18n fields are optional — missing translations fall back to English defaults.
 
-## Routing
+## HandRegistry
 
-`HandRouting` provides deterministic keyword-based hand selection:
+The registry is the central store, built with lock-free `DashMap` collections for concurrent access from the HTTP API, kernel, and router threads:
 
-```toml
-[routing]
-aliases = ["video editor", "clip maker"]      # score ×3
-weak_aliases = ["cut video", "trim"]          # score ×1
+| Collection | Key | Value | Purpose |
+|---|---|---|---|
+| `definitions` | `hand_id` | `HandDefinition` | All known hands |
+| `instances` | `instance_id` (Uuid) | `HandInstance` | Active/paused instances |
+| `agent_index` | `agent_id` (string) | `instance_id` | O(1) reverse lookup |
+| `active_index` | `hand_id` | `instance_id` | O(1) "is this hand active?" |
+
+A `Mutex` serializes the check-then-insert in `activate` to prevent race conditions where two concurrent requests both pass the "already active" check.
+
+### Install Paths
+
+Hands enter the registry through several routes:
+
+| Method | Source | Base Templates | Persists to Disk |
+|---|---|---|---|
+| `reload_from_disk` | Scans `registry/hands/` + `workspaces/` | ✅ (via `agents_dir`) | No (reads only) |
+| `install_from_path` | Arbitrary directory | ✅ | No |
+| `install_from_content` | Raw TOML string | ❌ (rejected) | No |
+| `install_from_content_persisted` | Raw TOML string | ✅ | Yes → `workspaces/{id}/` |
+
+`install_from_content` explicitly rejects hands with `base` references since it has no filesystem access. Use `install_from_content_persisted` or `install_from_path` when templates are needed.
+
+### Uninstall
+
+`uninstall_hand` removes a hand definition from memory and deletes its `workspaces/{id}/` directory. It refuses to:
+- Uninstall built-in hands (those under `registry/hands/`, regenerated on every sync)
+- Uninstall a hand with any active instance (deactivate first)
+
+### State Persistence
+
+Hand state survives daemon restarts via `hand_state.json`. The format is versioned (currently v5):
+
+| Version | Key additions |
+|---|---|
+| v1 | Bare JSON array, single `agent_id` |
+| v2 | `{ version, instances }` wrapper |
+| v3 | `agent_ids` as `BTreeMap`, `coordinator_role` |
+| v4 | `activated_at`, `updated_at` timestamps |
+| v5 | `agent_runtime_overrides` |
+
+**Forward compatibility**: Newer daemons load older formats via `#[serde(default)]` fields and a legacy untyped fallback path.
+
+**Backward compatibility**: Fields added in newer versions use `skip_serializing_if` so older daemons silently ignore them on load. A downgrade strips runtime overrides — users must re-apply from the dashboard.
+
+`legacy_agent_runtime_overrides` migrates the old `config.__model_overrides__` blob into the v5 `agent_runtime_overrides` map without clobbering existing entries.
+
+**Atomic writes**: `persist_state` writes to a temp file, syncs to disk, then renames over the target. On Unix, the parent directory is also fsynced so the rename is durable across power loss.
+
+### Requirements Checking
+
+`check_requirements` evaluates each `HandRequirement` against the current environment. `check_settings_availability` goes further — for each `Select`-type setting option, it checks whether the option's `provider_env` or `binary` is available, producing per-option `available` flags for the UI.
+
+### Readiness
+
+`readiness` combines requirement checks with runtime state into a single snapshot:
+
+```rust
+pub struct HandReadiness {
+    pub requirements_met: bool,  // all non-optional requirements satisfied
+    pub active: bool,            // has an Active-status instance
+    pub degraded: bool,          // active but some requirements unmet
+}
 ```
 
-Keywords are English-only; cross-lingual matching relies on semantic embedding fallback at the router layer, not keyword translation.
+## Parsing Pipeline
+
+The TOML parsing pipeline handles format variations through a try/fallback dispatch:
+
+1. **Flat format**: Fields at top level of `HAND.toml`
+2. **Wrapped format**: Fields under a `[hand]` section (extracted and re-serialized)
+
+For each format, the parser tries:
+- `parse_hand_definition` (filesystem-aware, resolves `base` templates)
+- Standard `serde::Deserialize` (no filesystem access)
+
+When `agents_dir` is available (from `reload_from_disk` or `install_from_path`), the filesystem-aware path is used so `base` template references are resolved with deep merging.
+
+### Skill Content
+
+Hands can include skill instructions:
+- `SKILL.md` — shared across all agents (stored in `skill_content`)
+- `SKILL-{role}.md` — per-agent override (stored in `agent_skill_content`)
+
+Per-role content takes precedence over shared content. These are populated at load time, not serialized to JSON.
 
 ## Error Handling
 
-`HandError` covers all failure modes:
+All operations return `HandResult<T>` with these error variants:
 
-| Variant | Meaning |
-|---------|---------|
-| `NotFound(id)` | Hand definition doesn't exist |
-| `AlreadyActive(id)` | Hand already has an active instance |
-| `AlreadyRegistered(id)` | Duplicate definition during install |
-| `BuiltinHand(id)` | Cannot uninstall a registry-synced hand |
-| `InstanceNotFound(uuid)` | Instance ID doesn't map to a live instance |
-| `ActivationFailed(reason)` | Generic activation error |
-| `TomlParse(reason)` | HAND.toml parsing failure |
-| `Io(error)` | Filesystem I/O failure |
-| `Config(reason)` | Configuration or serialization error |
+| Error | When |
+|---|---|
+| `NotFound` | Hand definition or instance doesn't exist |
+| `AlreadyActive` | Attempt to activate an already-active hand |
+| `AlreadyRegistered` | Attempt to install a duplicate definition |
+| `BuiltinHand` | Attempt to uninstall a registry-synced hand |
+| `InstanceNotFound` | Operation on a non-existent instance UUID |
+| `ActivationFailed` | Instance UUID collision during restart recovery |
+| `TomlParse` | Malformed HAND.toml |
+| `Io` | Filesystem errors |
+| `Config` | Invalid configuration |
 
-All results use `HandResult<T> = Result<T, HandError>`.
+## Default Provider/Model Sentinel
+
+Hands that omit `provider` or `model` get the string `"default"`. This is a sentinel resolved by the kernel to the user's global `default_model.provider`/`default_model.model` at driver-build time. This ensures hands don't pin themselves to whatever the author hardcoded — they respect the user's global configuration.

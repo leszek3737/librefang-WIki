@@ -2,248 +2,227 @@
 
 # CLI & TUI Module
 
-The `librefang-cli` crate provides the primary user-facing interface for LibreFang. It operates in three modes: a traditional command-line interface (CLI), a lightweight interactive launcher menu, and a full-screen terminal UI (TUI). When a daemon is running, the CLI communicates over HTTP; otherwise, it boots an in-process kernel for single-shot commands.
+The `librefang-cli` crate is the primary user-facing entry point for LibreFang. It provides a command-line interface with ~30 subcommands, an interactive launcher menu, a full-screen TUI dashboard, and supporting infrastructure for desktop app management, diagnostics, internationalization, and runtime log filtering.
 
 ## Architecture Overview
 
+The CLI operates in two fundamental modes depending on whether a daemon is already running:
+
 ```mermaid
 graph TD
-    User -->|"librefang [no subcommand]"| Launcher
-    User -->|"librefang &lt;command&gt;"| CLI
-    User -->|"librefang tui"| TUI
-
-    CLI --> main_rs["main.rs<br/>clap dispatch"]
-    Launcher --> launcher_rs["launcher.rs<br/>Ratatui menu"]
-
-    main_rs --> daemon_client["HTTP client"]
-    main_rs --> kernel["In-process kernel"]
-    main_rs --> doctor["doctor.rs"]
-    main_rs --> desktop["desktop_install.rs"]
-    main_rs --> i18n_mod["i18n.rs"]
-    main_rs --> log_filter["log_filter.rs"]
-    main_rs --> bundled["bundled_agents.rs"]
-
-    daemon_client --> http_client["http_client.rs"]
-    TUI --> tui_mod["tui/"]
-    Launcher --> desktop
+    A["librefang CLI"] --> B{Daemon running?}
+    B -->|Yes| C["HTTP client"]
+    C --> D["Daemon API"]
+    B -->|No| E["boot_kernel()"]
+    E --> F["In-process kernel"]
+    A --> G["No subcommand + TTY"]
+    G --> H["Interactive launcher"]
 ```
 
-## Module Layout
+- **Daemon mode**: Commands like `agent list`, `chat`, `status` delegate to a running daemon over HTTP via `find_daemon` → HTTP client.
+- **Single-shot mode**: When no daemon is found, `boot_kernel` starts an in-process `LibreFangKernel` for the duration of the command.
+- **Launcher mode**: Running `librefang` with no subcommand in a TTY opens the interactive Ratatui menu (`launcher::run`).
 
-| File | Purpose |
+## Entry Point — `main.rs`
+
+`main.rs` defines the clap-based CLI structure (`Cli` / `Commands`) and dispatches every subcommand to a dedicated `cmd_*` function. Key patterns:
+
+- **Global allocator**: Uses `tikv_jemallocator::Jemalloc` on non-MSVC targets.
+- **Ctrl+C handling**: Platform-specific — on Windows, installs a custom `SetConsoleCtrlHandler` that calls `process::exit` (the default handler doesn't reliably interrupt blocking `read_line` on MINGW). On Unix, the default SIGINT handler suffices.
+- **Config loading**: `load_config` is called with the optional `--config` path. `LIBREFANG_HOME` overrides `~/.librefang/`.
+- **Daemon discovery**: `find_daemon()` checks `LIBREFANG_HOME` for daemon info, then probes the default address. Returns `Option<String>` (base URL).
+- **Kernel boot**: `boot_kernel()` initializes tracing, creates a `LibreFangKernel`, and returns it for single-shot command execution.
+
+### Command Structure
+
+The `Commands` enum organizes subcommands into top-level entries and grouped subcommands (marked with `[*]` in help text):
+
+| Top-level | Description |
 |---|---|
-| `main.rs` | Entry point. Clap argument parsing, command dispatch, all `cmd_*` handlers |
-| `launcher.rs` | Lightweight Ratatui one-shot menu shown when no subcommand is given in a TTY |
-| `desktop_install.rs` | Cross-platform desktop app discovery, GitHub release download, and installation |
-| `doctor.rs` | Trait-based audit check framework for `librefang doctor` |
-| `http_client.rs` | Blocking `reqwest` client builder with bundled CA roots |
-| `i18n.rs` | Fluent-based internationalization (`en`, `zh-CN`) |
-| `log_filter.rs` | Hot-reloadable `EnvFilter` backed by `ArcSwap` for daemon tracing |
-| `bundled_agents.rs` | Backwards-compatible wrapper around `librefang_runtime::registry_sync` |
-| `ui.rs` | Terminal output helpers (`success`, `error`, `hint`, `section`, `kv`) |
-| `table.rs` | Columnar table renderer for agent lists, models, etc. |
-| `progress.rs` | Progress bar/spinner utilities |
-| `templates.rs` | Agent template loading and listing |
-| `tui/` | Full-screen interactive terminal dashboard (separate submodule) |
+| `init`, `start`, `stop`, `restart` | Lifecycle management |
+| `chat`, `spawn`, `agents`, `kill` | Agent operations |
+| `status`, `health`, `doctor` | Diagnostics |
+| `update` | Self-update from GitHub releases |
+| `dashboard`, `tui`, `logs` | UI/output |
+| `config`, `vault`, `models` | Configuration |
+| `channel`, `skill`, `hand`, `mcp` | Integrations |
+| `workflow`, `trigger`, `cron` | Automation |
+| `security`, `approvals`, `memory` | Operations |
+| `completion`, `new`, `migrate`, `uninstall` | Utilities |
 
-## Entry Point and Command Dispatch
+## Interactive Launcher — `launcher.rs`
 
-`main.rs` defines a `Cli` struct with clap `Parser` and a `Commands` enum covering all subcommands. The entry flow is:
-
-1. Load `.env` and vault credentials via `librefang_extensions::dotenv`
-2. Initialize i18n with the configured language
-3. If no subcommand is provided and stdin is a TTY, run the interactive launcher (`launcher::run`)
-4. Otherwise, match on the `Commands` variant and dispatch to the appropriate `cmd_*` function
-
-Most `cmd_*` functions follow a pattern:
-- Attempt to reach a running daemon via HTTP
-- If no daemon is available, boot an in-process kernel (`LibreFangKernel`)
-- Print results using `ui::*` helpers or `table::Table`
-
-### Dual-Mode Execution
-
-The CLI transparently supports two execution modes:
-
-- **Daemon mode**: Commands like `status`, `agents`, `chat`, `stop` talk to a running daemon over HTTP at the URL stored in `~/.librefang/daemon.json`
-- **In-process mode**: If no daemon is found, the CLI loads the kernel config and runs the operation in the current process
-
-The function `daemon_config_context()` (in `main.rs`) handles daemon lookup, and `find_daemon()` resolves the daemon URL from `daemon.json`.
-
-## Interactive Launcher
-
-When the user runs `librefang` with no subcommand in a TTY, `launcher::run()` displays a Ratatui-based menu. This is a one-shot interface — the user selects an action and the launcher returns a `LauncherChoice` enum variant that `main.rs` then dispatches.
+When the user runs `librefang` with no subcommand in a TTY, the launcher displays a Ratatui-based interactive menu with background daemon detection.
 
 ### Menu Variants
 
-The launcher shows different menus based on context:
+Two static menu configurations adapt to the user's state:
 
-- **First-run users** (`is_first_run()` checks for `~/.librefang/config.toml`): "Get started" is the top and default option
-- **Returning users**: "Chat with an agent" is first; "Settings" is relabeled from "Get started"
+- **`MENU_FIRST_RUN`**: Shown when `~/.librefang/config.toml` doesn't exist. Leads with "Get started" (onboarding).
+- **`MENU_RETURNING`**: Shown for existing installations. Leads with "Chat with an agent" (action-first).
 
-### Status Detection
+Both menus are capped at 9 items to fit the 1-9 number-shortcut keybinding.
 
-On launch, a background thread runs `find_daemon()` and, if found, queries `/api/agents` to show the daemon status and agent count. Provider detection scans standard environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) to show which provider is configured.
+### State and Screens
 
-### Key Bindings
+```
+Screen::Menu     →  Main menu with daemon/provider status indicators
+Screen::Help     →  Scrollable full --help output (j/k/PgUp/PgDn/g/G navigation)
+```
 
-- `↑`/`k` and `↓`/`j` to navigate
-- `1`–`9` for direct selection
-- `Enter` to confirm
-- `q`/`Esc` to quit
-- In the help screen: `PgUp`/`PgDn`, `g`/`G` for top/bottom
+`LauncherState` tracks:
+- Daemon detection result (spawned in a background thread, received via `mpsc::channel`)
+- Provider detection via environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.)
+- First-run status, OpenClaw/OpenFang migration detection
 
 ### Desktop App Launch
 
-Selecting "Open desktop app" calls `launch_desktop_app()`, which locates the desktop binary via `desktop_install::find_desktop_binary()`, offers to download it if not found, and launches it detached from the CLI process.
+`launch_desktop_app()` attempts to find an existing desktop binary via `desktop_install::find_desktop_binary()`. If not found, it prompts the user to download and install it.
 
-## Desktop App Installation
+## Doctor / Audit Framework — `doctor.rs`
 
-`desktop_install.rs` handles the full lifecycle of the native desktop application: discovery, download from GitHub Releases, and platform-specific installation.
-
-### Binary Discovery
-
-`find_desktop_binary()` searches in order:
-1. Sibling of the current CLI executable
-2. PATH lookup via `which_lookup()`
-3. Platform-specific install paths:
-   - macOS: `/Applications/LibreFang.app/Contents/MacOS/LibreFang`
-   - Windows: `%LOCALAPPDATA%\LibreFang\LibreFang.exe`
-   - Linux: `~/.local/bin/librefang-desktop` or `~/Applications/LibreFang.AppImage`
-
-### Download and Installation
-
-`prompt_and_install()` queries the GitHub Releases API, selects the correct asset for the current platform/arch, downloads it to a temp directory, and runs the platform installer:
-
-| Platform | Asset Suffix | Install Method |
-|----------|-------------|----------------|
-| macOS (aarch64) | `_aarch64.dmg` | Mount with `hdiutil`, copy to `/Applications`, clear quarantine |
-| macOS (x86_64) | `_x64.dmg` | Same as above |
-| Windows (x86_64) | `_x64-setup.exe` | Run NSIS installer with `/S` (silent) |
-| Linux (x86_64) | `_amd64.AppImage` | Copy to `~/.local/bin/`, `chmod 755` |
-
-Platform-specific functions like `install_linux_appimage_to()` accept a `dest_dir` parameter to support testing with temp directories — no writes escape the test sandbox.
-
-## Doctor (Diagnostic Framework)
-
-`doctor.rs` introduces a trait-based registry for audit checks, designed to replace the legacy inline checks in `cmd_doctor`.
+The doctor command runs diagnostic health checks. The module provides a trait-based registry so each check is an isolated, testable unit.
 
 ### Adding a New Check
 
 1. Create a unit struct implementing `AuditCheck`
 2. Add it to `registered_checks()`
 
-Each check receives an `AuditContext` (currently just `librefang_home: PathBuf`) and returns an `AuditResult` with a severity (`Pass`, `Info`, `Warn`, `Error`), summary, and optional hint.
+```rust
+pub trait AuditCheck {
+    fn run(&self, ctx: &AuditContext) -> AuditResult;
+}
+```
+
+`AuditContext` carries `librefang_home` — add fields here as new checks need them.
+
+### Severity Levels
+
+| Severity | Meaning |
+|---|---|
+| `Pass` | Green case — builds confidence |
+| `Info` | Informational — no action needed |
+| `Warn` | Fixable misconfiguration |
+| `Error` | Blocks correct operation |
 
 ### Registered Checks
 
-| Check | Severity | What It Validates |
-|-------|----------|-------------------|
-| `VaultKeyCheck` | Error | `LIBREFANG_VAULT_KEY` base64-decodes to exactly 32 bytes |
-| `ApiListenAddrCheck` | Warn/Error | `config.toml`'s `api_listen` parses as `SocketAddr`; warns on privileged ports or port 0 |
-| `ConfigTomlSchemaCheck` | Warn/Error | `config.toml` exists and parses as valid TOML |
+- **`VaultKeyCheck`**: Verifies `LIBREFANG_VAULT_KEY` base64-decodes to exactly 32 bytes. Catches the common gotcha where 32 ASCII characters ≠ 32 bytes after base64 decode.
+- **`ApiListenAddrCheck`**: Validates `config.toml`'s `api_listen` field parses as a valid `SocketAddr`. Warns on privileged ports (<1024) and port 0.
+- **`ConfigTomlSchemaCheck`**: Verifies `config.toml` exists and parses as valid TOML.
 
-The `VaultKeyCheck` specifically guards against the common mistake where users provide 32 ASCII characters instead of a base64-encoded 32-byte key (which is 44 characters). This matches the production validation in `librefang_extensions::vault::decode_master_key` and does **not** trim whitespace, matching production behavior.
+The framework runs alongside legacy inline checks in `cmd_doctor` — migration to the framework is incremental.
 
-### Integration with `cmd_doctor`
+## Desktop App Installation — `desktop_install.rs`
 
-The framework currently runs alongside the legacy inline checks. To migrate a legacy check:
-1. Extract it into a struct implementing `AuditCheck`
-2. Add it to `registered_checks()`
-3. Remove the inline version from `cmd_doctor`
+Handles discovery, download, and installation of the LibreFang desktop application across macOS, Windows, and Linux.
 
-## HTTP Client
+### Binary Discovery Order
 
-`http_client.rs` provides a blocking `reqwest` client with bundled CA roots (delegating TLS configuration to `librefang_runtime::http_client::tls_config()`). Two functions are exposed:
+`find_desktop_binary()` searches in order:
+1. Sibling of the current CLI executable
+2. PATH lookup (`which_lookup`)
+3. Platform-specific standard locations:
+   - macOS: `/Applications/LibreFang.app/Contents/MacOS/LibreFang`
+   - Windows: `%LOCALAPPDATA%\LibreFang\LibreFang.exe`
+   - Linux: `~/.local/bin/librefang-desktop` or `~/Applications/LibreFang.AppImage`
 
-- `client_builder()` → `reqwest::blocking::ClientBuilder` (for custom configuration)
-- `new_client()` → `reqwest::blocking::Client` (pre-built, panics on failure — should never fail)
+### Download and Install Flow
 
-The blocking client is used throughout the CLI for daemon communication and GitHub API calls. The TUI uses async clients separately.
+`prompt_and_install()` → `download_and_install()`:
+1. Queries GitHub Releases API (`librefang/librefang`) for the latest release
+2. Selects the platform-appropriate asset by suffix:
+   - macOS ARM: `_aarch64.dmg`
+   - macOS x64: `_x64.dmg`
+   - Windows x64: `_x64-setup.exe`
+   - Linux x64: `_amd64.AppImage`
+3. Downloads to a temp directory
+4. Platform-specific install:
+   - **macOS**: Mounts DMG via `hdiutil`, copies `.app` to `/Applications`, clears quarantine
+   - **Windows**: Runs NSIS installer with `/S` (silent)
+   - **Linux**: Copies AppImage to `~/.local/bin/`, sets `0o755` permissions
 
-## Internationalization
+On macOS, `launch()` detects `.app` bundles and uses `open -a` instead of direct binary execution.
 
-`i18n.rs` wraps the Fluent localization system with a thread-local `I18n` struct.
+## Internationalization — `i18n.rs`
 
-### Supported Languages
-
-`en` (default) and `zh-CN`. FTL files are included at compile time via `include_str!` from `locales/en/main.ftl` and `locales/zh-CN/main.ftl`.
-
-### Usage
+Thread-local Fluent-based i18n supporting English and Simplified Chinese.
 
 ```rust
-// Initialize at startup
-i18n::init("en");
-
-// Simple translation
-let msg = i18n::t("daemon-starting"); // "Starting daemon..."
-
-// Translation with arguments
-let msg = i18n::t_args("models-available", &[("count", "12")]); // "12 models available"
+i18n::init("zh-CN");           // Initialize (fallback to DEFAULT_LANGUAGE on error)
+let msg = i18n::t("key");      // Simple lookup
+let msg = i18n::t_args("key", &[("count", "12")]);  // With arguments
 ```
 
-If the requested language is unsupported, it falls back to `DEFAULT_LANGUAGE` ("en"). Missing keys return `[key_name]` as a fallback.
+- FTL files loaded at compile time via `include_str!`
+- Thread-local storage via `RefCell<Option<I18n>>`
+- Missing keys render as `[key_name]` rather than panicking
+- `SUPPORTED_LANGUAGES`: `["en", "zh-CN"]`, default: `"en"`
 
-## Hot-Reloadable Log Filter
+## HTTP Client — `http_client.rs`
 
-`log_filter.rs` provides `ReloadableEnvFilter` — a per-layer tracing `EnvFilter` that can be replaced at runtime via `reload_log_level()`.
+Thin wrapper that builds a `reqwest::blocking::Client` with bundled CA roots from `librefang_runtime::http_client::tls_config()`. Used throughout the CLI for daemon communication and GitHub API calls.
 
-### Why a Custom Filter?
-
-The daemon uses per-layer filtering so the OpenTelemetry exporter sees the full span tree while stderr stays terse. `tracing_subscriber::reload::Layer` requires the subscriber type as a generic parameter, which creates a brittle type signature. Instead, `ReloadableEnvFilter` wraps an `ArcSwap<EnvFilter>` and forwards all `Filter` trait methods to the currently loaded inner filter.
-
-### Baseline Directives
-
-Boot-time tracing init layers per-target overrides (e.g., `librefang_kernel=warn`) on top of the user's log level. `install_with_baseline()` stores these directives in a `OnceLock`. On every reload, `reload_log_level()` re-applies the baseline so a dashboard "set debug" toggle doesn't unmask kernel/runtime noise that boot had specifically suppressed.
-
-### Integration with the Kernel
-
-`CliLogLevelReloader` implements `librefang_kernel::log_reload::LogLevelReloader`, bridging the kernel's hot-reload interface to `reload_log_level()`. After swapping the filter, `tracing_core::callsite::rebuild_interest_cache()` is called to invalidate per-callsite `Interest` caches.
-
-## Bundled Agents
-
-`bundled_agents.rs` is a thin backwards-compatibility wrapper. `sync_registry_agents()` delegates directly to `librefang_runtime::registry_sync::sync_registry()` with the default cache TTL and empty filter. New code should call the runtime function directly.
-
-## Control Flow: `librefang` with No Arguments
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant main.rs
-    participant launcher
-    participant daemon_bg as Background Thread
-
-    User->>main.rs: librefang (no subcommand)
-    main.rs->>main.rs: Load .env, vault, i18n
-    main.rs->>launcher: run()
-    launcher->>launcher: init Ratatui terminal
-    launcher->>daemon_bg: spawn find_daemon()
-    daemon_bg-->>launcher: (daemon_url, agent_count)
-
-    loop Every 50ms
-        launcher->>launcher: Poll keyboard events
-        launcher->>launcher: Draw menu / help screen
-        launcher->>daemon_bg: try_recv() daemon status
-    end
-
-    User->>launcher: Enter (select item)
-    launcher-->>main.rs: LauncherChoice
-    main.rs->>main.rs: Dispatch choice (chat, dashboard, etc.)
-    launcher->>launcher: ratatui::try_restore()
+```rust
+let client = http_client::new_client();  // blocking client with bundled TLS
 ```
 
-## Platform Considerations
+## Reloadable Log Filter — `log_filter.rs`
 
-- **Ctrl+C handling**: On Windows/MINGW, a custom `SetConsoleCtrlHandler` is installed because the default handler doesn't reliably interrupt blocking `read_line` calls. On Unix, the default SIGINT handler is sufficient.
-- **Allocator**: On non-MSVC targets, `tikv_jemallocator::Jemalloc` is used as the global allocator.
-- **macOS `.app` bundles**: `launch()` detects `.app` bundles and uses `open -a` instead of executing the binary directly. `find_parent_app_bundle()` walks up from the binary path to locate the enclosing bundle.
-- **Linux AppImages**: Installed to `~/.local/bin/librefang-desktop` with executable permissions set via `std::os::unix::fs::PermissionsExt`.
+Provides a hot-reloadable `EnvFilter` for the daemon's tracing stack. The daemon installs per-layer filters so the OTel exporter sees the full span tree while stderr stays terse.
+
+### Key Design Decisions
+
+- Uses `ArcSwap<EnvFilter>` instead of `tracing_subscriber::reload::Layer` to avoid generic type proliferation in the subscriber's `Layered<…>` chain.
+- `install_with_baseline()` stores per-target overrides (e.g. `librefang_kernel=warn`) that survive reloads — a dashboard "give me debug" toggle won't unmask kernel chatter that boot had specifically masked.
+- `reload_log_level()` calls `tracing_core::callsite::rebuild_interest_cache()` after swapping to ensure per-callsite `Interest` caches are recomputed.
+- Process-global state via `OnceLock` — safe because the daemon initializes tracing exactly once.
+
+```rust
+let filter = ReloadableEnvFilter::install_with_baseline(
+    EnvFilter::new("warn"),
+    vec!["librefang_kernel=warn".into()],
+);
+// Later, from dashboard action:
+log_filter::reload_log_level("debug")?;  // baseline directives preserved
+```
+
+`CliLogLevelReloader` adapts this for the kernel's `LogLevelReloader` trait.
+
+## Registry Sync — `bundled_agents.rs`
+
+Backwards-compatible wrapper that delegates to `librefang_runtime::registry_sync::sync_registry` with default cache TTL. Called during `init` to populate the local agent registry.
+
+## UI Helpers — `ui.rs`
+
+Provides styled output functions (`success`, `error`, `hint`, `step`, `kv`, `section`, `blank`, `check_warn`, `check_ok`) used throughout command handlers for consistent terminal output.
+
+## Progress Reporting — `progress.rs`
+
+Terminal progress indicators with support for spinners, percentage bars, and timed operations. Adapts rendering based on whether stdout is a TTY (`is_terminal`).
+
+## Table Rendering — `table.rs`
+
+Columnar table output with ASCII and Unicode rendering modes. `render_auto()` selects Unicode when the terminal supports it. Uses `right_alignment()` for numeric column alignment.
+
+## Key Cross-Module Interactions
+
+| CLI component | External dependency |
+|---|---|
+| `boot_kernel` | `librefang_kernel::LibreFangKernel` |
+| `load_config` | `librefang_kernel::config` |
+| `find_daemon` | `librefang_api::server::read_daemon_info` |
+| HTTP client TLS | `librefang_runtime::http_client::tls_config` |
+| Registry sync | `librefang_runtime::registry_sync::sync_registry` |
+| Vault operations | `librefang_extensions::vault` |
+| dotenv loading | `librefang_extensions::dotenv` |
+| Config types | `librefang_types`, `librefang_kernel::config` |
+| MCP stdio | `librefang_mcp` via `mcp.rs` |
 
 ## Testing Patterns
 
-Several modules use dependency injection to avoid filesystem writes during tests:
+The module has extensive test coverage with specific patterns worth noting:
 
-- `linux_install_path_in(home)` accepts an explicit home directory instead of reading the real one
-- `install_linux_appimage_to(src, dest_dir)` accepts an explicit destination
-- `desktop_install` tests verify all writes stay within `tempfile::TempDir` boundaries
-- `doctor` tests use temp directories for `AuditContext::librefang_home`
-- `VaultKeyCheck` tests serialize via a process-wide `Mutex` (`env_lock()`) since environment variable mutation is process-global and `cargo test` runs in parallel
+- **Process-wide env var mutation**: Tests that modify `LIBREFANG_HOME`, `LIBREFANG_VAULT_KEY`, or `PATH` use a `Mutex` (`ENV_LOCK` / `env_lock()`) to serialize concurrent access, with save-and-restore in the same scope.
+- **Tempdir isolation**: All filesystem-mutating tests route writes through `tempfile::TempDir` — nothing escapes to the user's real home directory.
+- **Platform-conditional tests**: Desktop install tests use `#[cfg(target_os = "...")]` and dependency-injected variants (e.g., `install_linux_appimage_to`, `linux_install_path_in`) that accept explicit paths instead of probing the real filesystem.

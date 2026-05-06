@@ -4,58 +4,55 @@
 
 Cost metering and quota enforcement for the LibreFang kernel.
 
-## Overview
+## Purpose
 
-This module is responsible for tracking resource consumption and enforcing usage quotas within the LibreFang kernel. It provides the accounting layer that ensures callers cannot exceed their allocated budgets—whether those budgets are measured in compute steps, memory allocations, or other finite resources.
-
-The module is currently in a **scaffolded state**: the package manifest and dependency graph are defined, but no execution flows or call edges have been wired yet. The documentation below describes the intended architecture based on the declared dependencies and package description.
-
-## Intended Role
-
-Metering sits between raw resource consumption and quota enforcement:
-
-- **Metering** — measuring how much of a resource has been used.
-- **Quota enforcement** — deciding whether a requested operation is allowed given the remaining budget, and rejecting or flagging it when the limit is exceeded.
-
-This is a cross-cutting concern: any kernel subsystem that consumes finite resources should route through this module so that usage is consistently accounted for.
+This module is responsible for tracking resource consumption and enforcing usage quotas within the LibreFang kernel. It provides the accounting layer that ensures operations stay within defined cost boundaries — a critical function for a multi-tenant or resource-constrained runtime where unbounded usage could degrade system health.
 
 ## Dependencies
 
-| Dependency | Purpose in this module |
+| Crate | Role |
 |---|---|
-| `librefang-types` | Shared type definitions—likely includes metering-related types such as `Quota`, `UsageReport`, or `ResourceId`. |
-| `librefang-memory` | Memory is a primary resource to meter. This module probably queries or hooks into the memory allocator to track allocation counts or bytes used. |
-| `librefang-runtime` | Access to runtime state—likely needed to associate metering data with the current execution context (e.g., which tenant or session is consuming resources). |
-| `serde` | Serialization support for persisting metering snapshots, transmitting usage data over IPC, or encoding quota configurations. |
+| `librefang-types` | Shared type definitions — likely provides metering-related structs, enums, or trait declarations used across crates |
+| `librefang-memory` | Memory subsystem access — used to query or track memory allocation as a metered resource |
+| `librefang-runtime` | Runtime services — provides execution context, scheduling hooks, or runtime state needed during metering checks |
+| `serde` | Serialization — metering data and quota configurations are serializable, supporting persistence or network transport |
 
-## Expected Architecture
+## Position in the Architecture
 
 ```mermaid
 graph TD
-    A[Caller / Kernel subsystem] -->|request operation| B{Metering gate}
-    B -->|check quota| C[Quota store]
-    C -->|remaining budget| B
-    B -->|budget exceeded| D[Reject / signal]
-    B -->|budget available| E[Allow operation]
-    E -->|record usage| F[Usage accumulator]
-    F -->|update| C
+    A[Caller / Kernel Entry] --> B{Metering Gate}
+    B -->|Under Quota| C[Runtime Execution]
+    B -->|Over Quota| D[Reject / Throttle]
+    E[Memory Subsystem] -.->|allocation metrics| B
+    F[Types Registry] -.->|quota definitions| B
 ```
 
-The expected flow is:
+The metering module sits as a gate between incoming requests and the runtime. Before work proceeds, the metering layer checks whether the caller has remaining quota. If the budget is exhausted, the request is rejected or throttled rather than being dispatched to the runtime.
 
-1. A kernel subsystem requests to perform a metered operation.
-2. The metering gate checks the caller's remaining quota.
-3. If the budget is exhausted, the request is rejected or a signal is raised.
-4. If the budget allows, the operation proceeds and the actual consumption is recorded back into the usage accumulator.
+## Current State
 
-## Integration Points
+**This module has no detected execution flows, internal call graph, or incoming/outgoing calls.** This indicates one of the following:
 
-When implemented, this module is expected to be consumed by:
+1. **Placeholder / Stub** — The module has been scaffolded with its dependency declarations and Cargo metadata but does not yet contain implemented logic.
+2. **Type-only definitions** — The module may export traits, structs, or constants consumed elsewhere without containing executable call paths of its own.
+3. **Integration not yet wired** — The metering logic exists but has not been connected to the kernel's dispatch path.
 
-- **The request dispatch layer** — to meter incoming requests before they reach handlers.
-- **Memory allocation paths** — to count bytes or allocations against a per-context budget.
-- **Compute-heavy operations** — to enforce step or cycle limits on long-running work.
+When contributing to this module, check the source files (which were not provided in this analysis) to determine which case applies.
 
-## Status
+## Expected Responsibilities
 
-This module is **not yet implemented**. The `Cargo.toml` and dependency declarations are in place, but no types, traits, or functions have been defined. Contributions should begin by establishing the core types (quotas, usage counters, resource kinds) and the enforcement API surface.
+Based on the crate's name and description, a complete implementation would be expected to cover:
+
+- **Cost accounting** — Accumulating resource consumption per tenant, session, or operation type.
+- **Quota storage and lookup** — Maintaining configurable limits and comparing current usage against them.
+- **Enforcement decisions** — Returning accept/reject/throttle results that the kernel dispatch layer acts on.
+- **Metric export** — Exposing metering data via `serde`-serializable structures for monitoring or billing.
+
+## Contributing
+
+When implementing or extending this module, keep the following in mind:
+
+- **No side-effect coupling.** Metering should be observable but not alter the behavior of the operations it measures, except through explicit quota rejection.
+- **Serialization stability.** Anything annotated with `serde` derives must maintain wire-compatible shapes — avoid renaming fields without providing rename attributes.
+- **Dependency discipline.** The crate depends on `librefang-types`, `librefang-memory`, and `librefang-runtime` — do not add new dependencies without assessing whether the functionality belongs in one of those existing crates instead.

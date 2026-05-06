@@ -2,62 +2,78 @@
 
 # librefang-runtime-mcp
 
-MCP (Model Context Protocol) client for the LibreFang runtime. This crate provides integration with MCP-compatible services, enabling the runtime to communicate with model context servers for AI-assisted operations.
+MCP (Model Context Protocol) client for the LibreFang runtime. This module provides the integration layer that allows LibreFang to communicate with MCP-compatible services, enabling tool invocation, resource access, and prompt management through a standardized protocol.
 
 ## Purpose
 
-This module acts as the bridge between the LibreFang runtime and external MCP services. It handles connection management, request serialization, and response parsing for Model Context Protocol interactions.
+The Model Context Protocol is a standard for communication between AI applications and external tool/resource providers. This crate implements the client side of that protocol within the LibreFang runtime, allowing the system to:
 
-## Dependencies & Their Roles
-
-### Internal Crates
-
-| Crate | Role |
-|---|---|
-| `librefang-types` | Shared type definitions used across the project |
-| `librefang-http` | HTTP client infrastructure for making requests to MCP endpoints |
-
-### External Crates
-
-| Crate | Role |
-|---|---|
-| `rmcp` | Rust MCP client library — core protocol implementation |
-| `reqwest` | Underlying HTTP client used for transport |
-| `tokio` | Async runtime for non-blocking I/O |
-| `serde` / `serde_json` | Serialization and deserialization of MCP messages |
-| `http` | Low-level HTTP types (request/response builders, headers) |
-| `async-trait` | Async trait definitions for MCP client abstractions |
-| `thiserror` | Derived error types for protocol and transport failures |
-| `base64` / `sha2` | Encoding and hashing — likely used for authentication or payload verification |
-| `url` | URL parsing and construction for MCP endpoints |
-| `rand` | Random number generation — likely for nonce or session identifier creation |
-| `arc-swap` | Atomic swapping of shared state — enables live reconfiguration of MCP connections without service interruption |
-| `tracing` | Structured logging throughout the client lifecycle |
+- Discover and invoke tools exposed by MCP servers
+- Access resources provided by MCP servers
+- Manage prompts offered by MCP servers
+- Handle authentication and session management for MCP connections
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[LibreFang Runtime] -->|calls| B[librefang-runtime-mcp]
-    B -->|HTTP transport| C[librefang-http]
-    B -->|protocol logic| D[rmcp]
-    B -->|types| E[librefang-types]
-    B -->|MCP Server| F[External MCP Service]
-    C -->|underlying requests| F
+    A[librefang-runtime-mcp] --> B[rmcp]
+    A --> C[librefang-http]
+    A --> D[librefang-types]
+    A --> E[reqwest]
+    B -->|MCP protocol| F[MCP Server]
+    E -->|HTTP transport| F
 ```
 
-The module wraps `rmcp` with LibreFang-specific configuration and error handling. `librefang-http` provides the transport layer, while `rmcp` handles the MCP protocol semantics.
+The module sits between the LibreFang runtime and external MCP servers. It relies on `rmcp` (the Rust MCP client library) for protocol-level handling, while providing LibreFang-specific integration through `librefang-types` and `librefang-http`.
 
-## Key Design Decisions
+## Key Dependencies
 
-**`arc-swap` for live reconfiguration.** MCP connection details (endpoints, authentication tokens, configuration) can be updated at runtime without requiring a restart. `arc-swap` provides lock-free atomic swaps of the shared client configuration.
+### Internal Dependencies
 
-**Authentication via `base64` + `sha2`.** MCP endpoints likely require authenticated requests. These crates support encoding credentials and computing request signatures or token hashes.
+| Crate | Role |
+|---|---|
+| `librefang-types` | Shared type definitions used across LibreFang crates |
+| `librefang-http` | HTTP client infrastructure, connection pooling, and request configuration |
 
-**Separation of transport and protocol.** HTTP-level concerns live in `librefang-http`, while MCP message formatting, method dispatch, and response parsing belong here. This keeps each crate focused and testable in isolation.
+### External Dependencies
 
-## Integration Points
+| Crate | Role |
+|---|---|
+| `rmcp` | Core MCP client implementation — protocol message serialization, transport negotiation, and client lifecycle |
+| `reqwest` | HTTP client used for MCP server communication over HTTP/SSE transports |
+| `http` | Low-level HTTP types (request/response headers, status codes) |
+| `tokio` | Async runtime for non-blocking I/O |
+| `serde` / `serde_json` | JSON serialization for MCP protocol messages |
+| `async-trait` | Async trait definitions for transport and handler abstractions |
+| `thiserror` | Typed error definitions for MCP client failures |
+| `base64` / `sha2` | Encoding and hashing, likely for authentication tokens or session identifiers |
+| `url` | URL parsing and construction for MCP server endpoints |
+| `rand` | Random number generation for session nonces or request IDs |
+| `arc-swap` | Atomic swapping of shared state, used for hot-reloading MCP client configuration |
+| `tracing` | Structured logging and diagnostics |
 
-This crate is consumed by other LibreFang runtime components that need to query or interact with MCP-compatible AI services. It does not depend on higher-level LibreFang modules, keeping it a leaf dependency in the crate graph.
+## Integration with LibreFang
 
-No inbound or outbound call edges were detected in static analysis, suggesting the module exposes a library API (traits, structs, functions) rather than driving its own execution flow. The consuming runtime component is responsible for instantiation and lifecycle management.
+This crate is consumed by the LibreFang runtime to establish and manage MCP connections during execution. The dependency chain flows as follows:
+
+- The **runtime** calls into this module to initialize MCP clients for configured servers.
+- This module uses `librefang-http` for connection setup and `librefang-types` for shared data structures.
+- Protocol-level communication is delegated to `rmcp`, with this crate providing the glue code that adapts MCP semantics to LibreFang's execution model.
+
+## Testing
+
+Tests use `wiremock` to mock HTTP endpoints, allowing verification of MCP client behavior (connection establishment, tool invocation, error handling) against simulated MCP servers without requiring live infrastructure. Test configuration is enabled via the `macros` and `rt-multi-thread` features of `tokio` in `[dev-dependencies]`.
+
+## Error Handling
+
+Errors are defined using `thiserror` and should cover:
+
+- Connection failures to MCP servers
+- Protocol-level errors (malformed responses, unsupported methods)
+- Authentication failures
+- Timeout and transport errors propagated from `reqwest`
+
+## Logging
+
+All significant operations are instrumented with `tracing` spans and events, enabling observability of MCP client lifecycle events, request/response cycles, and error conditions in production deployments.

@@ -2,149 +2,136 @@
 
 # librefang-api
 
-HTTP/WebSocket API server for the LibreFang Agent OS daemon. This crate exposes the agent's runtime capabilities — conversations, skills, memory, channel management, extensions, and terminal sessions — over a RESTful HTTP API and WebSocket endpoints, backed by Axum.
+HTTP/WebSocket API server for the LibreFang Agent OS daemon. This crate exposes the entire agent management surface — sessions, channels, approvals, MCP, peer/A2A networking, and the React dashboard SPA — over JSON REST and WebSocket endpoints. The kernel runs in-process; CLI, desktop, and mobile clients all connect through this layer.
 
-## Architecture Overview
+## Architecture
 
 ```mermaid
 graph TD
-    Client[HTTP/WebSocket Clients]
-    API[librefang-api<br>Axum Router]
-    
-    Client -->|REST / WS| API
-    
-    API --> Kernel[librefang-kernel]
-    API --> Runtime[librefang-runtime]
-    API --> Types[librefang-types]
-    API --> LLM[librefang-llm-drivers]
-    API --> Memory[librefang-memory]
-    API --> Channels[librefang-channels]
-    API --> Skills[librefang-skills]
-    API --> Hands[librefang-hands]
-    API --> Extensions[librefang-extensions]
-    API --> Wire[librefang-wire]
-    API --> Migrate[librefang-migrate]
-    API --> HTTP[librefang-http]
+    subgraph Clients
+        CLI[CLI / Desktop / Mobile]
+        Browser[Browser]
+    end
+
+    subgraph "librefang-api"
+        Router["axum Router<br/>(build_router)"]
+        MW[Middleware Stack]
+        REST[REST Handlers<br/>routes::*]
+        WS[WebSocket Handlers<br/>ws::*]
+        Dashboard[React SPA<br/>include_dir!]
+    end
+
+    subgraph "In-Process Dependencies"
+        Kernel[librefang-kernel]
+        Channels[librefang-channels]
+        Memory[librefang-memory]
+        LLM[librefang-llm-drivers]
+        Skills[librefang-skills]
+        Hands[librefang-hands]
+        Extensions[librefang-extensions]
+    end
+
+    CLI -->|HTTP/WS| Router
+    Browser -->|HTTP/WS| Router
+    Router --> MW
+    MW --> REST
+    MW --> WS
+    Router --> Dashboard
+    REST --> Kernel
+    REST --> Channels
+    REST --> Memory
+    REST --> LLM
+    REST --> Skills
+    REST --> Hands
+    REST --> Extensions
+    WS --> Kernel
 ```
 
-The API crate is the top-level integration point. It wires together the kernel, runtime, LLM drivers, channel adapters, and extension subsystem into a unified server that serves both the agent API and the embedded React dashboard.
+The API server is a thin HTTP transport layer. All business logic lives in the kernel and its satellite crates. The server assembles an `AppState` struct shared across handlers, wires axum middleware (auth, rate limiting, telemetry), and embeds the pre-built React dashboard as static assets.
+
+## Entry Points
+
+- **`server::build_router(kernel, addr)`** — assembles the complete axum `Router` with all routes, middleware, and shared `AppState`. This is the primary public API. Callers pass an initialised kernel handle and a listen address.
+- **`routes::*`** — endpoint handlers organised by domain (agents, sessions, channels, approvals, MCP, peers, etc.).
+- **`middleware`** — authentication gate, rate limiting (`governor`), and telemetry injection. Three route-visibility tiers control which paths skip auth:
+  - `PUBLIC_ROUTES_ALWAYS` — no auth required for any method.
+  - `PUBLIC_ROUTES_GET_ONLY` — GET requests skip auth; mutations require authentication.
+  - `PUBLIC_ROUTES_DASHBOARD_READS` — dashboard read-only paths accessible without credentials.
+- **`ws`** — WebSocket authentication handshake and streaming message handlers for real-time session updates.
 
 ## Feature Flags
 
-Feature flags control which channel adapters are compiled in and whether telemetry is enabled. This keeps default build times fast — only five lightweight adapters ship by default.
+The crate uses feature flags extensively to control which channel adapters are compiled in. This avoids pulling in heavy or unmaintained transitive dependencies for users who only need a subset.
 
-### Channel Features
-
-| Feature Group | Description |
+| Feature | Description |
 |---|---|
-| `default` | Enables `core-channels` + `telemetry` |
-| `core-channels` | Telegram, Discord, Slack, Webhook, Ntfy — five lightweight adapters using only the workspace HTTP stack (`reqwest` + `rustls`) |
-| `mini` | 12 core channels (Telegram, Discord, Slack, Matrix, Email, Webhook, WhatsApp, Signal, Teams, Mattermost, IRC, Google Chat) |
-| `all-channels` | Every available channel adapter |
-| `all-channels-no-email` | All channels except Email — used for Android targets where `rustls-platform-verifier` lacks `new_with_extra_roots` support |
-| `channel-<name>` | Individual channel feature — forwarded directly to `librefang-channels` |
+| `default` | Enables `core-channels` + `telemetry`. Sufficient for most deployments. |
+| `core-channels` | Telegram, Discord, Slack, Webhook, ntfy — five lightweight HTTP-based adapters. |
+| `all-channels` | Every channel adapter. Used by release packaging pipelines. |
+| `all-channels-no-email` | All channels except email. Required for Android targets where `rustls-platform-verifier` lacks `new_with_extra_roots` support. |
+| `mini` | 12 common channels (core + Matrix, Email, WhatsApp, Signal, Teams, Mattermost, IRC, Google Chat). |
+| `telemetry` | OpenTelemetry tracing export + Prometheus metrics endpoint. |
+| `channel-*` | Individual channel toggles, forwarded directly to `librefang-channels`. |
 
-To build with all channels:
-
-```bash
-cargo build -p librefang-api --features all-channels
+```toml
+# Example: build with only Telegram and Discord
+cargo build -p librefang-api --no-default-features \
+    --features channel-telegram,channel-discord
 ```
 
-For release packaging, opt in explicitly via `--features all-channels`. Plain `cargo build` compiles only the core set.
+When adding a channel to `core-channels`, verify its dependency tree doesn't introduce heavyweight or unmaintained crates. Anything beyond the curated set should go through `all-channels` or individual features.
 
-### Telemetry Feature
+## Authentication and Security
 
-The `telemetry` feature (enabled by default) pulls in:
+The middleware layer enforces authentication using a combination of:
 
-- **OpenTelemetry** tracing export (`opentelemetry`, `opentelemetry-otlp`)
-- **Prometheus** metrics export (`metrics`, `metrics-exporter-prometheus`)
-- `tracing-opentelemetry` bridge
+- **JWT** (`jsonwebtoken`) — token-based session authentication.
+- **HMAC-SHA256** (`hmac` + `sha2`) — request signing for webhook channels.
+- **Argon2** (`argon2`) — password hashing for local accounts.
+- **Constant-time comparison** (`subtle`) — timing-safe secret validation.
+- **Rate limiting** (`governor`) — per-IP request throttling.
 
-Disable for lighter builds:
+## Key Dependencies
 
-```bash
-cargo build -p librefang-api --no-default-features --features core-channels
-```
-
-## Build Script (`build.rs`)
-
-The build script performs three tasks:
-
-1. **Dashboard static directory** — Ensures `static/react/` exists so the `include_dir!` macro (which embeds dashboard assets at compile time) never fails on fresh clones. The directory is gitignored because it's populated either by `npm run build` in the dashboard subcrate or by downloading release assets at runtime. When empty, nothing is embedded and the runtime falls back to `~/.librefang/dashboard/`.
-
-2. **Build metadata** — Injects the following as compile-time environment variables, accessible via `env!()`:
-   - `GIT_SHA` — Short git commit hash (e.g. `a1b2c3d`), or `"unknown"`
-   - `BUILD_DATE` — UTC date in `YYYY-MM-DD` format
-   - `RUSTC_VERSION` — Full `rustc --version` output
-
-3. **No outgoing calls** — The build script is self-contained; it does not call into other crates at build time.
-
-## Key Dependencies and Their Roles
-
-### Web Framework Stack
-
-- **`axum`** + **`tower`** + **`tower-http`** — HTTP server, middleware, and utility layers (CORS, compression, tracing, etc.)
-- **`utoipa`** (with `axum_extras`) — OpenAPI 3.0 schema generation; the API is self-documenting
-- **`governor`** — Rate limiting middleware
-
-### Authentication & Security
-
-- **`jsonwebtoken`** — JWT token creation and validation
-- **`argon2`** — Password hashing for credential storage
-- **`hmac`** + **`sha2`** — HMAC-SHA256 for API key signing and webhook verification
-- **`subtle`** — Constant-time comparisons to prevent timing attacks
-- **`base64`** — Encoding for tokens and keys
-
-### Core Integration Crates
-
-| Crate | Purpose |
+| Crate | Role |
 |---|---|
-| `librefang-types` | Shared type definitions (request/response schemas, domain types) |
-| `librefang-kernel` | Agent kernel — orchestration, conversation management |
-| `librefang-runtime` | Process registry, runtime state management |
-| `librefang-llm-drivers` | LLM provider integrations (OpenAI, Anthropic, local models, etc.) |
-| `librefang-memory` | Conversation history, long-term memory storage |
-| `librefang-channels` | Messaging channel adapters (Telegram, Discord, etc.) |
-| `librefang-wire` | Wire protocol definitions for inter-service communication |
-| `librefang-skills` | Skill/plugin execution framework |
-| `librefang-hands` | Tool-use / action execution capabilities |
-| `librefang-extensions` | Extension system, including vault for secrets |
-| `librefang-migrate` | Database schema migrations |
-| `librefang-http` | Shared HTTP client configuration |
+| `librefang-kernel` / `librefang-kernel-handle` | Core agent runtime, session management |
+| `librefang-channels` | Channel adapter multiplexer |
+| `librefang-memory` | Conversation memory and context |
+| `librefang-llm-drivers` | LLM provider integrations |
+| `librefang-skills` | Skill registry and execution |
+| `librefang-hands` | Tool/hand implementations |
+| `librefang-extensions` | Extension loading and vault |
+| `librefang-migrate` | Database migrations |
 | `librefang-telemetry` | Tracing and metrics infrastructure |
+| `librefang-wire` | Wire protocol types for WebSocket |
+| `librefang-types` | Shared type definitions |
+| `axum` + `tower-http` | HTTP framework and middleware |
+| `utoipa` + `schemars` | OpenAPI schema generation |
+| `include_dir` | Compile-time embedding of dashboard assets |
 
-### Utility Dependencies
+## Build Process
 
-- **`dashmap`** — Concurrent hash maps for in-memory state
-- **`portable-pty`** — Pseudo-terminal management for interactive shell sessions
-- **`tokio-stream`** — Async stream utilities for WebSocket/SSE endpoints
-- **`tokio`** — Async runtime
-- **`flate2`** + **`tar`** + **`zip`** — Archive handling (likely for extension packaging, backup/restore)
-- **`walkdir`** — Directory traversal for file operations
-- **`url`** — URL parsing and manipulation
-- **`serde`** + **`serde_json`** + **`toml`** + **`toml_edit`** — Serialization and configuration
-- **`schemars`** — JSON Schema generation from Rust types (works with `utoipa` for OpenAPI docs)
-- **`include_dir`** — Embeds the React dashboard at compile time
+The `build.rs` script performs three tasks:
 
-### Platform-Specific (Unix only)
+1. **Dashboard asset directory** — ensures `static/react/` exists so `include_dir!` compiles on fresh clones. The directory is gitignored because it contains build artifacts from `cargo xtask build-web`. When empty, the runtime falls back to serving assets from `~/.librefang/dashboard/`.
 
-- **`rustix`** (with `process` feature) — Low-level Unix process operations
-- **`libc`** — FFI bindings for system calls
+2. **Build metadata** — captures `GIT_SHA`, `BUILD_DATE`, and `RUSTC_VERSION` as compile-time environment variables, exposed through the API's health/version endpoint.
 
-## Adding a New Channel Adapter
+3. **No procedural macros** — the build script is straightforward with no outgoing calls beyond standard `std::process::Command` invocations.
 
-1. Implement the channel in `librefang-channels` behind a new feature flag (e.g. `channel-mychannel`).
-2. Add a corresponding feature in `librefang-api/Cargo.toml`:
-   ```toml
-   channel-mychannel = ["librefang-channels/channel-mychannel"]
-   ```
-3. If it should be in `core-channels`, add it there — but verify its dependency tree is lightweight (only `reqwest` + `rustls`). If it pulls in heavy or unmaintained transitive dependencies, leave it out of `core-channels` and document it as opt-in.
-4. Add it to `all-channels` (and `all-channels-no-email` if it isn't `channel-email`).
-5. Update `librefang-cli`'s feature forwarding if applicable.
+## OpenAPI
 
-## Development Dependencies
+An `openapi.json` is committed at the workspace root and regenerated by:
 
-- **`tempfile`** — Temporary directories for test fixtures
-- **`librefang-testing`** — Test utilities and mock infrastructure
-- **`http-body-util`** — HTTP body inspection in tests
-- **`totp-rs`** — TOTP generation/verification for 2FA testing
+```bash
+cargo xtask codegen --openapi
+```
+
+CI verifies this file for drift using hash baselines stored in `xtask/baselines/`. If you add or modify routes, run the codegen command and commit the updated spec.
+
+## Dashboard SPA
+
+The React dashboard lives under `dashboard/` as a separate TypeScript/React/TanStack Query project. It is built by `cargo xtask build-web`, which produces optimised static assets in `static/react/`. These are embedded into the API binary at compile time via `include_dir!` and served at the root path.
+
+For development, you can run the dashboard dev server independently and proxy API requests to the running backend.

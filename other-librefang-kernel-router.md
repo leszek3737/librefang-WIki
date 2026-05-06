@@ -2,75 +2,55 @@
 
 # librefang-kernel-router
 
-Hand and template routing engine for the LibreFang kernel. This module is responsible for resolving incoming requests to the correct hand implementation based on configurable routing rules and template matching.
+Hand and template routing engine for the LibreFang kernel. This module is responsible for matching incoming input against registered templates and routing execution to the appropriate hand.
 
-## Overview
+## Purpose
 
-LibreFang uses a **hand** abstraction — discrete processing units that handle specific categories of input. The router sits at the front of the kernel's request pipeline, examining incoming data and determining which hand (or chain of hands) should process it.
+The router sits between raw input and the LibreFang kernel's hand execution layer. Its job is to:
 
-Routing decisions are driven by **templates**: pattern-based rules that match against request attributes. Templates can use literal matching, regex patterns, or structured criteria to classify input.
+1. Maintain a registry of available hands and their associated templates.
+2. Match incoming requests against template patterns.
+3. Resolve the correct hand to invoke based on that match.
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────┐
-│              Incoming Request                    │
-└──────────────────┬──────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────┐
-│            Router                                │
-│  ┌─────────────┐  ┌──────────────────────────┐  │
-│  │ Template    │─▶│ Hand Resolution           │  │
-│  │ Matching    │  │ (via librefang-hands)     │  │
-│  └─────────────┘  └──────────────────────────┘  │
-│  ┌─────────────────────────────────────────────┐│
-│  │ Route Configuration (TOML)                  ││
-│  └─────────────────────────────────────────────┘│
-└──────────────────┬──────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────┐
-│          Target Hand Execution                   │
-└─────────────────────────────────────────────────┘
-```
+This decouples input recognition from hand execution, allowing hands to be added, removed, or reconfigured without modifying the kernel's core dispatch logic.
 
 ## Dependencies
 
-| Crate | Purpose |
-|-------|---------|
-| `librefang-types` | Shared type definitions for requests, routes, and routing metadata |
-| `librefang-hands` | Hand registry and hand trait implementations |
-| `serde_json` | Deserialization of route definitions stored in JSON format |
-| `regex-lite` | Pattern matching within template rules |
-| `toml` | Parsing route configuration from TOML files |
-| `dirs` | Resolving platform-specific configuration directories |
-| `tracing` | Structured logging of routing decisions and diagnostics |
+| Dependency | Role |
+|---|---|
+| `librefang-types` | Shared type definitions used across the LibreFang workspace |
+| `librefang-hands` | Hand definitions and hand management |
+| `regex-lite` | Lightweight regular expression matching for template patterns |
+| `serde_json` | JSON serialization for template data and routing configuration |
+| `toml` | Parsing of TOML-based routing configuration files |
+| `dirs` | Resolving platform-specific configuration and data directories |
+| `tracing` | Structured logging and diagnostics |
+
+`librefang-runtime` and `tempfile` are available in tests for integration-style validation of routing behavior.
+
+## Architecture
+
+```mermaid
+graph LR
+    A[Input] --> B[Router]
+    B -->|template match| C[Hand A]
+    B -->|template match| D[Hand B]
+    B -->|no match| E[Fallback / Error]
+    F[Config TOML] --> B
+    G[librefang-types] --> B
+    B --> H[librefang-hands]
+```
+
+The router loads template-to-hand mappings from configuration (typically TOML files resolved via the `dirs` crate), uses `regex-lite` to match incoming input against registered templates, and delegates to the appropriate hand from `librefang-hands`.
 
 ## Configuration
 
-Route definitions are loaded from TOML configuration files. The router uses the `dirs` crate to locate platform-appropriate configuration paths (e.g., `~/.config/librefang/` on Linux).
-
-Configuration defines the mapping between templates and hands. Each route entry specifies:
-
-- A **template pattern** to match against incoming data
-- The **hand identifier** to dispatch to upon match
-- Optional **priority** or **ordering** hints for ambiguous matches
-
-## Routing Process
-
-1. **Load configuration** — Parse TOML route definitions at startup.
-2. **Receive request** — Accept an incoming request from the kernel pipeline.
-3. **Template evaluation** — Match the request against loaded templates using literal and regex-based comparison (`regex-lite`).
-4. **Hand resolution** — Use `librefang-hands` to look up the hand implementation associated with the matched template.
-5. **Dispatch** — Forward the request to the resolved hand for execution.
-
-All routing decisions are instrumented with `tracing` spans, enabling runtime diagnostics of which templates matched and why.
-
-## Integration with LibreFang
-
-This module is a kernel-level component. It consumes types from `librefang-types` and delegates actual request processing to hands provided by `librefang-hands`. The runtime (`librefang-runtime`) is used only in dev-dependencies for integration tests that verify end-to-end routing behavior.
+Routing rules are defined in TOML. The `dirs` crate is used to locate configuration files in platform-appropriate directories (e.g., `~/.config/librefang/` on Linux).
 
 ## Testing
 
-Tests use `tempfile` to create isolated configuration files, ensuring route loading and matching logic is verified without mutating system config paths.
+Integration tests use `librefang-runtime` to exercise the full routing pipeline end-to-end. `tempfile` supports creating transient configuration files for isolated test scenarios.
+
+## Workspace Integration
+
+This crate is part of the LibreFang workspace. It depends on `librefang-types` for shared types and `librefang-hands` for hand definitions. It does not depend on `librefang-runtime` in production builds — that relationship is test-only.

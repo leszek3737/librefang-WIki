@@ -2,27 +2,29 @@
 
 # librefang-types-locales
 
-Localized API error messages for the LibreFang platform, stored in [Project Fluent](https://projectfluent.org/) (`.ftl`) format. This module is a **static resource** — it contains no executable code. Other crates load these files at runtime through a Fluent-compatible localization system to produce human-readable error strings in the user's preferred language.
+Fluent (FTL) localization resources for all LibreFang API error messages. This module is a pure data layer — it contains no executable code, only `.ftl` translation files consumed by the Fluent localization system at runtime.
 
-## Supported Locales
+## Overview
 
-| Directory | Language | Completeness |
-|-----------|----------|-------------|
-| `en/` | English (reference) | Full — all error keys |
-| `ja/` | Japanese | Full — matches English |
-| `de/` | German | Partial — core errors only |
-| `es/` | Spanish | Partial — core errors only |
-| `fr/` | French | Partial — core errors only |
-| `zh-CN/` | Simplified Chinese | Partial — core + tool errors |
+Every API-facing error in LibreFang is assigned a stable Fluent message identifier (e.g., `api-error-agent-not-found`). The corresponding human-readable text lives in per-language `.ftl` files under `librefang-types/locales/<lang>/errors.ftl`. Application code references the identifier; the Fluent runtime resolves it to the correct language string.
 
-English (`en`) is the canonical source of truth. When other locales are missing a key, the Fluent runtime falls back to English automatically.
+## Supported Languages
+
+| Locale | Code | Completeness |
+|---|---|---|
+| English | `en` | Full — canonical source of truth |
+| Japanese | `ja` | Full |
+| German | `de` | Core subset |
+| Spanish | `es` | Core subset |
+| French | `fr` | Core subset |
+| Simplified Chinese | `zh-CN` | Core subset |
+
+English (`en`) defines the complete set of message identifiers. The other full-coverage locale (`ja`) mirrors it nearly one-to-one. The core-subset locales cover the foundational error domains (agent, message, template, manifest, auth, session, workflow, trigger, budget, config, profile, cron, and general errors).
 
 ## File Structure
 
-Each locale contains a single `errors.ftl` file:
-
 ```
-locales/
+librefang-types/locales/
 ├── de/errors.ftl
 ├── en/errors.ftl
 ├── es/errors.ftl
@@ -31,110 +33,100 @@ locales/
 └── zh-CN/errors.ftl
 ```
 
-## Message Format
+Each file follows identical structure: grouped by error domain, with section headers as comments.
 
-Messages follow Fluent syntax. Each line defines a message identifier and its localized text:
+## Error Domains
 
-```fluent
-api-error-agent-not-found = Agent not found
-```
+Messages are prefixed by domain using the naming convention `api-error-<domain>-<detail>`:
 
-### Variables
+| Domain | Prefix | Examples |
+|---|---|---|
+| Agent | `api-error-agent-*` | `agent-not-found`, `agent-spawn-failed`, `agent-vanished` |
+| Message | `api-error-message-*` | `message-too-large`, `message-delivery-failed` |
+| Template | `api-error-template-*` | `template-not-found`, `template-parse-failed` |
+| Manifest | `api-error-manifest-*` | `manifest-too-large`, `manifest-signature-mismatch` |
+| Auth | `api-error-auth-*` | `auth-invalid-key`, `auth-missing-header` |
+| Session | `api-error-session-*` | `session-not-found`, `session-invalid-id` |
+| Workflow | `api-error-workflow-*` | `workflow-missing-steps`, `workflow-execution-failed` |
+| Trigger | `api-error-trigger-*` | `trigger-invalid-pattern`, `trigger-registration-failed` |
+| Budget | `api-error-budget-*` | `budget-invalid-amount`, `budget-update-failed` |
+| Config | `api-error-config-*` | `config-parse-failed`, `config-write-failed` |
+| Profile | `api-error-profile-*` | `profile-not-found` |
+| Cron | `api-error-cron-*` | `cron-invalid-expression`, `cron-create-failed` |
+| Goal | `api-error-goal-*` | `goal-circular-parent`, `goal-progress-range` |
+| Memory | `api-error-memory-*` | `memory-not-enabled`, `memory-missing-kv` |
+| Network / A2A | `api-error-network-*` | `network-connection-failed`, `network-a2a-not-found` |
+| Plugin | `api-error-plugin-*` | `plugin-missing-name`, `plugin-invalid-source` |
+| Channel | `api-error-channel-*` | `channel-invalid-from`, `channel-invalid-to` |
+| Provider | `api-error-provider-*` | `provider-alias-exists`, `provider-key-not-configured` |
+| Skill | `api-error-skill-*` | `skill-invalid-name`, `skill-install-failed` |
+| Hand | `api-error-hand-*` | `hand-not-found`, `hand-instance-not-found` |
+| MCP | `api-error-mcp-*` | `mcp-invalid-config`, `mcp-not-found` |
+| Integration / Extension | `api-error-integration-*`, `api-error-extension-*` | `integration-not-found` |
+| System | `api-error-system-*` | `system-cli-not-found` |
+| KV | `api-error-kv-*` | `kv-missing-fields`, `kv-array-empty` |
+| Approval | `api-error-approval-*` | `approval-not-found` |
+| Webhook | `api-error-webhook-*` | `webhook-url-unreachable`, `webhook-unknown-event` |
+| Backup | `api-error-backup-*` | `backup-missing-manifest`, `backup-invalid-archive` |
+| Schedule | `api-error-schedule-*` | `schedule-invalid-cron`, `schedule-save-failed` |
+| Job | `api-error-job-*` | `job-not-retryable`, `job-disappeared-cancel` |
+| Task | `api-error-task-*` | `task-not-found`, `task-disappeared` |
+| Pairing | `api-error-pairing-*` | `pairing-not-enabled`, `pairing-invalid-token` |
+| Binding | `api-error-binding-*` | `binding-out-of-range` |
+| Command | `api-error-command-*` | `command-not-found` |
+| File / Upload | `api-error-file-*` | `file-path-traversal`, `file-unsupported-type` |
+| Tool | `api-error-tool-*` | `tool-invoke-denied`, `tool-requires-agent` |
+| Validation | `api-error-validation-*` | `validation-color-invalid`, `validation-avatar-url-invalid` |
+| General | `api-error-*` (no domain) | `not-found`, `internal`, `bad-request`, `rate-limited` |
 
-Many messages accept interpolated variables using `{$name}` syntax:
+## Fluent Variable Interpolation
 
-```fluent
-api-error-message-delivery-failed = Message delivery failed: { $reason }
-api-error-template-not-found = Template '{ $name }' not found
-api-error-agent-execution-failed = Agent execution failed: { $error }
-api-error-agent-not-found-with-id = Agent not found: { $id }
-```
+Many messages include Fluent variables that are populated at runtime. The available variables are:
 
-When calling code resolves a message, it passes a map of variable values. The Fluent runtime substitutes them into the output string.
-
-## Error Key Naming Convention
-
-All keys follow the pattern:
-
-```
-api-error-<domain>-<specific-error>
-```
-
-Domains in the current catalog:
-
-| Domain | Example Key | Typical Variables |
-|--------|------------|-------------------|
-| `agent` | `api-error-agent-not-found` | `$id`, `$error`, `$field`, `$valid` |
-| `message` | `api-error-message-too-large` | `$reason` |
-| `template` | `api-error-template-not-found` | `$name`, `$error` |
-| `manifest` | `api-error-manifest-signature-mismatch` | — |
-| `auth` | `api-error-auth-invalid-key` | — |
-| `session` | `api-error-session-not-found` | `$error` |
-| `workflow` | `api-error-workflow-missing-steps` | `$step` |
-| `trigger` | `api-error-trigger-not-found` | — |
-| `budget` | `api-error-budget-update-failed` | — |
-| `config` | `api-error-config-parse-failed` | `$error` |
-| `profile` | `api-error-profile-not-found` | `$name` |
-| `cron` | `api-error-cron-create-failed` | `$error` |
-| `goal` | `api-error-goal-circular-parent` | `$id`, `$error` |
-| `memory` | `api-error-memory-not-found` | — |
-| `network` | `api-error-network-connection-failed` | `$url`, `$error`, `$status` |
-| `plugin` | `api-error-plugin-missing-name` | — |
-| `channel` | `api-error-channel-unknown` | — |
-| `provider` | `api-error-provider-not-found` | `$name`, `$alias`, `$id`, `$provider`, `$error` |
-| `skill` | `api-error-skill-missing-name` | `$error`, `$max` |
-| `hand` | `api-error-hand-not-found` | `$id` |
-| `mcp` | `api-error-mcp-not-found` | `$name`, `$error` |
-| `integration` | `api-error-integration-not-found` | `$id` |
-| `extension` | `api-error-extension-not-found` | `$id` |
-| `system` | `api-error-system-cli-not-found` | — |
-| `kv` | `api-error-kv-missing-fields` | — |
-| `approval` | `api-error-approval-not-found` | — |
-| `webhook` | `api-error-webhook-not-found` | `$error`, `$event`, `$valid` |
-| `backup` | `api-error-backup-not-found` | `$error` |
-| `schedule` | `api-error-schedule-not-found` | `$error` |
-| `job` | `api-error-job-not-found` | — |
-| `task` | `api-error-task-not-found` | — |
-| `pairing` | `api-error-pairing-not-enabled` | — |
-| `binding` | `api-error-binding-out-of-range` | — |
-| `command` | `api-error-command-not-found` | `$name` |
-| `file` | `api-error-file-not-found` | `$max` |
-| `tool` | `api-error-tool-not-found` | `$name` |
-| `validation` | `api-error-validation-title-required` | — |
-| *(general)* | `api-error-not-found` | `$reason` |
-
-General errors (`api-error-not-found`, `api-error-internal`, `api-error-bad-request`, `api-error-rate-limited`) have no domain prefix segment beyond `api-error-`.
-
-## How the Codebase Consumes These Files
-
-This module produces no function calls and receives none. It is a **pure data** dependency. The typical integration path is:
-
-1. At build time or startup, the consuming crate locates the `locales/` directory (via `CARGO_MANIFEST_DIR`, a configured path, or `include_str!`).
-2. A Fluent `Bundle` is constructed per locale, loading `errors.ftl` from each directory.
-3. When an API handler needs to return an error, it calls into a localization function that:
-   - Selects the user's preferred locale (from `Accept-Language`, configuration, or session data).
-   - Looks up the message by its Fluent identifier (e.g., `api-error-agent-not-found`).
-   - Passes any required variables (e.g., `{ "id": "abc-123" }`).
-   - Returns the resolved string for use in the HTTP response body.
+| Variable | Used in | Description |
+|---|---|---|
+| `{ $reason }` | `message-delivery-failed`, `bad-request` | Reason text for failure |
+| `{ $error }` | `template-parse-failed`, `config-parse-failed`, `config-write-failed`, `cron-create-failed`, `manifest-invalid`, `agent-execution-failed`, `agent-clone-spawn-failed`, `agent-error`, `goal-save-failed`, `network-connection-failed`, `network-task-post-failed`, `provider-secrets-write-failed`, `skill-dir-create-failed`, `mcp-invalid-config`, `backup-*`, `schedule-*` | Error detail from underlying operation |
+| `{ $name }` | `template-not-found`, `profile-not-found`, `tool-not-found`, `command-not-found`, `mcp-not-found`, `provider-not-found`, `provider-unknown` | Name of the requested resource |
+| `{ $id }` | `agent-not-found-with-id`, `goal-not-found-with-id`, `hand-not-found`, `integration-not-found`, `extension-not-found` | Identifier of the requested resource |
+| `{ $step }` | `workflow-step-needs-agent` | Step name in a workflow |
+| `{ $alias }` | `provider-alias-exists`, `provider-alias-not-found` | Provider alias |
+| `{ $url }` | `network-a2a-not-found`, `network-missing-url` | URL parameter |
+| `{ $status }` | `network-auth-failed` | HTTP status code |
+| `{ $max }` | `skill-description-too-long`, `file-too-large` | Maximum allowed value |
+| `{ $event }` | `webhook-unknown-event` | Event type string |
+| `{ $valid }` | `agent-invalid-sort`, `webhook-unknown-event` | List of valid values |
+| `{ $field }` | `agent-invalid-sort` | Field name that was invalid |
+| `{ $provider }` | `provider-model-exists` | Provider name |
 
 ## Adding a New Error Message
 
-1. **Add the key to `en/errors.ftl`** — this is the reference locale. Place it under the correct domain comment heading, or add a new heading if it's a new domain.
+1. Add the message to `en/errors.ftl` first — this is the canonical source. Place it under the appropriate domain comment heading.
+2. Use the naming convention `api-error-<domain>-<detail>` with kebab-case.
+3. If the message needs runtime data, use Fluent variables: `{ $variable-name }`.
+4. Mirror the message to `ja/errors.ftl` for full coverage.
+5. Add the message to any core-subset locales (`de`, `es`, `fr`, `zh-CN`) if it falls within their covered domains, or leave it for a future translation pass. Untranslated messages fall back to English via Fluent's built-in fallback mechanism.
 
-   ```fluent
-   api-error-agent-new-example = New example error: { $detail }
-   ```
+Example entry in `en/errors.ftl`:
 
-2. **Add translations to all other locales** that should cover this error. At minimum, add the key to every locale directory that exists. If a locale is still a partial translation, adding the key is still recommended to make future completion easier.
-
-3. **Use the key in application code** — reference the identifier when constructing API error responses so the Fluent resolver can look it up at runtime.
+```ftl
+api-error-example-domain-new-error = Description of the new error with { $detail }
+```
 
 ## Adding a New Locale
 
-1. Create a new directory under `locales/` using the appropriate [BCP 47](https://tools.ietf.org/html/bcp47) tag (e.g., `pt-BR/`).
-2. Copy `en/errors.ftl` into the new directory as a starting template.
-3. Translate every message value (the text after `=`) while keeping:
-   - All message identifiers unchanged.
-   - All variable references (`{ $name }`) unchanged.
-   - All comments (optional — translate or remove as needed).
-4. Register the new locale in whatever locale negotiation or bundle construction logic the consuming crate uses.
+1. Create the directory `librefang-types/locales/<code>/`.
+2. Create `errors.ftl` with the same message identifiers as `en/errors.ftl`.
+3. Translate the message values. Do **not** translate the identifiers (the left-hand side of `=`).
+4. Preserve all Fluent variables exactly — `{ $reason }` must remain `{ $reason }`.
+5. Keep the same section comment structure for maintainability.
+
+## Integration with Application Code
+
+This module is a passive data dependency. The consuming application:
+
+1. Loads the Fluent bundle for the negotiated locale at startup.
+2. On error, calls the Fluent bundle with the message ID (e.g., `api-error-agent-not-found`) and any required variables.
+3. If the message ID is missing from the active locale, Fluent falls back through the locale chain, ultimately reaching English.
+
+Because these are `.ftl` files bundled at compile time or loaded at runtime, no Rust code in this crate performs any logic — the crate exists solely to co-locate and version the translation resources alongside the type definitions in `librefang-types`.

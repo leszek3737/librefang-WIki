@@ -2,49 +2,47 @@
 
 # LLM Drivers
 
-Unified abstraction over every LLM provider LibreFang supports — from cloud APIs (Anthropic, OpenAI, Gemini, Bedrock, Vertex AI) to CLI-based backends (Claude Code, Qwen Code, Aider). Callers use a single `complete()` / `stream()` interface and never deal with provider-specific wire formats.
+The LLM Drivers module group provides a provider-agnostic interface for calling large language models, along with production-ready concrete implementations for every supported provider.
 
-## Sub-module breakdown
+## Structure
+
+```mermaid
+graph LR
+    subgraph "Consumer Layer"
+        AL[agent_loop]
+        CE[context_engine]
+    end
+
+    subgraph "llm-driver<br/>(trait & types)"
+        LD[LlmDriver trait]
+        CR[CompletionRequest / Response]
+        SE[StreamEvent]
+        LE[LlmError]
+    end
+
+    subgraph "llm-drivers<br/>(implementations)"
+        AN[AnthropicDriver]
+        OA[OpenAIDriver]
+        VA[VertexAiDriver]
+        CP[CredentialPool]
+        RL[RateLimitTracker]
+        BO[Backoff / RetryAfter]
+        UF[Utf8Stream / ThinkFilter]
+    end
+
+    AL & CE --> LD
+    LD -.->|implemented by| AN & OA & VA
+    AN & OA & VA --> CP & RL & BO & UF
+    AN & OA & VA -->|errors classified as| LE
+```
 
 | Sub-module | Role |
 |---|---|
-| [librefang-llm-driver](librefang-llm-driver-src.md) | Defines the `LlmDriver` trait, `CompletionRequest` / `DriverConfig` types, and the `FailoverReason` taxonomy that drives provider failover decisions. |
-| [librefang-llm-drivers-src](librefang-llm-drivers-src.md) | Concrete driver implementations (Anthropic, OpenAI, Gemini, Vertex AI, Ollama, Qwen Code, Gemini CLI, etc.) plus shared infrastructure for retry logic, credential/token rotation, rate-limit tracking, and prompt caching. |
+| [librefang-llm-driver-src](librefang-llm-driver-src.md) | Defines the `LlmDriver` trait, core request/response types (`CompletionRequest`, `CompletionResponse`, `StreamEvent`), `DriverConfig`, `LlmFamily`, and the `llm_errors` classification pipeline that turns raw provider errors into structured categories for retry and failover decisions. |
+| [librefang-llm-drivers-src](librefang-llm-drivers-src.md) | Concrete `LlmDriver` implementations (Anthropic, OpenAI-compatible, Vertex AI, Aider CLI, and others) plus shared infrastructure: credential rotation via `CredentialPool`, retry/backoff logic, rate-limit tracking with cross-process lockout files, `Utf8Stream` for correct streaming of multi-byte codepoints, and `ThinkFilter` for stripping `<think/>` blocks from model output. |
 
-## How they connect
+## How They Fit Together
 
-```mermaid
-graph TB
-    subgraph Consumers
-        AL[Agent Runtime]
-        FC[Fallback Chain]
-    end
+**[librefang-llm-driver-src](librefang-llm-driver-src.md)** is the interface contract. It owns the `LlmDriver` trait (with `complete` and `stream` methods), the error taxonomy (`LlmError`), and the data types every provider must produce. Consumers such as the agent loop and context engine depend only on this crate.
 
-    subgraph "llm-driver — trait & error layer"
-        LDT["LlmDriver trait<br/>CompletionRequest<br/>FailoverReason"]
-    end
-
-    subgraph "llm-drivers-src — implementations"
-        impl[Anthropic · OpenAI · Gemini · Vertex AI<br/>Bedrock · Ollama · Qwen Code · Gemini CLI · …]
-        infra[Token Rotation · RateLimitTracker<br/>SharedRateGuard · Retry Logic]
-    end
-
-    AL -->|"CompletionRequest"| LDT
-    FC -->|"FailoverReason"| LDT
-    LDT -->|"complete() / stream()"| impl
-    impl --> infra
-```
-
-The **trait crate** owns the contract; every concrete driver in the **implementations crate** depends on `CompletionRequest` and `DriverConfig` from it. Raw provider errors are classified into `FailoverReason` variants (also defined in the trait crate), which the `FallbackChain` consumes to decide when to switch providers.
-
-## Key cross-cutting workflows
-
-1. **Request lifecycle** — The agent runtime builds a `CompletionRequest` (trait crate) and calls a driver's `complete()` or `stream()`. The driver converts it into a provider-specific payload (e.g. `GeminiRequest`, `GeminiContent`, `GenerationConfig` in the Gemini driver) and handles response parsing.
-
-2. **Rate-limit awareness** — `RateLimitTracker` and `SharedRateGuard` (implementations crate) maintain rolling-window snapshots of per-provider quota. These surface during the CLI startup flow (`main → load_dotenv → load_vault → display → has_data / ascii_bar / fmt_seconds`) so users see bucket status before the first request fires.
-
-3. **Credential rotation** — The `TokenRotation` wrapper marks credentials as exhausted (`mark_exhausted` → `now_ms`) and cycles through alternatives without the caller's involvement.
-
-4. **Failover** — When a driver invocation fails, the error is mapped to a `FailoverReason`. The `FallbackChain` uses that signal to select the next provider, retrying or switching transparently.
-
-See the individual sub-module pages for driver-specific details and configuration options.
+**[librefang-llm-drivers-src](librefang-llm-drivers-src.md)** implements that trait for each supported provider and houses the cross-cutting infrastructure those implementations share — credential pool rotation, exponential backoff, `Retry-After` header parsing, rate-limit tracking, and streaming utilities. When a concrete driver encounters a provider error, it surfaces it through the classification pipeline defined in the driver crate, giving upstream code a consistent basis for retry and failover decisions.

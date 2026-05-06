@@ -2,181 +2,200 @@
 
 # librefang-llm-drivers-tests
 
-Integration test suite for the LLM driver layer. Validates retry logic, error classification, adaptive request rewriting, and cross-process rate-limit coordination for the OpenAI, Anthropic, and Gemini drivers.
+Integration test suite for the LLM driver layer. Every test spins up an in-process HTTP mock (via `wiremock`), constructs a real driver instance pointed at it, and asserts on either the outbound request shape, the parsed response, or the retry/error-handling behaviour. No test contacts a live provider.
 
 ## Architecture
 
 ```mermaid
 graph TD
     subgraph "Test Files"
-        A[anthropic_retry.rs]
-        G[gemini_retry.rs]
-        OC[openai_retry_complete.rs]
-        OS[openai_retry_stream.rs]
-        SG[shared_rate_guard_integration.rs]
+        RS[request_shape tests]
+        RT[retry tests]
+        TH[trace_headers tests]
+        SG[shared_rate_guard_integration]
     end
 
     subgraph "common/mod.rs"
-        TE[TestEnv / isolated_env]
-        RB[Request Builders]
-        MB[Mock Response Builders]
+        IE[isolated_env]
+        MD[mock_*_driver factories]
+        FB[fixture builders]
         CS[collect_stream]
-        LF[lockout_file_exists / create_lockout_file]
+        LK[lockout_file_exists]
     end
 
-    A --> TE
-    A --> MB
-    A --> CS
-    A --> LF
-    G --> TE
-    G --> MB
-    G --> CS
-    OC --> TE
-    OC --> RB
-    OC --> MB
-    OC --> LF
-    OS --> TE
-    OS --> RB
-    OS --> MB
-    OS --> CS
-    SG --> TE
-    SG --> RB
+    subgraph "Drivers Under Test"
+        OA[OpenAIDriver]
+        AD[AnthropicDriver]
+        GD[GeminiDriver]
+        BD[BedrockDriver]
+        CG[ChatGptDriver]
+        CD[CopilotDriver]
+    end
 
-    TE -->|LIBREFANG_HOME + zero backoff| B[backoff::enable_test_zero_backoff]
-    LF -->|reads lockout files| SRG[shared_rate_guard::key_id_hash]
+    RS --> IE
+    RT --> IE
+    TH --> IE
+    SG --> IE
+    RS --> MD
+    RT --> MD
+    TH --> MD
+    RS --> CS
+    RT --> CS
+    TH --> FB
+    RT --> LK
+    MD --> OA
+    MD --> AD
+    MD --> GD
+    TH --> BD
+    TH --> CG
+    TH --> CD
 ```
 
-## Shared Infrastructure (`common/mod.rs`)
+## Test Isolation
 
-### Environment Isolation
+Every test follows the same setup pattern:
 
-Every test calls `isolated_env()` to create a `TestEnv` that:
+```rust
+let _env = isolated_env();
+let server = MockServer::start().await;
+```
 
-1. Creates a `tempfile::TempDir` and sets `LIBREFANG_HOME` to point at it. This prevents tests from reading or writing real rate-limit state in `~/.librefang/rate_limits/`.
-2. Sets `NO_PROXY` / `no_proxy` to `127.0.0.1,localhost` so the HTTP client talks directly to the wiremock server, bypassing any system proxy.
-3. Calls `backoff::enable_test_zero_backoff()` to obtain a `ZeroBackoffGuard`. While this guard lives, all exponential-backoff sleeps collapse to zero, keeping test execution fast.
+`isolated_env()` (in `common/mod.rs`) does three things:
 
-`TestEnv` holds both the temp dir and the guard. Dropping `_env` at test end restores normal behaviour.
+1. Creates a **temporary `LIBREFANG_HOME`** directory so rate-limit lockout files, backoff state, and other filesystem artifacts never leak between tests or pollute the developer's real config.
+2. Sets `NO_PROXY` / `no_proxy` to `127.0.0.1,localhost` so the reqwest client connects directly to the wiremock server even if the host has an HTTP proxy configured.
+3. Enables **zero-backoff mode** via `backoff::enable_test_zero_backoff()` — all `tokio::time::sleep` calls inside the driver's retry loop are skipped so tests complete in milliseconds rather than waiting for real backoff intervals.
 
-### Request Constructors
+All tests are marked `#[serial_test::serial]` because they mutate shared process state (`LIBREFANG_HOME` env var, global backoff flag).
 
-| Function | Purpose |
+## Test Categories
+
+### 1. Request Shape Tests
+
+Files: `openai_request_shape.rs`, `anthropic_request_shape.rs`, `gemini_request_shape.rs`
+
+Lock in the **provider wire contract** — the exact HTTP method, path, headers, and JSON body the driver sends. These tests inspect the recorded `wiremock::Request` after a `driver.complete()` call to assert:
+
+- **Authentication headers** are present (`Authorization: Bearer` for OpenAI, `x-api-key` for Anthropic, `?key=` query param for Gemini).
+- **Content-Type** is `application/json`.
+- **Request body** carries the caller-supplied model, messages, tools, system prompt, and `max_tokens` in the provider-specific envelope.
+- **Tool definitions** survive serialization (OpenAI's `[{type: "function", function: {...}}]`, Anthropic's `[{name, input_schema}]`, Gemini's `[{functionDeclarations}]`).
+
+These tests also verify **tool-call response parsing**: a mock response containing a `tool_calls` / `tool_use` / `functionCall` block parses into `CompletionResponse.tool_calls` with `StopReason::ToolUse`, correct id/name/input, and accurate usage counters.
+
+**Streaming contract** is verified by asserting that concatenated `StreamEvent::TextDelta` events equal `CompletionResponse.text()`, and that the stream terminates with `StreamEvent::ContentComplete`.
+
+### 2. Retry Tests
+
+Files: `openai_retry_complete.rs`, `openai_retry_stream.rs`, `anthropic_retry.rs`, `gemini_retry.rs`
+
+Exercise the driver's **retry and error-classification logic**:
+
+| Scenario | Behaviour |
 |---|---|
-| `simple_request(model)` | Minimal `CompletionRequest`: one user message, no tools, `max_tokens=16`, `temperature=0.0`. |
-| `request_with_tools(model)` | Adds a single `get_weather` tool definition. Used to test tool-stripping retries. |
-| `request_with_temperature(model, temp)` | Sets a non-zero temperature. Used to test temperature-stripping retries. |
-| `o_series_request()` | Targets `o3-mini` with `temperature=1.0` and higher token limits. |
+| 429 with `retry-after` | Retries up to `max_retries`, then returns `LlmError::RateLimited` |
+| 529 / 503 overloaded | Retries, returns `LlmError::Overloaded` on exhaustion |
+| 403 authentication failure | Immediate `LlmError::AuthenticationFailed`, no retry |
+| Generic 500 | No retry (unless tools are present — see below) |
+| Pre-existing lockout file | Short-circuits without network call |
 
-All return `CompletionRequest` from `librefang_llm_driver`.
+**OpenAI-specific adaptive retries** (in `openai_retry_complete.rs`):
 
-### Mock Response Builders
+- **`max_tokens` → `max_completion_tokens`**: On 400 "unsupported parameter: max_tokens", retries with the renamed field.
+- **Temperature strip**: On 400 "unsupported parameter: temperature", retries without `temperature`.
+- **Tool strip on 500**: If a tool-bearing request gets a 500, retries without `tools` or `tool_choice`.
+- **`max_tokens` auto-cap**: On 400 complaining about a maximum, retries with the server-advertised cap.
+- **`stream_options` strip** (streaming): On 400 "unrecognized argument: stream_options", retries without it.
+- **`tool_use_failed` retry**: On 400 `tool_use_failed` from Groq-like providers.
 
-Per-provider helpers construct `ResponseTemplate` or `serde_json::Value` bodies matching real API shapes:
+**Lockout file semantics**:
+- 429 creates a lockout file at `$LIBREFANG_HOME/rate_limits/{provider}__{key_id_hash}.json`.
+- 529/503 does **not** create a lockout file (overloaded is transient, not account-level rate limiting).
+- `lockout_file_exists()` in `common/mod.rs` checks for the file via `shared_rate_guard::key_id_hash`.
 
-- **OpenAI**: `openai_200_body`, `openai_429_response`, `openai_400_temperature_rejected`, `openai_400_max_tokens_unsupported`, `openai_400_max_tokens_cap`, `openai_400_tool_not_supported`, `openai_500_tool_error`, `openai_400_tool_use_failed`, `openai_sse_body`
-- **Anthropic**: `anthropic_200_body`, `anthropic_429_response`, `anthropic_529_response`, `anthropic_sse_body`
-- **Gemini**: `gemini_200_body`, `gemini_429_response`, `gemini_503_response`, `gemini_sse_body`
+### 3. Trace Header Tests
 
-SSE builders emit properly formatted `data:` lines; Anthropic's includes the full event stream (`message_start` → `content_block_start` → deltas → `content_block_stop` → `message_delta` → `message_stop`).
+Files: `openai_trace_headers.rs`, `anthropic_trace_headers.rs`, `gemini_trace_headers.rs`, `bedrock_trace_headers.rs`, `chatgpt_trace_headers.rs`, `copilot_trace_headers.rs`
 
-### Lockout File Utilities
+Verify that the `x-librefang-agent-id`, `x-librefang-session-id`, and `x-librefang-step-id` headers are emitted on outbound requests when the corresponding `CompletionRequest` fields are populated. These headers allow observability sidecars to correlate requests without parsing the JSON body.
 
-- **`lockout_file_exists(provider, api_key)`** — hashes the key via `shared_rate_guard::key_id_hash`, then checks whether `{LIBREFANG_HOME}/rate_limits/{provider}__{hash}.json` exists on disk.
-- **`create_lockout_file(provider, api_key, until)`** — writes a lockout record with the given expiry. Used to simulate a pre-existing lockout.
+Every driver follows the same contract:
 
-### Stream Collection
+| Condition | Behaviour |
+|---|---|
+| All three IDs populated | All three headers present |
+| Subset populated | Only those headers appear |
+| All `None` | No trace headers emitted |
+| `Some("")` (empty string) | Treated as absent, no header emitted |
+| Malformed value (CRLF, NUL, control chars) | Silently dropped, request proceeds |
+| `with_emit_caller_trace_headers(false)` | Headers suppressed regardless of request fields |
 
-`collect_stream(driver, request)` spawns a `tokio::mpsc` channel, calls `driver.stream(request, tx)`, drains all `StreamEvent` values into a `Vec`, and returns `(result, events)`. This lets tests assert both the final `Result` and the individual stream events.
+The **OpenAI trace header tests** (`openai_trace_headers.rs`) are the most comprehensive and serve as the reference implementation:
+
+- **Partial headers**: Only the populated fields produce headers.
+- **Extra-header override**: When `with_extra_headers` contains a `x-librefang-*` key, the per-request trace value **replaces** it (single value, not duplicated).
+- **Malformed value handling**: Values with `\r\n`, `\0`, `\x07` etc. are silently dropped — the driver logs a warning but does not fail the LLM call.
+- **Extended ASCII passthrough**: Non-ASCII UTF-8 values (e.g. `步骤-7`) pass through without being dropped.
+- **Opt-out preserves extras**: When the emit flag is `false`, `extra_headers` set by the operator still ride out.
+- **Streaming**: Trace headers are also emitted on `driver.stream()` calls.
+
+The **Copilot** trace header tests note that the driver delegates to an inner `OpenAIDriver` after GitHub PAT exchange, and `new_for_test` bypasses the token exchange so the mock only sees `/chat/completions`.
+
+The **Bedrock** trace header tests document that the current driver uses Bearer token auth (not SigV4), so custom headers travel outside any signing scope. A comment notes that a future SigV4 migration would need to verify trace headers are excluded from the canonical-request hash.
+
+### 4. Shared Rate Guard Integration
+
+File: `shared_rate_guard_integration.rs`
+
+An end-to-end test for the **cross-process rate-limit guard**. Spawns a raw TCP stub server (not wiremock) that always returns 429, then:
+
+1. **First driver instance** hits the server → records a lockout file.
+2. **Second driver instance** (fresh struct, simulating a sibling process) → request short-circuits without any TCP connection.
+
+Asserts using an `AtomicUsize` hit counter on the stub that only one connection was made. This validates that the file-based lockout in `$LIBREFANG_HOME/rate_limits/` is read on driver construction, not just maintained in-memory.
+
+## Common Test Utilities
+
+`common/mod.rs` provides shared infrastructure:
 
 ### Driver Factories
 
-`mock_openai_driver`, `mock_anthropic_driver`, and `mock_gemini_driver` each construct a driver instance with a random API key and the wiremock server URL as proxy, plus a 5-second timeout.
+- **`mock_openai_driver(server)`** — `OpenAIDriver` with random `sk-test-*` key, 5-second timeout.
+- **`mock_anthropic_driver(server)`** — `AnthropicDriver` with random `sk-ant-test-*` key.
+- **`mock_gemini_driver(server)`** — `GeminiDriver` with random `test-key-*` key.
 
-### Miscellaneous
+Each uses `with_proxy_and_timeout` to point at the wiremock server.
 
-- `request_json(request)` — parses a wiremock `Request` body as JSON for assertion.
-- `provider_for_openai_mock()` — returns `"openai-compat"`, the provider string OpenAI-family drivers write into lockout files.
-- `rate_limit_dir_path()` — resolves the rate-limit directory from `LIBREFANG_HOME` (falling back to `~/.librefang`).
+### Request Builders
 
----
+- **`simple_request(model)`** — Minimal `CompletionRequest` with one user message, no tools.
+- **`request_with_tools(model)`** — Includes a `get_weather` tool definition with `input_schema`.
+- **`request_with_temperature(model, temp)`** — Sets a custom temperature.
+- **`o_series_request()`** — `o3-mini` model with `max_tokens: 1000`, `temperature: 1.0`.
 
-## Test Files
+### Response Fixtures
 
-### `anthropic_retry.rs`
+Provider-specific 200, 429, 529/503, 400, and SSE response builders:
 
-Tests `AnthropicDriver` retry behaviour. Uses a local `driver_with_key` helper that creates a driver with a unique `sk-ant-test-{uuid}` key and a 5-second timeout.
+- `openai_200_body(text)`, `openai_sse_body(chunks)`, `openai_429_response(secs)`
+- `anthropic_200_body(text)`, `anthropic_sse_body(text)`, `anthropic_429_response()`, `anthropic_529_response()`
+- `gemini_200_body(text)`, `gemini_sse_body(text)`, `gemini_429_response()`, `gemini_503_response()`
 
-Helper functions `anthropic_429_fast_retry()` and `anthropic_529_overloaded()` produce mock responses with short `retry-after` values (1 second) so zero-backoff mode keeps tests instant.
+### Stream Collection
 
-| Test | Scenario | Assertions |
-|---|---|---|
-| `aa1_429_retry_then_success` | Two 429s then 200 | 3 total requests; lockout file created |
-| `aa2_429_exhaustion` | Four consecutive 429s | `RateLimited` error; lockout file exists |
-| `aa3_529_retry_then_success_no_lockout` | One 529 then 200 | 2 requests; **no** lockout file (529 = overloaded, not account-level rate limit) |
-| `aa4_529_exhaustion_overloaded` | Four consecutive 529s | `Overloaded` error; no lockout file |
-| `aa5_stream_429_retry` | Two 429s then SSE stream on `stream()` | Stream completes with non-empty events; 3 requests |
+`collect_stream(driver, request)` spawns a tokio task that drains the `mpsc::Receiver<StreamEvent>` into a `Vec`, then returns `(Result<CompletionResponse, LlmError>, Vec<StreamEvent>)`.
 
-Key distinction: Anthropic 429 triggers a lockout file (account-level rate limit), while 529 (overloaded) does not.
+### Lockout Helpers
 
-### `gemini_retry.rs`
+- `lockout_file_exists(provider, api_key)` — Checks if a rate-limit lockout file exists for the given key.
+- `create_lockout_file(provider, api_key, until)` — Pre-creates a lockout file (used by `oc3_preexisting_lockout_blocks_request`).
 
-Tests `GeminiDriver`. Uses a custom `SequencedResponder` that returns responses in order from a `Vec<ResponseTemplate>`, with an `AtomicUsize` counter tracking how many times the mock was hit. This is needed because Gemini's endpoint path includes the model name in the URL, making priority-based mocking less ergonomic.
+## Adding New Tests
 
-| Test | Scenario | Assertions |
-|---|---|---|
-| `ag1_429_retry_then_success` | Two 429s then 200 | 3 hits; lockout file created |
-| `ag2_429_exhaustion` | Four consecutive 429s | `RateLimited` error; 4 hits |
-| `ag3_503_retry_then_success_no_lockout` | One 503 then 200 | 2 hits; **no** lockout file |
-| `ag4_auth_failure_403` | Single 403 | `AuthenticationFailed` error; exactly 1 hit (no retry) |
-| `ag5_stream_429_retry` | Two 429s then SSE stream | Stream succeeds; 3 hits |
+When adding a test for a new driver or a new error scenario:
 
-### `openai_retry_complete.rs`
-
-Tests `OpenAIDriver.complete()` (non-streaming). This is the most extensive file, covering adaptive request rewriting — the driver detects specific error patterns and mutates the request before retrying.
-
-Custom matchers `BodyContains` and `BodyNotContains` implement wiremock `Match` by inspecting the UTF-8 request body, enabling assertions like "second request must not contain `max_tokens`".
-
-| Test | Scenario | Adaptive Behaviour |
-|---|---|---|
-| `oc1_429_retry_then_success` | Two 429s then 200 | Standard retry; lockout file created |
-| `oc2_429_exhaustion` | All 429s | `RateLimited` after 4 attempts (initial + 3 retries) |
-| `oc3_preexisting_lockout_blocks_request` | Lockout file pre-created | Zero HTTP requests — short-circuited by file check |
-| `oc4_max_tokens_to_max_completion_tokens` | 400: `max_tokens` unsupported | Retries with `max_completion_tokens` instead of `max_tokens` |
-| `oc5_temperature_strip` | 400: `temperature` unsupported | First request has `temperature`; retry omits it |
-| `oc6_toolless_retry_on_500` | 500 with tools in request | First request has `tools` + `tool_choice`; retry omits both |
-| `oc7_max_tokens_auto_cap` | 400: `max_tokens` exceeds limit | Retries with capped value (extracted from error message) |
-| `oc8_non_retryable_403` | 403 permission denied | No retry; single request; `Api { status: 403 }` |
-| `oc9_groq_tool_use_failed_retries` | 400: `tool_use_failed` | Retries up to 3 times (2 failures + success) |
-| `oc10_max_retries_exceeded_generic_500` | Generic 500 without tools | No retry (generic 500 only retries if tools are present) |
-
-### `openai_retry_stream.rs`
-
-Tests `OpenAIDriver.stream()` with the same categories of adaptive rewriting, applied to streaming requests.
-
-| Test | Scenario | Adaptive Behaviour |
-|---|---|---|
-| `os1_429_retry_then_success_stream` | Two 429s then SSE stream | Stream produces `TextDelta` events; 3 requests |
-| `os2_stream_options_strip` | 400: `stream_options` unsupported | First request includes `stream_options`; retry omits it |
-| `os3_429_exhaustion_stream` | All 429s | `RateLimited`; empty events; 4 requests |
-| `os4_temperature_strip_stream` | 400: `temperature` unsupported | First has `temperature`; retry omits it |
-
-### `shared_rate_guard_integration.rs`
-
-End-to-end test of the cross-process rate-limit guard. Instead of wiremock, it spawns a raw TCP listener (`TcpListener`) that unconditionally responds with HTTP 429 and an `x-ratelimit-reset-requests-1h: 3540` header. An `AtomicUsize` counter tracks accepted connections.
-
-The test flow:
-
-1. Create an isolated `LIBREFANG_HOME` temp directory.
-2. Instantiate `OpenAIDriver` (driver A), call `complete()` → server is hit, lockout file is written.
-3. Instantiate a **separate** `OpenAIDriver` (driver B) with the same API key → simulates a different process with no shared in-memory state.
-4. Call `complete()` on driver B → assert the TCP hit counter did **not** advance (request was short-circuited by the lockout file).
-5. Verify the lockout file on disk: valid JSON, provider `"openai-compat"`, `until_unix` approximately 1 hour in the future.
-
-This validates the core acceptance criteria: a rate-limit event in one process prevents network requests from sibling processes.
-
-## Conventions
-
-- **Serial execution**: Every test is annotated `#[serial_test::serial]`. Tests share environment variables (`LIBREFANG_HOME`, `NO_PROXY`) that are process-global in Rust's `std::env`, so concurrent execution would cause cross-test contamination.
-- **Deterministic naming**: API keys include UUIDs or process IDs to avoid collisions even if `isolated_env()` weren't used.
-- **Priority-based mocking**: In wiremock, `up_to_n_times(N)` with a lower priority number fires first. Higher-priority mocks act as catch-alls. This lets tests express "fail N times, then succeed."
-- **Zero backoff**: `backoff::enable_test_zero_backoff()` must be called in every test to avoid real sleeps during retry loops. The returned `ZeroBackoffGuard` restores original behaviour on drop.
+1. Add driver factory and response fixtures to `common/mod.rs` if not already present.
+2. Use `isolated_env()` at the top of every test — the `TestEnv` guard must live for the entire test lifetime.
+3. Mark tests `#[serial_test::serial]` so env-var mutations don't race.
+4. For retry tests, use `wiremock`'s `up_to_n_times` + `with_priority` to sequence responses, or use the `SequencedResponder` pattern (see `gemini_retry.rs`) for more complex sequences.
+5. For trace header tests, follow the three-case pattern: headers present → headers absent → emit flag disabled.

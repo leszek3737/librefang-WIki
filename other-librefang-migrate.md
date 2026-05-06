@@ -6,48 +6,79 @@ Migration engine for importing configurations and data from other agent framewor
 
 ## Purpose
 
-`librefang-migrate` provides tooling to bring existing agent framework installations—their configurations, agent definitions, conversation histories, and related artifacts—into the LibreFang ecosystem. It handles format detection, parsing, transformation, and output of LibreFang-compatible structures.
+`librefang-migrate` provides tooling to transition from competing or legacy agent frameworks by converting their configuration formats, agent definitions, and related data into native LibreFang types. It abstracts the parsing and translation logic so that migrations are consistent, reproducible, and auditable.
 
-## Design
+This crate is intended to be used as both a library (embedded in tooling or CLIs) and a basis for standalone migration utilities.
 
-The crate is structured around a multi-format parsing pipeline. Its dependency footprint reveals its approach:
+## Supported Input Formats
 
-| Dependency | Role |
-|---|---|
-| `serde`, `serde_json`, `serde_yaml`, `json5`, `toml` | Deserialize source configurations in their native formats |
-| `walkdir` | Recursively discover files in a source framework's directory tree |
-| `librefang-types` | Target types for the converted output |
-| `thiserror` | Typed error handling for migration failures |
-| `tracing` | Structured logging of migration progress and warnings |
-| `chrono` | Timestamp normalization during import |
-| `dirs` | Locate standard platform directories (e.g., auto-discovering existing framework data) |
+The crate supports reading source configurations in multiple formats, reflecting the diversity of frameworks it can import from:
 
-### Migration Pipeline
+| Format | Crate |
+|--------|-------|
+| JSON | `serde_json` |
+| YAML | `serde_yaml` |
+| JSON5 | `json5` |
+| TOML | `toml` |
+
+All formats are deserialized through `serde`, so any source structure that can be represented in these formats is reachable.
+
+## Architecture
 
 ```mermaid
-flowchart LR
-    A[Source Directory] --> B[Discovery walkdir]
-    B --> C[Format Detection]
-    C --> D[Parse serde / json5 / toml / yaml]
-    D --> E[Transform to librefang-types]
-    E --> F[Write Output]
+graph LR
+    A[Source Framework Config] -->|JSON/YAML/JSON5/TOML| B[Deserializer]
+    B --> C[Intermediate Representation]
+    C --> D[librefang-types]
+    D --> E[LibreFang Native Types]
+    
+    F[walkdir] -->|Directory traversal| B
+    G[tracing] -.->|Logs progress| B
+    G -.->|Logs progress| D
 ```
 
-The process follows four stages:
+## Key Dependencies and Their Roles
 
-1. **Discovery** — Walk a directory tree using `walkdir` to locate candidate files for migration.
-2. **Detection** — Identify the source framework and file format (JSON, YAML, TOML, JSON5) based on file extensions and content structure.
-3. **Parsing & Transformation** — Deserialize the source data and map it onto `librefang-types` structures.
-4. **Output** — Emit the converted data in LibreFang's native representation.
+### Deserialization Layer
+- **serde, serde_json, serde_yaml, json5, toml** — Multi-format parsing. Source configurations may come in any of these formats depending on the originating framework. The migration engine normalizes them through serde's trait system before translating to LibreFang types.
 
-## Relationship to Other Crates
+### File Discovery
+- **walkdir** — Recursive directory traversal for locating configuration files, agent definitions, and nested module descriptors within a source framework's directory structure.
 
-This crate sits at the edge of the workspace. It depends on `librefang-types` for its output structures but is not depended upon by any other workspace crate. It is intended to be used as a standalone binary or invoked as a one-time import step, not as a runtime dependency of the core agent system.
+### Type Conversion
+- **librefang-types** — The target type system. All migrated data is ultimately expressed as types defined in this crate, ensuring compatibility with the rest of the LibreFang ecosystem.
 
-## Error Handling
+### Date/Time Handling
+- **chrono** — Timestamps in source configurations (creation dates, scheduling metadata, log entries) are parsed and re-encoded into LibreFang's expected formats.
 
-Errors are defined using `thiserror` and cover common migration failure modes: unsupported source formats, malformed configuration files, missing required fields during transformation, and filesystem I/O errors during discovery or output.
+### Platform Paths
+- **dirs** — Resolves standard platform directories (home, config, data) to locate source framework installations and determine sensible defaults for output paths.
+
+### Error Handling
+- **thiserror** — Defines structured error types for migration failures: unsupported formats, schema mismatches, missing required fields, and I/O errors. Downstream consumers can match on these variants to provide user-facing diagnostics.
+
+### Observability
+- **tracing** — Emits structured log events during migration: files discovered, records processed, conversion warnings, and completion summaries.
+
+## Integration with LibreFang
+
+This crate sits at the edge of the LibreFang workspace. It depends on `librefang-types` but is not depended upon by other workspace crates. This means:
+
+- It can be included or excluded from a build without affecting core functionality.
+- Migration tooling can be versioned and released independently.
+- The crate produces validated `librefang-types` output that any other LibreFang crate can consume directly.
 
 ## Testing
 
-The `tempfile` dev-dependency is used to construct ephemeral directory trees in tests, simulating source framework layouts without touching the real filesystem.
+The `tempfile` dev-dependency supports integration tests that create synthetic source directory structures on disk, run migrations against them, and assert the output. This avoids mutating real configuration directories during tests.
+
+## Error Strategy
+
+Migrations can fail for several distinct reasons, and this crate distinguishes them:
+
+- **I/O errors** — Source files unreadable, output paths not writable.
+- **Parse errors** — Malformed JSON, invalid YAML anchors, TOML type mismatches.
+- **Schema errors** — Well-formed input that doesn't conform to any recognized source framework schema.
+- **Conversion errors** — Valid source data that has no equivalent in LibreFang's type system (e.g., unsupported features or deprecated patterns).
+
+All errors are reported through types derived with `thiserror`, carry context about which file or field caused the failure, and are emitted through `tracing` for diagnostic capture.

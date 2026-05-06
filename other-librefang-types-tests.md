@@ -1,108 +1,96 @@
 # Other — librefang-types-tests
 
-# librefang-types — Integration Tests
+# librefang-types Tests
 
-## Overview
+Integration tests that guard against silent drift between three sources of truth: the dashboard's TOML serializer, the kernel's serde deserialization, and manual `Default` implementations on config types.
 
-This directory contains three integration test suites that guard against serialization and configuration drift across the system. Together they form a continuous-intigration safety net that catches three specific bug classes:
+## Architecture
 
-1. **Dashboard ↔ kernel TOML drift** — the visual editor in the dashboard emits TOML that the kernel must parse without error.
-2. **`Default` impl vs. `#[serde(default)]` drift** — a manual `Default` implementation that omits a field will silently disagree with serde's per-field defaulting (issue #3404).
-3. **Schema generation regressions** — `schemars` must produce valid, sufficiently large JSON Schema for core config types.
+```mermaid
+graph LR
+    subgraph "External"
+        D[Dashboard agentManifest.ts]
+    end
+    subgraph "librefang-types (src)"
+        S[Serde Deserialize structs]
+        DF[Manual Default impls]
+        SD["#[serde(default = ...)"]' helpers]
+    end
+    subgraph "librefang-types (tests)"
+        A[agent_form_roundtrip]
+        C[config_default_roundtrip]
+        P[schemars_poc]
+    end
+    D -- "mirrors serializer" --> A
+    A -- "parses via" --> S
+    C -- "compares" --> DF
+    C -- "compares" --> SD
+    P -- "generates JSON Schema" --> S
+```
 
 ## Test Files
 
 ### `agent_form_roundtrip.rs`
 
-**Purpose:** Ensures the TOML emitted by the dashboard's agent manifest visual editor (implemented in `agentManifest.ts`) can be round-tripped through the kernel's `AgentManifest` deserializer.
+Catches drift between the dashboard's visual editor (TypeScript serializer in `crates/librefang-api/dashboard/src/lib/agentManifest.ts`) and the kernel's TOML deserializer. The dashboard emits TOML; the kernel must read it back. Any renamed field, changed enum variant, or moved section that isn't mirrored on both sides will fail here.
 
-**Why it exists:** The dashboard serializer and the kernel deserializer are maintained in different languages. A renamed field, changed enum variant, or new required field in one place without updating the other causes runtime parse failures. These tests lock the contract at build time.
+**What it tests:**
 
-**Test cases:**
+| Test function | Scope |
+|---|---|
+| `parses_form_minimum_viable_output` | Minimal manifest: `name`, `module`, `[model]` with `provider`/`model` |
+| `parses_form_full_output_with_capabilities_and_resources` | All standard sections: tags, skills, `[resources]`, `[capabilities]`, model tuning (temperature, max_tokens) |
+| `parses_form_with_advanced_sections` | Every advanced section the form can emit: `priority`, `session_mode`, `web_search_augmentation`, `schedule`, `exec_policy`, `[thinking]`, `[autonomous]`, `[routing]`, `[[fallback_models]]`, `[[context_injection]]`, capability ACLs (`memory_read`, `memory_write`, `agent_message`, `ofp_connect`) |
+| `parses_form_response_format_json_schema` | `ResponseFormat::JsonSchema` variant with inline schema, name, and strict flag |
+| `omitting_optional_sections_uses_defaults` | Sections left out by the form produce correct defaults (empty capability lists, `None` resource quotas, `agent_spawn = false`) |
 
-| Test | What it covers |
-|------|----------------|
-| `parses_form_minimum_viable_output` | Bare-minimum manifest: `name`, `version`, `module`, and a `[model]` section with `provider` and `model`. |
-| `parses_form_full_output_with_capabilities_and_resources` | All common sections populated: `tags`, `skills`, model tuning (`temperature`, `max_tokens`), `resources` quotas, and `capabilities` (network, shell, `agent_spawn`). |
-| `parses_form_with_advanced_sections` | Every advanced section filled: priority, session mode, web search augmentation, schedule, exec policy, thinking budget, autonomous settings, routing tiers, fallback models, context injection. Also verifies enum parsing (`Priority::High`, `SessionMode::New`). |
-| `parses_form_response_format_json_schema` | Inline TOML table for `response_format` with `JsonSchema` variant, including `strict = true`. |
-| `omitting_optional_sections_uses_defaults` | Confirms that leaving out `resources` and `capabilities` falls back to empty/zero defaults (e.g., `network` is empty, `agent_spawn` is false, `max_llm_tokens_per_hour` is `None`). |
-
-**Key type:** `librefang_types::agent::AgentManifest`
+**When to update:** Any time `agentManifest.ts` changes its serializer output, or `AgentManifest` / nested structs gain/rename fields.
 
 ### `config_default_roundtrip.rs`
 
-**Purpose:** Regression guard for [issue #3404](#). When a new field is added with `#[serde(default)]` but the developer forgets to add it to the manual `Default` impl (or vice versa), the two sources of "default" silently diverge. These tests catch that drift.
+Regression guard for [issue #3404](#bug-class-3404). Every config struct that has both `#[serde(default)]` attributes and a manual `impl Default` is covered here.
 
-**Mechanism:**
+#### Bug class #3404
 
-```
-assert_default_roundtrip::<T>("T")
-```
+When a developer adds a field with `#[serde(default)]` but forgets to add it to the manual `Default` impl (or vice versa), two different default values exist for the same field:
 
-For each config type `T`, the helper performs two checks:
+- **Serde path:** Empty TOML → `#[serde(default)]` fills the field with `Field::default()` or the named helper
+- **In-memory path:** `T::default()` returns whatever the manual `impl Default` produces
 
-1. **Empty-TOML agreement:** `T::default()` serialized to TOML must equal an empty TOML document deserialized into `T` and re-serialized. If they differ, a field has `#[serde(default)]` returning one value while the `Default` impl produces another.
-2. **Round-trip idempotency:** `T::default()` → serialize to TOML → deserialize back → serialize again must produce identical TOML.
+Both paths produce valid values, so no error surfaces — but they disagree silently.
 
-Equality is checked by comparing serialized TOML strings rather than requiring `PartialEq` on every config struct, which would cascade through the entire nested tree.
+#### How the tests catch it
 
-**Helper functions:**
+Each test calls one of two helper functions:
 
-- `assert_default_roundtrip::<T>(label)` — common case; both sources must agree on every field.
-- `assert_default_roundtrip_with::<T>(label, normalize)` — for types with a known legitimate divergence. The `normalize` closure adjusts the divergent field before comparison, while every other field is still checked exactly.
+**`assert_default_roundtrip::<T>(label)`** — for types where `T::default()` and serde-empty deserialization must agree on every field:
 
-**Types with known divergences:**
+1. Serialize `T::default()` to TOML
+2. Deserialize an empty string `""` into `T`, serialize that to TOML
+3. Assert the two TOML strings are identical
 
-| Type | Divergent field | Reason |
-|------|----------------|--------|
-| `KernelConfig` | `config_version` | `Default` sets current `CONFIG_VERSION` (2); serde's `default_config_version()` returns `1` as a migration tripwire for legacy on-disk configs. |
-| `ChannelsConfig` | `file_download_max_bytes` | `#[derive(Default)]` gives `0`; serde helper `default_file_download_max_bytes` returns 50 MiB. Flagged as a known bug requiring triage. |
+It also round-trips the serialized default back through deserialization to catch non-idempotent serialization.
 
-**Covered types** (all other tests use `assert_default_roundtrip` without normalization):
+**`assert_default_roundtrip_with::<T>(label, normalize)`** — for types with a known legitimate divergence. The `normalize` closure patches the divergent field before comparison. Every other field is still checked exactly.
 
-`QueueConfig`, `QueueConcurrencyConfig`, `BudgetConfig`, `SessionConfig`, `CompactionTomlConfig`, `TaskBoardConfig`, `TriggersConfig`, `WebhookTriggerConfig`, `WebConfig`, `WebFetchConfig`, `BrowserConfig`, `BraveSearchConfig`, `TavilySearchConfig`, `PerplexitySearchConfig`, `JinaSearchConfig`, `ReloadConfig`, `RateLimitConfig`, `SkillsConfig`, `ExtensionsConfig`, `VaultConfig`, `AutoReplyConfig`, `InboxConfig`, `TelemetryConfig`, `PromptIntelligenceConfig`, `CanvasConfig`, `ThinkingConfig`, `ContextEngineTomlConfig`, `ExternalAuthConfig`, `AuditConfig`, `PrivacyConfig`, `HealthCheckConfig`, `HeartbeatTomlConfig`, `AutoDreamConfig`, `RegistryConfig`, `MemoryConfig`, `MemoryDecayConfig`, `ChunkConfig`, `NetworkConfig`, `TtsConfig`, `DockerSandboxConfig`, `PairingConfig`, `SanitizeConfig`, `ParallelToolsConfig`, `TerminalConfig`, `VoiceConfig`, `LinkedInConfig`, `AgentManifest`, `BroadcastConfig`.
+#### The `KernelConfig` special case
 
-### `schemars_poc.rs`
+`KernelConfig` is the only type using `assert_default_roundtrip_with`. The divergence is on `config_version`:
 
-**Purpose:** Proof-of-concept diagnostics that dump `schemars`-generated JSON Schema (draft-07) for representative config types. These are visual-check tests, not automated assertions (except for `KernelConfig`).
+- `KernelConfig::default()` sets `config_version` to `CONFIG_VERSION` (currently `2`) — fresh in-memory configs need no migration
+- `default_config_version()` (the serde helper) returns `1` — a legacy on-disk TOML omitting `config_version` is pre-versioning, and `run_migrations` will upgrade it
 
-Run with `--nocapture` to see output:
+The test normalizes `config_version` to the canonical value so all other fields are still checked.
 
-```bash
-cargo test -p librefang-types --test schemars_poc -- --nocapture
-```
+#### Covered types (50 structs)
 
-| Test | What it checks |
-|------|---------------|
-| `dump_budget_config_schema` | Prints the schema for `BudgetConfig`. |
-| `dump_vault_config_schema` | Tests `Option<PathBuf>` rendering — how schemars handles filesystem path types. |
-| `full_kernel_config_schema_generates` | Asserts the full `KernelConfig` schema has >50 top-level properties and >50 nested definitions. Validates that the schema is well-formed JSON. |
-| `dump_response_format_schema` | Tagged enum carrying `serde_json::Value` — a high-risk edge case for schema correctness. |
+Every config struct with both `#[serde(default)]` and a manual `Default` impl. The full list:
 
-## Architecture
+`KernelConfig`, `QueueConfig`, `QueueConcurrencyConfig`, `BudgetConfig`, `SessionConfig`, `CompactionTomlConfig`, `TaskBoardConfig`, `TriggersConfig`, `WebhookTriggerConfig`, `WebConfig`, `WebFetchConfig`, `BrowserConfig`, `BraveSearchConfig`, `TavilySearchConfig`, `PerplexitySearchConfig`, `JinaSearchConfig`, `ReloadConfig`, `RateLimitConfig`, `SkillsConfig`, `ExtensionsConfig`, `VaultConfig`, `AutoReplyConfig`, `InboxConfig`, `TelemetryConfig`, `PromptIntelligenceConfig`, `CanvasConfig`, `ThinkingConfig`, `ContextEngineTomlConfig`, `ExternalAuthConfig`, `AuditConfig`, `PrivacyConfig`, `HealthCheckConfig`, `HeartbeatTomlConfig`, `AutoDreamConfig`, `RegistryConfig`, `MemoryConfig`, `MemoryDecayConfig`, `ChunkConfig`, `NetworkConfig`, `TtsConfig`, `DockerSandboxConfig`, `PairingConfig`, `SanitizeConfig`, `ParallelToolsConfig`, `TerminalConfig`, `VoiceConfig`, `LinkedInConfig`, `AgentManifest`, `ChannelsConfig`, `BroadcastConfig`
 
-```mermaid
-graph TD
-    subgraph "Dashboard (TypeScript)"
-        A[agentManifest.ts<br/>TOML serializer]
-    end
+#### Adding a new type
 
-    subgraph "librefang-types (Rust)"
-        B[AgentManifest<br/>TOML deserializer]
-        C[Config structs<br/>Default + serde]
-        D[schemars<br/>JSON Schema gen]
-    end
-
-    A -- "TOML output" --> B
-    C -- "T::default() vs empty TOML" --> E[config_default_roundtrip.rs]
-    C -- "schema_for! T" --> F[schemars_poc.rs]
-    B -- "parse verification" --> G[agent_form_roundtrip.rs]
-```
-
-## Adding a New Config Type to Tests
-
-**For `config_default_roundtrip.rs`:** Add a new test function:
+For most config structs, add a new test:
 
 ```rust
 #[test]
@@ -111,8 +99,51 @@ fn my_config_default_roundtrips_through_toml() {
 }
 ```
 
-If the type has a known legitimate divergence (like a migration version field), use `assert_default_roundtrip_with` and pass a normalization closure that copies the canonical value.
+If the type has a field where `Default` and serde legitimately diverge, use `assert_default_roundtrip_with` and supply a normalizer closure. Document why the divergence exists.
 
-**For `agent_form_roundtrip.rs`:** Add a new test only if the dashboard form gains new TOML sections or changes serialization behavior. Mirror the exact TOML the TypeScript serializer emits.
+#### Pinned-value tests
 
-**For `schemars_poc.rs`:** Add a new dump test if the type introduces a novel schema pattern (e.g., new generic wrapper, custom `JsonSchema` impl) that needs visual verification.
+Some types also have an independent pinned-value test that checks a specific default value. These protect against a future change that silently zeroes both the `Default` impl *and* the serde helper (keeping them consistent but wrong):
+
+- **`channels_config_default_has_50mb_max`** — asserts `ChannelsConfig::default().file_download_max_bytes == 50 * 1024 * 1024` (issue #4436)
+
+### `schemars_poc.rs`
+
+Diagnostic tests that print schemars-generated JSON Schema (draft-07) for representative types. Not assertions-heavy — the primary value is the stdout output for manual review.
+
+Run with output visible:
+
+```bash
+cargo test -p librefang-types --test schemars_poc -- --nocapture
+```
+
+**What it exercises:**
+
+| Test | Type | Why |
+|---|---|---|
+| `dump_budget_config_schema` | `BudgetConfig` | Representative config struct |
+| `dump_vault_config_schema` | `VaultConfig` | Contains `Option<PathBuf>` — tests filesystem path rendering |
+| `full_kernel_config_schema_generates` | `KernelConfig` | End-to-end sanity: asserts >50 top-level properties and >50 nested definitions |
+| `dump_response_format_schema` | `ResponseFormat` | Tagged enum carrying `serde_json::Value` — major risk point for schema correctness |
+
+## Running
+
+```bash
+# All tests in this module
+cargo test -p librefang-types
+
+# Only agent form round-trip tests
+cargo test -p librefang-types --test agent_form_roundtrip
+
+# Only config default round-trip tests
+cargo test -p librefang-types --test config_default_roundtrip
+
+# Schema PoC (must see output)
+cargo test -p librefang-types --test schemars_poc -- --nocapture
+```
+
+## Relationships to other crates
+
+- **`librefang-types` (src):** Defines all config structs, `AgentManifest`, `ResponseFormat`, and their serde/Default impls. Tests live in this crate's `tests/` directory.
+- **`librefang-api/dashboard`:** Contains `agentManifest.ts` whose serializer output the agent-form round-trip tests mirror. Changes there may require updating the TOML literals in `agent_form_roundtrip.rs`.
+- **Migration system (`config/version.rs`):** `default_config_version()` returns `1` as the migration tripwire; `CONFIG_VERSION` is the current version. The `KernelConfig` test normalizes across this boundary.
