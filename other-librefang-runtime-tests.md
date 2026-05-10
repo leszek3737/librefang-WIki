@@ -2,165 +2,174 @@
 
 # librefang-runtime-tests
 
-Integration tests for the `librefang-runtime` crate, organized into four files covering MCP OAuth flows and tool-runner dispatch through `execute_tool_raw`.
+Integration test suite for `librefang-runtime`. Tests exercise the crate's public APIs end-to-end without requiring a live kernel, LLM driver, or external services. The tests live under `librefang-runtime/tests/` and are compiled as separate crates by Cargo's integration test harness.
 
-## Overview
+## Test Files and Coverage
 
-These tests verify that the runtime correctly wires internal subsystems to the tool execution layer. There are two distinct testing concerns:
-
-1. **Tool dispatch** — ensuring `execute_tool_raw` forwards the right parameters to the correct kernel trait methods when agents invoke built-in tools.
-2. **MCP OAuth** — verifying OAuth metadata discovery fallback, token lifecycle through mock providers, and auth-state serialization for the dashboard.
-
-All tests use **mock kernels** that implement the full `KernelHandle` trait composition, stubbing unused traits and recording calls on the ones under test.
-
-## Test Files
-
-### `mcp_oauth_integration.rs`
-
-Tests for the MCP OAuth subsystem (`librefang_runtime::mcp_oauth`).
-
-**OAuth metadata discovery:**
-
-| Test | What it verifies |
-|---|---|
-| `test_discover_fallback_to_config` | When the well-known endpoint is unreachable, `discover_oauth_metadata` falls back to the `McpOAuthConfig` values for `auth_url`, `token_url`, and `client_id`. |
-| `test_discover_fails_without_any_source` | With no config and no discovery endpoint, the function returns an error containing `"OAuth metadata"`. |
-
-**OAuth provider wiring (regression tests):**
-
-These tests guard against the bug where `oauth_provider: None` was silently passed in `connect_mcp_servers`, disabling the entire OAuth flow.
-
-| Test | What it verifies |
-|---|---|
-| `test_http_connect_calls_oauth_provider_load_token` | `McpConnection::connect` calls `McpOAuthProvider::load_token` when an HTTP server returns 401. Uses `TrackingOAuthProvider` which records invocations via `AtomicBool` flags. |
-
-**Token lifecycle (`InMemoryOAuthProvider`):**
-
-| Test | What it verifies |
-|---|---|
-| `test_provider_store_then_load` | `store_tokens` followed by `load_token` returns the stored access token. |
-| `test_provider_clear_removes_token` | `clear_tokens` deletes the token; subsequent `load_token` returns `None`. |
-| `test_provider_clear_is_isolated` | Clearing tokens for one server does not affect another server's tokens. |
-| `test_provider_reauthorize_after_clear` | The store → clear → store transition works (simulates revoke then re-authorize). |
-
-**Auth state serialization (`McpAuthState`):**
-
-| Test | What it verifies |
-|---|---|
-| `test_auth_state_lifecycle` | The state machine transitions `NeedsAuth` → `PendingAuth` → `Authorized` → `NeedsAuth` serialize to distinct `"state"` values. Guards against the bug where revoking removed the state entirely, hiding the "Authorize" button. |
-| `test_needs_auth_serializes_differently_from_pending_auth` | `NeedsAuth` and `PendingAuth` produce different `"state"` JSON values, preventing the dashboard from showing "Authorizing..." before the user clicks Authorize. |
-
-#### Mock providers
-
-Two mock `McpOAuthProvider` implementations are defined:
-
-- **`TrackingOAuthProvider`** — records whether `load_token` and `store_oauth_metadata` were called (via `AtomicBool`). Returns `None` for tokens to force a 401 flow.
-- **`InMemoryOAuthProvider`** — stores tokens in a `tokio::sync::Mutex<HashMap<String, OAuthTokens>>`. Used for CRUD lifecycle tests.
-
----
-
-### `tool_runner_agent_event.rs`
-
-Tests for `agent_send`, `agent_list`, and `event_publish` tool dispatch.
-
-| Test | What it verifies |
-|---|---|
-| `agent_send_forwards_target_agent_id_and_message` | `agent_send` calls `AgentControl::send_to_agent` with the correct `agent_id` and `message`. |
-| `agent_send_self_is_refused_to_avoid_deadlock` | Self-send is rejected with an error *before* `send_to_agent` is invoked, preventing deadlock on the per-agent message lock. |
-| `agent_list_renders_kernel_provided_agents` | `agent_list` includes both agent IDs and names from `KernelHandle::list_agents` in its output string. |
-| `agent_list_when_no_agents_running_returns_friendly_string` | An empty agent list returns a non-error result containing wording like "no agents" or "0 agents". |
-| `event_publish_forwards_event_type_and_payload` | `event_publish` calls `EventBus::publish_event` with the exact `event_type` string and `payload` JSON value. |
-| `event_publish_missing_event_type_errors_without_invoking_kernel` | Missing `event_type` in input returns an error *without* calling `publish_event`. |
-
----
-
-### `tool_runner_forwarding.rs`
-
-Tests for memory tool dispatch, specifically verifying that `sender_id` from `ToolExecContext` is correctly forwarded as the `peer_id` parameter to `MemoryAccess` methods.
-
-| Test | What it verifies |
-|---|---|
-| `test_memory_store_forwards_sender_id_as_peer_id` | `memory_store` passes `ctx.sender_id` as `peer_id` to `MemoryAccess::memory_store`. |
-| `test_memory_store_forwards_none_when_no_sender` | When `sender_id` is `None`, `peer_id` is also `None`. |
-| `test_memory_recall_forwards_sender_id_as_peer_id` | Same forwarding for `memory_recall`. |
-| `test_memory_recall_forwards_none_when_no_sender` | Same `None` forwarding for `memory_recall`. |
-| `test_memory_list_forwards_sender_id_as_peer_id` | Same forwarding for `memory_list`. |
-| `test_memory_list_forwards_none_when_no_sender` | Same `None` forwarding for `memory_list`. |
-| `test_sender_id_not_leaked_between_calls` | Sequential calls with different `sender_id` values (including `None`) each pass their own value — no state leakage. |
-
----
-
-### `tool_runner_forwarding_task_cron.rs`
-
-Tests for task and cron tool dispatch.
-
-**Task tools:**
-
-| Test | What it verifies |
-|---|---|
-| `test_task_post_forwards_caller_as_created_by` | `task_post` passes `ctx.caller_agent_id` as `created_by` to `TaskQueue::task_post`. |
-| `test_task_post_forwards_none_created_by` | When `caller_agent_id` is `None`, `created_by` is also `None`. |
-| `test_task_status_projects_six_canonical_fields` | `task_status` returns exactly six fields: `status`, `result`, `title`, `assigned_to`, `created_at`, `completed_at` — projecting from the full task row. |
-| `test_task_status_not_found_returns_message` | A missing task ID returns a non-error result containing `"not found"`. |
-| `test_task_status_missing_task_id_errors` | Missing `task_id` in input returns an error without calling `task_get`. |
-
-**Cron tools:**
-
-| Test | What it verifies |
-|---|---|
-| `test_cron_create_injects_sender_peer_id` | `cron_create` injects `ctx.sender_id` as `peer_id` into the job JSON when not already present. |
-| `test_cron_create_preserves_existing_peer_id` | If the input already contains a `peer_id`, it is not overwritten. |
-| `test_cron_create_forwards_caller_as_agent_id` | `cron_create` passes `ctx.caller_agent_id` as the `agent_id` parameter to `CronControl::cron_create`. |
+| File | Concern | Key APIs under test |
+|------|---------|-------------------|
+| `instrument_span_fields.rs` | Tracing span field propagation | `tracing::span`, `EnvFilter` |
+| `mcp_oauth_integration.rs` | MCP OAuth discovery & token lifecycle | `McpOAuthProvider`, `McpAuthState`, `discover_oauth_metadata` |
+| `tool_exec_backend_selection.rs` | Tool-exec backend dispatch | `resolve_backend_kind`, `build_backend`, `BackendKind` |
+| `tool_runner_agent_event.rs` | Agent & event tool dispatch | `execute_tool_raw` via `agent_send`, `agent_list`, `event_publish` |
+| `tool_runner_forwarding.rs` | Memory tool forwarding | `execute_tool_raw` via `memory_store`, `memory_recall`, `memory_list` |
+| `tool_runner_forwarding_task_cron.rs` | Task & cron tool dispatch | `execute_tool_raw` via `task_post`, `task_status`, `cron_create` |
 
 ## Architecture
 
+The tool-runner tests share a common mock-kernel pattern. A `CapturingKernel` struct implements the full `KernelHandle` role-trait composition from `librefang-kernel-handle`. Each test file specializes the mock: traits relevant to the test record invocations into `Arc<Mutex<Vec<...>>>` capture logs, while all other traits return stub errors.
+
 ```mermaid
 graph TD
-    TC[Test Code] -->|calls| ETR[execute_tool_raw]
-    ETR -->|dispatches| KH[dyn KernelHandle]
-    KH -.->|AgentControl| AC[AgentControl mock]
-    KH -.->|MemoryAccess| MA[MemoryAccess mock]
-    KH -.->|TaskQueue| TQ[TaskQueue mock]
-    KH -.->|CronControl| CC[CronControl mock]
-    KH -.->|EventBus| EB[EventBus mock]
+    TC["Test case"] -->|"constructs"| CTX["ToolExecContext"]
+    TC -->|"calls"| ETR["execute_tool_raw(tool_name, input, ctx)"]
+    ETR -->|"dispatches to"| CK["CapturingKernel (mock)"]
+    CK -->|"implements"| KH["dyn KernelHandle"]
+    KH -.->|"AgentControl"| AC["send_to_agent / list_agents"]
+    KH -.->|"MemoryAccess"| MA["memory_store / recall / list"]
+    KH -.->|"TaskQueue"| TQ["task_post / task_get"]
+    KH -.->|"EventBus"| EB["publish_event"]
+    KH -.->|"CronControl"| CC["cron_create"]
+    AC & MA & TQ & EB & CC -->|"records into"| CAP["Arc<Mutex<Vec<CapturedCall>>>"]
+    TC -->|"asserts on"| CAP
 ```
 
-All test files share the same mock-kernel pattern:
+### ToolExecContext Construction
 
-1. A `CapturingKernel` struct implements every trait in the `KernelHandle` composition.
-2. Unused trait methods return errors (`"not implemented"`) or use default impls.
-3. The trait under test records call arguments into `Arc<Mutex<Vec<_>>>` handles.
-4. The test asserts on both the `execute_tool_raw` return value and the captured call arguments.
+Every tool-runner test builds a `ToolExecContext` with a helper function (`make_ctx`) that wires an `Arc<dyn KernelHandle>` and relevant IDs:
 
-This pattern ensures tests can verify:
-- **Output correctness** — the tool returns the right result/error to the agent.
-- **Input forwarding** — the kernel method was called with the correct parameters.
-- **Short-circuit behavior** — validation failures reject the call *before* the kernel method is invoked.
+```rust
+fn make_ctx<'a>(
+    kernel: &'a Arc<dyn KernelHandle>,
+    sender_id: Option<&'a str>,
+    caller_agent_id: Option<&'a str>,
+) -> ToolExecContext<'a>
+```
 
-## Key types from other crates
+Fields like `mcp_connections`, `web_ctx`, `browser_ctx`, `media_engine`, etc. are set to `None` because the tests under test here don't exercise those code paths.
 
-| Type | Crate | Role |
-|---|---|---|
-| `execute_tool_raw` | `librefang_runtime::tool_runner` | The function under test for tool dispatch |
-| `ToolExecContext` | `librefang_runtime::tool_runner` | Carries `kernel`, `caller_agent_id`, `sender_id`, and other context into tool execution |
-| `KernelHandle` (trait composition) | `librefang_kernel_handle` | Supertrait composed of `AgentControl`, `MemoryAccess`, `TaskQueue`, `CronControl`, `EventBus`, and others |
-| `McpConnection`, `McpServerConfig`, `McpTransport` | `librefang_runtime::mcp` | MCP connection types used in the OAuth wiring test |
-| `McpOAuthProvider` | `librefang_runtime::mcp_oauth` | Trait for OAuth token storage; mocked as `TrackingOAuthProvider` and `InMemoryOAuthProvider` |
-| `discover_oauth_metadata` | `librefang_runtime::mcp_oauth` | OAuth metadata discovery with config fallback |
-| `McpAuthState` | `librefang_runtime::mcp_oauth` | Enum for dashboard auth-state machine |
-| `OAuthTokens` | `librefang_types::oauth` | Token struct with `access_token`, `refresh_token`, `token_type`, `expires_in`, `scope` |
+## Test Details by File
+
+### instrument_span_fields.rs
+
+Validates that `agent.id` and `session.id` set as `#[instrument]` fields on `run_agent_loop` propagate to child events. Rather than spinning up a real agent loop, tests construct equivalent spans by hand and use a `CaptureWriter` to intercept formatted output.
+
+Three scenarios:
+
+- **`warn_inside_agent_span_includes_agent_and_session_ids`** — Verifies both fields appear in a non-compact formatted event inside the span.
+- **`info_span_is_dropped_under_warn_target_filter`** — Confirms that `INFO`-level spans are filtered out when the subscriber uses `EnvFilter::new("warn")`, justifying the `level = "warn"` override on `run_agent_loop`'s `#[instrument]`.
+- **`warn_span_survives_warn_target_filter_and_carries_fields`** — Confirms that `WARN`-level spans survive the warn filter and fields propagate to events.
+
+### mcp_oauth_integration.rs
+
+Tests MCP OAuth discovery, provider wiring, token lifecycle, and auth-state serialization.
+
+**Discovery tests:**
+- `test_discover_fallback_to_config` — When the server is unreachable, `discover_oauth_metadata` falls back to `McpOAuthConfig` values.
+- `test_discover_fails_without_any_source` — With no server and no config, discovery returns an error.
+
+**OAuth provider wiring (regression):**
+- `test_http_connect_calls_oauth_provider_load_token` — Catches the bug where `oauth_provider: None` was silently passed in `connect_mcp_servers`. Uses `TrackingOAuthProvider` which records whether `load_token` was invoked during a failed HTTP MCP connection.
+
+**Token lifecycle via `InMemoryOAuthProvider`:**
+- `test_provider_store_then_load` — Store then load returns the token.
+- `test_provider_clear_removes_token` — Clear removes the stored token.
+- `test_provider_clear_is_isolated` — Clearing one server doesn't affect another.
+- `test_provider_reauthorize_after_clear` — Store → clear → store works (re-authorization).
+
+**Auth state serialization:**
+- `test_auth_state_lifecycle` — Validates the full lifecycle: `NeedsAuth` → `PendingAuth` → `Authorized` → `NeedsAuth` (after revoke). Regression test ensuring revoke produces `NeedsAuth` (showing the Authorize button), not a removed/null state.
+- `test_needs_auth_serializes_differently_from_pending_auth` — Ensures `NeedsAuth` and `PendingAuth` serialize to distinct `"state"` values, preventing the dashboard from showing "Authorizing..." before the user clicks Authorize.
+
+### tool_exec_backend_selection.rs
+
+Tests the dispatch path from `config.toml` + `agent.toml` → `resolve_backend_kind` → `build_backend` → trait-object dispatch (issue #3332).
+
+**Resolution precedence:**
+- `default_kernel_config_resolves_to_local` — Default `KernelConfig` gives `BackendKind::Local`.
+- `agent_manifest_override_wins_over_global` — Per-agent `tool_exec_backend` overrides global config.
+- `agent_manifest_no_field_falls_back_to_global` — When `tool_exec_backend` is `None`, global config wins.
+
+**TOML parsing:**
+- `config_toml_kind_local_loads` / `config_toml_kind_docker_loads` — Verifies `[tool_exec] kind = "..."` parses correctly.
+
+**Backend construction:**
+- `build_backend_local_dispatches_to_local_impl` — Local always succeeds.
+- `build_backend_docker_dispatches_to_docker_impl` — Docker builds even without a running daemon.
+- `build_backend_ssh_without_subtable_or_feature_errors` / `build_backend_daytona_without_subtable_or_feature_errors` — Missing config returns an error.
+
+**End-to-end (Unix only):**
+- `end_to_end_local_dispatch_runs_command` — Full pipeline from TOML parse through `build_backend` to `run_command("echo end-to-end-3332")`, verifying stdout.
+
+### tool_runner_agent_event.rs
+
+Tests `agent_send`, `agent_list`, and `event_publish` dispatch through `execute_tool_raw` (issue #3696). Uses a `CapturingKernel` that records sends and events.
+
+**agent_send:**
+- `agent_send_forwards_target_agent_id_and_message` — Verifies `AgentControl::send_to_agent` receives the correct `agent_id` and `message`.
+- `agent_send_self_is_refused_to_avoid_deadlock` — Self-send is rejected before reaching the kernel (prevents deadlock on the per-agent message lock).
+
+**agent_list:**
+- `agent_list_renders_kernel_provided_agents` — Output contains both IDs and names from `list_agents`.
+- `agent_list_when_no_agents_running_returns_friendly_string` — Empty list returns a user-friendly "no agents" message, not an error.
+
+**event_publish:**
+- `event_publish_forwards_event_type_and_payload` — Verifies `EventBus::publish_event` receives the correct `event_type` and `payload`.
+- `event_publish_missing_event_type_errors_without_invoking_kernel` — Validation short-circuits before calling `publish_event`.
+
+### tool_runner_forwarding.rs
+
+Tests that `memory_store`, `memory_recall`, and `memory_list` forward the `sender_id` from `ToolExecContext` as the `peer_id` argument to `MemoryAccess` trait methods.
+
+Key behaviors verified:
+- `sender_id: Some("user-42")` → `peer_id: Some("user-42")` for all three tools.
+- `sender_id: None` → `peer_id: None` for all three tools.
+- `sender_id_not_leaked_between_calls` — Sequential calls with different `sender_id` values maintain isolation; each call records only its own sender.
+
+### tool_runner_forwarding_task_cron.rs
+
+Tests `task_post`, `task_status`, and `cron_create` dispatch through `execute_tool_raw`.
+
+**task_post:**
+- `test_task_post_forwards_caller_as_created_by` — `caller_agent_id` is forwarded as `created_by`.
+- `test_task_post_forwards_none_created_by` — When `caller_agent_id` is `None`, `created_by` is `None`.
+
+**cron_create:**
+- `test_cron_create_injects_sender_peer_id` — `sender_id` from context is injected as `peer_id` in the cron job JSON if not already present.
+- `test_cron_create_preserves_existing_peer_id` — If the input already has a `peer_id`, it is preserved (not overwritten).
+- `test_cron_create_forwards_caller_as_agent_id` — `caller_agent_id` is forwarded as the `agent_id` parameter to `CronControl::cron_create`.
+
+**task_status:**
+- `test_task_status_projects_six_canonical_fields` — Returns exactly `status`, `result`, `title`, `assigned_to`, `created_at`, `completed_at` from the full task row.
+- `test_task_status_not_found_returns_message` — Missing task returns a "not found" message (not an error result).
+- `test_task_status_missing_task_id_errors` — Missing `task_id` parameter returns an error.
 
 ## Running
 
 ```bash
-# All runtime tests
+# All integration tests for this crate
 cargo test -p librefang-runtime
 
-# Just the MCP OAuth integration tests
+# Single file
+cargo test -p librefang-runtime --test instrument_span_fields
 cargo test -p librefang-runtime --test mcp_oauth_integration
-
-# Just the tool dispatch tests
+cargo test -p librefang-runtime --test tool_exec_backend_selection
 cargo test -p librefang-runtime --test tool_runner_agent_event
 cargo test -p librefang-runtime --test tool_runner_forwarding
 cargo test -p librefang-runtime --test tool_runner_forwarding_task_cron
+
+# Single test case
+cargo test -p librefang-runtime --test tool_runner_agent_event -- agent_send_self_is_refused
 ```
+
+## Adding New Tool Dispatch Tests
+
+To test a new tool through `execute_tool_raw`:
+
+1. Add the trait method to the existing `CapturingKernel` in the relevant file (or create a new test file if it's a distinct tool family).
+2. Record calls into an `Arc<Mutex<Vec<...>>>` inside the trait implementation.
+3. Build a `ToolExecContext` via `make_ctx`, populating only the fields the tool reads.
+4. Call `execute_tool_raw(tool_id, "tool_name", &json_input, &ctx).await`.
+5. Assert on both the return value (`result.is_error`, `result.content`) and the captured calls.
+
+For the mock kernel, only implement the traits the tool under test actually calls. All other `KernelHandle` traits should return stub errors (`Err("not implemented".into())`) so that accidental calls surface as test failures rather than silent no-ops.

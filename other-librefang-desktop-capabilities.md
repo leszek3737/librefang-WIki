@@ -2,88 +2,80 @@
 
 # LibreFang Desktop Capabilities
 
-Capability configurations that define which Tauri plugins and APIs the app's frontend is permitted to access. Tauri uses these as a permission boundary — if a permission isn't listed here, the corresponding IPC calls will be rejected at runtime.
+## Overview
 
-## Files
+The `librefang-desktop/capabilities` module defines **Tauri security capability files** that control which system APIs and plugins the LibreFang application is permitted to access at runtime. These JSON files follow the [Tauri capability schema](https://raw.githubusercontent.com/nicedoc/tauri/refs/heads/dev/crates/tauri-utils/schema.json) and are consumed by the Tauri build system to generate the permission grants enforced by the application's IPC layer.
 
-| File | Platforms | Description |
-|---|---|---|
-| `capabilities/default.json` | macOS, Windows, Linux | Full desktop permission set |
-| `capabilities/mobile.json` | iOS, Android | Reduced set excluding desktop-only plugins |
+Tauri's capability system is a deny-by-default security model. No plugin or core API is accessible unless explicitly listed in a capability file. This module is the single source of truth for those grants.
 
-Both files target the `main` window and use the Tauri JSON schema (`$schema`) for IDE validation and autocompletion of permission strings.
+## Capability Files
 
-## Desktop Permissions (`default.json`)
+### `default.json` — Desktop Platforms
 
-```json
-"permissions": [
-  "core:default",
-  "notification:default",
-  "shell:default",
-  "dialog:default",
-  "global-shortcut:allow-register",
-  "global-shortcut:allow-unregister",
-  "global-shortcut:allow-is-registered",
-  "autostart:default",
-  "updater:default"
-]
-```
+**Platforms:** macOS, Windows, Linux  
+**Window scope:** `main`
 
-| Permission | Grants access to |
+Grants the following permissions:
+
+| Permission | Purpose |
 |---|---|
-| `core:default` | Base Tauri runtime APIs (event system, window management, etc.) |
-| `notification:default` | System notification dispatch |
-| `shell:default` | Shell command execution and process spawning |
-| `dialog:default` | Native file pickers, message boxes, confirm dialogs |
-| `global-shortcut:allow-register` | Register a global keyboard shortcut |
-| `global-shortcut:allow-unregister` | Unregister a previously registered shortcut |
-| `global-shortcut:allow-is-registered` | Query whether a shortcut is currently registered |
-| `autostart:default` | Read/write launch-at-login behavior |
-| `updater:default` | Check for and apply in-app updates |
+| `core:default` | Standard Tauri core APIs (window management, event system, etc.) |
+| `notification:default` | Native OS notification delivery |
+| `shell:default` | Spawning external processes and opening URLs in the system browser |
+| `dialog:default` | Native file pickers, message boxes, and input dialogs |
+| `global-shortcut:allow-register` | Registering system-wide keyboard shortcuts |
+| `global-shortcut:allow-unregister` | Removing previously registered shortcuts |
+| `global-shortcut:allow-is-registered` | Querying whether a shortcut is currently registered |
+| `autostart:default` | Launching LibreFang automatically on user login |
+| `updater:default` | Checking for and applying application updates |
 
-The `global-shortcut` permissions are listed individually rather than using the `global-shortcut:default` blanket. This is intentional — only the three specific operations the app needs are exposed, following least-privilege.
+The global-shortcut permissions are broken out individually rather than using `global-shortcut:default` to adhere to the principle of least privilege — the app only needs to register, unregister, and query shortcuts, and should not acquire any other shortcut-related APIs unless explicitly added.
 
-## Mobile Permissions (`mobile.json`)
+### `mobile.json` — iOS / Android
 
-```json
-"permissions": [
-  "core:default",
-  "notification:default",
-  "dialog:default"
-]
-```
+**Platforms:** iOS, Android  
+**Window scope:** `main`
 
-Desktop-only plugins (`shell`, `global-shortcut`, `autostart`, `updater`) are excluded because they are either not bundled in mobile builds, don't apply on mobile (autostart), or use platform-native update mechanisms (app store updates instead of Tauri's updater).
+Grants a **strict subset** of the desktop permissions:
 
-## How Tauri Selects a Capability File
+| Permission | Purpose |
+|---|---|
+| `core:default` | Standard Tauri core APIs |
+| `notification:default` | Push / local notification delivery |
+| `dialog:default` | Native dialog sheets and alerts |
+
+Plugins such as `shell`, `global-shortcut`, `autostart`, and `updater` are **not bundled** on mobile targets, so they must not appear in the mobile capability file. Including permissions for absent plugins would cause a build failure.
+
+## How Capabilities Are Applied
 
 ```mermaid
 flowchart LR
-    A[App Launch] --> B{Tauri matches<br/>platforms array}
-    B -->|macOS / Windows / Linux| C[default.json]
-    B -->|iOS / Android| D[mobile.json]
-    C --> E[Desktop permissions<br/>loaded into main window]
-    D --> F[Mobile permissions<br/>loaded into main window]
+    A[Build starts] --> B{Tauri detects target platform}
+    B -->|macOS / Windows / Linux| C[Load default.json]
+    B -->|iOS / Android| D[Load mobile.json]
+    C --> E[Inject permitted APIs into IPC bridge]
+    D --> E
+    E --> F[Runtime enforcement in main window]
 ```
 
-At build time and runtime, Tauri checks each capability file's `platforms` array against the current OS. Only matching files are active. Because the two files have non-overlapping platform lists (`["macOS", "windows", "linux"]` vs `["iOS", "android"]`), exactly one set of permissions is ever in effect.
+Tauri matches capability files to the current build target using the `platforms` and `windows` fields:
 
-## Adding a New Plugin
+1. **Platform filter** — Only capability files whose `platforms` array includes the current compile target are considered.
+2. **Window filter** — Among those, only capabilities scoped to the window being created are applied. Both files target `"main"`, the primary application window.
+3. **Permission injection** — The listed permission identifiers are resolved against the plugin manifests bundled into the app. Valid permissions are injected into the IPC bridge available to the webview runtime.
+4. **Runtime enforcement** — Any IPC call from the frontend that is not backed by a granted permission is rejected with a security error.
 
-When introducing a new Tauri plugin to the app:
+## Adding a New Permission
 
-1. **Rust side** — add the plugin crate and register it with the Tauri builder.
-2. **JS side** — install the `@tauri-apps/plugin-*` binding.
-3. **Capabilities** — add the permission string to the appropriate file(s):
-   - `default.json` if needed on desktop.
-   - `mobile.json` if needed on mobile.
-   - Both if the plugin works everywhere.
-4. **Use specific scopes** (`allow-*`) over `default` when the app only needs a subset of the plugin's API.
+When a new Tauri plugin or core API is introduced:
 
-The `$schema` reference at the top of each file enables autocompletion in editors like VS Code, which helps discover available permission strings for installed plugins.
+1. Add the plugin dependency in `Cargo.toml` (Rust side) and register it in the Tauri builder.
+2. Add the corresponding permission identifier to the appropriate capability file(s). Use the narrowest permission set that satisfies the use case — prefer `allow-<specific-action>` over `<plugin>:default` when possible.
+3. If the plugin only makes sense on desktop, add it **only** to `default.json`. Do **not** add it to `mobile.json`.
+4. Verify the build succeeds on both desktop and mobile targets, as including a permission for a plugin that isn't compiled in will fail.
 
-## Design Notes
+## Key Conventions
 
-- **Single window (`"windows": ["main"]`)** — the app operates one webview. If multi-window support is introduced later, capabilities will need to be expanded or additional capability files created for per-window scoping.
-- **No custom permissions** — all entries reference standard plugin permission identifiers. If the app adds custom Tauri commands or state, corresponding permission entries will need to be authored.
-- **Schema pinned to dev branch** — the `$schema` URL references `refs/heads/dev` of the Tauri repo. This should be updated to a tagged release once the Tauri version used by the app stabilizes.
+- **One capability file per platform group.** Rather than a single file with complex conditional logic, the module uses separate files (`default.json` for desktop, `mobile.json` for mobile) to keep the permission sets clear and avoid accidental cross-platform leakage.
+- **`identifier` field** — Used by Tauri for logging and diagnostics. Each file has a unique identifier (`"default"` and `"mobile"`).
+- **`$schema` field** — Points to the Tauri capability JSON Schema, enabling IDE autocomplete and validation during editing.

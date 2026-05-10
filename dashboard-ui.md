@@ -2,240 +2,273 @@
 
 # Dashboard UI Module
 
-## Overview
+The dashboard is a React-based single-page application that provides a web interface for managing and monitoring the LibreFang agent platform. It communicates with the LibreFang kernel through a REST API and Server-Sent Events (SSE) for real-time updates.
 
-The Dashboard is a React-based single-page application that provides the operator interface for LibreFang. It communicates with the kernel's HTTP API to manage agents, sessions, channels, schedules, hands, skills, models, users, budgets, and more. The frontend is built with Vite, uses TanStack Query for server state management, and targets both browser and Tauri desktop environments.
-
-## Architecture
+## Architecture Overview
 
 ```mermaid
 graph TD
-    A[Pages] --> B[Mutations]
-    A --> C[Queries]
-    B --> D[api.ts]
-    C --> D
-    D --> E[HTTP Client]
-    E --> F[Kernel REST API]
-    E --> G[SSE Streams]
-    E --> H[WebSocket]
-    D --> I[generated.ts]
-    I --> F
-    A --> J[lib utilities]
-    A --> K[Components]
+    A[React SPA] --> B[api.ts - API Client]
+    B --> C[generated.ts - OpenAPI Types]
+    B --> D[REST API Endpoints]
+    B --> E[SSE Streams]
+    B --> F[WebSocket Connections]
+    D --> G[LibreFang Kernel]
+    E --> G
+    F --> G
+    A --> H[React Router]
+    H --> I[Pages]
+    I --> J[lib/queries - React Query]
+    I --> K[lib/mutations]
+    J --> B
+    K --> B
 ```
 
-## Key Layers
+## Key Files
 
-### API Client (`dashboard/src/api.ts`)
+| File | Purpose |
+|---|---|
+| `openapi/generated.ts` | Auto-generated TypeScript types from the OpenAPI schema. **Do not edit directly** — regenerated via `openapi-typescript`. |
+| `dashboard/src/api.ts` | Hand-written API client layer. All HTTP calls, authentication header construction, error parsing, and WebSocket setup live here. |
+| `dashboard/src/main.tsx` | Application entry point. Mounts the React tree and the `ToastContainer`. |
+| `dashboard/src/App.tsx` | Root component. Handles auth checks (`checkAuth`), terminal feature detection (`setTerminalEnabled`), and renders `SidebarUserBlock` with `UserMenuPanel`. |
+| `dashboard/src/router.tsx` | Route definitions mapping paths to page components (e.g., `UserPolicyPage`, `PluginsPage`). |
 
-The central HTTP client. Every backend call flows through here. It exposes four primitives — `get`, `post`, `put`, `del` — plus a `getText` variant for endpoints returning non-JSON (e.g., TOML manifests). All primitives call `buildHeaders` which invokes `authHeader` to read the stored API key from `localStorage`.
+## Auto-Generated API Types (`generated.ts`)
 
-```typescript
-// Authentication header resolution
-buildHeaders() → authHeader() → getStoredApiKey() → localStorage.getItem()
-```
+This file is produced by `openapi-typescript` and exports TypeScript interfaces describing every endpoint the kernel exposes. It is the single source of truth for request/response shapes.
 
-**Error handling.** Every response passes through `parseError`, which wraps non-2xx responses into an `ApiError` (from `lib/http/errors.ts`). On 401 responses, `clearApiKey` is called to flush stale credentials.
+### Structure
 
-**WebSocket support.** `buildAuthenticatedWebSocket` constructs a `ws://` or `wss://` URL with the API key as a query parameter for EventSource/WebSocket clients that cannot set HTTP headers.
+The file exports these top-level namespaces:
 
-Notable top-level API functions include:
+- **`paths`** — Maps every URL pattern to its HTTP methods and associated operation IDs. Each path entry specifies which methods are available and points into the `operations` interface.
+- **`operations`** — Maps operation IDs (e.g., `"list_agents"`, `"spawn_agent"`) to their request parameters, request body, and response types.
+- **`components`** — Shared schemas referenced by operations (request/response bodies, enums, etc.).
 
-| Function | Endpoint | Purpose |
-|----------|----------|---------|
-| `listAgentSessions` | `GET /api/agents/{id}/sessions` | Paginated session list for an agent |
-| `getHandStats` | `GET /api/hands/instances/{id}/stats` | Dashboard stats for a hand instance |
-| `listActiveHands` | `GET /api/hands/active` | Active hand instances |
-| `getMcpServer` | `GET /api/mcp/servers/{name}` | Single MCP server config + status |
-| `reloadChannels` | `POST /api/channels/reload` | Hot-reload channel config from disk |
-| `runSchedule` | `POST /api/schedules/{id}/run` | Manually trigger a cron job |
-| `setSessionLabel` | `PUT /api/sessions/{id}/label` | Name a session |
-| `listUsageByAgent` | `GET /api/usage` | Per-agent usage statistics |
-| `suspendAgent` | `PUT /api/agents/{id}/mode` | Change agent operational mode |
-| `getHandManifestToml` | `GET /api/hands/{hand_id}` (text) | Raw TOML manifest for a hand |
-| `getMcpAuthStatus` | `GET /api/mcp/health` | MCP server connectivity snapshot |
-| `setAutoDreamEnabled` | `PUT /api/auto-dream/agents/{id}/enabled` | Toggle auto-dream for an agent |
-| `deleteTerminalWindow` | `DELETE /api/...` | Terminal session cleanup |
-| `clawhubSearch` | `GET /api/clawhub/search` | Vector search on ClawHub marketplace |
-| `skillhubBrowse` | `GET /api/clawhub/browse` | Browse ClawHub skills by sort order |
-| `getMetricsText` | `GET /api/metrics` | Prometheus text-format metrics |
-| `verifyStoredAuth` | `POST /api/auth/introspect` | Validate stored token, return claims |
-| `patchHandAgentRuntimeConfig` | `PATCH /api/agents/{id}/hand-runtime-config` | Runtime-only config override for hand agents |
+### Adding a New Endpoint
 
-### OpenAPI Types (`dashboard/openapi/generated.ts`)
+When a new route is added to the kernel's OpenAPI spec:
 
-Auto-generated by `openapi-typescript`. Do **not** edit manually. Re-generate by running the types generator against the kernel's OpenAPI spec.
+1. Regenerate the types: `npx openapi-typescript <spec-url> -o dashboard/openapi/generated.ts`
+2. The new path and operation types will appear automatically.
+3. Add a corresponding caller function in `api.ts`.
 
-The `paths` interface maps every route to its HTTP methods and corresponding `operations` type. Each operation carries fully-typed request parameters, query strings, request bodies, and response shapes. Pages and mutations import these types for compile-time safety.
+## API Client Layer (`api.ts`)
 
-Key route groups:
+All backend communication flows through `api.ts`. It provides HTTP primitives and domain-specific functions layered on top.
 
-- **`/api/agents/**`** — Agent CRUD, sessions, messages, streaming, files, memory, tools, skills, MCP servers, stats, traces
-- **`/api/sessions/**`** — Cross-agent session listing, labels, cleanup, export/import
-- **`/api/channels/**`** — Channel adapters, configuration, QR login flows (WeChat/WhatsApp), testing
-- **`/api/hands/**`** — Hand definitions, activation, deactivation, pause/resume, browser state, settings
-- **`/api/mcp/**`** — MCP server management, catalog, health, taint rules
-- **`/api/budget/**`** — Global and per-agent/user budget tracking
-- **`/api/clawhub/**`** — ClawHub marketplace browse, search, install
-- **`/api/memory/**`** — Proactive memory CRUD, consolidation, KV store, search
-- **`/api/cron/jobs/**`** and **`/api/schedules/**`** — Scheduled job management
-- **`/api/comms/**`** — Inter-agent messaging, topology, event streams
-- **`/api/audit/**`** — Audit log query, export, chain verification
-- **`/api/auth/**`** — OAuth2 login/callback/providers/userinfo
+### HTTP Primitives
 
-### Query Layer (`lib/queries/`)
+Four core functions handle all requests:
 
-React Query hooks that wrap API functions for automatic caching, refetching, and loading states.
+| Function | Method | Auth |
+|---|---|---|
+| `get<T>(path, params?)` | GET | Automatic via `buildHeaders` |
+| `post<T>(path, body?, params?)` | POST | Automatic |
+| `put<T>(path, body?, params?)` | PUT | Automatic |
+| `del<T>(path, params?)` | DELETE | Automatic |
 
-| Module | Key Hook | API Function Called |
-|--------|----------|-------------------|
-| `agents.ts` | agent list/detail/stats | `listAgentSessions`, `getAgentStats` |
-| `hands.ts` | hand list/stats | `listActiveHands`, `getHandStats` |
-| `skills.ts` | skill listing | `getSupportingFile` |
-| `sessions.ts` | session listing/streaming | SSE-based session stream |
-| `memory.ts` | memory stats | `GET /api/memory/stats` |
-| `terminal.ts` | terminal health | `useTerminalHealth` |
-| `analytics.ts` | usage summary | `GET /api/usage/summary` |
+Each primitive calls `buildHeaders` → `authHeader` → `getStoredApiKey` to attach the current API key. Responses are typed via generics. Errors are caught and normalized through `parseError` → `fromResponse` → `ApiError`.
 
-The session streaming hook (`lib/queries/sessions.ts`) uses SSE to receive real-time session events. Tests in `sessions-stream.test.tsx` mock `EventSource` and verify event emission via `emitOpen`.
-
-### Mutation Layer (`lib/mutations/`)
-
-TanStack Query mutations for state-changing operations. Each mutation hook wraps an API function and typically invalidates related query caches on success.
-
-| Module | Key Mutation | Used By |
-|--------|-------------|---------|
-| `workflows.ts` | `useRunWorkflow`, `useUpdateWorkflow` | CanvasPage |
-| `hands.ts` | `useActivateHand` | HandsPage |
-| `providers.ts` | `useSetProviderKey` | WizardPage |
-| `channels.ts` | `useTestChannel` | ChannelsPage |
-| `schedules.ts` | `useDeleteTrigger`, `useSetScheduleDeliveryTargets` | SchedulerPage |
-| `autoDream.ts` | `useTriggerAutoDream` | SettingsPage |
-
-### Pages (`src/pages/`)
-
-| Page | Route | Responsibility |
-|------|-------|---------------|
-| `OverviewPage` | `/` | System status, quick-init, KPI tiles |
-| `AgentsPage` | `/agents` | Agent list, spawn, bulk operations, per-agent stats |
-| `SessionsPage` | `/sessions` | Session list, labels, delete, cleanup |
-| `SkillsPage` | `/skills` | Installed skills, ClawHub browse/search, install/uninstall |
-| `HandsPage` | `/hands` | Hand marketplace, activate/deactivate, pause/resume |
-| `ChannelsPage` | `/channels` | Channel adapters, config, test, QR login |
-| `SchedulerPage` | `/schedules` | Cron jobs, schedules, manual trigger |
-| `CanvasPage` | `/canvas` | Visual workflow editor |
-| `TerminalPage` | `/terminal` | Interactive terminal with health check |
-| `WizardPage` | `/wizard` | First-run setup, provider key configuration |
-| `ModelsPage` | `/models` | Model catalog, custom models, aliases |
-| `UsersPage` | `/users` | User CRUD, API key rotation |
-| `SettingsPage` | `/settings` | Auto-dream, security, budget config |
-
-### Library Utilities (`src/lib/`)
-
-**State management.** `store.ts` uses Zustand. `createClientId` generates a unique per-tab ID using `Date.now()`.
-
-**Agent manifest serialization.** `agentManifest.ts` handles the TOML ↔ form state round-trip:
-- `serializeManifestForm` — Converts form state to TOML, calling `stringifyExtras` and `parseFloatish`
-- `jsonValueToInlineToml` — Converts JSON values to TOML inline syntax via `tomlBareKeyOrQuoted`
-- `parseResponseFormatField` — Parses `response_format` config, detecting TOML tables with `isTomlTable`
-
-**Chat utilities.** `chat.ts`:
-- `normalizeToolOutput` — Timestamps tool outputs using `Date.now()`
-- `extractAssistantHistoryParts` — Extracts structured parts from assistant message history
-- `formatMeta` — Formats metadata for display
-
-**Keyboard and focus.**
-- `useKeyboardShortcuts` — Global shortcut handler, dispatches custom events
-- `useFocusTrap` — Modal focus trap, manages `tabindex` and focus cycling
-- `useListNav` — Arrow-key navigation for lists
-- `useCreateShortcut` — Registers/unregisters keyboard shortcuts
-
-**Voice and TTS.**
-- `useVoiceInput` — Browser microphone capture
-- `useTtsManager` — Text-to-speech playback control (play, pause)
-
-**Other utilities:**
-- `clipboard.ts` — `copyToClipboard` using `document.execCommand` fallback
-- `datetime.ts` — `formatRelativeTime`, `formatDate`
-- `i18n.ts` — Internationalization setup
-- `errors.ts` — `toastErr` for consistent error toast display
-- `csvParser.ts` — CSV text parsing (tested in `csvParser.test.ts`)
-- `sessionSelector.ts` — `pickLatestSessionId` for default session resolution
-- `tauri.ts` — `getCredentials` for Tauri desktop credential storage
-- `bundleMode.ts` — `setupBundleMode` with `isApiPath` guard for bundled deployments
-
-## Authentication Flow
-
-```mermaid
-sequenceDiagram
-    participant Browser
-    participant api.ts
-    participant localStorage
-    participant Kernel
-
-    Browser->>api.ts: page load / API call
-    api.ts->>localStorage: getStoredApiKey()
-    localStorage-->>api.ts: key or null
-    alt key exists
-        api.ts->>Kernel: request with Authorization header
-        Kernel-->>api.ts: 200 or 401
-        alt 401
-            api.ts->>localStorage: clearApiKey()
-        end
-    else no key
-        Browser->>Kernel: GET /api/auth/login/{provider}
-        Kernel-->>Browser: redirect to IdP
-        Browser->>Kernel: GET /api/auth/callback
-        Kernel-->>Browser: set token
-        Browser->>localStorage: setApiKey()
-    end
-```
-
-The `WizardPage` uses `useSetProviderKey` which calls `setProviderKey` in the API layer. For OAuth-based providers (e.g., GitHub Copilot), `copilot_oauth_start` initiates a device flow and `copilot_oauth_poll` checks completion status.
-
-## Real-Time Streaming
-
-The dashboard supports three streaming mechanisms:
-
-1. **SSE message streaming** — `POST /api/agents/{id}/message/stream` returns an SSE stream of agent response chunks
-2. **SSE session attach** — `GET /api/agents/{id}/sessions/{session_id}/stream` allows any client to subscribe to in-flight turn events
-3. **SSE audit log** — `GET /api/logs/stream` streams new audit entries with 15-second heartbeat pings
-4. **SSE comms events** — `GET /api/comms/events/stream` polls every 500ms for inter-agent events
-
-## Data Flow Patterns
-
-**Page → Mutation → API → Error path:**
+### Authentication Flow
 
 ```
-Page component
-  → useMutation hook (lib/mutations/*)
-    → API function (api.ts)
-      → HTTP primitive (get/post/put/del)
-        → buildHeaders → authHeader → localStorage
-        → fetch()
-        → parseError on non-2xx
-          → ApiError (lib/http/errors.ts)
-          → clearApiKey on 401
+Request → buildHeaders() → authHeader() → getStoredApiKey()
+                                              ↓
+                                     localStorage / cookie
+                                              ↓
+                                     Authorization: Bearer <key>
 ```
 
-**Query invalidation on mutation success:**
+- **`getStoredApiKey()`** — Retrieves the persisted API key from browser storage.
+- **`authHeader()`** — Formats the key into an `Authorization: Bearer` header.
+- **`buildHeaders()`** — Assembles the full headers object including auth and content type.
+- **`verifyStoredAuth()`** — Validates that the stored credentials are still valid (used at app startup and in tests).
 
-Mutations call `queryClient.invalidateQueries()` with the appropriate query key to trigger refetches. For example, `useActivateHand` invalidates both the active hands list and the hand definition list after successfully activating a hand.
+For WebSocket connections, `buildAuthenticatedWebSocket` constructs a WS URL with the token attached as a query parameter since browsers cannot set custom headers on WebSocket handshakes.
 
-## Running Tests
+### Error Handling
 
-The test suite covers:
-- `dashboard/src/api.test.ts` — API client unit tests (auth, tool CRUD, WebSocket construction, metrics, hand runtime config)
-- `lib/mutations/workflows.test.tsx` — Mutation hook tests
-- `lib/mutations/schedules.test.tsx` — Schedule mutation tests
-- `lib/queries/sessions-stream.test.tsx` — SSE stream mocking
-- `src/lib/chat.test.ts` — Chat utility tests
-- `src/lib/csvParser.test.ts` — CSV parsing tests
-- `src/lib/useListNav.test.ts` — List navigation tests
-- `src/lib/sessionSelector.test.ts` — Session selection logic
-- `src/pages/OverviewPage.test.tsx` — Overview page rendering
-- `src/pages/ModelsPage.test.tsx` — Models page interactions
+```
+HTTP Error Response
+    ↓
+parseError(response)
+    ↓
+fromResponse(response)   [from lib/http/errors.ts]
+    ↓
+ApiError { status, message, detail }
+```
 
-## Build and Entry Point
+Every API function wraps the HTTP primitive in a try/catch that converts the raw response into a typed `ApiError`. This ensures the UI can display meaningful error messages and React Query can track error states.
 
-`dashboard/src/main.tsx` is the Vite entry point. The Vite config (`librefang-api/dashboard/vite.config.ts`) is referenced by the `main.tsx` `on` handler for HMR. The generated OpenAPI types in `dashboard/openapi/generated.ts` are regenerated separately and should not be hand-edited.
+### Domain-Specific API Functions
+
+The file exports ~100+ functions organized by domain. Here are the major groups:
+
+#### Agent Management
+- `getAgentDetail(id)` → GET `/api/agents/{id}`
+- `sendAgentMessage(id, body)` → POST `/api/agents/{id}/message`
+- `stopAgent(id)` → POST `/api/agents/{id}/stop`
+- `uploadAgentFile(id, file)` → POST `/api/agents/{id}/upload` (uses `parseError` directly for upload-specific error handling)
+
+#### Hand Agents
+- `patchHandAgentRuntimeConfig(id, patch)` — Calls `serializeHandAgentRuntimeConfigPatch` to transform the UI form state before sending.
+- `sendHandMessage(id, body)` → POST to the hand agent's messaging endpoint.
+
+#### A2A (Agent-to-Agent)
+- `sendA2ATask(body)` → POST `/a2a/tasks/send`
+
+#### Memory
+- `updateMemory(id, content)` → PUT `/api/memory/items/{id}`
+
+#### MCP Servers
+- `addMcpServer(config)` → POST `/api/mcp/servers`
+- `reloadMcp()` → POST `/api/mcp/reload`
+
+#### Usage & Metrics
+- `getUsageSummary()` → GET `/api/usage/summary`
+- `getUsageByModelPerformance()` → GET `/api/usage/by-model`
+- `getMetricsText()` → GET `/api/metrics` (returns raw Prometheus text via `getText` instead of JSON-parsed `get`)
+
+#### Other Domains
+- `listTools()` — Tool definitions
+- `listGoals()` — Goal tracking
+- `getNetworkStatus()` — OFP network status
+- `createSchedule(body)` — Scheduled jobs
+- `createPairingRequest()` — Device pairing
+- `listTerminalWindows()` — Terminal feature (uses `buildHeaders` directly for special headers)
+- `deleteBackup(filename)` — Backup management
+- `modifyAndRetryApproval(id, body)` — Approval workflow
+- `transcribeAudio(blob)` — Audio transcription (uses `buildHeaders` for multipart)
+- `submitVideo(body)` — Video submission
+- `saveWorkflowAsTemplate(body)` — Workflow templates
+- `setDefaultProvider(name)` — Provider configuration
+
+### Utility Functions
+
+- **`deref(ref)`** — Resolves JSON `$ref` pointers within API responses by calling `resolveRef`.
+- **`serializeHandAgentRuntimeConfigPatch(patch)`** — Transforms the dashboard's hand agent configuration form into the kernel's expected wire format.
+
+## Real-Time Streams
+
+The dashboard consumes three types of real-time data:
+
+### Server-Sent Events (SSE)
+
+| Stream | Endpoint | Purpose |
+|---|---|---|
+| Audit log | `GET /api/logs/stream` | Live audit entries with backfill on connect. Heartbeat every 15s. Filters via `level`, `filter`, `token` query params. |
+| Agent messages | `POST /api/agents/{id}/message/stream` | Streaming LLM responses token-by-token. |
+| Session attach | `GET /api/agents/{id}/sessions/{session_id}/stream` | Subscribe to an in-flight session's events. Late attachers receive events from subscribe time (no replay). |
+| Comms events | `GET /api/comms/events/stream` | Inter-agent communication events. Polls audit log every 500ms. |
+
+### WebSocket
+
+- `buildAuthenticatedWebSocket(path)` — Constructs an authenticated WS connection for terminal and other interactive features.
+
+## React Query Integration
+
+The `lib/queries/` and `lib/mutations/` directories wrap `api.ts` functions for React Query:
+
+```
+lib/queries/skills.ts  →  getSkillDetail()  →  get()  →  buildHeaders()  →  authHeader()  →  getStoredApiKey()
+lib/mutations/skills.ts →  installSkill()   →  post() →  buildHeaders()  →  authHeader()  →  getStoredApiKey()
+lib/mutations/agents.ts →  stopAgent()      →  post() →  buildHeaders()  →  authHeader()  →  getStoredApiKey()
+```
+
+Query functions feed data into React Query caches. Mutation functions trigger state changes and invalidate related queries on success. Both go through the same authenticated pipeline in `api.ts`.
+
+## Pages
+
+The router maps URLs to page components. Key pages visible in the call graph:
+
+| Page | File | API Functions Used |
+|---|---|---|
+| **MemoryPage** | `src/pages/MemoryPage.tsx` | Memory CRUD, search, consolidation |
+| **AuditPage** | `src/pages/AuditPage.tsx` | Audit log stream, query, export, verify |
+| **A2APage** | `src/pages/A2APage.tsx` | `sendA2ATask`, agent discovery |
+| **TerminalPage** | `src/pages/TerminalPage.tsx` | `listTerminalWindows`, WebSocket |
+| **UserPolicyPage** | `dashboard/src/router.tsx` | User management |
+| **PluginsPage** | `dashboard/src/router.tsx` | Extensions/MCP management |
+
+## Shared Libraries
+
+Pages depend on shared utilities in `src/lib/`:
+
+- **`useListNav`** — Keyboard-navigable list component hook
+- **`chat.ts` / `extractAssistantHistoryParts`** — Chat message parsing
+- **`agentManifest.ts` / `emptyManifestExtras`** — Agent manifest formatting
+- **`sessionSelector.ts` / `pickLatestSessionId`** — Session selection logic
+- **`csvParser.ts` / `parseCsvText`** — CSV parsing for audit exports
+
+## Testing
+
+Tests live alongside the source:
+
+- `dashboard/src/api.test.ts` — Tests `verifyStoredAuth`, `updateAgentTools`, `getAgentTools`, `patchHandAgentRuntimeConfig`, `buildAuthenticatedWebSocket`, `getMetricsText`
+- `src/pages/MemoryPage.test.tsx` — Component tests for MemoryPage
+- `src/lib/*.test.ts` — Unit tests for shared utilities
+
+When writing API tests, mock at the `fetch` level rather than importing `api.ts` internals. The test file demonstrates this pattern: it calls exported functions and asserts on the resulting HTTP requests.
+
+## API Endpoint Reference by Domain
+
+The `generated.ts` `paths` interface documents ~120 endpoints. Grouped by prefix:
+
+| Prefix | Count | Purpose |
+|---|---|---|
+| `/api/agents` | ~30 | CRUD, sessions, memory, files, tools, skills, mode, stats, traces |
+| `/api/a2a` | 5 | External agent discovery and task delegation |
+| `/a2a` | 4 | Standard A2A protocol endpoints |
+| `/api/sessions` | 6 | Session listing, cleanup, labels |
+| `/api/memory` | 15 | Proactive memory CRUD, search, consolidation, import/export |
+| `/api/budget` | 5 | Global and per-agent/user budget tracking |
+| `/api/usage` | 4 | Token usage, daily breakdowns, model-level stats |
+| `/api/mcp` | 8 | MCP server management, catalog, health, taint rules |
+| `/api/channels` | 7 | Channel adapter configuration, QR login flows |
+| `/api/auth` | 6 | OAuth2 login/callback, providers, userinfo, introspect |
+| `/api/skills` | 4 | Skill installation, creation, uninstall |
+| `/api/hands` | 12 | Hand marketplace, activation, pause/resume, browser state |
+| `/api/triggers` | 4 | Event trigger CRUD |
+| `/api/schedules` / `/api/cron` | 8 | Scheduled and cron job management |
+| `/api/budget` | 5 | Cost tracking and limits |
+| `/api/comms` | 4 | Inter-agent messaging, topology, events |
+| `/api/backup` / `/api/restore` | 4 | State backup and restoration |
+| `/api/providers` | 8 | LLM provider management, key/URL config, testing |
+| `/api/models` | 6 | Model catalog, aliases, custom models |
+| `/api/audit` | 4 | Audit log query, export, chain verification |
+| `/api/approvals` | 4 | Approval request workflow |
+| `/api/config` | 4 | Config read/reload/set/schema |
+| `/api/users` | 5 | User management, key rotation |
+| `/api/health` | 2 | Liveness probe and detailed diagnostics |
+| `/api/logs/stream` | 1 | SSE audit log stream |
+| `/api/metrics` | 1 | Prometheus-format metrics |
+| `/api/tools` | 3 | Tool listing and direct invocation |
+| `/api/extensions` | 4 | Extension catalog and install/uninstall |
+| `/api/catalog` | 2 | Remote model catalog sync |
+| `/api/clawhub` | 4 | ClawHub skill marketplace browse/search/install |
+| `/api/network` | 1 | OFP network status |
+| `/api/peers` | 2 | OFP peer discovery |
+| `/api/pairing` | 5 | Device pairing and notifications |
+| `/api/queue` | 1 | Command queue status |
+| `/api/security` | 1 | Security feature status |
+| `/api/templates` | 2 | Agent template listing |
+| `/api/hooks` | 2 | Webhook triggers (agent turn, wake event) |
+| `/api/migrate` | 3 | Framework migration |
+| `/api/marketplace` | 1 | FangHub marketplace search |
+| `/api/profiles` | 2 | Tool profiles |
+| `/api/commands` | 2 | Chat command registry |
+| `/api/bindings` | 2 | Agent bindings |
+| `/api/auto-dream` | 4 | Auto-dream scheduling |
+| `/api/shutdown` | 1 | Graceful shutdown |
+| `/api/init` | 1 | Quick provider detection and init |
+
+## Regenerating OpenAPI Types
+
+```bash
+# From the project root, point openapi-typescript at the running kernel's spec
+npx openapi-typescript http://localhost:3000/openapi.json -o librefang-api/dashboard/openapi/generated.ts
+```
+
+The file header explicitly states: *"This file was auto-generated by openapi-typescript. Do not make direct changes to the file."* Any manual edits will be overwritten on the next regeneration.

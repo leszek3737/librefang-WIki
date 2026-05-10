@@ -1,138 +1,121 @@
 # Other — librefang-runtime-wasm-tests
 
-# librefang-runtime-wasm-tests
-
-Integration test suite for the `librefang-runtime-wasm` sandbox. Exercises the public `WasmSandbox` API end-to-end using WAT-defined guest modules — no external test fixtures required.
+# librefang-runtime-wasm-tests — Integration Test Suite
 
 ## Purpose
 
-This crate validates the sandbox boundary guarantees that `librefang-runtime-wasm` provides. Each test targets a specific security or correctness invariant:
+End-to-end integration tests for the `WasmSandbox` public API in `librefang-runtime-wasm`. The suite exercises the full lifecycle — load, instantiate, invoke — and validates every sandbox boundary enforcement mechanism: capabilities, fuel caps, ABI validation, and memory limits.
 
-- **Happy path**: module load → instantiate → invoke with JSON round-trip
-- **Capability deny**: no-grant implies no-access to host resources
-- **Capability allow**: explicit grant enables the corresponding host call
-- **Fuel cap**: runaway guests trap instead of burning CPU
-- **ABI enforcement**: modules missing required exports are rejected with a typed error
-- **Memory cap**: linear-memory growth beyond the configured limit is blocked
+Tests use inline WAT (WebAssembly Text format) guest modules so there are **no external fixture dependencies**. Wasmtime's `Module::new` accepts both binary `.wasm` and text `.wat`, so each test embeds its guest program as a `const &str`.
 
-## Test Architecture
+All tests target the async `execute()` entry point, which means the `spawn_blocking` + watchdog plumbing in the production code path is also covered.
 
-```mermaid
-graph TD
-    subgraph "Integration Tests"
-        T1[sandbox_loads_and_invokes_echo_module]
-        T2[sandbox_accepts_module_loaded_from_disk]
-        T3[sandbox_denies_fs_read_without_capability]
-        T4[sandbox_allows_capless_host_call]
-        T5[sandbox_capability_grant_toggles_env_read]
-        T6[sandbox_fuel_cap_traps_runaway_guest]
-        T7[sandbox_rejects_module_missing_required_exports]
-        T8[sandbox_memory_cap_blocks_oversized_growth]
-    end
+## Test Coverage Matrix
 
-    subgraph "Public API"
-        E[WasmSandbox::execute]
-        C[SandboxConfig]
-    end
+| Test | Boundary | Validates |
+|------|----------|-----------|
+| `sandbox_loads_and_invokes_echo_module` | Happy path | JSON round-trip through guest, fuel metering reports > 0 |
+| `sandbox_accepts_module_loaded_from_disk` | Happy path | Bytes loaded from disk work identically to inline bytes |
+| `sandbox_denies_fs_read_without_capability` | Capability | `fs_read` returns a denied error when no capabilities are granted |
+| `sandbox_allows_capless_host_call` | Capability | `time_now` (no capability required) succeeds unconditionally |
+| `sandbox_capability_grant_toggles_env_read` | Capability | `env_read("PATH")` succeeds with `EnvRead("PATH")` grant, denied without it |
+| `sandbox_fuel_cap_traps_runaway_guest` | Fuel | Infinite loop traps with `SandboxError::FuelExhausted` at the configured limit |
+| `sandbox_rejects_module_missing_required_exports` | ABI | Module missing `execute` export is rejected with `SandboxError::AbiError` |
+| `sandbox_memory_cap_blocks_oversized_growth` | Memory | Guest requesting 200 pages (≈13 MiB) against a 1 MiB cap is denied |
 
-    T1 --> E
-    T2 --> E
-    T3 --> E
-    T4 --> E
-    T5 --> E
-    T6 --> E
-    T7 --> E
-    T8 --> E
-    T3 --> C
-    T5 --> C
-    T6 --> C
-    T8 --> C
+## Guest Module Fixtures
+
+Each fixture is a self-contained WAT module. All well-behaved modules export the same minimum ABI that the sandbox expects:
+
+- **`memory`** — exported linear memory
+- **`alloc(size) → ptr`** — bump allocator for the host to write into guest memory
+- **`execute(ptr, len) → u64`** — entry point; returns `(ptr: u32, len: u32)` packed into the low and high 32 bits of an `i64`
+
+### `ECHO_WAT`
+
+```
+memory(1 page)  ·  alloc  ·  execute → returns input ptr/len unchanged
 ```
 
-Every test goes through the public async `execute()` entry point. This ensures the full `spawn_blocking` + watchdog plumbing in `WasmSandbox` is covered — tests don't call internal sync helpers directly.
+The simplest conforming guest. The host writes JSON into allocated memory, calls `execute`, and the guest returns the same pointer and length — the host then reads back identical bytes. Validates JSON serialization round-trip and the core ABI.
 
-## Guest Fixtures
+### `HOST_CALL_PROXY_WAT`
 
-All guest modules are inlined as WAT (WebAssembly Text) string constants. Wasmtime's `Module::new` accepts both binary `.wasm` and text `.wat`, so no build step or external files are needed.
+```
+memory(2 pages)  ·  alloc  ·  execute → forwards to host_call import
+```
 
-### Required Guest ABI
+Imports `librefang::host_call` from the host. `execute` passes its input directly to `host_call` and returns whatever the host sends back. This is the vehicle for testing capability checks — the test sends JSON like `{"method": "fs_read", "params": {"path": "Cargo.toml"}}` and inspects the response for denied/allowed signals.
 
-Every guest module that passes ABI validation must export:
+### `INFINITE_LOOP_WAT`
 
-| Export | Signature | Purpose |
-|--------|-----------|---------|
-| `memory` | `(memory 1+)` | Linear memory for JSON I/O |
-| `alloc` | `(func (param i32) (result i32))` | Bump allocator — host writes input JSON here |
-| `execute` | `(func (param i32 i32) (result i64))` | Entry point. Receives `(ptr, len)`, returns packed `(ptr:u32 << 32 | len:u32)` as `i64` |
+```
+memory(1 page)  ·  alloc  ·  execute → (loop (br 0)) — never returns
+```
 
-### Fixture Modules
+A tight infinite loop (`loop $inf (br $inf)`). With a low `fuel_limit` (10,000), wasmtime traps with `Trap::OutOfFuel`, which the sandbox maps to `SandboxError::FuelExhausted`. Guards against unbounded CPU consumption by runaway guests.
 
-| Constant | Description | Used by |
-|----------|-------------|---------|
-| `ECHO_WAT` | Minimal echo — returns input bytes verbatim via the packed-pointer convention. | `sandbox_loads_and_invokes_echo_module`, `sandbox_accepts_module_loaded_from_disk` |
-| `HOST_CALL_PROXY_WAT` | Imports `librefang::host_call` and forwards input to it. Returns whatever the host responds with. | Capability deny/allow tests (`sandbox_denies_fs_read_without_capability`, `sandbox_allows_capless_host_call`, `sandbox_capability_grant_toggles_env_read`) |
-| `INFINITE_LOOP_WAT` | Contains a tight `(loop $inf (br $inf))`. Used to prove fuel exhaustion traps the guest. | `sandbox_fuel_cap_traps_runaway_guest` |
-| `MISSING_EXECUTE_WAT` | Exports `memory` and `alloc` but omits `execute`. Triggers `SandboxError::AbiError`. | `sandbox_rejects_module_missing_required_exports` |
-| `MEMORY_GROW_WAT` | Calls `memory.grow` with a 200-page request (~13 MiB). Surfaces `memory.grow`'s return value (-1 on denial) as the packed result length so the host can detect the failure. | `sandbox_memory_cap_blocks_oversized_growth` |
+### `MISSING_EXECUTE_WAT`
 
-## Test Cases
+```
+memory(1 page)  ·  alloc  — no execute export
+```
 
-### Happy Path
+Deliberately omits the required `execute` export. The sandbox's ABI validation detects this during export resolution and returns `SandboxError::AbiError` mentioning the missing symbol. Prevents unclear failures later in the pipeline.
 
-**`sandbox_loads_and_invokes_echo_module`** — The primary smoke test. Constructs a `WasmSandbox`, passes a JSON object to `execute()` with `ECHO_WAT`, and asserts:
-- The output JSON matches the input exactly (round-trip).
-- `fuel_consumed` is non-zero (metering is active).
+### `MEMORY_GROW_WAT`
 
-**`sandbox_accepts_module_loaded_from_disk`** — Writes `ECHO_WAT` to a `NamedTempFile`, reads the bytes back via `std::fs::read`, and passes them to `execute()`. Defends against regressions where the API might require ownership or fail on borrowed bytes from disk I/O.
+```
+memory(1 page)  ·  alloc  ·  execute → memory.grow(200), returns grow result as len
+```
 
-### Capability Boundary
+Calls `memory.grow(200)` (requesting ~12.5 MiB). When the `MemoryLimiter` denies the request, `memory.grow` returns `-1`, which the guest surfaces as the packed result length. The host's bounds check then rejects the oversized (or `-1`-cast) length, surfacing as `SandboxError::AbiError`. This proves the linear-memory cap is enforced at the wasmtime level before host memory is consumed.
 
-**`sandbox_denies_fs_read_without_capability`** — Uses `HOST_CALL_PROXY_WAT` to issue an `fs_read` request for `Cargo.toml`. Configures `SandboxConfig` with an empty `capabilities` vector. Asserts the response JSON contains `"denied"` or `"Capability"`. Includes a CWD guard that asserts `Cargo.toml` exists — this prevents false passes if a future test runner changes the working directory.
+## Architecture and Execution Flow
 
-**`sandbox_allows_capless_host_call`** — Issues a `time_now` request (a capability-free host call) and verifies the response contains a plausible Unix timestamp (> 1,700,000,000). Confirms the sandbox boundary isn't a blanket deny-all.
+Each test follows the same pattern:
 
-**`sandbox_capability_grant_toggles_env_read`** — Runs the same `env_read("PATH")` call twice: once with `Capability::EnvRead("PATH")` granted, once without. Asserts the granted call does **not** return a "denied" error, and the ungranted call **does**. This positive→negative pair confirms the capability dispatcher is wired correctly (not degenerate always-allow or always-deny).
+```mermaid
+flowchart LR
+    A[Test function] -->|"WAT bytes + JSON input + SandboxConfig"| B[WasmSandbox::execute]
+    B --> C[Module::new]
+    C --> D[Instantiate + configure limits]
+    D --> E["Guest execute()"]
+    E -->|Success| F["SandboxResult { output, fuel_consumed }"]
+    E -->|Trap| G["SandboxError::*"]
+```
 
-### Resource Limits
-
-**`sandbox_fuel_cap_traps_runaway_guest`** — Configures `SandboxConfig { fuel_limit: 10_000 }` and runs `INFINITE_LOOP_WAT`. Asserts the result is `Err(SandboxError::FuelExhausted)`. Pins the `Trap::OutOfFuel` → `SandboxError::FuelExhausted` mapping.
-
-**`sandbox_memory_cap_blocks_oversized_growth`** — Configures `max_memory_bytes: 1 MiB` and runs `MEMORY_GROW_WAT`, which attempts a 200-page (~13 MiB) growth. The `MemoryLimiter` denies the growth; `memory.grow` returns `-1` to the guest. The test accepts:
-- `Err(SandboxError::AbiError(_))` — the guest surfaces -1 as an oversized result length.
-- `Err(other)` — any other error variant is acceptable; the invariant is "host didn't OOM".
-- Panics on `Ok(...)` — successful execution would mean the memory cap was bypassed.
-
-### ABI Validation
-
-**`sandbox_rejects_module_missing_required_exports`** — Runs `MISSING_EXECUTE_WAT` (no `execute` export) and asserts the error is `SandboxError::AbiError(msg)` where `msg` contains `"execute"`. Confirms typed rejection, not a panic or generic error.
+1. **Create sandbox** — `WasmSandbox::new()` initializes the wasmtime `Engine`.
+2. **Prepare input** — A `serde_json::Value` and a `SandboxConfig` (fuel limit, capabilities, memory cap).
+3. **Call `execute()`** — The async entry point spawns work on a blocking thread, compiles the WAT, validates exports, instantiates with configured limiters, and invokes the guest's `execute`.
+4. **Assert outcome** — Either the result JSON matches expectations (happy path) or the error variant matches the expected `SandboxError` variant (boundary tests).
 
 ## Dependencies
 
-| Crate | Role |
-|-------|------|
-| `librefang_runtime_wasm` | System under test. Provides `WasmSandbox`, `SandboxConfig`, `SandboxError`. |
-| `librefang_types` | Provides `Capability` enum for capability grant configuration. |
-| `serde_json` | Constructs test inputs and inspects outputs. |
-| `tempfile` | `NamedTempFile` for the disk-load test. |
-| `tokio` | `#[tokio::test]` runtime for async `execute()` calls. |
+- **`librefang-runtime-wasm`** — the crate under test; provides `WasmSandbox`, `SandboxConfig`, `SandboxError`.
+- **`librefang-types`** — provides `Capability` enum for capability grant configuration.
+- **`tokio`** — test runtime (`#[tokio::test]`).
+- **`serde_json`** — constructing and asserting on JSON payloads.
+- **`tempfile`** — `NamedTempFile` for the disk-load test only.
 
-## Running
+## Running the Tests
 
 ```sh
 # From the workspace root
-cargo test -p librefang-runtime-wasm
+cargo test -p librefang-runtime-wasm --test sandbox_integration
 
-# Individual test
-cargo test -p librefang-runtime-wasm sandbox_fuel_cap_traps_runaway_guest
+# Single test
+cargo test -p librefang-runtime-wasm --test sandbox_integration sandbox_fuel_cap_traps_runaway_guest
 ```
 
-Tests are self-contained — no Docker, no external services, no fixture files on disk. They only require a working Wasmtime runtime, which is pulled in as a dependency of `librefang-runtime-wasm`.
+### CWD Assumption
 
-## Extending the Suite
+`sandbox_denies_fs_read_without_capability` asserts that `Cargo.toml` exists in the current working directory. Cargo sets CWD to the crate root by default, but alternative test runners (e.g., nextest with a custom workdir) could break this assumption. The test fails loudly with a diagnostic if `Cargo.toml` is missing rather than silently passing for the wrong reason.
 
-When adding a new sandbox boundary test:
+## Adding New Tests
 
-1. **Define the WAT inline** as a `const` string — don't add external fixture files. Keep the module minimal: only export what the test needs.
-2. **Use `execute()`**, not internal APIs. These are integration tests; the public async path is the one that matters.
-3. **Assert on `SandboxError` variants** when testing failure modes — don't just check `is_err()`.
-4. **Include a positive→negative pair** for new capability checks (grant allows, no-grant denies) to avoid degenerate false-pass scenarios.
+To add a test for a new sandbox boundary:
+
+1. **Define a WAT fixture** as a module-level `const &str` if no existing fixture exercises the behavior. Follow the minimum ABI (`memory`, `alloc`, `execute`).
+2. **Write the test** as an `async fn` with `#[tokio::test]`, calling `sandbox.execute()` with the appropriate `SandboxConfig`.
+3. **Assert on the specific `SandboxError` variant** for negative tests, or on the `SandboxResult::output` JSON for positive tests. Avoid asserting on exact error messages — prefer matching the error variant and checking for keyword presence.

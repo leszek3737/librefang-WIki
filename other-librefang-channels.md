@@ -2,146 +2,156 @@
 
 # librefang-channels
 
-Channel Bridge Layer for LibreFang — 40+ pluggable messaging integrations that convert platform messages into unified `ChannelMessage` events and route agent replies back out.
+Pluggable messaging bridge layer for LibreFang. Converts inbound platform messages into unified `ChannelMessage` events consumed by the kernel, and routes agent replies back out through the originating channel.
 
 ## Architecture
 
-```mermaid
-graph TD
-    Platform[Platform: Telegram, Discord, Slack, ...]
-    Adapter[ChannelAdapter impl]
-    Core[Trait + Dispatch Core]
-    Kernel[librefang-kernel]
-    API[librefang-api webhook routes]
+Each messaging platform is implemented as an adapter behind the `ChannelAdapter` trait. The trait and all dispatch infrastructure compile unconditionally — only individual adapters are gated by cargo features.
 
-    Platform -->|inbound message| Adapter
-    Adapter -->|ChannelMessage| Core
-    Core -->|dispatch| Kernel
-    Kernel -->|agent reply| Core
-    Core -->|send()| Adapter
-    Adapter -->|outbound| Platform
-    API -->|HTTP POST| Adapter
+```mermaid
+graph LR
+    subgraph Platforms
+        T[Telegram]
+        D[Discord]
+        S[Slack]
+        W[Webhook]
+        E[email / IMAP]
+        O["40+ more"]
+    end
+    subgraph librefang-channels
+        A["ChannelAdapter trait"]
+        R["router / dispatch"]
+    end
+    K["librefang-kernel"]
+    T -->|inbound| A
+    D -->|inbound| A
+    S -->|inbound| A
+    W -->|inbound| A
+    E -->|inbound| A
+    O -->|inbound| A
+    A -->|ChannelMessage| R
+    R -->|events| K
+    K -->|agent reply| R
+    R -->|send()| A
+    A -->|outbound| T
+    A -->|outbound| D
+    A -->|outbound| S
+    A -->|outbound| W
+    A -->|outbound| E
 ```
 
-Channels sit below the kernel. The kernel calls into channels through dispatch — channels never import the kernel. Inbound messages from platforms are normalized into `ChannelMessage` events. Outbound replies flow back through the same adapter's `send()` method.
+Sessions are derived deterministically via `SessionId::for_channel(agent, "channel:chat")`. The kernel owns the per-`(agent, session)` lock; channels never touch it directly.
 
 ## Cargo Features
 
-**`default = []`** — intentionally empty. Every workspace consumer (`librefang-api`, `librefang-cli`, `librefang-desktop`) sets `default-features = false` and forwards an explicit subset. Always pick features explicitly when depending on this crate.
+`default = []`. Every workspace consumer sets `default-features = false` and forwards an explicit feature subset.
 
-- **`all-channels`** — enables every adapter. Used by release CI and packaging pipelines. Not for everyday development.
-- **Per-adapter features** — `channel-telegram`, `channel-discord`, `channel-slack`, `channel-webhook`, `channel-ntfy`, etc. See `Cargo.toml` for the full list of 45 features.
+| Feature | Description |
+|---|---|
+| `all-channels` | Aggregates every adapter. Used by release CI and packaging. |
+| `channel-telegram` | Telegram Bot API |
+| `channel-discord` | Discord via gateway |
+| `channel-slack` | Slack Events API |
+| `channel-matrix` | Matrix (heavy; pulls in `matrix-sdk`) |
+| `channel-email` | SMTP send + IMAP receive (adds `lettre`, `imap`, `rustls-connector`, `mailparse`) |
+| `channel-webhook` | Generic outbound webhooks with SSRF guard |
+| `channel-mqtt` | MQTT pub/sub (adds `rumqttc`) |
+| `channel-bluesky` | Bluesky/AT Protocol |
+| `channel-nostr` | Nostr relays (adds `k256`) |
+| `channel-ntfy` | ntfy.sh push notifications |
+| `channel-feishu` / `channel-wecom` | Adds `aes` + `cbc` for payload decryption |
+| `channel-google-chat` | Adds `rsa` for signature verification |
 
-Some adapters pull in additional dependencies:
-- `channel-email` → `lettre`, `imap`, `rustls-connector`, `mailparse`
-- `channel-google-chat` → `rsa`
-- `channel-feishu` / `channel-wecom` → `aes`, `cbc`
-- `channel-nostr` → `k256`
-- `channel-mqtt` → `rumqttc`
+See `Cargo.toml` for the full 45-feature matrix. Adding a new adapter requires a matching entry in the `all-channels` list.
 
 ## Always-Compiled Core
 
-The trait definitions, dispatch glue, and shared utilities compile unconditionally. Only adapter implementations are feature-gated.
+These modules are available regardless of which channel features are enabled:
 
-Core modules:
-- **`types`** — `ChannelMessage` event type and related shared types
-- **`bridge`** — dispatch and routing infrastructure
-- **`router`** — message routing logic
-- **`attachment_enrich`** — attachment processing
-- **`commands`** — channel command handling
-- **`formatter`** — message formatting for platform-specific constraints
-- **`message_journal`** — message logging/journaling
-- **`message_truncator`** — message length truncation utilities
+- **`types`** — `ChannelMessage`, session identifiers, shared enums
+- **`router`** — dispatch routing from adapter → kernel event bus
+- **`bridge`** — top-level adapter registry and lifecycle
+- **`formatter`** — message formatting across platform constraints
+- **`sanitizer`** — input sanitization for inbound payloads
+- **`commands`** — channel command parsing
+- **`roster`** — contact/participant tracking
 - **`rate_limiter`** — per-channel rate limiting
-- **`roster`** — contact/participant management
-- **`sanitizer`** — input sanitization
-- **`sidecar`** — auxiliary channel processing
-- **`thread_ownership`** — conversation thread tracking
+- **`message_journal`** — inbound/outbound message logging
+- **`message_truncator`** — platform-aware message splitting
+- **`attachment_enrich`** — attachment metadata extraction (uses `image`, `pdf-extract`)
+- **`thread_ownership`** — conversation threading semantics
+- **`sidecar`** — auxiliary channel-side processing
 
-Re-exported utilities for platform message limits:
-- `split_to_utf16_chunks`, `truncate_to_utf16_limit`, `utf16_len`
-- `DISCORD_MESSAGE_LIMIT` (2000 characters)
-- `TELEGRAM_MESSAGE_LIMIT` (4096 characters)
-- `TELEGRAM_CAPTION_LIMIT` (1024 characters)
+**Re-exports:** `split_to_utf16_chunks`, `truncate_to_utf16_limit`, `utf16_len`, `DISCORD_MESSAGE_LIMIT` (2000), `TELEGRAM_CAPTION_LIMIT` (1024), `TELEGRAM_MESSAGE_LIMIT` (4096).
 
-## Channel Adapter Trait
+## Adding a New Channel Adapter
 
-Each adapter lives in `src/<channel>/mod.rs` and implements `ChannelAdapter`. The trait defines the interface for:
+1. **Create `src/<channel>/mod.rs`** implementing the `ChannelAdapter` trait.
+2. **Add a cargo feature** `channel-<name>` in `Cargo.toml`. If it needs extra crate dependencies, add them as optional deps and wire `dep:xxx` in the feature.
+3. **Add the feature to `all-channels`** in the same `Cargo.toml`.
+4. **Wire HTTP webhook route** (if the platform uses webhooks) in `librefang-api/src/routes/channels.rs`.
+5. **Write `tests/<channel>_wiremock.rs`** covering at least the `send()` happy path and one error response (e.g., 429 rate limit, 500 server error).
+6. **Document required environment variables** in the adapter module's doc comment.
 
-1. **Inbound parsing** — receive a platform-specific webhook payload, validate it, and produce a `ChannelMessage`.
-2. **Outbound sending** — take an agent reply and deliver it to the platform via the adapter's `send()` method.
+### ChannelAdapter Trait Contract
 
-Sessions are derived deterministically: `SessionId::for_channel(agent, "channel:chat")`. The kernel owns the per-`(agent, session)` lock; channels never touch it.
+Every adapter implements:
 
-## Security
+- **Inbound parsing** — transform platform-specific webhook payloads or streaming events into `ChannelMessage`.
+- **`send()`** — transmit an agent reply back to the platform. Must be testable via wiremock.
+- **Lifecycle hooks** — startup validation (credential checks, SSRF guard), graceful shutdown.
 
-### HMAC Verification (Mandatory)
+## Webhook Security
 
-HMAC signature verification is **mandatory** for platforms that provide it. There is no bypass.
+HMAC/signature verification is **mandatory** for platforms that provide it. There is no bypass.
 
-| Platform | Environment Variable | Config Key | Failure Behavior |
-|----------|---------------------|------------|------------------|
-| Messenger | `MESSENGER_APP_SECRET` | `[channels.messenger] app_secret_env` | 400 (missing), 401 (mismatch) |
-| Teams | `TEAMS_SECURITY_TOKEN` | `[channels.teams] security_token_env` | 400 (missing), 401 (mismatch) |
-| LINE | Platform-specific header | — | 400/401 |
-| Viber | Platform-specific header | — | 400/401 |
-| DingTalk | Platform-specific header | — | 400/401 |
+| Platform | Verification | Config key |
+|---|---|---|
+| Messenger | HMAC-SHA1 with App Secret | `app_secret_env` in `[channels.messenger]` |
+| Teams | Base64 outgoing-webhook token | `security_token_env` in `[channels.teams]` |
+| LINE | Platform signature header | Auto-detected |
+| Viber | Platform signature header | Auto-detected |
+| DingTalk | Platform signature header | Auto-detected |
 
-Health checks and probes without the correct signature header receive 4xx responses. This is intentional.
+Missing signature → **400**. Mismatched signature → **401**. Health-check probes (curl, monitoring) without the header will receive 4xx — this is intentional.
 
-### Outbound SSRF Guard
+If you cannot implement verification for a platform, the adapter must refuse to start.
 
-`[channels.webhook] callback_url` must resolve to a public IP. The adapter refuses to start if the URL targets:
+## Outbound Webhook SSRF Guard
 
-- Private ranges: `10/8`, `172.16/12`, `192.168/16`
-- Carrier-grade NAT: `100.64/10`
-- Loopback: `127/8`, `::1`
-- Link-local, multicast, cloud metadata endpoints
-- IPv6 short forms (`[::]`), IPv4-mapped IPv6 (`[::ffff:127.0.0.1]`), NAT64, trailing-dot FQDNs
+`[channels.webhook] callback_url` must resolve to a publicly routable IP. The guard rejects:
 
-For local development, use a public tunnel (ngrok, cloudflared) or omit `callback_url`.
+- Private ranges: 10/8, 172.16/12, 192.168/16
+- CGN: 100.64/10
+- Loopback: 127/8, ::1
+- Link-local, multicast, cloud metadata (169.254/16)
+- IPv6 short forms (`[::]`), IPv4-mapped (`[::ffff:127.0.0.1]`), NAT64, trailing-dot FQDNs
 
-## Dependencies
+Adapters refuse to start if the callback URL violates these rules. For local development, use a public tunnel (ngrok, cloudflared) or omit `callback_url` entirely.
 
-Direct dependencies:
-- `librefang-types` — shared type definitions
-- `librefang-extensions` — vault access, `http_client::shared_client()`
-- `librefang-http` — HTTP utilities
+## Testing Requirements
 
-Explicitly **not** depended on:
-- `librefang-kernel` — channels are below kernel in the layer graph
-- `librefang-runtime` — no direct runtime dependency
+Inbound parsing has extensive coverage (795 tests). Outbound `send()` has historically been undertested.
 
-HTTP requests must use `librefang-extensions::http_client::shared_client()`. Do not create bespoke `reqwest::Client` instances.
+**All new adapters and `send()` changes must include a wiremock test** in `tests/<channel>_wiremock.rs`. Minimum coverage:
 
-## Testing
+- Happy-path `send()` with expected request shape
+- At least one error response (HTTP 4xx/5xx) verifying the adapter handles it gracefully
 
-Inbound parsing has extensive coverage (795+ tests). Outbound `send()` has historically been undertested.
+PRs without `send()` tests will be rejected.
 
-**Requirement:** Any new adapter or `send()` work must include a wiremock test in `tests/<channel>_wiremock.rs`. Minimum coverage:
+## Dependency Boundaries
 
-- `send()` happy path
-- One error response scenario
+### Allowed dependencies
+- `librefang-types`
+- `librefang-extensions` (vault for secrets, `http_client::shared_client()` for HTTP)
+- `librefang-http`
+- Channel-specific SDKs (gated per feature)
 
-PRs adding an adapter without a `send()` test will be rejected.
+### Forbidden dependencies
+- **`librefang-kernel`** — channels sit below the kernel. The kernel calls into channels through dispatch; never the reverse.
+- **`librefang-runtime`** — same boundary reason.
 
-The crate also includes a criterion benchmark at `benches/dispatch`.
+### Shared HTTP client
 
-## Adding a New Channel
-
-1. Create `src/<channel>/mod.rs` implementing the `ChannelAdapter` trait.
-2. Add a `channel-<name>` feature to `Cargo.toml` (empty feature flag, or with optional dependencies).
-3. Add the feature to the `all-channels` list in `Cargo.toml`.
-4. If the channel uses webhooks, wire the HTTP route in `librefang-api/src/routes/channels.rs`.
-5. Create `tests/<channel>_wiremock.rs` with at minimum a `send()` happy-path test and one error case.
-6. Document required environment variables in the adapter's module-level doc comment.
-
-All channels ship off-by-default. Do not add new channels to `default`.
-
-## Constraints
-
-- **No `librefang-kernel` import.** The kernel calls down into channels; channels never reach up.
-- **No bespoke `reqwest::Client`.** Always use the shared client from `librefang-extensions`.
-- **No `default = ["all-channels"]`.** The default feature set is and remains empty.
-- **No bypassing HMAC verification.** Implement it fully or refuse to start the adapter.
-- **No raw `callback_url` without SSRF validation.** Use the existing guard.
+Do not construct a bespoke `reqwest::Client`. Always use `librefang-extensions::http_client::shared_client()` to reuse connection pools and respect workspace-wide TLS/proxy configuration.

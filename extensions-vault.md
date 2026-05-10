@@ -1,343 +1,270 @@
 # Extensions & Vault
 
-# Extensions & Vault Module
+# Extensions & Vault (`librefang-extensions`)
 
 ## Purpose
 
-`librefang-extensions` provides the infrastructure for managing MCP server integrations, encrypted credential storage, and runtime health monitoring. It bridges the gap between the upstream MCP server registry (a set of TOML templates) and the running kernel by resolving catalog entries into live `McpServerConfigEntry` values, provisioning their credentials, and tracking their health.
+`librefang-extensions` manages everything related to connecting LibreFang to external services: discovering MCP server templates, securely storing the credentials those services require, monitoring their health, and installing them into the user's config. It owns no side effects beyond disk I/O for the vault and `.env` files — the kernel, CLI, and API layer drive all writes.
 
-Every installed MCP server is an `[[mcp_servers]]` entry in `~/.librefang/config.toml`. An optional `template_id` field links it back to the catalog entry it originated from.
+All installed MCP servers are stored as `[[mcp_servers]]` entries in `~/.librefang/config.toml`, each with an optional `template_id` linking back to the catalog entry it came from.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    subgraph "Template Layer"
-        REG["Upstream Registry<br/>(librefang-runtime::registry_sync)"]
-        CAT["McpCatalog<br/>~/.librefang/mcp/catalog/"]
+    subgraph "Credential Sources"
+        V["Vault<br/>(vault.enc)"]
+        DE[".env file"]
+        EV["Process env vars"]
+        IP["Interactive prompt"]
     end
 
-    subgraph "Installation"
-        INST["install_integration()"]
-    end
-
-    subgraph "Credential Layer"
-        CR["CredentialResolver"]
-        V["CredentialVault<br/>~/.librefang/vault.enc"]
-        DE["dotenv module<br/>~/.librefang/.env"]
-        ENV["Process Environment"]
+    subgraph "Templates & Install"
+        CAT["McpCatalog<br/>(catalog/*.toml)"]
+        INST["Installer"]
     end
 
     subgraph "Runtime"
+        CR["CredentialResolver"]
         HM["HealthMonitor<br/>(DashMap)"]
-        OA["OAuth PKCE<br/>(localhost callback)"]
-        HC["http_client<br/>(TLS + timeouts)"]
+        OA["OAuth PKCE"]
+        DT["dotenv loader"]
     end
 
-    subgraph "Consumers"
-        K["librefang-kernel"]
-        API["librefang-api"]
-        RT["librefang-runtime"]
-    end
+    CR --> V
+    CR --> DE
+    CR --> EV
+    CR --> IP
+    INST --> CAT
+    INST --> CR
+    DT --> V
+    DT --> DE
 
-    REG -->|syncs to disk| CAT
-    CAT -->|template lookup| INST
-    INST -->|writes| CR
-    CR -->|tries in order| V
-    CR -->|tries in order| DE
-    CR -->|tries in order| ENV
-    INST -->|returns McpServerConfigEntry| K
-    DE -->|loads into| ENV
-    V -->|AES-256-GCM| K
-    HM -->|tracks status| K
-    OA -->|stores tokens in| V
-    HC -->|used by| OA
-    K -->|vault_get / vault_set| V
-    API -->|dashboard_login| V
-    RT -->|exists check| V
+    KERNEL["Kernel / API / CLI"] --> INST
+    KERNEL --> HM
+    KERNEL --> CR
+    KERNEL --> OA
 ```
-
-## Core Types (`lib.rs`)
-
-The crate root defines the shared vocabulary used across all submodules:
-
-- **`McpCatalogEntry`** — A bundled MCP server template. Contains id, name, transport config, required environment variables, optional OAuth template, health check config, tags, i18n overrides, and setup instructions. Deserialized from TOML files in the catalog directory.
-- **`McpCategory`** — Classification enum: `DevTools`, `Productivity`, `Communication`, `Data`, `Cloud`, `AI`.
-- **`McpStatus`** — Lifecycle state: `Ready`, `Setup` (missing credentials), `Available` (catalog-only), `Error(String)`, `Disabled`.
-- **`McpCatalogTransport`** — How to launch the server: `Stdio { command, args }`, `Sse { url }`, or `Http { url }`.
-- **`McpCatalogRequiredEnv`** — Describes a required credential: env var name, human label, help text, secret flag, and optional URL to obtain the key.
-- **`OAuthTemplate`** — OAuth2 provider config template with auth/token URLs and scopes.
-- **`ExtensionError`** — Error enum covering `NotFound`, `VaultLocked`, `VaultKeyMismatch`, `OAuth`, `Io`, etc.
 
 ---
 
-## MCP Catalog (`catalog.rs`)
+## Key Components
 
-An in-memory, read-only view of all TOML template files under `~/.librefang/mcp/catalog/`. Templates are refreshed from the upstream registry by `librefang_runtime::registry_sync`.
+### Credential Vault (`vault.rs`)
 
-### File Layout
+AES-256-GCM encrypted secret storage at `~/.librefang/vault.enc`. The vault provides at-rest encryption with path-bound AAD (additional authenticated data) so a ciphertext cannot be moved between file paths.
 
-Two on-disk layouts are supported:
+**Master key resolution** (in priority order):
 
-| Layout | Pattern | ID Source |
-|--------|---------|-----------|
-| Flat file | `<id>.toml` | Filename minus extension |
-| Directory | `<id>/MCP.toml` | Directory name |
+1. `LIBREFANG_VAULT_KEY` environment variable
+2. OS keyring (macOS Keychain / Windows Credential Manager / Linux Secret Service via `libsecret`)
+3. File-based fallback at `<data_local_dir>/librefang/.keyring` — AES-256-GCM wrapped with an Argon2id key derived from a machine fingerprint
 
-`McpCatalog::load()` scans the catalog directory, parses every valid entry, and rebuilds the internal `HashMap<String, McpCatalogEntry>`. A full reload clears existing entries first so deleted files don't linger.
+On macOS, the OS keyring is **opt-in** by default because the Keychain ACL is bound to the per-binary code signature — every `cargo build` invalidates the ACL and triggers a re-authorization prompt. Set `LIBREFANG_VAULT_NO_KEYRING=false` or configure `use_os_keyring: true` in config to override.
 
-### Key Methods
+**Key operations:**
 
 | Method | Description |
-|--------|-------------|
-| `McpCatalog::new(home_dir)` | Create an empty catalog rooted at `home_dir/mcp/catalog/` |
-| `load(&mut self, home_dir)` | Full reload from disk; returns count of entries parsed |
-| `get(id)` | Look up a single entry by ID |
-| `list()` | All entries sorted by ID |
-| `list_by_category(category)` | Filter by `McpCategory` |
-| `search(query)` | Case-insensitive search across id, name, description, and tags |
+|---|---|
+| `CredentialVault::new(path)` | Create a locked vault handle |
+| `init()` | Generate a master key, store it, create an empty vault |
+| `init_with_key(key)` | Initialize with an explicit 32-byte key (testing/programmatic) |
+| `unlock()` | Decrypt and load entries using the resolved master key |
+| `unlock_with_key(key)` | Unlock with an explicit key |
+| `get(key)` / `set(key, value)` / `remove(key)` | CRUD on secrets |
+| `rewrap_with_new_key(new_key)` | Re-encrypt the entire vault under a new master key |
+| `verify_or_install_sentinel()` | Validate the startup sentinel (#3651) |
 
----
+**Startup Sentinel (#3651):** Every vault contains a reserved `__sentinel__` key with a known plaintext value (`librefang-vault-sentinel-v1`). After `unlock()`, the boot path calls `verify_or_install_sentinel()` — if the sentinel decrypts to the wrong value, the daemon refuses to start with `VaultKeyMismatch`. This catches the case where `LIBREFANG_VAULT_KEY` points to the wrong key before any credential is silently lost. The sentinel key is write-protected: `set()` and `remove()` reject it.
 
-## Credential Vault (`vault.rs`)
+**On-disk format:** `OFV1` magic header + JSON with `version`, `salt`, `nonce`, `ciphertext` (all base64), and `schema_version`. Schema version 0 uses path-only AAD (legacy compat); version 1 prepends the schema version as little-endian bytes to the AAD. Writes are atomic via `<path>.tmp` + `fsync` + `rename`, created with mode 0600.
 
-AES-256-GCM encrypted secret storage at `~/.librefang/vault.enc`. The vault provides the primary credential store for API keys, OAuth tokens, and other secrets.
+**Keyring file migration:** Version 2 keyring files (raw `random_id` fingerprint) are auto-migrated to version 3 (SHA-512 mixed fingerprint) on first load.
 
-### Master Key Resolution
+### Credential Resolver (`credentials.rs`)
 
-The master key is resolved in priority order:
-
-1. **Cached key** — If the vault instance was previously unlocked, the key is reused from memory.
-2. **Environment variable** — `LIBREFANG_VAULT_KEY` (base64-encoded 32-byte key). Takes priority over keyring to survive re-opens in CI/headless.
-3. **OS keyring** — Windows Credential Manager, macOS Keychain, or Linux Secret Service (via the `keyring` crate). On macOS this is **disabled by default** because the Keychain ACL is per-binary-signature; every `cargo build` invalidates it and triggers a prompt.
-4. **File fallback** — `<data_local_dir>/librefang/.keyring` (mode 0600, AES-256-GCM wrapped with an Argon2id-derived machine-fingerprint key). Used when OS keyring is unavailable or disabled.
-
-The `LIBREFANG_VAULT_NO_KEYRING=1` env var forces the file-based fallback regardless of config.
-
-### Encryption Scheme
-
-```
-master_key (32 bytes)
-  → Argon2id(master_key, salt) → derived_key (32 bytes)
-    → AES-256-GCM(derived_key, nonce, plaintext, AAD) → ciphertext
-```
-
-- **KDF**: Argon2id with 256 MB memory, 3 iterations, degree 4 parallelism.
-- **AAD**: `schema_version_le_bytes || vault_path_bytes` — binds the ciphertext to both the file path and the schema version, preventing file-swap attacks.
-- **On-disk format**: `OFV1` magic header + JSON with base64-encoded salt, nonce, and ciphertext.
-- **File permissions**: 0600 enforced on Unix; atomic write via `.tmp` + `fsync` + `rename`.
-
-### Startup Sentinel (#3651)
-
-Every vault contains a reserved key `__sentinel__` with value `librefang-vault-sentinel-v1`. Written at `init()` time and verified on every `unlock()` via `verify_or_install_sentinel()`. If the sentinel is present but doesn't match, the daemon refuses to boot with `VaultKeyMismatch` — this catches the case where `LIBREFANG_VAULT_KEY` points to a wrong key without silently losing credentials.
-
-The sentinel key is excluded from `list_keys()` and cannot be written or removed by external callers.
-
-### Key Operations
-
-| Method | Description |
-|--------|-------------|
-| `init()` | Generate master key, store in keyring, create empty vault with sentinel |
-| `init_with_key(key)` | Same but with an explicit 32-byte key |
-| `unlock()` | Load and decrypt vault using resolved master key |
-| `unlock_with_key(key)` | Same but with an explicit key |
-| `get(key)` | Retrieve a `Zeroizing<String>` value |
-| `set(key, value)` | Store a secret; rejects the reserved sentinel key |
-| `remove(key)` | Delete a secret; rejects the sentinel key |
-| `list_keys()` | All user-visible keys (sentinel excluded) |
-| `list_keys_including_internal()` | All keys including sentinel (for key rotation) |
-| `iter_all_entries()` | Iterator over all (key, value) pairs including sentinel |
-| `rewrap_with_new_key(new_key)` | Re-encrypt entire vault under a new master key |
-| `verify_or_install_sentinel()` | Ensure sentinel is present and matches; backfill on legacy vaults |
-| `exists()` | Check if `vault.enc` file is present |
-
-### Key Rotation Flow
-
-`rewrap_with_new_key()` re-encrypts all entries (including the sentinel) under the provided key. The caller is responsible for persisting the new key. Used by `librefang vault rotate-key`.
-
----
-
-## Credential Resolution (`credentials.rs`)
-
-`CredentialResolver` implements a priority chain for resolving secrets at runtime.
-
-### Resolution Order
+Resolves secrets from multiple sources in a fixed priority chain:
 
 1. **Encrypted vault** (`vault.enc`) — if unlocked
-2. **Dotenv file** (`~/.librefang/.env`) — boot-time snapshot
-3. **Process environment variable** — `std::env::var`
-4. **Interactive prompt** — CLI only, when `with_interactive(true)` is set
+2. **Dotenv file** (`~/.librefang/.env`) — loaded at construction time
+3. **Process environment variables**
+4. **Interactive prompt** — CLI only, opt-in via `.with_interactive(true)`
 
-All resolved values are wrapped in `Zeroizing<String>` to minimize secret lifetime in memory.
+The resolver wraps the vault through a `VaultSource` enum that is either `Owned` (standalone vault for CLI/tests) or `Shared` (an `Arc<RwLock<CredentialVault>>` from the kernel's cached vault handle). The shared path avoids re-running Argon2id KDF on every API request.
 
-### Key Methods
+```rust
+// Short-lived (CLI, tests)
+let resolver = CredentialResolver::new(Some(vault), Some(dotenv_path));
 
-| Method | Description |
-|--------|-------------|
-| `new(vault, dotenv_path)` | Construct with optional vault and `.env` path |
-| `with_interactive(bool)` | Enable/disable terminal prompting as last resort |
-| `resolve(key)` | Try all sources in order, return first match |
-| `has_credential(key)` | Check availability without prompting |
-| `resolve_all(keys)` | Resolve multiple keys into a `HashMap` |
-| `missing_credentials(keys)` | Return which keys from a list have no source |
-| `store_in_vault(key, value)` | Write a credential to the vault |
-| `clear_dotenv_cache(key)` | Evict a stale entry from the boot-time `.env` snapshot |
+// Long-lived (API handlers) — reuses the kernel's cached vault
+let resolver = CredentialResolver::with_vault_handle(
+    Some(kernel_vault_handle),
+    Some(dotenv_path),
+);
+```
 
----
+**Key methods:**
 
-## Dotenv Loader (`dotenv.rs`)
+- `resolve(key)` → `Option<Zeroizing<String>>` — try all sources in order
+- `resolve_all(&[keys])` → `HashMap<String, Zeroizing<String>>` — batch resolve
+- `missing_credentials(&[keys])` → `Vec<String>` — identify gaps
+- `has_credential(key)` → `bool` — check without prompting
+- `store_in_vault(key, value)` — write-through to the vault
+- `clear_dotenv_cache(key)` — evict a stale dotenv entry after dashboard deletion
 
-A shared `.env` file loader used by the CLI, desktop app, and kernel. Call `load_dotenv()` from synchronous `main()` **before** spawning any tokio runtime — `std::env::set_var` is UB in Rust 1.80+ once other threads exist.
+### Dotenv Loader (`dotenv.rs`)
 
-### Priority (highest first)
+Loads secrets into the process environment from multiple files, called once from synchronous `main()` before the tokio runtime starts (required because `std::env::set_var` is UB once other threads exist).
 
-1. System environment variables (already present) — **never overridden**
+**Load priority** (highest first — earlier sources never override later ones):
+
+1. Existing system environment variables
 2. Credential vault (`vault.enc`)
 3. `~/.librefang/.env`
 4. `~/.librefang/secrets.env`
 
-### File Format
+The `load_dotenv()` function is gated by a `Once` guard — repeated calls are no-ops.
 
-Standard `KEY=VALUE` lines. Supports:
-- Comments (`#`) and blank lines
-- Double-quoted values with escape sequences (`\\`, `\n`, `\r`, `\"`)
-- Single-quoted values (literal, no escaping)
-- Surrounding whitespace trimming
+**File management functions:**
 
-### Atomic Writes
+- `save_env_key(key, value)` — upsert a key in `.env` with atomic write (PID-uniquified temp file, 0600 at creation time, `fsync` + `rename`)
+- `remove_env_key(key)` — delete a key from `.env`
+- `list_env_keys()` — enumerate key names (no values)
+- `escape_env_value` / `unescape_env_value` — handle `\`, `\n`, `\r`, `"` inside double-quoted values; single-quoted values are literal
 
-`save_env_key()` and `remove_env_key()` modify `~/.librefang/.env` using an atomic write pattern:
+### MCP Catalog (`catalog.rs`)
 
-1. Write to `<path>.tmp.<pid>` with mode 0600 (created `create_new` so no TOCTOU race)
-2. `fsync` + `sync_all`
-3. `rename` over the target file
+Read-only in-memory index of MCP server templates stored at `~/.librefang/mcp/catalog/`. Templates are refreshed from the upstream `librefang-registry` by `librefang_runtime::registry_sync`.
 
-This prevents three classes of corruption: mid-write crashes leaving a truncated file, default-perms TOCTOU windows, and concurrent saves colliding on the same staging path.
+**Two valid layouts:**
 
----
+- **Flat:** `<id>.toml` — ID from filename minus extension
+- **Directory:** `<id>/MCP.toml` — for multi-file MCP packages, ID from directory name
 
-## Health Monitor (`health.rs`)
+`load()` performs a full reload — existing entries are cleared before reading disk so deleted templates don't linger.
 
-Tracks the status of configured MCP servers with auto-reconnect support.
+**Query methods:**
 
-### `McpHealth` Record
+- `get(id)` — lookup by ID
+- `list()` — all entries sorted by ID
+- `list_by_category(category)` — filter by `McpCategory` (DevTools, etc.)
+- `search(query)` — fuzzy match against ID, name, description, and tags
 
-| Field | Description |
-|-------|-------------|
-| `status` | Current `McpStatus` |
-| `tool_count` | Number of tools available |
-| `last_ok` | Timestamp of last successful health check |
-| `last_error` | Most recent error message |
-| `consecutive_failures` | Unbroken failure count |
-| `reconnecting` / `reconnect_attempts` | Auto-reconnect state |
+### Health Monitor (`health.rs`)
 
-### `HealthMonitor`
+Tracks the operational status of configured MCP servers using a `DashMap<String, McpHealth>` for lock-free concurrent access from background health-check tasks and foreground API handlers.
 
-Backed by a `DashMap<String, McpHealth>` for lock-free concurrent access from background health-check tasks. Key methods:
+**`McpHealth` fields:** `status` (Ready/Error/Available/Setup), `tool_count`, `last_ok`, `last_error`, `consecutive_failures`, `reconnecting`, `reconnect_attempts`, `connected_since`.
 
-- **`register(id)`** / **`unregister(id)`** — Add/remove servers from monitoring
-- **`report_ok(id, tool_count)`** — Mark healthy; resets failure counters
-- **`report_error(id, error)`** — Record a failure; increments `consecutive_failures`
-- **`should_reconnect(id)`** — Returns true if status is `Error` and attempts remain
-- **`backoff_duration(attempt)`** — Exponential backoff: 5s → 10s → 20s → ... → capped at 300s
+**Auto-reconnect** uses exponential backoff: 5s → 10s → 20s → 40s → ... capped at 300s (configurable via `max_backoff_secs`), with a maximum of 10 attempts. The monitor only suggests reconnection via `should_reconnect()` — the actual reconnect logic lives in the kernel.
 
-Default config: 60s check interval, 10 max reconnect attempts, 300s max backoff.
+```rust
+let monitor = HealthMonitor::new(HealthMonitorConfig::default());
+monitor.register("github");
+monitor.report_ok("github", 12);
+let should = monitor.should_reconnect("github"); // false — healthy
+```
 
----
+### OAuth2 PKCE (`oauth.rs`)
 
-## OAuth2 PKCE (`oauth.rs`)
+Implements the complete Authorization Code + PKCE flow for Google, GitHub, Microsoft, and Slack. Each flow:
 
-Implements the full OAuth2 Authorization Code flow with PKCE for Google, GitHub, Microsoft, and Slack.
+1. Generates a PKCE code verifier/challenge pair (S256)
+2. Binds an ephemeral localhost HTTP server to a random port
+3. Constructs an HMAC-signed state token binding the flow to `(auth_url, client_id, redirect_uri, nonce, expiry)`
+4. Opens the browser to the authorization URL
+5. Waits for the callback (5-minute timeout)
+6. Exchanges the authorization code for tokens
 
-### Flow
+**State token security (#3791):** The state is `base64url(json_payload).base64url(hmac)`. The HMAC key is a per-process random 32-byte value (`OnceLock`), so a daemon restart invalidates any in-flight flows. Verification checks the HMAC in constant time, confirms the payload hasn't expired (10-minute TTL), and validates that the `provider`, `client_id`, and `redirect_uri` match the expected values. Only the first valid callback wins; subsequent hits get a "Gone" response.
 
-1. Generate random PKCE verifier + SHA-256 challenge
-2. Bind a temporary localhost HTTP server to `127.0.0.1:0` (random port)
-3. Build HMAC-signed state token binding the flow to `(provider, client_id, redirect_uri, nonce, expiry)`
-4. Open the browser to the authorization URL
-5. Wait for callback with authorization code (5-minute timeout)
-6. Exchange code for tokens via the token endpoint
+Client IDs are resolved from defaults (embedded placeholders) with config-file overrides via `resolve_client_ids()`.
 
-### State Token Security (#3791)
+### HTTP Client (`http_client.rs`)
 
-State tokens are HMAC-SHA256-signed and contain:
-- `provider` — auth URL of the OAuth template
-- `client_id` — OAuth app registration
-- `redirect_uri` — loopback listener address
-- `nonce` — 16-byte random value
-- `exp` — absolute UNIX timestamp (10-minute TTL)
+A shared `reqwest::ClientBuilder` configured with:
 
-Verification rejects mismatched providers, client IDs, redirect URIs, expired tokens, and invalid signatures. The HMAC key is re-seeded on every daemon restart, invalidating any in-flight flows from a prior process.
+- Native CA roots (via `rustls_native_certs`) with `webpki_roots` fallback
+- `aws_lc_rs` TLS provider
+- 10-second connect timeout, 30-second read timeout
+- Maximum 5 redirects
 
-### Client ID Resolution
+Use `client_builder()` for custom configuration or `new_client()` for the default built client.
 
-`resolve_client_ids(config)` merges defaults with config overrides. Default client IDs are safe to embed — PKCE doesn't require a client secret.
+### Installer (`installer.rs`)
 
----
+Pure transforms from catalog templates to `McpServerConfigEntry` values. No side effects — the caller decides when to persist the result.
 
-## Installer (`installer.rs`)
+**`install_integration(catalog, resolver, id, provided_keys)`** pipeline:
 
-Pure transforms from catalog entries into `McpServerConfigEntry` values. **No side effects** — callers decide when to persist the result.
+1. Look up the template by ID in the catalog
+2. Store any user-provided credentials in the vault (best-effort)
+3. Check which required env vars are still missing
+4. Convert the template transport into a `McpTransportEntry`
+5. Return an `InstallResult` with status (`Ready` if all creds present, `Setup` if missing), the server entry, and a human-readable message
 
-### `install_integration(catalog, resolver, id, provided_keys)`
+**`catalog_entry_to_mcp_server(entry)`** maps transport types:
 
-1. Look up the catalog template by ID (returns `NotFound` if missing)
-2. Store provided credentials in the vault (best effort — warns on failure)
-3. Check which required env vars still lack a credential source
-4. Convert the template transport + env into a `McpServerConfigEntry`
-5. Return `InstallResult` with status (`Ready` or `Setup`), missing credential list, and user-facing message
+- `McpCatalogTransport::Stdio { command, args }` → `McpTransportEntry::Stdio`
+- `McpCatalogTransport::Sse { url }` → `McpTransportEntry::Sse`
+- `McpCatalogTransport::Http { url }` → `McpTransportEntry::Http`
 
-The returned `InstallResult.server` has `template_id` set to the catalog entry ID so the kernel/dashboard can trace its origin.
+The resulting entry gets `template_id` set to the catalog ID so the dashboard can trace it back.
 
-### `catalog_entry_to_mcp_server(entry)`
-
-Maps `McpCatalogTransport` → `McpTransportEntry`, collects required env var names, and optionally converts `OAuthTemplate` → `McpOAuthConfig`.
-
-### Scaffolding
-
-- `scaffold_integration(dir)` — Creates a `mcp.toml` template for a custom MCP server
-- `scaffold_skill(dir)` — Creates `skill.toml` + `SKILL.md` for a new custom skill
+**Scaffolding:** `scaffold_integration(dir)` and `scaffold_skill(dir)` generate starter TOML templates for custom MCP servers and skills respectively.
 
 ---
 
-## HTTP Client (`http_client.rs`)
+## Integration Points
 
-Shared `reqwest::Client` builder with:
+### Daemon Boot Sequence
 
-- **TLS**: `rustls` with native CA roots first; falls back to bundled `webpki-roots` if none found
-- **Connect timeout**: 10 seconds
-- **Read timeout**: 30 seconds
-- **Redirect policy**: Max 5 redirects (prevents SSRF amplification)
+The vault is central to daemon startup. The typical flow:
 
-Use `new_client()` for a ready-built client or `client_builder()` to customize further.
+1. `dotenv::load_dotenv()` runs from synchronous `main()` — injects vault secrets + `.env` into process env
+2. `run_daemon()` → `check_bind_auth_safety()` → `resolve_dashboard_credential()` → `vault.unlock()`
+3. After unlock, `verify_or_install_sentinel()` validates the key
+4. The kernel caches the unlocked vault as an `Arc<RwLock<CredentialVault>>` for API request handlers
+
+### API Request Path
+
+API handlers (terminal operations, skill routes) call `resolve_dashboard_credential()` which reads from the cached vault. The `CredentialResolver` with `VaultSource::Shared` routes through this cache to avoid Argon2id on every request.
+
+### TUI / CLI
+
+The init wizard (`tui/screens/init_wizard.rs`) and free provider guide (`tui/screens/free_provider_guide.rs`) call `save_env_key()` directly. The CLI `vault rotate-key` subcommand uses `decode_master_key()`, `init_with_key()`, `rewrap_with_new_key()`, and `verify_or_install_sentinel()`.
 
 ---
 
-## Integration with the Rest of the Codebase
+## Error Handling
 
-### Kernel (`librefang-kernel`)
+All operations return `ExtensionResult<T>` (`Result<T, ExtensionError>`). Key error variants:
 
-The kernel's `mcp_oauth_provider` module is the primary consumer of the vault:
+| Variant | Meaning |
+|---|---|
+| `NotFound(id)` | Catalog entry doesn't exist |
+| `VaultLocked` | Vault hasn't been unlocked yet |
+| `VaultKeyMismatch { hint }` | Sentinel failed — wrong master key |
+| `Vault(msg)` | Encryption/decryption/IO failure |
+| `OAuth(msg)` | PKCE flow failure |
+| `Io(err)` | Filesystem errors |
 
-- **`vault_get`** → `CredentialVault::unlock()` → `resolve_master_key()` → `get()`
-- **`vault_set`** → `CredentialVault::exists()` → `init()` → `unlock()` → `set()`
-- **`vault_remove`** → `CredentialVault::exists()` → `remove()`
+---
 
-These are called during TOTP setup, auth callbacks, dashboard login, and OAuth token persistence.
+## File Layout
 
-### Runtime (`librefang-runtime`)
+```
+~/.librefang/
+├── vault.enc              # AES-256-GCM encrypted credentials
+├── .env                   # User-managed secrets (0600)
+├── secrets.env            # Additional secrets (0600)
+├── config.toml            # [[mcp_servers]] entries live here
+└── mcp/catalog/           # Template files
+    ├── github.toml        # Flat layout
+    ├── slack.toml
+    └── my-server/         # Directory layout
+        └── MCP.toml
 
-Uses `CredentialVault::exists()` as a general "is LibreFang initialized?" check across the context engine, checkpoint manager, browser discovery, artifact store, and catalog sync.
-
-### API (`librefang-api`)
-
-The `dashboard_login` endpoint resolves the dashboard credential by unlocking the vault and comparing the stored value — this flows through `unlock()` → `resolve_master_key()` → `decode_master_key()`.
-
-### Boot Sequence
-
-A typical daemon startup invokes:
-
-1. `dotenv::load_dotenv()` — injects vault + `.env` secrets into the process environment (sync, before tokio)
-2. `CredentialVault::init_with_config(use_os_keyring)` — sets the process-global keyring preference
-3. `CredentialVault::unlock()` — decrypts the vault
-4. `CredentialVault::verify_or_install_sentinel()` — validates the correct key was used
+<data_local_dir>/librefang/
+└── .keyring               # File-based keyring fallback (0600)
+```

@@ -1,88 +1,57 @@
 # Other — librefang-api-dashboard
 
-# LibreFang API Dashboard
+# LibreFang Dashboard
 
 ## Overview
 
-The dashboard is a single-page application providing the management interface for the LibreFang autonomous agent operating system. It is built with React 19, TanStack Router v1 for routing, and TanStack Query v5 for server-state management. The entry point is `src/main.tsx`; route pages live in `src/pages/`.
+The LibreFang Dashboard is a single-page application built with **React 19**, **TanStack Router v1**, and **TanStack Query v5**. It provides a management interface for the LibreFang autonomous agent operating system — covering agents, sessions, approvals, channels, workflows, scheduling, analytics, memory, and runtime configuration.
 
-The application supports 17+ domain areas including agents, sessions, approvals, channels, providers, skills, hands, workflows, scheduling, goals, analytics, memory, runtime, and more.
+- **Entry point**: `src/main.tsx`
+- **Pages**: `src/pages/`
+- **Package manager**: pnpm 10.33.0
+- **Build tool**: Vite 8
 
 ## Architecture
 
 ```mermaid
 graph TD
-    subgraph "Browser"
-        P["Pages<br/>src/pages/"]
-        C["UI Components<br/>src/components/ui/"]
-        Q["Query Hooks<br/>src/lib/queries/"]
-        M["Mutation Hooks<br/>src/lib/mutations/"]
-        K["Key Factories<br/>src/lib/queries/keys.ts"]
-        HTTP["HTTP Client<br/>src/lib/http/"]
-        API["Raw API Calls<br/>src/api.ts"]
-    end
-
-    subgraph "Backend"
-        REST["REST API<br/>/api/*"]
-    end
-
-    P --> C
-    P --> Q
-    P --> M
-    Q --> K
-    Q --> HTTP
-    M --> HTTP
-    M --> K
-    HTTP --> API
-    API -->|fetch| REST
+    Pages["Pages (src/pages/)"] --> QueryHooks["Query Hooks (src/lib/queries/)"]
+    Pages --> MutationHooks["Mutation Hooks (src/lib/mutations/)"]
+    QueryHooks --> KeyFactories["Key Factories (keys.ts)"]
+    QueryHooks --> HttpClient["HTTP Client (src/lib/http/client.ts)"]
+    MutationHooks --> HttpClient
+    HttpClient --> ApiLayer["Raw API (src/api.ts)"]
+    ApiLayer --> Backend["LibreFang API Server"]
+    Pages --> Components["Shared Components (src/components/)"]
+    Components --> DrawerStore["Drawer Store (Zustand)"]
 ```
 
-**Data flow rule**: Pages and components never call `fetch()` or `api.*` directly. All data access goes through the hooks layer (`src/lib/queries/` and `src/lib/mutations/`). The only exceptions are streaming/SSE endpoints, imperative terminal control channels, and one-shot probes that must not be cached — these are kept narrow with inline comments explaining the exception.
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Framework | React 19 |
-| Routing | TanStack Router v1 |
-| Server state | TanStack Query v5 |
-| Client state | Zustand |
-| Styling | Tailwind CSS v4 |
-| Animations | Motion (Framer Motion) |
-| Markdown rendering | react-markdown + remark-gfm + remark-math + rehype-katex |
-| Charts | Recharts |
-| Workflow canvas | XYFlow (React) |
-| Terminal | xterm.js |
-| TOML handling | smol-toml |
-| i18n | i18next + react-i18next |
-| Command palette | cmdk |
-| Build | Vite 8 |
-| Type generation | openapi-typescript |
-| Testing | Vitest + Testing Library + Playwright |
-| Package manager | pnpm 10 |
-
 ## Data Layer
+
+All data access from pages and components goes through the shared hooks layer. **Never call `fetch()` or `api.*` directly** inside a page or component file (except for documented exceptions).
 
 ### Directory Layout
 
 ```
 src/lib/
   http/
-    client.ts     # Thin wrapper over src/api.ts + typed re-exports
-    errors.ts     # ApiError class used by the wrapper
+    client.ts       # Thin wrapper over src/api.ts + typed re-exports
+    errors.ts       # ApiError class used by the wrapper
   queries/
-    keys.ts       # All query-key factories
-    keys.test.ts  # Smoke tests for key anchoring
-    <domain>.ts   # queryOptions + useXxx hooks per domain
+    keys.ts         # All query-key factories
+    keys.test.ts    # Smoke tests for key factories
+    <domain>.ts     # queryOptions + useXxx hooks per domain
   mutations/
-    <domain>.ts   # useXxx mutation hooks with cache invalidation
+    <domain>.ts     # useXxx mutation hooks with cache invalidation
 ```
 
-Current domain files: `agents`, `analytics`, `approvals`, `channels`, `config`, `goals`, `hands`, `mcp`, `media`, `memory`, `models`, `network`, `overview`, `plugins`, `providers`, `runtime`, `schedules`, `sessions`, `skills`, `workflows`.
+### Current Domains
+
+`agents`, `analytics`, `approvals`, `channels`, `config`, `goals`, `hands`, `mcp`, `media`, `memory`, `models`, `network`, `overview`, `plugins`, `providers`, `runtime`, `schedules`, `sessions`, `skills`, `workflows`.
 
 ### Query Key Factories
 
-All query keys are defined in `src/lib/queries/keys.ts` using a hierarchical pattern. Every sub-key is anchored to the domain's `all` key so that broad invalidation works correctly:
+Every domain defines a hierarchical key factory in `src/lib/queries/keys.ts`. Sub-keys are always anchored to `[...fooKeys.all]` so broad invalidation works correctly:
 
 ```ts
 export const fooKeys = {
@@ -94,11 +63,9 @@ export const fooKeys = {
 };
 ```
 
-Never construct a `queryKey` inline — always call the factory. Never subscribe to the same endpoint with a different key for a subset; use `select` on the shared `queryOptions` instead.
-
 ### Query Hooks
 
-Each domain file exports a `queryOptions` factory and a corresponding `useXxx` hook:
+Each domain file exports a `queryOptions` factory and a `useXxx` hook:
 
 ```ts
 export const fooQueryOptions = (filters?: FooFilters) =>
@@ -119,196 +86,191 @@ export function useFoo(filters?: FooFilters, options: UseFooOptions = {}) {
 }
 ```
 
-Hooks set sensible defaults (`staleTime`, `refetchInterval`) so consumers without special needs inherit one policy. Call sites can override via an optional `options` argument for per-page needs (bell-icon polls fast, bulk pages poll slowly, tabs gate by active tab). Every call-site override carries a short inline comment explaining why.
+Hooks accept an optional `options` argument (`enabled`, `staleTime`, `refetchInterval`) so call sites can override per-page needs. Every override should have a short inline comment explaining why.
 
 ### Mutation Hooks
 
-Every write operation **must** invalidate relevant cache keys, and invalidation **must** live inside the hook. Call sites may additionally attach `onSuccess`/`onError` for UI feedback (toasts, modal dismissal), which is orthogonal to invalidation.
+Every write operation **must invalidate** the relevant cache keys. Invalidation **must live inside the hook**, never at the call site.
 
-**Invalidate the narrowest set that covers what changed:**
+Use the narrowest key set that covers what actually changed:
 
-| Scope | When to use | Example |
-|-------|-------------|---------|
-| `fooKeys.detail(id)` + `fooKeys.lists()` | Per-id update where the list projection also changes (default template) | `usePatchAgentConfig`, `useUpdateFoo` |
-| `fooKeys.lists()` | List-shape change with no existing detail to refresh | `useCreateFoo`, `useDeleteFoo` |
-| `fooKeys.detail(id)` or nested sub-key | Change genuinely scoped to one detail or nested collection | `useUpdateFooSettings` |
-| `fooKeys.all` | Bulk import / cache reset / cross-cutting schema migration | `useImportFoos` |
+| Scenario | Keys to invalidate |
+|---|---|
+| Per-id update where list projection changes (patch, rename) | `fooKeys.lists()` + `fooKeys.detail(id)` |
+| List-shape change, no existing detail (create, delete) | `fooKeys.lists()` |
+| Scoped to one detail or nested sub-key, list unaffected | `fooKeys.detail(id)` or nested key |
+| Bulk import / cache reset | `fooKeys.all` |
 
-Invalidating `fooKeys.all` when N items are cached refetches the list plus every cached sub-key (`detail(id)`, nested keys) for each of the N items. Use it only when that is the desired effect.
+Call sites may attach per-call `onSuccess`/`onError` for UI feedback (toasts, modal dismissal) — that is orthogonal to invalidation.
 
-## Adding a New Endpoint
+### Adding a New Endpoint
 
-1. **Raw call**: Add in `src/api.ts` (or re-export via `src/lib/http/client.ts`).
-2. **Key factory**: If a new domain, add a factory in `src/lib/queries/keys.ts` following the hierarchical pattern.
-3. **Query hook**: Add `queryOptions` + `useXxx` in `src/lib/queries/<domain>.ts`.
-4. **Mutation hook**: Add `useXxx` in `src/lib/mutations/<domain>.ts` with appropriate invalidation.
-5. **Tests**: Update `src/lib/queries/keys.test.ts` — at minimum add the factory to the "all factories exist" list; add anchoring tests for non-trivial factories.
+1. Add the raw call in `src/api.ts` (or re-export via `src/lib/http/client.ts`).
+2. Add a key factory in `src/lib/queries/keys.ts` following the hierarchical pattern.
+3. Add query hooks in `src/lib/queries/<domain>.ts`.
+4. Add mutation hooks in `src/lib/mutations/<domain>.ts` with appropriate invalidation.
+5. Update `src/lib/queries/keys.test.ts` — add the factory to the "all factories exist" list, plus anchoring tests for non-trivial factories.
+
+### Consuming in Pages
+
+```tsx
+import { useFoo } from "../lib/queries/foo";
+import { useCreateFoo } from "../lib/mutations/foo";
+
+function FooPage() {
+  const { data, isLoading } = useFoo({ active: true });
+  const createFoo = useCreateFoo();
+}
+```
+
+Never build a `queryKey` inline — always call the factory. Never subscribe to the same endpoint with a different key just to get a subset; use `select` on the shared `queryOptions`.
+
+### Exceptions (Uncached Data)
+
+Streaming/SSE, imperative fire-and-forget control channels (e.g., terminal window lifecycle in `TerminalTabs.tsx`), and one-shot probes that must not be cached may call `fetch` directly. Keep these narrow and comment why.
 
 ## Authentication
 
-API key tokens are stored in `sessionStorage` (not `localStorage`) under the key `librefang-api-key`. The `setApiKey`/`clearApiKey` helpers in `src/api.ts` manage storage. All API calls include an `Authorization: Bearer <token>` header via `buildHeaders`.
+Authentication tokens are stored in `sessionStorage` under the key `librefang-api-key` (never `localStorage`). The API layer sends tokens as:
 
-For WebSocket connections, `buildAuthenticatedWebSocket` passes the token as a `Sec-WebSocket-Protocol` sub-protocol (`bearer.<token>`), which avoids custom headers that browsers reject on WebSocket handshakes.
+- **HTTP requests**: `Authorization: Bearer <token>` header
+- **WebSocket connections**: `Sec-WebSocket-Protocol: bearer.<token>` sub-protocol
 
-`verifyStoredAuth` probes a protected endpoint — if it returns 401, stale credentials are cleared automatically.
+The `verifyStoredAuth` function probes a protected endpoint and clears stale tokens on 401. The sign-in dialog is shown when the dashboard auth mode is `credentials` (detected via `/api/auth/dashboard-check`).
 
-The sign-in dialog appears when `GET /api/auth/dashboard-check` returns `{ mode: "credentials" }`. The e2e test in `e2e/dashboard.spec.ts` verifies this flow.
+Key functions in `src/api.ts`: `setApiKey`, `verifyStoredAuth`, `buildAuthenticatedWebSocket`.
 
-## UI Components
+## Key Components
 
-### Modal (`src/components/ui/Modal.tsx`)
+### DrawerPanel
 
-Shared modal shell handling focus trapping, escape-to-close, backdrop dismissal, enter/exit animations, and accessibility (`role="dialog"`, `aria-modal`). Three layout variants:
+`src/components/ui/DrawerPanel.tsx` — A global drawer slot backed by a Zustand store (`src/lib/drawerStore.ts`). Only one drawer can be open at a time. Ownership tracking prevents sibling drawers from collateral-closing each other when one transitions from open to closed in the same React commit (e.g., picker → config flow on ProvidersPage/ChannelsPage).
 
-| Variant | Shape | Backdrop | Click-outside | Use case |
-|---------|-------|----------|---------------|----------|
-| `modal` (default) | Centred, bottom-sheet on mobile | Dim + blur | Yes | Standard blocking dialog |
-| `drawer-right` | Right-docked, full height | None | No (Esc + close button only) | Inspector panels where the underlying list stays interactive (Linear/Figma pattern) |
-| `panel-right` | Right-docked, full height | Dim + blur | Yes | Forms/configuration where the user must commit or cancel |
+### MultiSelectCmdk
 
-The drawer variant intentionally leaves Tab unconstrained so keyboard users can navigate back to the underlying page without dismissing the drawer first.
+`src/components/ui/MultiSelectCmdk.tsx` — A combobox-style multi-select built on `cmdk`. Supports chip removal, backspace-to-remove, search filtering, and hides already-selected options from the dropdown.
 
-`Modal` accepts `size` (sm through 7xl), `zIndex`, `hideCloseButton`, `disableBackdropClose`, and `overflowVisible` props.
+### ToolCallsPanel
 
-### ConfirmDialog (`src/components/ui/ConfirmDialog.tsx`)
+`src/components/ui/ToolCallsPanel.tsx` — Displays tool call history for an agent chat session. Shows a summary bar with count, running/error badges, and expands into a modal with per-call detail cards.
 
-Replaces `window.confirm()` with a styled confirmation dialog. Supports a `tone` prop (`"default"` | `"destructive"`). Destructive dialogs require an explicit click (Enter does not confirm). Handles focus trapping and editable-field detection to prevent accidental confirmation when a textarea or input is focused.
+### PromptsExperimentsModal
 
-### MultiSelectCmdk (`src/components/ui/MultiSelectCmdk.tsx`)
-
-A multi-select combobox built on `cmdk`. Renders selected items as removable chips, supports keyboard Backspace to remove the last chip, filters the dropdown by search text, and hides already-selected options from the dropdown list.
-
-### ToolCallsPanel (`src/components/ui/ToolCallsPanel.tsx`)
-
-Displays a summary bar showing total tool call count, running count, and error count. Clicking opens a modal with individual `ToolCallCard` entries per tool invocation.
+`src/components/PromptsExperimentsModal.tsx` — Tabbed dialog for managing prompt versions and A/B experiments per agent. Uses mutation hooks from `src/lib/mutations/agents.ts` (`useCreatePromptVersion`, `useCreateExperiment`, `useActivatePromptVersion`, `useStartExperiment`, etc.).
 
 ### DeliveryTargetsEditor
 
-Validates delivery target configurations for scheduled jobs. Supports four target types — `channel`, `webhook`, `local_file`, and `email` — with validation rules:
-- **Webhook**: rejects localhost, loopback IPs, link-local addresses, cloud metadata IPs (169.254.169.254), and `metadata.google.internal` to prevent SSRF.
-- **Local file**: rejects absolute paths and path traversal (`..`).
-- **Channel**: requires `channel_type` and `recipient`.
-- **Email**: requires `to` address.
+`src/components/ui/DeliveryTargetsEditor.tsx` — Form editor for scheduler delivery targets (channel, webhook, local_file, email). Includes SSRF validation for webhook URLs (blocks localhost, loopback, link-local, metadata endpoints), path traversal checks for local_file, and strips empty optional fields.
 
-Empty optional fields are stripped before submission to avoid sending `Some("")` to the backend.
+## Utility Libraries
 
-## Library Modules
+### `src/lib/agentManifest.ts`
 
-### Agent Manifest (`src/lib/agentManifest.ts`)
+TOML-based agent manifest parser and serializer using `smol-toml`. Handles:
 
-Handles TOML parsing and serialization for agent configuration files. Provides:
+- **Parsing**: `parseManifestToml(toml)` → structured form + extras (preserves unknown fields)
+- **Serialization**: `serializeManifestForm(form, extras)` → valid TOML
+- **Validation**: `validateManifestForm(form)` → error array
+- **Round-trip safety**: Handles edge cases like exec_policy alias normalization, response_format mutual exclusion with preserved extras, nested-table section scoping, negative/out-of-range integer rejection, and per-fallback-model extra_params preservation.
 
-- `parseManifestToml(toml)` — Parses TOML into a structured `form` + `extras` split. First-class fields (name, model, resources, capabilities, schedule, thinking, autonomous, routing, fallback_models, context_injection, response_format, exec_policy) populate the form; genuinely unknown keys ride along in `extras` so they survive round-trips.
-- `serializeManifestForm(form, extras)` — Serializes back to TOML, merging extras alongside form fields. Handles mutual exclusion (e.g., if the user picks an `exec_policy` shorthand in the form, the old preserved `[exec_policy]` table is dropped to avoid TOML key/table redefinition conflicts).
-- `validateManifestForm(form)` — Returns an array of field names that are missing required values (at minimum: `name`, `model.provider`, `model.model`).
-- `emptyManifestForm()` / `emptyManifestExtras()` — Factory functions for blank state.
+### `src/lib/agentManifestMarkdown.ts`
 
-Key design decisions:
-- Numeric fields stored as strings in the form (to represent empty state) and parsed during serialization, rejecting negatives and values above `MAX_SAFE_INTEGER`.
-- `exec_policy` aliases (`none`, `disabled`, `restricted`, `all`, `unrestricted`) are normalized to canonical forms (`deny`, `allowlist`, `full`).
-- `response_format` with `json_schema` preserves the nested schema body correctly (avoids the naive `stringify().split("\n")[0]` bug).
+Generates human-readable Markdown documentation from a manifest form. Used for agent detail views.
 
-### Agent Manifest Markdown (`src/lib/agentManifestMarkdown.ts`)
+### `src/lib/chat.ts`
 
-`generateManifestMarkdown(form, extras?)` renders a human-readable Markdown summary of an agent configuration. Empty sections are omitted. Includes sections for model, resources (as a table), capabilities, skills, MCP servers, schedule, fallback models, extended thinking, autonomous guardrails, model routing, context injections, response format, lifecycle overrides, and advanced configuration (extras).
+Chat message utilities:
 
-### Chat Utilities (`src/lib/chat.ts`)
+- `normalizeRole` — normalizes API role strings to lowercase
+- `asText` — converts unknown content to string
+- `formatMeta` — formats token/cost/iteration metadata
+- `normalizeToolOutput` — normalizes tool output events for display
+- `extractAssistantHistoryParts` — separates text and thinking blocks from content block arrays, joining each with double newlines for paragraph breaks
 
-- `normalizeRole(role)` — Normalizes API message roles to lowercase (`"user"`, `"system"`, `"assistant"`).
-- `asText(value)` — Converts unknown values to text strings.
-- `formatMeta(meta)` — Formats token usage metadata as `"X in / Y out | N iter | $Z"`.
-- `normalizeToolOutput(event)` — Normalizes tool output events for persistent display, filtering malformed entries.
-- `extractAssistantHistoryParts(content)` — Splits assistant message content into `{ text, thinking }` parts. Text blocks are joined with double newlines (paragraph breaks). Thinking blocks are collected independently. `tool_use` blocks are ignored. `redacted_thinking` and unknown block types are silently skipped for forward compatibility.
+### `src/lib/chatPicker.ts`
 
-### Chat Picker (`src/lib/chatPicker.ts`)
+`groupedPicker(agents, hands, showHandAgents)` — Groups agents into standalone vs. hand-instance groups for the chat agent picker. Handles loading states (keeps `is_hand` agents visible while hand instances are loading), sorts groups alphabetically, orders roles with coordinator first.
 
-`groupedPicker(agents, handInstances, showHandAgents)` organizes agents for the chat target picker:
-- When `showHandAgents` is false, returns a flat `standalone` list.
-- When true, groups `is_hand` agents under their active hand instances (sorted alphabetically by `hand_name`), with the coordinator agent first. Agents belonging to paused/inactive hands are hidden entirely — they do not fall back to standalone.
-- While `handInstances` is still loading (`undefined`), `is_hand` agents remain visible in standalone to prevent URL-pinned selections from being dropped during bootstrap.
+### `src/lib/csvParser.ts`
 
-### CSV Parser (`src/lib/csvParser.ts`)
+RFC-4180-compliant CSV parser. Handles quoted fields with embedded newlines/commas, escaped double-quotes, BOM, CRLF/CR line endings. `parseUsersCsv` validates required columns (`name`, `role`) and maps unknown columns to channel bindings.
 
-- `parseCsvText(text)` — RFC-4180-compliant CSV parser handling quoted fields with embedded newlines/commas, escaped double-quotes, CRLF/CR line endings, BOM stripping, and no phantom trailing records.
-- `parseUsersCsv(text, roles)` — Parses user import CSVs, mapping `name` and `role` columns and treating all other columns as channel bindings. Validates role values, flags missing names, and skips blank rows.
+### `src/lib/trafficSplit.ts`
 
-## Styling System
+`buildEvenTrafficSplit(n)` — Distributes 100 traffic buckets as evenly as possible across `n` variants.
 
-### Theme
+## Service Worker and PWA
 
-Dual light/dark theme driven by CSS custom properties on `:root` and `:root.dark`. The semantic palette uses `--color-brand`, `--color-surface`, `--color-border-subtle`, etc., mapped to concrete Tailwind color names via `@theme` in `src/index.css`.
+The dashboard is an installable PWA:
 
-### Animations
-
-Apple-style spring animation system with custom easing curves (`--apple-spring`, `--apple-ease`, `--apple-bounce`). Animation variants are defined in `src/lib/motion.ts` and consumed by components. Key CSS utilities:
-
-| Utility | Purpose |
-|---------|---------|
-| `card-glow` | Hover lift + sky-blue glow on cards |
-| `surface-lit` | Subtle top-edge highlight |
-| `animate-pulse-soft` | Status dot pulse (scale-based) |
-| `animate-shimmer` | Skeleton loading placeholder |
-| `animate-rise` | Toast/modal entry animation |
-| `animate-glow-ring` | Approval waiting indicator |
-
-Custom breakpoints `3xl` (1920px) and `4xl` (2560px) allow card grids to go 5-wide and 6-wide on high-resolution displays.
-
-### Safe Area
-
-Utilities (`pb-safe`, `pb-safe-2`, `pb-safe-4`, `pt-safe`, `pl-safe`, `pr-safe`) handle iOS safe-area insets for elements at screen edges.
+- **Manifest**: `public/manifest.json` — standalone display mode, start URL `/dashboard/#/overview`
+- **Service Worker**: `public/sw.js` — precaches `/dashboard/`, uses stale-while-revalidate for static assets, network-only for API requests
+- **Icons**: `icon-192.png`, `icon-512.png`
 
 ## Internationalization
 
-i18next with `i18next-browser-languagedetector`. Reference locale is `en.json` in `src/locales/`. The script `scripts/i18n-parity.mjs` (and its vitest mirror `src/lib/__tests__/locale-parity.test.ts`) checks that all other locale files have exact key parity with the reference — no missing or extra keys. Run `pnpm test:i18n-parity` for a quick pre-commit check.
+Uses `i18next` with `react-i18next`. Locale files live in `src/locales/` with `en.json` as the reference. Parity is enforced by:
 
-## Progressive Web App
+- **Vitest**: `src/lib/__tests__/locale-parity.test.ts` (runs as part of `pnpm test`)
+- **CLI script**: `scripts/i18n-parity.mjs` — standalone check for quick pre-commit verification
 
-The dashboard is a PWA with:
-- `public/manifest.json` — App name, icons, standalone display mode, start URL at `/dashboard/#/overview`.
-- `public/sw.js` — Service worker that precaches `/dashboard/`, serves static assets with stale-while-revalidate, and bypasses the cache entirely for `/api/*` requests.
+Both flatten each locale's keys and report missing/extra keys relative to `en.json`.
 
 ## Testing
 
-### Unit Tests (Vitest)
+### Unit Tests
+
+- **Runner**: Vitest with jsdom
+- **Libraries**: `@testing-library/react`, `@testing-library/user-event`
+- **Location**: Co-located `*.test.ts(x)` files
+
+### Test Utilities
+
+`src/lib/test/query-client.tsx` exports `createQueryClientWrapper` — a React wrapper that provides a fresh `QueryClient` for hook tests and exposes it for spying on `invalidateQueries`.
+
+### E2E Tests
+
+- **Runner**: Playwright
+- **Config**: `playwright.config.ts` — targets `http://127.0.0.1:4173`, starts dev server automatically
+- **Location**: `e2e/`
+- **Coverage**: Shell navigation (sidebar links, page headings), auth dialog appearance
+
+### Key Test Patterns
+
+- **Mutation invalidation**: Each mutation hook test verifies exact `invalidateQueries` calls with specific key factories (e.g., `agentKeys.detail(id)`, `sessionKeys.lists()`)
+- **Component isolation**: Heavy mocks for `react-i18next` (returns key as text), `motion/react` (renders plain elements), and data hooks
+- **Edge case coverage**: CSV parsing (BOM, embedded newlines), manifest round-trips (section scoping, alias normalization, mutual exclusion), drawer ownership races
+
+## Build & Verify
 
 ```bash
-pnpm test --run               # All unit tests
-pnpm test:watch               # Watch mode
+pnpm typecheck          # tsc --noEmit — must be green
+pnpm test --run         # vitest — all tests pass
+pnpm build              # vite build — must succeed
 ```
 
-Mutation tests use `createQueryClientWrapper` from `src/lib/test/query-client.tsx` which provides a real `QueryClient` so `invalidateQueries` spy assertions work correctly.
+Run all three after any change to `src/lib/queries/`, `src/lib/mutations/`, or `src/api.ts`. A passing typecheck alone is insufficient — key-factory tests catch anchoring regressions that the compiler does not.
 
-### End-to-End Tests (Playwright)
+### Additional Scripts
 
 ```bash
-pnpm e2e                      # Playwright tests against dev server
+pnpm dev                          # Vite dev server
+pnpm preview                      # Preview production build
+pnpm openapi:types                # Generate types from OpenAPI spec
+pnpm test:watch                   # Vitest in watch mode
+pnpm test:i18n-parity             # Check locale key parity
+pnpm e2e                          # Playwright end-to-end tests
 ```
 
-Configuration in `playwright.config.ts` — targets `http://127.0.0.1:4173`, starts a dev server automatically, 30-second timeout, trace on first retry.
+## Conventions
 
-The smoke test (`e2e/dashboard.spec.ts`) verifies:
-- The dashboard shell loads with all navigation links (Overview, Agents, Sessions, Approvals, Comms, Providers, Channels, Skills, Hands, Workflows, Scheduler, Goals, Analytics, Memory, Runtime, Logs).
-- Navigation between pages renders correct headings.
-- The sign-in dialog appears when credentials are required.
+- **TypeScript strict mode** — no `any` in new hooks; use types from `src/api.ts` or `openapi/generated.ts`
+- **Hooks set sensible defaults** — shared `staleTime`/`refetchInterval` inherited by consumers; override per call site with inline comment
+- **Mutation invalidation in the hook** — callers never need to know which keys a mutation touches
+- **Commit convention**: `feat(dashboard/<area>):`, `refactor(dashboard/<area>):`, `fix(dashboard/<area>):` — never include `Co-Authored-By` footer
 
-## Build & Verification
+## Navigation Structure
 
-Run all three after any change to `src/lib/queries/`, `src/lib/mutations/`, or `src/api.ts`:
+The sidebar exposes these sections (verified by E2E):
 
-```bash
-pnpm typecheck                # tsc --noEmit — must be green
-pnpm test --run               # vitest — all tests pass
-pnpm build                    # vite build — must succeed
-```
-
-A passing typecheck alone is not sufficient — the key-factory tests in `keys.test.ts` catch anchoring regressions that the compiler cannot detect.
-
-To regenerate TypeScript types from the backend OpenAPI schema:
-
-```bash
-pnpm openapi:types            # Generates openapi/generated.ts
-```
-
-## Commit Conventions
-
-Follows the root repo pattern: `feat(dashboard/<area>):`, `refactor(dashboard/queries):`, `fix(dashboard/<area>):`. Never include a `Co-Authored-By` footer.
+Overview · Agents · Sessions · Approvals · Comms · Providers · Channels · Skills · Hands · Workflows · Scheduler · Goals · Analytics · Memory · Runtime · Logs

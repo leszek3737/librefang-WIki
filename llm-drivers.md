@@ -2,47 +2,63 @@
 
 # LLM Drivers
 
-The LLM Drivers module group provides a provider-agnostic interface for calling large language models, along with production-ready concrete implementations for every supported provider.
+The LLM Drivers module group provides LibreFang's complete interface to large language model services. It ships a provider-agnostic trait layer together with concrete driver implementations for cloud APIs, local model servers, and CLI-based tools.
 
-## Structure
+## How the crates relate
+
+The two sub-modules follow a trait/impl split:
+
+| Crate | Role |
+|---|---|
+| [`librefang-llm-driver`](librefang-llm-driver-src.md) | Defines the `LlmDriver` trait, shared request/response types (`CompletionRequest`, `CompletionResponse`), and the error-classification infrastructure (`LlmError`, `ClassifiedError`, `classify_error`) that every backend depends on. |
+| [`librefang-llm-drivers`](librefang-llm-drivers-src.md) | Implements `LlmDriver` for every supported provider—Anthropic, OpenAI, Azure OpenAI, Vertex AI (Gemini), Ollama, Claude Code CLI, Qwen Code, and custom endpoints—and adds cross-cutting infrastructure: retry logic, token rotation, rate-limit guards, credential pooling, driver caching, and streaming utilities. |
 
 ```mermaid
 graph LR
     subgraph "Consumer Layer"
-        AL[agent_loop]
-        CE[context_engine]
+        A[Agent Loop]
+        B[Session Runtime]
+        C[Routes / API]
     end
 
-    subgraph "llm-driver<br/>(trait & types)"
-        LD[LlmDriver trait]
-        CR[CompletionRequest / Response]
-        SE[StreamEvent]
-        LE[LlmError]
+    subgraph "librefang-llm-driver"
+        TRAIT["LlmDriver trait"]
+        REQ["CompletionRequest"]
+        RESP["CompletionResponse"]
+        ERR["LlmError → ClassifiedError"]
     end
 
-    subgraph "llm-drivers<br/>(implementations)"
-        AN[AnthropicDriver]
-        OA[OpenAIDriver]
-        VA[VertexAiDriver]
-        CP[CredentialPool]
-        RL[RateLimitTracker]
-        BO[Backoff / RetryAfter]
-        UF[Utf8Stream / ThinkFilter]
+    subgraph "librefang-llm-drivers"
+        D1[OpenAI / Azure]
+        D2[Anthropic / Claude Code]
+        D3[Vertex AI]
+        D4[Ollama]
+        D5[Qwen Code]
+        D6[Custom Providers]
+        CACHE[Driver Cache]
+        ROTATE[Token Rotation]
     end
 
-    AL & CE --> LD
-    LD -.->|implemented by| AN & OA & VA
-    AN & OA & VA --> CP & RL & BO & UF
-    AN & OA & VA -->|errors classified as| LE
+    A & B & C --> REQ
+    REQ --> TRAIT
+    TRAIN --> D1 & D2 & D3 & D4 & D5 & D6
+    D1 & D2 & D3 & D4 & D5 & D6 --> RESP
+    D1 & D2 & D3 & D4 & D5 & D6 --> ERR
+    ERR -->|failover_reason| A
+    CACHE -.->|get_or_create| D1 & D2 & D3 & D4 & D5 & D6
+    ROTATE -.-> D1 & D3
 ```
 
-| Sub-module | Role |
-|---|---|
-| [librefang-llm-driver-src](librefang-llm-driver-src.md) | Defines the `LlmDriver` trait, core request/response types (`CompletionRequest`, `CompletionResponse`, `StreamEvent`), `DriverConfig`, `LlmFamily`, and the `llm_errors` classification pipeline that turns raw provider errors into structured categories for retry and failover decisions. |
-| [librefang-llm-drivers-src](librefang-llm-drivers-src.md) | Concrete `LlmDriver` implementations (Anthropic, OpenAI-compatible, Vertex AI, Aider CLI, and others) plus shared infrastructure: credential rotation via `CredentialPool`, retry/backoff logic, rate-limit tracking with cross-process lockout files, `Utf8Stream` for correct streaming of multi-byte codepoints, and `ThinkFilter` for stripping `<think/>` blocks from model output. |
+## Key cross-module workflows
 
-## How They Fit Together
+1. **Request lifecycle** — A consumer (agent loop, session runtime, API route) builds a `CompletionRequest` from the shared types in `librefang-llm-driver`, calls `LlmDriver::complete` or `LlmDriver::stream`, and receives a typed `CompletionResponse`. The consumer never knows which backend handled the call.
 
-**[librefang-llm-driver-src](librefang-llm-driver-src.md)** is the interface contract. It owns the `LlmDriver` trait (with `complete` and `stream` methods), the error taxonomy (`LlmError`), and the data types every provider must produce. Consumers such as the agent loop and context engine depend only on this crate.
+2. **Error classification and failover** — Any driver can return an `LlmError`. The `classify_error` function in `librefang-llm-driver` maps it to a `ClassifiedError` whose `failover_reason` field drives the fallback chain in the caller. This keeps retry/failover decisions decoupled from individual provider error formats.
 
-**[librefang-llm-drivers-src](librefang-llm-drivers-src.md)** implements that trait for each supported provider and houses the cross-cutting infrastructure those implementations share — credential pool rotation, exponential backoff, `Retry-After` header parsing, rate-limit tracking, and streaming utilities. When a concrete driver encounters a provider error, it surfaces it through the classification pipeline defined in the driver crate, giving upstream code a consistent basis for retry and failover decisions.
+3. **Driver instantiation and caching** — `librefang-llm-drivers` exposes `create_driver_from_entry` and a driver cache (`get_or_create`) that resolve a `DriverConfig` (defined in `librefang-llm-driver`) into a concrete, possibly Arc-shared, driver instance. Credential pooling and provider auto-detection happen at this boundary.
+
+4. **Token rotation** — For providers that use rotating credentials (e.g. Vertex AI service account keys, Azure tokens), the rotation wrapper in `librefang-llm-drivers` intercepts `complete` calls, detects rate-limit or auth failures, and swaps the active key before retrying—without the consumer or the trait layer needing to know.
+
+5. **Streaming** — Streaming responses flow through `utf8_stream` utilities in `librefang-llm-drivers`, ensuring consistent UTF-8 decoding across all providers before reaching the session runtime.
+
+Consult the individual sub-module pages for driver-specific configuration options, supported environment variables, and implementation details.

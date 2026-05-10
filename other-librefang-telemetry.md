@@ -2,61 +2,61 @@
 
 # librefang-telemetry
 
-OpenTelemetry + Prometheus metrics instrumentation for LibreFang.
+OpenTelemetry and Prometheus metrics instrumentation for LibreFang.
 
 ## Purpose
 
-`librefang-telemetry` provides the centralized metrics layer for the LibreFang project. It wraps the `metrics` facade crate and pairs it with LibreFang-specific domain types from `librefang-types`, giving other workspace crates a single, consistent dependency for emitting telemetry data.
-
-Rather than each binary or library importing and configuring metrics independently, this crate acts as the one place that defines what gets measured and how those measurements are labeled.
-
-## Role in the Workspace
-
-```
-┌──────────────────┐
-│  librefang-types │
-└────────┬─────────┘
-         │  depends on
-┌────────▼─────────┐
-│librefang-telemetry│
-└────────┬─────────┘
-         │  used by
-    ┌────┴────┐
-    ▼         ▼
- binaries  libraries
-```
-
-Downstream crates depend on `librefang-telemetry` to:
-
-- **Record metrics** without coupling to a specific metrics backend.
-- **Use domain-relevant label types** (from `librefang-types`) rather than raw strings, keeping telemetry consistent across the codebase.
-
-The crate itself has no incoming or outgoing runtime call edges—it is a pure utility layer. Other modules call into it at their own discretion.
+This crate centralizes all metrics definitions and telemetry helpers used across the LibreFang project. By isolating telemetry into its own crate, metric names, labels, and instrumentation patterns stay consistent and discoverable — any crate that needs to emit or observe metrics depends on `librefang-telemetry` rather than importing the raw `metrics` crate directly.
 
 ## Dependencies
 
-| Dependency | Source | Purpose |
-|---|---|---|
-| `metrics` | Workspace | Generic metrics facade (counters, gauges, histograms). The actual exporter (e.g., Prometheus endpoint) is configured at the binary level, not here. |
-| `librefang-types` | Workspace path `../librefang-types` | Shared domain types used as metric labels or keys, ensuring telemetry labels stay type-safe and consistent. |
+| Crate | Why |
+|---|---|
+| `metrics` (workspace) | Core metrics façade — provides macros like `counter!`, `gauge!`, `histogram!`. This crate wraps or re-exports them with LibreFang-specific conventions. |
+| `librefang-types` | Shared domain types. Metrics often need to derive label values from types like player IDs, game states, or room identifiers. |
 
-## Design Decisions
+## Architectural Role
 
-**Backend-agnostic facade.** By depending on the `metrics` crate rather than a concrete exporter, this module remains decoupled from any specific observability stack. Binaries wire up the exporter they need (Prometheus, OpenTelemetry OTLP, etc.) at startup; library code only calls into this crate.
+`librefang-telemetry` is a **leaf dependency** — it does not call into any other LibreFang crates at runtime. Other crates throughout the workspace import it to emit metrics. This keeps the telemetry surface area small and prevents circular dependencies.
 
-**No runtime graph edges.** The call graph shows no internal, outgoing, or incoming calls because this module exposes static helpers—metric definitions, label constructors, and thin wrappers. There is no stateful runtime or background thread owned by this crate.
+```
+┌──────────────────┐
+│ librefang-server │ ──┐
+├──────────────────┤   │
+│ librefang-game   │ ──┤    depends on
+├──────────────────┤   ├───────────────────►  librefang-telemetry
+│ librefang-irc    │ ──┤                         │
+├──────────────────┤   │                         │ uses
+│      ...        │ ──┘                         ▼
+└──────────────────┘                      metrics (facade)
+```
 
-## Integration Guide
+## Usage Patterns
 
-To use telemetry from another workspace crate, add the dependency:
+Other crates interact with this module by calling into its definitions at instrumentation points — typically around network events, game actions, or resource lifecycle changes. The actual metric exporters (Prometheus scrape endpoint, OpenTelemetry push) are configured at the application boundary, not in this library.
+
+### Registering metrics
+
+Metrics are expected to be described or initialized through this crate so that label namespaces and naming conventions (e.g., `librefang_players_connected_total`) remain uniform. This avoids ad-hoc `counter!("my_counter")` calls scattered across the codebase.
+
+### Consuming types for labels
+
+Because `librefang-types` is a dependency, metric helpers can accept domain types directly and extract the relevant label values internally, keeping call sites clean.
+
+## Workspace Integration
+
+This crate is part of the LibreFang workspace. It shares workspace-level lint configuration and version numbering via `workspace = true` inheritance in `Cargo.toml`. To add it as a dependency in another workspace crate:
 
 ```toml
 [dependencies]
 librefang-telemetry = { path = "../librefang-telemetry" }
 ```
 
-Then import and use the provided helpers wherever you need to emit metrics. The actual metric recording delegates to the `metrics` facade, so you must install an exporter in your binary's `main` for the data to go anywhere.
+## Adding New Metrics
 
-## Linting
+When adding a new metric:
 
-This crate inherits workspace-level lints via the `[lints] workspace = true` configuration, ensuring it follows the same code quality standards as the rest of the project.
+1. **Define it here** — add the metric name constant and any label helpers to this crate.
+2. **Use domain types** — accept `librefang-types` values where possible so label extraction stays centralized.
+3. **Follow naming conventions** — use the `librefang_` prefix and snake_case to keep Prometheus output consistent.
+4. **Document units** — note whether a metric is a count, a gauge in bytes/milliseconds, etc., so downstream dashboard authors know what to expect.
