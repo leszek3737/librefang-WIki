@@ -1,146 +1,133 @@
 # Other — librefang-api-src
 
-# Login Page (`librefang-api/src/login_page.html`)
+# LibreFang Login Page (`login_page.html`)
 
 ## Overview
 
-A self-contained, single-file HTML login page served by the LibreFang API server. It handles username/password authentication with optional TOTP two-factor support, stores the resulting session token client-side, and redirects the user to the dashboard.
+A self-contained, single-file HTML page that serves as the authentication gate for the LibreFang dashboard. It includes inline CSS and vanilla JavaScript — no external dependencies, no build step, no framework. The page is served at `/dashboard` and `/dashboard/` and acts as the entry point before the SPA shell loads.
 
-The page is intentionally standalone — no external CSS frameworks, no build step, no JavaScript dependencies. Everything is inlined for zero-latency serving.
+## Purpose
 
-## Authentication Flow
+- Collect user credentials (username + password)
+- Optionally collect a TOTP code when two-factor authentication is required
+- Authenticate against the backend API at `POST /api/auth/dashboard-login`
+- Persist the returned session token in `localStorage`
+- Redirect the user to the SPA root (`/`) upon success
+
+## Architecture
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant LoginPage
+    participant LoginPage as login_page.html
     participant API as /api/auth/dashboard-login
 
-    User->>LoginPage: Submit username + password
-    LoginPage->>API: POST credentials
-    API-->>LoginPage: Response
-
-    alt Success (token returned)
-        LoginPage->>LoginPage: Store token in localStorage
-        LoginPage->>User: Redirect to /dashboard/
-    else TOTP required
-        LoginPage->>User: Show TOTP input field
-        User->>LoginPage: Submit username + password + totp_code
-        LoginPage->>API: POST with TOTP
-        API-->>LoginPage: Response (success or error)
-    else Invalid credentials
-        LoginPage->>User: Display error message
+    User->>LoginPage: Submit credentials
+    LoginPage->>API: POST {username, password}
+    API-->>LoginPage: {ok, token} or {requires_totp}
+    alt TOTP required
+        LoginPage->>LoginPage: Show TOTP input
+        User->>LoginPage: Submit TOTP code
+        LoginPage->>API: POST {username, password, totp_code}
+        API-->>LoginPage: {ok, token}
     end
+    LoginPage->>LoginPage: Store token in localStorage
+    LoginPage->>User: Redirect to target path
 ```
 
-## Key Components
+## Two-Factor Authentication Flow
 
-### HTML Structure
+The TOTP field (`#totp-row`) is hidden by default. The flow is:
 
-The page is organized into a single centered card (`<main class="card">`) containing:
+1. User submits username and password.
+2. The API responds with `{ "requires_totp": true }`.
+3. The `#totp-row` element is unhidden, the TOTP input receives focus, and a prompt message is shown.
+4. On the next submission, `totp_code` is included in the payload alongside the credentials.
+5. A successful response returns `{ "ok": true, "token": "..." }`.
 
-| Element | ID | Purpose |
-|---------|----|---------|
-| Username input | `#u` | Captures the username with `autocomplete="username"` |
-| Password input | `#p` | Password field with `autocomplete="current-password"` |
-| TOTP input | `#t` | Hidden by default; revealed when the backend signals `requires_totp` |
-| Submit button | `#btn` | Triggers the form submission handler; disabled during in-flight requests |
-| Error display | `#err` | Live region (`aria-live="polite"`) for error messages |
+The TOTP input is constrained to 6 numeric digits via `inputmode="numeric"`, `pattern="[0-9]{6}"`, and `maxlength="6"`.
 
-### CSS Styling
+## Token Storage
 
-The styling is dark-mode by default with a **light-mode fallback** via `@media (prefers-color-scheme: light)`. Key design decisions:
+On a successful login, the JWT or session token returned by the API is stored under the key **`librefang-api-key`** in `localStorage`. The write is wrapped in a `try/catch` to gracefully handle environments where `localStorage` is unavailable (e.g., Safari private browsing).
 
-- **Dark palette**: `#0b0d12` background, `#12151c` card, `#e6e8ee` text
-- **Light palette**: `#f6f7fb` background, `#fff` card, `#1a1c22` text
-- The `:root { color-scheme: light dark; }` declaration ensures native form controls respect the user's preference
-- Layout uses `display: grid; place-items: center` for dead-center card placement
-- The card caps at `min(92vw, 380px)` for mobile responsiveness
-- Focus states use the brand accent color `#7c8cff` with a matching box-shadow ring
+Any downstream SPA or API client should read the token from this same key.
 
-### JavaScript Logic
+## Redirect Logic
 
-All behavior lives in an IIFE at the bottom of the page. There are no imports or dependencies.
+After storing the token, the page determines the redirect target:
 
-#### State
+```
+current path = "/"           → redirect to "/"
+current path = "/dashboard"  → redirect to "/"
+current path = "/dashboard/" → redirect to "/"
+any other path               → redirect to path + search + hash
+```
 
-- **`requiresTotp`** — A boolean flag, initially `false`. Once the server indicates TOTP is required for the account, this is set to `true` so subsequent submission attempts include the `totp_code` field.
+The special-casing of `/dashboard` and `/dashboard/` exists because those paths host the inline login page itself — redirecting back to them would land on a 404 or re-render the login form. All other paths are preserved with their query string and fragment intact, allowing deep-linking into the SPA after authentication.
 
-#### Form Submission Handler
+## Styling
 
-The `submit` event listener on `#f`:
+The page supports both dark and light color schemes via `prefers-color-scheme`:
 
-1. **Prevents default** form submission (no page reload).
-2. **Disables the button** to prevent double-submission.
-3. **Constructs the payload**:
-   - Always includes `username` (trimmed) and `password` (raw).
-   - Includes `totp_code` only if `requiresTotp` is `true`.
-4. **Sends** `POST /api/auth/dashboard-login` with `Content-Type: application/json` and `credentials: 'same-origin'`.
-5. **Handles the response**:
-   - **`d.ok && d.token`** — Stores the token in `localStorage` under the key `librefang-api-key`, then redirects. The redirect target is the current `location.pathname + location.search + location.hash`, defaulting to `/dashboard/` if the user was at the root. This preserves any original destination the user was trying to reach before being intercepted by the login page.
-   - **`d.requires_totp`** — Reveals the TOTP input row, sets `requiresTotp = true`, focuses the TOTP field, and prompts the user.
-   - **All other cases** — Displays `d.error` or a generic fallback message.
-6. **Network errors** display a `"Network error."` message.
-7. **`finally`** re-enables the button regardless of outcome.
+- **Dark mode** (default): Dark background (`#0b0d12`), card background (`#12151c`), light text.
+- **Light mode**: Light background (`#f6f7fb`), white card, dark text, adjusted via a `@media` block.
 
-#### Error Display
-
-The `setError(msg)` function writes to `#err`. The element has `aria-live="polite"` so screen readers announce changes automatically. The container has a `min-height: 1.2em` to prevent layout shift when an error appears.
+The `:root` declaration `color-scheme: light dark` ensures native form controls also adapt. The layout centers the card vertically and horizontally using CSS Grid (`display: grid; place-items: center`). The card is capped at `380px` wide with `width: min(92vw, 380px)`.
 
 ## API Contract
 
-The page expects the backend endpoint to behave as follows:
+The page expects the backend endpoint `POST /api/auth/dashboard-login` to accept and return the following shapes:
 
-**`POST /api/auth/dashboard-login`**
-
-Request body:
+**Request:**
 ```json
 {
   "username": "string",
   "password": "string",
-  "totp_code": "123456"  // optional, 6 digits
+  "totp_code": "string (optional, 6 digits)"
 }
 ```
 
-Success response:
+**Response — success:**
 ```json
-{ "ok": true, "token": "jwt-or-api-key-string" }
+{
+  "ok": true,
+  "token": "string"
+}
 ```
 
-TOTP required response:
+**Response — TOTP required:**
 ```json
-{ "requires_totp": true }
+{
+  "requires_totp": true
+}
 ```
 
-Error response:
+**Response — failure:**
 ```json
-{ "ok": false, "error": "Human-readable error message" }
+{
+  "ok": false,
+  "error": "string (human-readable message)"
+}
 ```
 
-## Token Storage
+All responses are expected to have `Content-Type: application/json`. The page sends `credentials: 'same-origin'` to include cookies if the backend uses them.
 
-On successful login, the token is written to:
+## Error Handling
 
-```
-localStorage['librefang-api-key']
-```
+Errors are displayed in the `#err` element with `aria-live="polite"` for screen reader announcements. There are three error paths:
 
-Other parts of the application (the dashboard, API client code) must read from this same key to authenticate subsequent requests. The `try/catch` around `localStorage.setItem` gracefully handles cases where storage is disabled or full.
+| Condition | Message shown |
+|---|---|
+| API returns `{ error: "..." }` | The `error` string from the response |
+| API returns a non-ok response with no `error` field | Generic "Sign in failed." |
+| `fetch` throws a network error | "Network error." |
 
-## Redirect Behavior
+The submit button is disabled during the in-flight request and re-enabled in the `finally` block to prevent duplicate submissions.
 
-After storing the token, the page uses `location.replace()` to navigate to the originally requested URL. This is important because:
+## Integration Notes
 
-- `replace()` does not create a browser history entry, so the user can't accidentally navigate back to the login page.
-- The page uses the full `pathname + search + hash`, so deep links and query parameters are preserved through the authentication redirect.
-- If the user was already at `/` (the login page itself), the fallback is `/dashboard/`.
-
-## Integration Points
-
-This file is served directly by the LibreFang API server for unauthenticated requests to dashboard routes. The server should:
-
-1. Detect that the user lacks a valid session/token.
-2. Return this HTML page (likely as a fallback or via a specific route like `/login`).
-3. After login, the stored token is sent with future requests (presumably via an `Authorization` header or similar mechanism handled by the dashboard's JavaScript).
-
-The footer text references `config.toml`, indicating that authentication requirements are configurable by the server administrator.
+- This file is not part of the SPA build. It is served directly by the backend as a static HTML page at `/dashboard` and `/dashboard/`.
+- The `<meta name="robots" content="noindex, nofollow">` tag prevents search engine indexing.
+- The `autocomplete` attributes are set to `username`, `current-password`, and `one-time-code` to ensure password managers and browser autofill work correctly.
+- The form `action` is not set; submission is handled entirely by the JavaScript `submit` event listener which calls `e.preventDefault()`.

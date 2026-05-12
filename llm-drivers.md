@@ -2,63 +2,53 @@
 
 # LLM Drivers
 
-The LLM Drivers module group provides LibreFang's complete interface to large language model services. It ships a provider-agnostic trait layer together with concrete driver implementations for cloud APIs, local model servers, and CLI-based tools.
+Provider-agnostic LLM integration layer that defines a uniform interface for completion requests, streaming, and error handling, then ships multiple concrete driver implementations behind a health-aware fallback system.
 
-## How the crates relate
+## Sub-modules
 
-The two sub-modules follow a trait/impl split:
-
-| Crate | Role |
+| Sub-module | Role |
 |---|---|
-| [`librefang-llm-driver`](librefang-llm-driver-src.md) | Defines the `LlmDriver` trait, shared request/response types (`CompletionRequest`, `CompletionResponse`), and the error-classification infrastructure (`LlmError`, `ClassifiedError`, `classify_error`) that every backend depends on. |
-| [`librefang-llm-drivers`](librefang-llm-drivers-src.md) | Implements `LlmDriver` for every supported provider—Anthropic, OpenAI, Azure OpenAI, Vertex AI (Gemini), Ollama, Claude Code CLI, Qwen Code, and custom endpoints—and adds cross-cutting infrastructure: retry logic, token rotation, rate-limit guards, credential pooling, driver caching, and streaming utilities. |
+| [librefang-llm-driver](librefang-llm-driver-src.md) | Core `LlmDriver` trait, request/response types, streaming events, and error classification taxonomy |
+| [librefang-llm-drivers](librefang-llm-drivers-src.md) | Concrete driver implementations, credential pooling, fallback routing, and stream utilities |
+
+## How they fit together
 
 ```mermaid
 graph LR
-    subgraph "Consumer Layer"
-        A[Agent Loop]
-        B[Session Runtime]
-        C[Routes / API]
+    subgraph "librefang-llm-driver (interface)"
+        T["LlmDriver trait"]
+        ERR["classify_error → ClassifiedError"]
     end
 
-    subgraph "librefang-llm-driver"
-        TRAIT["LlmDriver trait"]
-        REQ["CompletionRequest"]
-        RESP["CompletionResponse"]
-        ERR["LlmError → ClassifiedError"]
+    subgraph "librefang-llm-drivers (implementations)"
+        CP["CredentialPool"]
+        FB["FallbackChain"]
+        D1[Anthropic]
+        D2[OpenAI / ChatGPT]
+        D3[Bedrock]
+        D4[Gemini]
+        D5[Claude Code CLI]
+        D6[Codex CLI]
+        D7[Copilot]
     end
 
-    subgraph "librefang-llm-drivers"
-        D1[OpenAI / Azure]
-        D2[Anthropic / Claude Code]
-        D3[Vertex AI]
-        D4[Ollama]
-        D5[Qwen Code]
-        D6[Custom Providers]
-        CACHE[Driver Cache]
-        ROTATE[Token Rotation]
-    end
-
-    A & B & C --> REQ
-    REQ --> TRAIT
-    TRAIN --> D1 & D2 & D3 & D4 & D5 & D6
-    D1 & D2 & D3 & D4 & D5 & D6 --> RESP
-    D1 & D2 & D3 & D4 & D5 & D6 --> ERR
-    ERR -->|failover_reason| A
-    CACHE -.->|get_or_create| D1 & D2 & D3 & D4 & D5 & D6
-    ROTATE -.-> D1 & D3
+    CP -->|provides keys| D1 & D2 & D3 & D4 & D7
+    D1 & D2 & D3 & D4 & D5 & D6 & D7 -.->|implement| T
+    FB -->|routes to healthiest| D1 & D2 & D3 & D4 & D5 & D6 & D7
+    ERR -->|drives failover| FB
 ```
+
+[librefang-llm-driver](librefang-llm-driver-src.md) defines the contract — `LlmDriver::complete`, `LlmDriver::stream`, `CompletionRequest`/`CompletionResponse`, and the `classify_error` taxonomy that categorises failures as overloaded, context overflow, transient, etc.
+
+[librefang-llm-drivers](librefang-llm-drivers-src.md) implements that contract across seven providers, then layers two orchestration mechanisms on top:
+
+- **CredentialPool** — rotates API keys and marks them exhausted when a provider returns rate-limit errors, so the next request automatically picks a live key.
+- **FallbackChain** — wraps multiple drivers behind EWMA-based health scoring. When `classify_error` reports a retryable or overloaded failure, the chain suppresses the unhealthy driver for a cooldown window and routes subsequent requests to the next healthiest provider.
+
+CLI-based drivers (Claude Code, Codex) additionally probe for local credential files and binary availability at startup, allowing the fallback chain to skip them entirely when unavailable.
 
 ## Key cross-module workflows
 
-1. **Request lifecycle** — A consumer (agent loop, session runtime, API route) builds a `CompletionRequest` from the shared types in `librefang-llm-driver`, calls `LlmDriver::complete` or `LlmDriver::stream`, and receives a typed `CompletionResponse`. The consumer never knows which backend handled the call.
-
-2. **Error classification and failover** — Any driver can return an `LlmError`. The `classify_error` function in `librefang-llm-driver` maps it to a `ClassifiedError` whose `failover_reason` field drives the fallback chain in the caller. This keeps retry/failover decisions decoupled from individual provider error formats.
-
-3. **Driver instantiation and caching** — `librefang-llm-drivers` exposes `create_driver_from_entry` and a driver cache (`get_or_create`) that resolve a `DriverConfig` (defined in `librefang-llm-driver`) into a concrete, possibly Arc-shared, driver instance. Credential pooling and provider auto-detection happen at this boundary.
-
-4. **Token rotation** — For providers that use rotating credentials (e.g. Vertex AI service account keys, Azure tokens), the rotation wrapper in `librefang-llm-drivers` intercepts `complete` calls, detects rate-limit or auth failures, and swaps the active key before retrying—without the consumer or the trait layer needing to know.
-
-5. **Streaming** — Streaming responses flow through `utf8_stream` utilities in `librefang-llm-drivers`, ensuring consistent UTF-8 decoding across all providers before reaching the session runtime.
-
-Consult the individual sub-module pages for driver-specific configuration options, supported environment variables, and implementation details.
+1. **Request with fallback** — Caller issues a `CompletionRequest` through `FallbackChain`. The chain picks the healthiest driver, calls `complete`, and if the result is a classified error, it re-routes to the next driver after updating health scores.
+2. **Streaming** — `LlmDriver::stream` returns `mpsc`-based `StreamEvent`s; the trait layer tests that dropped receivers surface as default stream errors.
+3. **Credential rotation** — A driver obtains a key from `CredentialPool::fill_first`, uses it for the request, and on rate-limit classification calls `mark_exhausted` so subsequent calls skip that key.

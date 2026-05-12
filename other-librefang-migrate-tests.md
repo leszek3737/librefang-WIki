@@ -1,37 +1,27 @@
 # Other — librefang-migrate-tests
 
-# Idempotency & Forward-Compatibility Tests
+# `librefang-migrate` — Idempotency & Forward-Compatibility Tests
 
-## Purpose
+## Overview
 
-`tests/idempotency.rs` provides end-to-end integration tests that verify the **filesystem-level contract** of the migrate crate. While the in-crate unit tests in `src/openclaw.rs` check idempotency by asserting `report.imported.is_empty()` on a second run, these tests go further—they snapshot the entire destination directory tree as raw bytes and assert that nothing on disk changes across runs.
+`tests/idempotency.rs` is an integration-level test suite that validates the **filesystem-level contracts** of the `librefang-migrate` crate. Where the in-crate unit tests in `src/openclaw.rs` verify idempotency by inspecting the returned `MigrateReport` (asserting `report.imported.is_empty()` on a second run), this module goes further: it snapshots the **actual bytes on disk** before and after re-runs to guarantee that callers never observe duplicate sessions, clobbered configs, or rewritten timestamps.
 
-Three behaviours are validated:
+The tests exercise three distinct guarantees:
 
-1. **Second-run is a no-op** — a repeated migration produces a byte-identical destination tree (no duplicate sessions, no clobbered configs, no rewritten timestamps).
-2. **Partial-write recovery** — a migration interrupted mid-write (simulated by deleting a file) can be re-driven to a correct state without corrupting surviving entries.
-3. **Forward compatibility** — the prior major version's `KernelConfig` shape still deserialises and round-trips through `run_migrations`.
-
-These tests were introduced for issue #3407.
+1. **Second-run idempotency** — running a migration twice produces a byte-identical destination tree.
+2. **Partial-write recovery** — after simulating a killed process (deleting files mid-migration), a re-run reconstructs the missing files without corrupting survivors.
+3. **Forward compatibility** — configs authored against the prior major version's schema still deserialize and migrate to the current version.
 
 ## Test Architecture
 
 ```mermaid
 graph TD
-    subgraph "Test Fixtures"
-        OC[write_openclaw_workspace]
-        OF[write_openfang_workspace]
-        FIX[tests/fixtures/legacy_config/config_v1.toml]
-    end
-
-    subgraph "Snapshot Infrastructure"
-        ST[snapshot_tree] --> WI[walkdir_iter]
-    end
-
-    subgraph "Migration Targets"
-        OM[openclaw::migrate]
-        FM[openfang::migrate]
-        RM[run_migrations]
+    subgraph "Helpers"
+        WO[write_openclaw_workspace]
+        WF[write_openfang_workspace]
+        SN[snapshot_tree]
+        WA[walkdir_iter]
+        OP[opts]
     end
 
     subgraph "Idempotency Tests"
@@ -49,125 +39,154 @@ graph TD
         T6[legacy_v1_config_migrates_forward_to_current_version]
     end
 
-    OC --> T1 & T3
-    OF --> T2 & T4
-    T1 & T2 & T3 & T4 --> ST
-    T1 & T3 --> OM
-    T2 & T4 --> FM
-    FIX --> T5 & T6
-    T5 --> KernelConfig
-    T6 --> RM
+    SN --> WA
+    T1 --> WO
+    T1 --> OP
+    T1 --> SN
+    T2 --> WF
+    T2 --> OP
+    T2 --> SN
+    T3 --> WO
+    T3 --> OP
+    T3 --> SN
+    T4 --> WF
+    T4 --> OP
+    T4 --> SN
 ```
 
-## Infrastructure Functions
+## Helper Functions
 
 ### `snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>>`
 
-Reads every regular file under `root` and returns a sorted map from relative path to byte contents. Using `BTreeMap` ensures deterministic iteration order, so `assert_eq!` failures point at the first differing path rather than depending on `HashMap` insertion order. Returns an empty map if `root` doesn't exist.
+Recursively reads every regular file under `root` and returns a sorted map of relative paths to byte contents. The `BTreeMap` ordering is critical: when an `assert_eq!` fails, the diff points at the first differing path alphabetically, rather than depending on nondeterministic `HashMap` iteration order.
 
 ### `walkdir_iter(root: &Path) -> Vec<PathBuf>`
 
-A small recursive directory walker built on `std::fs::read_dir`. Avoids pulling `walkdir` into dev-dependencies. Symlinks are deliberately ignored since neither migrator produces them. Results are sorted for deterministic ordering.
+A minimal recursive directory walker built on `std::fs::read_dir`, intentionally avoiding a `walkdir` dev-dependency. Symlinks are skipped deliberately — neither migrator produces them, and including them would make snapshots unstable across platforms.
 
 ### `write_openclaw_workspace(dir: &Path)`
 
-Creates a minimal but representative OpenClaw source workspace:
+Creates a minimal but representative OpenClaw source workspace containing:
 
-- `openclaw.json` — agent definitions (coder, researcher), channel config (Telegram), memory and session settings
-- `memory/coder/MEMORY.md` — per-agent memory file
-- `sessions/agent_coder_main.jsonl` — a session file (critical for verifying no duplication on re-run)
+| File | Purpose |
+|------|---------|
+| `openclaw.json` | JSON5 agent/channel/memory/session config |
+| `memory/coder/MEMORY.md` | Per-agent memory file |
+| `sessions/agent_coder_main.jsonl` | Session history (must not be duplicated on re-run) |
 
 ### `write_openfang_workspace(dir: &Path)`
 
-Creates a minimal OpenFang source workspace:
+Creates a minimal OpenFang source workspace containing:
 
-- `config.toml` — kernel config with `config_version = 2`, API listen address, log level, and a `[default_model]` table
-- `secrets.env` — environment file that must be preserved verbatim
-- `agents/coder/agent.toml` — an agent manifest
-- `data/index.db` — a binary blob
+| File | Purpose |
+|------|---------|
+| `config.toml` | Top-level config (v2 format with root-level fields) |
+| `secrets.env` | Environment file (must be copied verbatim) |
+| `agents/coder/agent.toml` | Agent manifest (exercises TOML rewrite path) |
+| `data/index.db` | Binary file (exercises raw copy path) |
 
 ### `opts(source, src, dst) -> MigrateOptions`
 
-Helper that constructs a `MigrateOptions` with `dry_run: false`. Accepts a `MigrateSource` variant and the source/destination paths.
+Constructs a `MigrateOptions` with `dry_run: false` and the specified source type and directory paths.
 
-## Test Details
+## Idempotency Tests
 
-### A. Second-Run Byte-Identity
+### `openclaw_second_run_is_byte_identical`
 
-#### `openclaw_second_run_is_byte_identical`
+Verifies that the OpenClaw migrator's marker file (`.openclaw_migrated`) short-circuits before any writes. After a successful first run, the test:
 
-1. Write an OpenClaw workspace to a temp directory.
-2. Run `openclaw::migrate` and snapshot the destination.
-3. Run migration again; assert `report.imported.is_empty()` (the marker file short-circuits before any writes).
-4. Snapshot the destination again and assert byte-equality with the first snapshot.
+1. Snapshots the entire destination tree.
+2. Calls `openclaw::migrate` a second time.
+3. Asserts `report.imported.is_empty()`.
+4. Asserts the second snapshot is byte-identical to the first.
 
-The OpenClaw migrator uses a `.openclaw_migrated` marker file to detect prior runs. This test confirms that the marker's timestamp body is not rewritten on a second invocation.
+This is strictly stronger than the in-crate unit test, which only checks the report — here the timestamp embedded in the marker body must also be unchanged.
 
-#### `openfang_second_run_is_byte_identical`
+### `openfang_second_run_is_byte_identical`
 
-1. Write an OpenFang workspace to a temp directory.
-2. Run `openfang::migrate` and snapshot the destination. Assert something was imported and nothing was skipped.
-3. Run migration again; assert `report.imported.is_empty()` and that every previously-imported entry is now in `report.skipped`.
-4. Assert the two snapshots are byte-identical.
+OpenFang has no marker file; it relies on per-entry `dest_path.exists()` guards. After a clean first run, every source path already exists at the destination. This test asserts:
 
-OpenFang migration has no marker file—it relies on per-entry `dest_path.exists()` checks. Each source file should appear as "skipped: already exists" on re-run.
+- The second run's `report.imported` is empty.
+- `report.skipped.len()` equals the first run's `report.imported.len()` (every previously-imported file is now "already exists").
+- The on-disk tree is byte-identical across both runs.
 
-### B. Partial-Write Recovery
+## Recovery Tests
 
-#### `openclaw_partial_write_is_recoverable`
+These simulate a migration process that was killed mid-write. The pattern is:
 
-1. Run a clean migration and snapshot the baseline.
-2. Select a "victim" file (prefers an agent manifest like `agent.toml` for `coder`; falls back to any non-marker file).
-3. Delete the victim file **and** the `.openclaw_migrated` marker (simulating a process killed mid-write, before the marker was written).
-4. Re-run migration.
-5. Assert the victim file is recreated with its original byte content.
-6. Assert every other surviving file (excluding the marker, which may have a fresh timestamp) is byte-identical to the baseline.
-
-This tests the **never-clobber semantics** implemented by `promote_staging` (issue #3795).
-
-#### `openfang_partial_write_is_recoverable`
-
-1. Run a clean migration and snapshot the baseline.
-2. Delete `agents/coder/agent.toml` (a rewritten file, exercising the rewrite path on recovery).
+1. Run migration to completion → snapshot the baseline.
+2. Delete a "victim" file (and for OpenClaw, the marker file).
 3. Re-run migration.
-4. Assert the victim file is recreated with identical bytes.
-5. Assert every other file is unchanged.
+4. Assert the victim is recreated with its original bytes.
+5. Assert every surviving file is unchanged.
 
-Since OpenFang has no marker, only the victim file needs to be deleted.
+### `openclaw_partial_write_is_recoverable`
 
-### C. Forward Compatibility
+Selects a deterministic victim file from the baseline (preferring an agent manifest like `coder/agent.toml`, falling back to any non-marker file). After deleting the victim and `.openclaw_migrated`, the recovery run must:
 
-Both forward-compat tests use the fixture at `tests/fixtures/legacy_config/config_v1.toml`, which represents the minimal v1 `KernelConfig` shape—`config_version = 1` plus an `[api]` table with `api_key`, `api_listen`, and `log_level`. This is the smallest representation that exercises deserialisation and migration; a complete v1 config is not used because the schema surface area makes it impractical to reconstruct.
+- Recreate the victim with byte-identical content.
+- Leave all other files untouched (the `promote_staging` never-clobber semantics from #3795).
+- Recreate the marker.
 
-#### `legacy_v1_config_parses_into_current_kernel_config`
+### `openfang_partial_write_is_recoverable`
 
-Asserts that the v1 TOML fixture deserialises into the current `KernelConfig` type via `toml::from_str`. Unknown fields (like the `[api]` table) are ignored under `#[serde(default)]`; missing root fields fall back to `Default`. Verifies `config_version == 1`.
+Targets `agents/coder/agent.toml` specifically — a rewritten file that exercises both the copy and rewrite paths. After deletion and re-run:
 
-#### `legacy_v1_config_migrates_forward_to_current_version`
+- The agent manifest is recreated with identical content.
+- All other files (config, secrets, binary data) remain byte-identical.
 
-Calls `run_migrations(&mut raw, 1)` from `librefang_types::config` and asserts:
+## Forward-Compatibility Tests
 
-- The returned version equals `CONFIG_VERSION`.
-- The `[api]` table is removed (hoisted to root level).
-- `api_key`, `api_listen`, and `log_level` appear as top-level keys with their original values.
+These tests reference the fixture at `tests/fixtures/legacy_config/config_v1.toml`, which represents the v1 config schema where `api_key`, `api_listen`, and `log_level` lived under an `[api]` table. The v1→v2 migration hoists these to root level and removes the `[api]` table.
 
-## Dependencies
+### `legacy_v1_config_parses_into_current_kernel_config`
 
-| Dependency | Usage |
-|---|---|
-| `librefang_migrate` | The crate under test—provides `openclaw::migrate`, `openfang::migrate`, `MigrateOptions`, `MigrateSource` |
-| `librefang_types` | Provides `config::KernelConfig`, `config::run_migrations`, `config::CONFIG_VERSION` for forward-compat tests |
-| `tempfile` | `TempDir` for isolated source/destination directories |
-| `toml` | Parsing the legacy fixture and inspecting migrated `toml::Value` |
+Asserts that the v1 fixture deserializes directly into `librefang_types::config::KernelConfig`. This works because:
 
-## Running
+- `KernelConfig` has `#[serde(default)]` annotations — missing root fields fall back to defaults.
+- Unknown top-level fields (like the `[api]` table) are silently ignored by serde.
+
+This test acts as an early-warning system: if a required field is added to `KernelConfig` without a `#[serde(default)]` annotation, the v1 fixture will stop deserializing.
+
+### `legacy_v1_config_migrates_forward_to_current_version`
+
+Calls `run_migrations(&mut raw, 1)` on the v1 fixture loaded as raw `toml::Value`, then asserts:
+
+- The returned version number equals `CONFIG_VERSION`.
+- The `[api]` table has been removed.
+- `api_key`, `api_listen`, and `log_level` are hoisted to the root table with their original values (`legacy-secret-key`, `127.0.0.1:4545`, `info`).
+
+## Relationship to the Rest of the Codebase
+
+```
+librefang-migrate
+├── src/
+│   ├── lib.rs          — MigrateOptions, MigrateSource (used by opts())
+│   ├── openclaw.rs     — openclaw::migrate(), marker file logic, unit-level idempotency
+│   └── openfang.rs     — openfang::migrate(), per-entry exists() skip logic
+├── tests/
+│   ├── idempotency.rs  — THIS FILE
+│   └── fixtures/
+│       └── legacy_config/
+│           └── config_v1.toml
+│
+librefang-types
+└── src/config/
+    ├── version.rs      — run_migrations(), CONFIG_VERSION
+    └── (KernelConfig)
+```
+
+The fixture `config_v1.toml` is intentionally minimal — only `config_version` plus the `[api]` table. This avoids the fragility of trying to reconstruct a complete v1 config with every legacy field-by-field default, while still exercising the critical load + migrate path.
+
+## Running the Tests
 
 ```sh
-# All idempotency tests
+# From the workspace root
 cargo test -p librefang-migrate --test idempotency
 
 # Individual tests
-cargo test -p librefang-migrate --test idempotency openclaw_second_run_is_byte_identical
-cargo test -p librefang-migrate --test idempotency openfang_partial_write_is_recoverable
-cargo test -p librefang-migrate --test idempotency legacy_v1_config_migrates_forward_to_current_version
+cargo test -p librefang-migrate --test idempotency -- openclaw_second_run_is_byte_identical
+cargo test -p librefang-migrate --test idempotency -- legacy_v1_config_migrates_forward_to_current_version
 ```
+
+All tests use `tempfile::TempDir` for source and destination directories and clean up automatically on completion.

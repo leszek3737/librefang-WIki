@@ -1,137 +1,130 @@
 # Other — librefang-kernel-handle-tests
 
-# librefang-kernel-handle/tests
-
-Integration tests for the `librefang-kernel-handle` crate's default trait implementations and delegation contracts.
+# librefang-kernel-handle — Integration Tests
 
 ## Purpose
 
-The `librefang-kernel-handle` crate defines a set of traits that abstract kernel operations (agent lifecycle, memory, task queues, events, knowledge graph, cron, wiki, channel I/O, etc.). Many of these traits provide **default method implementations** so that concrete kernel adapters only need to override the methods they actually support.
+This test suite validates the **default trait method implementations** provided by `librefang-kernel-handle`. The crate exposes a collection of traits (`AgentControl`, `MemoryAccess`, `TaskQueue`, `EventBus`, `KnowledgeGraph`, `ApprovalGate`, `ToolPolicy`, `ChannelSender`, etc.) that define the kernel's capability surface. Most traits ship default method bodies so that implementors only need to override what they actually support. These tests ensure those defaults are correct, stable, and semantically meaningful.
 
-This test module locks down those defaults with three goals:
+## Architecture
 
-1. **Pin return values** — default methods must return documented sentinel values (`Allow`, `false`, `120`, empty collections, `Unavailable` errors).
-2. **Verify delegation** — composite methods like `send_to_agent_as` must delegate to their simpler counterpart (`send_to_agent`), not bypass it.
-3. **Assert zero-copy contracts** — the `Bytes`-based `send_channel_file_data` path must never silently clone the underlying buffer.
-
-## File Overview
-
-```
-tests/
-├── defaults_approval.rs              # ApprovalGate & ToolPolicy default returns
-├── defaults_delegation.rs            # Delegation: _as → base, _checked → base, _with_context → base
-├── defaults_returns.rs               # Scalar & collection defaults, Unavailable error variants
-└── send_channel_file_data_zero_copy.rs  # Regression: Bytes zero-copy contract (#3553)
-```
-
-## Test Architecture
-
-Every test file follows the same pattern: define a stub struct, implement all kernel traits (required methods return stub values or errors), then call the **default** method under test. This is only possible because the traits are object-safe and the default methods are callable on any implementor.
+Every test file follows the same pattern: define a stub struct, implement only the **required** trait methods (often as no-ops or error-returning stubs), leave the default methods untouched, and then assert on the default behavior.
 
 ```mermaid
 graph TD
-    A[Test File] --> B[Stub Struct]
-    B --> C[Implement Required Trait Methods]
-    C --> D[Leave Default Methods Unoverridden]
-    D --> E[Call Default Method from Test]
-    E --> F[Assert Return Value / Side Effect]
-    
-    style A fill:#f9f,stroke:#333
-    style E fill:#bbf,stroke:#333
+    subgraph "Test Stubs"
+        A[NoopKernelHandle]
+        B[TrackingSendHandle]
+        C[TrackingSpawnHandle]
+        D[TrackingApprovalHandle]
+        E[CapturingFileKernel]
+    end
+
+    subgraph "Traits Under Test"
+        F[ApprovalGate]
+        G[ToolPolicy]
+        H[AgentControl]
+        I[ChannelSender]
+        J[CronControl]
+        K[WikiAccess]
+        L[MemoryAccess]
+    end
+
+    A -->|"defaults_approval, defaults_returns"| F
+    A -->|"defaults_returns"| G
+    A -->|"defaults_returns"| J
+    A -->|"defaults_returns"| K
+    B -->|"delegates to send_to_agent"| H
+    C -->|"delegates to spawn_agent"| H
+    D -->|"delegates to requires_approval"| F
+    E -->|"zero-copy Bytes"| I
+    A -->|"defaults_returns"| L
 ```
 
-### Required Trait Implementations
+## Test Files
 
-Each stub must implement every trait in the kernel surface area, even if the test only targets one. The traits and their required methods are:
+### `defaults_approval.rs`
 
-| Trait | Required Methods | Default Methods Tested |
+Verifies default implementations in `ApprovalGate` and `ToolPolicy`.
+
+| Test | What it asserts |
+|---|---|
+| `test_request_approval_default_auto_approves` | `request_approval()` returns `ApprovalDecision::Approved` without asking anyone |
+| `test_is_tool_denied_with_context_default_false` | `is_tool_denied_with_context()` returns `false` regardless of sender/channel |
+| `test_requires_approval_default_false` | `requires_approval()` returns `false` for any tool name |
+
+**Key insight:** When a kernel doesn't override approval/tool-policy methods, the system operates in an **unrestricted** mode — all tools are allowed and no approval is required. This is the correct default for development and for kernels that don't need human-in-the-loop gating.
+
+The stub (`NoopKernelHandle`) implements all required methods as errors. The defaults under test never call those required methods, so the errors are never triggered.
+
+### `defaults_delegation.rs`
+
+Ensures that **convenience methods with extra parameters** correctly delegate to the simpler base methods. Each test uses a tracking handle with an `AtomicBool` flag to prove the base method was actually called.
+
+| Test | Default method under test | Delegates to |
 |---|---|---|
-| `AgentControl` | `spawn_agent`, `send_to_agent`, `list_agents`, `kill_agent`, `find_agents` | `send_to_agent_as`, `spawn_agent_checked` |
-| `MemoryAccess` | `memory_store`, `memory_recall`, `memory_list` | `memory_acl_for_sender` |
-| `WikiAccess` | *(none required)* | `wiki_get`, `wiki_search`, `wiki_write` |
-| `TaskQueue` | `task_post`, `task_claim`, `task_complete`, `task_list`, `task_delete`, `task_retry`, `task_get`, `task_update_status` | *(none)* |
-| `EventBus` | `publish_event` | *(none)* |
-| `KnowledgeGraph` | `knowledge_add_entity`, `knowledge_add_relation`, `knowledge_query` | *(none)* |
-| `CronControl` | *(none required)* | `cron_create`, `cron_list`, `cron_cancel` |
-| `ApprovalGate` | *(none required)* | `request_approval`, `requires_approval`, `requires_approval_with_context` |
-| `ToolPolicy` | *(none required)* | `is_tool_denied_with_context`, `resolve_user_tool_decision`, `tool_timeout_secs`, `tool_timeout_secs_for`, `max_agent_call_depth`, `readonly_workspace_prefixes`, `named_workspace_prefixes` |
-| `ChannelSender` | *(none required — but tested via override)* | `send_channel_file_data` |
-| `HandsControl`, `A2ARegistry`, `PromptStore`, `WorkflowRunner`, `GoalControl` | *(none required)* | *(none — marker-like)* |
+| `test_send_to_agent_as_delegates_to_send_to_agent` | `send_to_agent_as(agent_id, msg, parent_id)` | `send_to_agent(agent_id, msg)` |
+| `test_spawn_agent_checked_delegates_to_spawn_agent` | `spawn_agent_checked(toml, parent_id, &[])` | `spawn_agent(toml, parent_id)` |
+| `test_requires_approval_with_context_delegates_to_requires_approval` | `requires_approval_with_context(tool, sender, channel)` | `requires_approval(tool)` |
 
-## Test Details
+**Key insight:** The `_with_context` and `_as` / `_checked` variants exist to give implementors richer call sites, but the default behavior is to **ignore the extra parameters** and forward to the base method. If you need context-aware approval logic, you must override `requires_approval_with_context` directly — overriding `requires_approval` alone won't be called.
 
-### defaults_approval.rs
+### `defaults_returns.rs`
 
-Tests that the default `ApprovalGate` and `ToolPolicy` implementations provide permissive, pass-through behavior:
+Validates the concrete return values of default implementations across multiple traits.
 
-- **`test_request_approval_default_auto_approves`** — `request_approval` returns `ApprovalDecision::Approved` unconditionally, regardless of the agent ID, tool name, summary, or context.
-- **`test_is_tool_denied_with_context_default_false`** — `is_tool_denied_with_context` returns `false` for any tool/sender/channel combination.
-- **`test_requires_approval_default_false`** — `requires_approval` returns `false` for any tool name.
-
-Uses a fully no-op `NoopKernelHandle` where every required method returns `"not implemented"` errors (unreachable in these tests).
-
-### defaults_delegation.rs
-
-Verifies that default composite methods delegate to their simpler counterparts using `AtomicBool` flags. Three separate stub structs isolate each delegation:
-
-#### `TrackingSendHandle` → `send_to_agent_as`
-
-```
-send_to_agent_as("agent1", "msg", "parent1")
-  → calls send_to_agent("agent1", "<prefixed msg>")
-```
-
-The test confirms `send_to_agent` was invoked (`send_called` flag) and the result propagates unchanged.
-
-#### `TrackingSpawnHandle` → `spawn_agent_checked`
-
-```
-spawn_agent_checked("toml", None, &[])
-  → calls spawn_agent("toml", None)
-```
-
-The empty `&[]` forbidden-tools list means no filtering occurs; the raw `(id, name)` tuple passes through.
-
-#### `TrackingApprovalHandle` → `requires_approval_with_context`
-
-```
-requires_approval_with_context("tool", Some("sender"), Some("channel"))
-  → calls requires_approval("tool")
-```
-
-Only the `ApprovalGate` trait has a custom `requires_approval` override (sets `approval_checked`, returns `true`). All other traits remain no-op.
-
-### defaults_returns.rs
-
-Pins the scalar and collection defaults, plus the `Unavailable` error variant pattern:
-
-| Test | Method | Expected Default |
+| Test | Default method | Expected return |
 |---|---|---|
-| `test_resolve_user_tool_decision_default_allow` | `resolve_user_tool_decision` | `UserToolGate::Allow` |
-| `test_memory_acl_for_sender_default_none` | `memory_acl_for_sender` | `None` |
-| `test_cron_defaults_return_errors` | `cron_create`, `cron_list`, `cron_cancel` | `Err(KernelOpError::Unavailable("Cron scheduler"))` |
-| `test_tool_timeout_defaults` | `tool_timeout_secs`, `tool_timeout_secs_for` | `120` |
-| `test_max_agent_call_depth_default` | `max_agent_call_depth` | `5` |
-| `test_workspace_prefix_defaults_empty` | `readonly_workspace_prefixes`, `named_workspace_prefixes` | empty `Vec` |
-| `test_wiki_access_defaults_return_unavailable_with_method_name` | `wiki_get`, `wiki_search`, `wiki_write` | `Err(KernelOpError::Unavailable("wiki_get"))` etc. |
+| `test_resolve_user_tool_decision_default_allow` | `resolve_user_tool_decision(tool, sender, channel)` | `UserToolGate::Allow` |
+| `test_memory_acl_for_sender_default_none` | `memory_acl_for_sender(sender, channel)` | `None` |
+| `test_cron_defaults_return_errors` | `cron_create`, `cron_list`, `cron_cancel` | `KernelOpError::Unavailable("Cron scheduler")` |
+| `test_tool_timeout_defaults` | `tool_timeout_secs()`, `tool_timeout_secs_for(tool)` | `120` |
+| `test_max_agent_call_depth_default` | `max_agent_call_depth()` | `5` |
+| `test_workspace_prefix_defaults_empty` | `readonly_workspace_prefixes(agent)`, `named_workspace_prefixes(agent)` | empty `Vec` |
+| `test_wiki_access_defaults_return_unavailable_with_method_name` | `wiki_get`, `wiki_search`, `wiki_write` | `KernelOpError::Unavailable("wiki_get")` etc. |
 
-The `Unavailable` variant tests (#3541, #3329) are notable: they match on the **variant and capability string** rather than substring-matching the error message. This lets callers discriminate programmatically in `match` arms while the `Display` impl still produces human-readable logs.
+**Key design decisions captured by these tests:**
 
-### send_channel_file_data_zero_copy.rs
+- **`KernelOpError::Unavailable`** carries a capability name string (e.g. `"Cron scheduler"`, `"wiki_get"`), not a human-readable sentence. This makes programmatic matching reliable (#3541).
+- **Wiki defaults** are per-method (`"wiki_get"`, `"wiki_search"`, `"wiki_write"`) rather than a single `"wiki"` label. This lets callers and audit logs distinguish which wiki entry-point was hit (#3329).
+- **Tool timeouts** default to 120 seconds globally and per-tool. Override either method to customize.
 
-Regression test for **issue #3553**. When `send_channel_file_data` was changed from `Vec<u8>` to `bytes::Bytes`, the motivation was zero-cost cloning for wrapping layers (retry, metering, fan-out). This test locks that property down.
+### `send_channel_file_data_zero_copy.rs`
 
-Uses `CapturingFileKernel` which implements `ChannelSender` by recording the pointer address and length of the received `Bytes`:
+Regression test for issue **#3553**. Validates that `ChannelSender::send_channel_file_data` uses `bytes::Bytes` instead of `Vec<u8>`, enabling **zero-copy buffer sharing** across retry wrappers, metering layers, and fan-out adapters.
 
-- **`cloning_bytes_shares_underlying_allocation`** — pure `bytes` crate test: three successive clones of a 10 MiB `Bytes` all share the same pointer address. No allocation occurs on clone.
-- **`send_channel_file_data_does_not_copy_buffer`** — calls the trait method with `original.clone()`, then asserts the kernel observed the same pointer. Simulates the real-world pattern where a wrapper clones before forwarding.
-- **`vec_to_bytes_round_trip_is_zero_copy_for_unique_bytes`** — verifies `Vec::from(Bytes)` is O(1) when the `Bytes` uniquely owns its allocation (the `into_vec` vtable path in bytes 1.x).
+| Test | What it asserts |
+|---|---|
+| `cloning_bytes_shares_underlying_allocation` | `Bytes::clone()` does not allocate a new buffer — the pointer address is identical across all clones |
+| `send_channel_file_data_does_not_copy_buffer` | When the caller clones `Bytes` before passing it, the kernel's `CapturingFileKernel` receives the same allocation address |
+| `vec_to_bytes_round_trip_is_zero_copy_for_unique_bytes` | `Vec<u8>` → `Bytes::from()` → `Vec::from()` preserves the original allocation address (O(1) when `Bytes` uniquely owns the data) |
 
-## Adding New Tests
+The `CapturingFileKernel` stub records the `as_ptr()` address and length received by `send_channel_file_data`. The test compares these against the caller's original `Bytes` to confirm no intermediate copy occurred.
 
-When adding a default method to any kernel trait:
+**Why this matters:** Channel adapters that retry on failure or broadcast to multiple recipients can `.clone()` the `Bytes` handle freely. Each clone is a refcount bump (~24 bytes), not a multi-megabyte memcpy. The 10 MiB payload size in `cloning_bytes_shares_underlying_allocation` reflects the real-world scenario that motivated #3553.
 
-1. **Add a return-value test** in `defaults_returns.rs` (or the appropriate file) using `NoopKernelHandle`.
-2. **If the method delegates**, add a delegation test with a tracking struct using `AtomicBool` flags, following the pattern in `defaults_delegation.rs`.
-3. **If the method involves data-transfer semantics** (buffers, slices), consider a zero-copy assertion in a dedicated file, similar to `send_channel_file_data_zero_copy.rs`.
-4. **Update the stub** in every test file to satisfy the new required method (if any), keeping the stub implementations consistent across files.
+## Implementing a New Test Stub
+
+If you add a new trait method with a default implementation, you need to update the existing stubs. Every stub must implement all **required** methods. The pattern is:
+
+1. Create a struct (or reuse an existing one if the method is on a trait already covered).
+2. Implement the trait's required methods — return errors, empty collections, or `Ok(default)`.
+3. Add the trait impl block with empty braces for marker-style traits (`CronControl`, `A2ARegistry`, etc.).
+4. Write the test calling the **default** method and asserting its return value.
+5. For delegation tests, add an `AtomicBool` field to the struct and flip it inside the base method, then assert it was set.
+
+### Required trait methods reference
+
+Every stub in this suite implements the following required methods:
+
+| Trait | Required methods |
+|---|---|
+| `AgentControl` | `spawn_agent`, `send_to_agent`, `list_agents`, `kill_agent`, `find_agents` |
+| `MemoryAccess` | `memory_store`, `memory_recall`, `memory_list` |
+| `WikiAccess` | none (all default) |
+| `TaskQueue` | `task_post`, `task_claim`, `task_complete`, `task_list`, `task_delete`, `task_retry`, `task_get`, `task_update_status` |
+| `EventBus` | `publish_event` |
+| `KnowledgeGraph` | `knowledge_add_entity`, `knowledge_add_relation`, `knowledge_query` |
+| `ChannelSender` | `send_channel_file_data` (required; tested explicitly in the zero-copy file) |
+
+Traits with **no required methods** (marker-style, all defaults): `CronControl`, `ApprovalGate`, `HandsControl`, `A2ARegistry`, `PromptStore`, `WorkflowRunner`, `GoalControl`, `ToolPolicy`.

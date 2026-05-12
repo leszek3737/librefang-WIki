@@ -2,55 +2,46 @@
 
 # librefang-testing — Test Infrastructure
 
-Provides mock infrastructure for unit and integration testing API routes without starting a full daemon. The crate wraps a real `LibreFangKernel` booted with minimal configuration (in-memory SQLite, temp directory, no networking), letting tests exercise production code paths end-to-end.
+Provides mock infrastructure for unit and integration testing API routes without starting a full daemon. Every component is designed to produce real kernel/app instances with the heavy bits (networking, LLM providers, persistent storage) swapped out for deterministic fakes.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    TC[Test Code] --> TA[TestAppState]
-    TC --> MKB[MockKernelBuilder]
-    TC --> MD[MockLlmDriver]
-    TC --> H[helpers]
-
-    TA -->|uses| MKB
-    MKB -->|boots| K[LibreFangKernel]
-    TA -->|wraps| AS[AppState]
-    TA -->|produces| R[Router]
-
-    H -->|builds requests| TR[test_request]
-    H -->|asserts responses| AJO[assert_json_ok]
-    H -->|asserts responses| AJE[assert_json_error]
-
-    MD -->|implements| LLM[LlmDriver trait]
-    FLD[FailingLlmDriver] -->|implements| LLM
+    TK["MockKernelBuilder"] -->|build| K["Arc&lt;LibreFangKernel&gt;"]
+    TK -->|returns| TD["TempDir"]
+    TA["TestAppState"] -->|uses| TK
+    TA -->|produces| AS["Arc&lt;AppState&gt;"]
+    TA -->|router| R["axum::Router"]
+    ML["MockLlmDriver"] -->|implements| LD["LlmDriver trait"]
+    FL["FailingLlmDriver"] -->|implements| LD
+    H["helpers"] -->|test_request| REQ["Request&lt;Body&gt;"]
+    H -->|assert_json_ok| VAL["serde_json::Value"]
+    H -->|assert_json_error| VAL
+    AS -->|wires into| R
+    K -->|backs| AS
 ```
 
-## Re-exports
+## Key Components
 
-The crate root re-exports the primary API surface:
+### MockKernelBuilder
 
-| Symbol | Source |
-|---|---|
-| `test_request`, `assert_json_ok`, `assert_json_error` | `helpers` module |
-| `MockLlmDriver`, `FailingLlmDriver` | `mock_driver` module |
-| `MockKernelBuilder`, `CatalogSeed`, `test_catalog_baseline` | `mock_kernel` module |
-| `TestAppState` | `test_app` module |
+Boots a real `LibreFangKernel` via `LibreFangKernel::boot_with_config` with an in-memory SQLite database, a temp directory, and networking disabled. This is not a stub — it's a full kernel with all subsystems live, just isolated from the outside world.
 
----
+**Builder methods:**
 
-## MockKernelBuilder
+| Method | Purpose |
+|--------|---------|
+| `new()` | Default minimal config |
+| `with_config(f)` | Mutate `KernelConfig` before boot |
+| `with_catalog_seed(seed)` | Replace the model catalog with deterministic entries after boot |
+| `build()` | Returns `(Arc<LibreFangKernel>, TempDir)` |
 
-Builds a real `LibreFangKernel` with a temp directory and in-memory SQLite database. The kernel goes through the full `boot_with_config` path, skipping networking, OFP, and cron initialization.
+**TempDir lifetime:** The returned `TempDir` must be held for the duration of the test. Dropping it deletes the temp directory, invalidating all kernel file paths (skills, workspaces, vault).
 
-### Lifecycle
+**Vault key stability:** The builder pins a deterministic vault master key (`LIBREFANG_VAULT_KEY` env var) on first construction using `Once`. This prevents parallel test shards from racing on the process-shared keyring file — each test process gets the same key, so `vault_get`/`vault_set` never fails due to decryption mismatches.
 
-1. `MockKernelBuilder::new()` — creates a builder with default `KernelConfig`.
-2. Optional: chain `.with_config(|cfg| ...)` to mutate config before boot.
-3. Optional: chain `.with_catalog_seed(seed)` to inject a deterministic model catalog.
-4. `.build()` — boots the kernel, returns `(Arc<LibreFangKernel>, TempDir)`.
-
-**The caller must hold onto the `TempDir`** for the lifetime of the test. Dropping it deletes the temp directory and invalidates kernel file paths.
+**Catalog seeding:** Without seeding, the catalog is populated by `sync_registry` which fetches from the network — flaky on CI under rate-limits or partitions. Use `with_catalog_seed(test_catalog_baseline())` to get a stable baseline containing `gpt-4o-mini` under the `openai` provider. Add entries to `test_catalog_baseline()` as needed, but keep the list minimal.
 
 ```rust,ignore
 let (kernel, _tmp) = MockKernelBuilder::new()
@@ -61,69 +52,92 @@ let (kernel, _tmp) = MockKernelBuilder::new()
     .build();
 ```
 
-### Vault Key Stabilization
+The convenience function `test_kernel()` is shorthand for `MockKernelBuilder::new().build()`.
 
-Parallel tests share the process's keyring file (`<data_local_dir>/librefang/.keyring`). Without intervention, one test's `init()` overwrites another's master key, causing `vault_get`/`vault_set` decryption failures (historically seen as TOTP test flake on CI).
+### MockLlmDriver
 
-`MockKernelBuilder::build()` calls `ensure_test_vault_key()`, which uses a `Once` guard to set `LIBREFANG_VAULT_KEY` to a fixed 32-byte value (`AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=`) if not already present. This runs before any kernel boots, eliminating the race.
+A configurable fake `LlmDriver` that returns canned responses in order and records every call for assertions.
 
-### Model Catalog Seeding
+**Construction:**
 
-The kernel's `boot_with_config` calls `sync_registry`, which fetches from `github.com/librefang-registry`. On CI runners this flakes due to rate limiting or network partitions, producing an empty or partial catalog. Tests that assert on specific model IDs (e.g., `gpt-4o-mini`) then fail with 404 inconsistently across shards.
+```rust
+// Multiple responses, returned in order:
+let driver = MockLlmDriver::new(vec!["First response".into(), "Second".into()]);
 
-`.with_catalog_seed(seed)` replaces the catalog post-boot with a deterministic baseline. Use `test_catalog_baseline()` for a minimal set covering the `librefang-api` integration suite, or construct a custom `(Vec<ProviderInfo>, Vec<ModelCatalogEntry>)` pair.
-
-```rust,ignore
-let (kernel, _tmp) = MockKernelBuilder::new()
-    .with_catalog_seed(test_catalog_baseline())
-    .build();
+// Single response repeated forever:
+let driver = MockLlmDriver::with_response("Always this");
 ```
 
-The baseline provides:
-- Provider: `openai` with standard OpenAI API configuration
-- Model: `gpt-4o-mini` (128k context, 16k max output, tool-use + vision + streaming enabled)
+When responses are exhausted, the driver repeats the last one indefinitely.
 
-Add entries to `test_catalog_baseline()` as test demands grow — keep the list minimal and intentional.
+**Configuration (builder pattern):**
 
-### Convenience Function
+| Method | Default | Override |
+|--------|---------|----------|
+| `with_tokens(input, output)` | 10 / 5 | Custom token counts |
+| `with_stop_reason(reason)` | `EndTurn` | Any `StopReason` variant |
 
-`test_kernel()` is shorthand for `MockKernelBuilder::new().build()`.
+**Call recording:**
 
----
+```rust
+let driver = MockLlmDriver::with_response("hi");
+// ... exercise code that calls driver.complete() ...
 
-## TestAppState
+let calls = driver.recorded_calls();
+assert_eq!(calls.len(), 1);
+assert_eq!(calls[0].model, "gpt-4o-mini");
+assert_eq!(calls[0].message_count, 3);
+```
 
-Wraps the mock kernel output to produce a production-compatible `AppState` and axum `Router`. This is the primary entry point for route-level integration tests.
+Each `RecordedCall` captures: `model`, `message_count`, `tool_count`, `system`.
 
-### Construction
+**Streaming:** The driver implements `stream()` by calling `complete()` internally, then emitting `TextDelta` followed by `ContentComplete` events. This exercises the same event flow as production streaming.
 
-| Method | Description |
-|---|---|
-| `TestAppState::new()` | Default mock kernel, zero config |
-| `TestAppState::with_builder(builder)` | Custom `MockKernelBuilder` |
-| `TestAppState::from_kernel(kernel, tmp)` | Wrap an existing kernel (caller holds `TempDir`) |
+### FailingLlmDriver
 
-### Router
+Always returns `LlmError::Api { status: 500, ... }` from `complete()`. Use it to test error-handling paths without configuring a mock to fail.
 
-`test_app.router()` returns an axum `Router` with all production API routes nested under `/api`:
+```rust
+let driver = FailingLlmDriver::new("provider unreachable");
+```
 
-- `/api/health`, `/api/status`, `/api/version`, `/api/metrics`
-- `/api/agents`, `/api/agents/{id}`, `/api/agents/{id}/message`, etc.
-- `/api/skills`, `/api/skills/create`
-- `/api/config`, `/api/config/set`, `/api/config/reload`
-- `/api/memory/search`, `/api/memory/stats`
-- `/api/usage`, `/api/usage/summary`
-- `/api/tools`, `/api/models`, `/api/providers`
-- `/api/sessions`, `/api/profiles`
-- `/api/commands`
+`is_configured()` returns `false`, matching the behavior of a misconfigured real provider.
 
-Use with `tower::ServiceExt` to send requests directly:
+### TestAppState
+
+Wraps `MockKernelBuilder` output into a production-compatible `AppState` and provides a fully-wired `axum::Router`. This is the primary entry point for API route integration tests.
+
+**Construction paths:**
+
+| Method | When to use |
+|--------|-------------|
+| `new()` | Default kernel, no customization |
+| `with_builder(builder)` | Custom kernel config or catalog |
+| `from_kernel(kernel, tmp)` | You've already built a kernel yourself |
+
+**Auth configuration:**
+
+```rust,ignore
+let test = TestAppState::new()
+    .with_api_key("test-secret-key")
+    .with_user_api_keys(vec![ApiUserAuth { ... }]);
+
+// Or with RBAC users writing config to disk:
+let test = TestAppState::with_builder(
+    MockKernelBuilder::new().with_config(|cfg| { /* ... */ })
+)
+.with_api_key("secret")
+.with_user_api_keys(users)
+.with_config_path(tmp_path.join("config.toml"));
+```
+
+**Router:** `test.router()` returns an `axum::Router` with all API routes nested under `/api`, matching the production setup. Use `tower::ServiceExt` to send requests directly:
 
 ```rust,ignore
 let test = TestAppState::new();
-let router = test.router();
+let app = test.router();
 
-let response = router
+let response = app
     .oneshot(test_request(Method::GET, "/api/health", None))
     .await
     .unwrap();
@@ -132,168 +146,86 @@ let body = assert_json_ok(response).await;
 assert_eq!(body["status"], "ok");
 ```
 
-### Auth Configuration
+**Decomposition:** `into_parts()` returns `(Arc<AppState>, TempDir, Option<PathBuf>)` when you need direct access to all components.
 
-| Method | Purpose |
-|---|---|
-| `.with_api_key(key)` | Sets the global API key for auth middleware |
-| `.with_user_api_keys(keys)` | Pre-populates per-user API key list (`Vec<ApiUserAuth>`) |
+### Helper Functions
 
-These set runtime locks on `AppState` — they are **not** persisted by `with_config_path`.
+Three functions for building requests and asserting on responses. All are re-exported at the crate root.
 
-### Config File Serialization
+**`test_request(method, path, body)`** — Builds an `axum::http::Request<Body>`. Automatically sets `Content-Type: application/json` when a body is provided.
 
-`.with_config_path(path)` writes the kernel's internal `KernelConfig` as TOML to disk. Use this for tests that exercise config-reload endpoints. Note: runtime-only values set via `with_api_key` / `with_user_api_keys` must be baked into the config via `MockKernelBuilder::with_config` if the test reloads from the file.
+**`assert_json_ok(response)`** — Asserts status 200, parses body as JSON. Returns `serde_json::Value`. Panics with the raw body on failure.
 
-### Destructuring
-
-`.into_parts()` returns `(Arc<AppState>, TempDir, Option<PathBuf>)` for tests that need direct ownership of all components.
-
----
-
-## MockLlmDriver
-
-A configurable fake `LlmDriver` implementation that returns canned responses and records all calls for post-hoc assertions.
-
-### Creating
+**`assert_json_error(response, expected_status)`** — Asserts the given status code, parses body as JSON. Returns `serde_json::Value`. Use for verifying error responses:
 
 ```rust,ignore
-// Single repeated response
-let driver = MockLlmDriver::with_response("Hello, world!");
+let response = app
+    .oneshot(test_request(Method::GET, "/api/agents/nonexistent", None))
+    .await
+    .unwrap();
 
-// Multiple responses, returned in order
-let driver = MockLlmDriver::new(vec![
-    "First response".into(),
-    "Second response".into(),
-]);
+let body = assert_json_error(response, StatusCode::NOT_FOUND).await;
 ```
 
-When the canned response list is exhausted, the driver wraps around and returns the **last** response indefinitely.
+Both assertion functions read the body via a shared internal `read_body()` helper that collects `Body` into a `String` and includes the raw content in any panic message for debugging.
 
-### Customizing
+## Typical Test Patterns
 
-| Method | Default | Description |
-|---|---|---|
-| `.with_tokens(input, output)` | `(10, 5)` | Override token counts in `TokenUsage` |
-| `.with_stop_reason(reason)` | `EndTurn` | Override `StopReason` in the response |
-
-```rust,ignore
-let driver = MockLlmDriver::with_response("hi")
-    .with_tokens(100, 50)
-    .with_stop_reason(StopReason::MaxTokens);
-```
-
-### Call Recording
-
-Every call to `complete` or `stream` records a `RecordedCall`:
-
-| Field | Content |
-|---|---|
-| `model` | Model name from the request |
-| `message_count` | Number of messages sent |
-| `tool_count` | Number of tool definitions |
-| `system` | System prompt, if any |
-
-Access recordings:
-- `driver.recorded_calls()` — `Vec<RecordedCall>`
-- `driver.call_count()` — `usize`
-
-### Streaming
-
-`MockLlmDriver` implements `stream()` by calling `complete()` internally, then sending `StreamEvent::TextDelta` followed by `StreamEvent::ContentComplete` on the provided channel. This simulates a basic streaming response.
-
-## FailingLlmDriver
-
-A `LlmDriver` that always returns an error. Use it for testing error-handling paths:
-
-```rust,ignore
-let driver = FailingLlmDriver::new("API rate limit exceeded");
-```
-
-Returns `LlmError::Api { status: 500, message, code: None }` on every `complete` call. `is_configured()` returns `false`.
-
----
-
-## HTTP Helpers
-
-Functions for building test requests and asserting on responses. All work with `axum::http::Request<Body>` and `axum::http::Response<Body>`.
-
-### test_request
-
-```rust
-pub fn test_request(method: Method, path: &str, body: Option<&str>) -> Request<Body>
-```
-
-Builds an HTTP request. When `body` is `Some`, sets `Content-Type: application/json` automatically.
-
-```rust,ignore
-let req = test_request(Method::GET, "/api/health", None);
-let req = test_request(Method::POST, "/api/agents", Some(r#"{"name": "test"}"#));
-```
-
-### assert_json_ok
-
-```rust
-pub async fn assert_json_ok(response: Response<Body>) -> serde_json::Value
-```
-
-Asserts status `200 OK`, parses the body as JSON, returns the `serde_json::Value`. Panics with a descriptive message including the raw body on either failure.
-
-### assert_json_error
-
-```rust
-pub async fn assert_json_error(response: Response<Body>, expected_status: StatusCode) -> serde_json::Value
-```
-
-Same contract as `assert_json_ok` but asserts against a caller-specified status code. Use for validating error responses.
-
-### read_body (internal)
-
-Both assertion functions delegate to the private `read_body` helper, which collects the response body bytes and converts to `String` (asserting UTF-8 validity).
-
----
-
-## Integration Pattern
-
-A typical integration test combines these components:
+### Basic API route test
 
 ```rust,ignore
 #[tokio::test]
-async fn test_agent_lifecycle() {
-    // 1. Boot test infrastructure
-    let test = TestAppState::with_builder(
-        MockKernelBuilder::new()
-            .with_catalog_seed(test_catalog_baseline()),
-    );
+async fn test_health() {
+    let test = TestAppState::new();
+    let app = test.router();
 
-    // 2. Get a router to send requests through
-    let router = test.router();
+    let response = app
+        .oneshot(test_request(Method::GET, "/api/health", None))
+        .await
+        .unwrap();
 
-    // 3. Create an agent
-    let req = test_request(
-        Method::POST,
-        "/api/agents",
-        Some(r#"{"model": "gpt-4o-mini"}"#),
-    );
-    let resp = router.oneshot(req).await.unwrap();
-    let body = assert_json_ok(resp).await;
-    let agent_id = body["id"].as_str().unwrap();
-
-    // 4. Send a message (using MockLlmDriver injected elsewhere)
-    let req = test_request(
-        Method::POST,
-        &format!("/api/agents/{agent_id}/message"),
-        Some(r#"{"content": "Hello"}"#),
-    );
-    let resp = router.oneshot(req).await.unwrap();
-    assert_json_ok(resp).await;
+    let body = assert_json_ok(response).await;
+    assert_eq!(body["status"], "ok");
 }
 ```
 
-### External Consumers
+### Authenticated endpoint
 
-The testing crate is used across multiple crates in the workspace:
+```rust,ignore
+#[tokio::test]
+async fn test_protected_route() {
+    let test = TestAppState::new().with_api_key("secret");
+    let app = test.router();
 
-- **librefang-api** — integration tests for all route handlers (agents, providers, workflows, skills, users, TOTP, prompts, terminal, system tools)
-- **librefang-channels** — discourse channel auth header tests
-- **librefang-api telemetry** — OpenTelemetry tracing initialization tests
+    let req = test_request(Method::GET, "/api/agents", None)
+        .with_header("authorization", "Bearer secret");
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_json_ok(response).await;
+}
+```
+
+### Custom kernel config
+
+```rust,ignore
+#[tokio::test]
+async fn test_custom_config() {
+    let test = TestAppState::with_builder(
+        MockKernelBuilder::new()
+            .with_config(|cfg| {
+                cfg.default_model.model = "gpt-4o-mini".into();
+            })
+            .with_catalog_seed(test_catalog_baseline()),
+    );
+    let app = test.router();
+    // ...
+}
+```
+
+## Connection to the Rest of the Codebase
+
+This crate sits between `librefang-kernel` (provides `LibreFangKernel::boot_with_config`), `librefang-api` (provides routes and `AppState`), and `librefang-runtime` (provides the `LlmDriver` trait and `ModelCatalog`). Integration tests in `librefang-api/tests/` are the primary consumers:
+
+- Tests call `TestAppState::with_builder(...)` to customize the kernel, then `.with_api_key(...)` / `.with_user_api_keys(...)` for auth, then `.with_config_path(...)` when exercising config-reload endpoints that read from disk.
+- `MockLlmDriver` and `FailingLlmDriver` are injected when tests need to control LLM behavior (agent conversations, tool-use flows).
+- The vault key initialization in `ensure_test_vault_key()` prevents cross-shard flakiness in CI by ensuring all tests in a process share the same deterministic key before any kernel boots.

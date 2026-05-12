@@ -1,84 +1,71 @@
 # Other — librefang-hands-tests
 
-# librefang-hands/tests — Registry Smoke Tests
+# librefang-hands/tests/registry_smoke
+
+Integration smoke tests that exercise the `HandRegistry` public API lifecycle end-to-end. These tests operate against a temporary directory with no LLM, no kernel, and no network — they validate pure tool-dispatch and persistence behaviour.
 
 ## Purpose
 
-Integration smoke tests that exercise the `HandRegistry` public API end-to-end, catching cross-method invariant violations that unit tests alone often miss. Every historical regression in this area was a compositional bug — definitions present without a workspace, instances lingering after uninstall, etc. — so these tests treat the registry as a black box and verify that the full lifecycle composes correctly.
+Every historical regression in the hand registry has been a **cross-method invariant violation**: definitions present without a workspace directory, instances lingering after uninstall, or a refused uninstall corrupting in-memory state. Unit tests in `registry.rs` cover individual method contracts; these smoke tests catch the composition bugs that slip through when methods are called in sequence.
 
-No LLM, no kernel — these tests validate purely tool-dispatch and persistence behaviour.
-
-## Test Fixtures
-
-Two inline constants define the minimal hand content needed for installation:
-
-| Constant | Format | Purpose |
-|---|---|---|
-| `SMOKE_HAND_TOML` | TOML (id, name, description, category, routing, agent) | A complete `HAND.toml` for a hand named `"smoke-hand"` |
-| `SMOKE_SKILL_MD` | Markdown | A minimal `SKILL.md` body |
-
-The hand declares no required settings, which is significant — it means activation can succeed with an empty `HashMap::new()` config, testing the explicit-default code path.
-
-## Test Functions
+## Test Cases
 
 ### `install_activate_deactivate_uninstall_lifecycle`
 
-Walks the complete state machine of a hand from installation through cleanup. Each step asserts not just its own outcome but the observable side effects visible through read-side APIs.
+Walks the complete lifecycle a custom hand goes through in production:
 
-```
-┌─────────┐    ┌─────────┐    ┌──────────┐    ┌────────────┐    ┌───────────┐
-│ install  │───▶│ activate │───▶│ uninstall │───▶│ deactivate │───▶│ uninstall  │
-│          │    │          │    │ (refused) │    │            │    │ (succeeds) │
-└─────────┘    └─────────┘    └──────────┘    └────────────┘    └───────────┘
-```
-
-**Steps and invariants verified:**
-
-1. **Fresh registry is empty** — `list_definitions()` and `list_instances()` both return empty collections.
-2. **`install_from_content_persisted(home, toml, md)`** — Writes `HAND.toml` and `SKILL.md` to `home/workspaces/smoke-hand/`, returns the definition with correct `id` and `name`. Both files are asserted to exist on disk. The definition becomes visible via `list_definitions()` and `get_definition("smoke-hand")`.
-3. **`activate("smoke-hand", HashMap::new())`** — Creates an active instance (`HandStatus::Active`). The instance is visible in `list_instances()` (exactly one) and retrievable via `get_instance(id)`.
-4. **`uninstall_hand(home, "smoke-hand")` while active** — Must fail. The test asserts the error without pinning a specific error variant (unit tests cover that). Critically, it also asserts that the refused uninstall does **not** corrupt in-memory state: the definition and instance both survive untouched.
-5. **`deactivate(instance_id)`** — Returns the deactivated instance. `list_instances()` must now be empty.
-6. **`uninstall_hand(home, "smoke-hand")` with no live instances** — Must succeed. Removes the in-memory definition (confirmed via `get_definition` returning `None`) and physically deletes the workspace directory from disk.
+1. **Fresh state** — A new `HandRegistry` has zero definitions and zero instances.
+2. **Install** — `install_from_content_persisted` writes `HAND.toml` and `SKILL.md` to `home/workspaces/<id>/` and registers the definition in memory. Asserts both files exist on disk and `list_definitions` / `get_definition` reflect the new hand.
+3. **Activate** — `activate("smoke-hand", HashMap::new())` creates a live instance with status `HandStatus::Active`. Verifies the instance appears in `list_instances` and is retrievable via `get_instance`.
+4. **Uninstall while active (must fail)** — `uninstall_hand` returns an error. Critically, asserts that the failed call does **not** perturb in-memory state: the definition and instance are still present. This is the invariant the DELETE `/api/hands/{id}` route depends on.
+5. **Deactivate** — `deactivate(instance_id)` removes the instance from `list_instances`.
+6. **Uninstall after deactivation (must succeed)** — `uninstall_hand` now succeeds. Asserts the in-memory definition is gone and the workspace directory is physically removed from disk.
 
 ### `definitions_round_trip_through_a_disk_reload`
 
-Validates that the `home/workspaces/<id>/HAND.toml` layout is the authoritative source of truth. After one registry instance writes a hand to disk, a completely independent `HandRegistry` can discover it via `reload_from_disk`.
+Validates that `home/workspaces/<id>/HAND.toml` is the source of truth for persistence:
 
-**Steps:**
+1. One `HandRegistry` installs a hand via `install_from_content_persisted`.
+2. A second, independent `HandRegistry` is created (simulating a daemon restart). It starts empty.
+3. `reload_from_disk(home)` discovers and loads the hand from the filesystem.
+4. Asserts `get_definition` returns the correct data after reload.
 
-1. `installer` registry calls `install_from_content_persisted` into a temp home.
-2. `fresh` — a new, empty `HandRegistry` — starts with zero definitions.
-3. `fresh.reload_from_disk(home)` returns `(loaded, _failed)` where `loaded >= 1`.
-4. `fresh.get_definition("smoke-hand")` returns the definition with `name == "Smoke Hand"`.
+This test locks in the contract that a process restart can fully recover state from disk without replaying any in-memory log.
 
-This test locks in the contract that a daemon restart can fully rehydrate state from disk without replaying any in-memory log.
+## Fixtures
 
-## Dependencies on `HandRegistry` API
-
-The tests exercise every primary method on the public registry surface:
-
-| Method | Called by |
+| Constant | Purpose |
 |---|---|
-| `HandRegistry::new()` | Both tests |
-| `install_from_content_persisted(home, toml, md)` | Both tests |
-| `list_definitions()` | Lifecycle test |
-| `get_definition(id)` | Both tests |
-| `activate(hand_id, config)` | Lifecycle test |
-| `list_instances()` | Lifecycle test |
-| `get_instance(instance_id)` | Lifecycle test |
-| `deactivate(instance_id)` | Lifecycle test |
-| `uninstall_hand(home, hand_id)` | Lifecycle test |
-| `reload_from_disk(home)` | Reload test |
+| `SMOKE_HAND_TOML` | Minimal valid `HAND.toml` with id `smoke-hand`, category `data`, and a single routing alias. |
+| `SMOKE_SKILL_MD` | Trivial Markdown body for the skill file. |
+
+Both fixtures are embedded as string constants — no external files required.
+
+## API Surface Under Test
+
+```
+HandRegistry::new()
+HandRegistry::install_from_content_persisted(home, toml, skill_md)
+HandRegistry::list_definitions()
+HandRegistry::get_definition(id)
+HandRegistry::activate(hand_id, config_map)
+HandRegistry::list_instances()
+HandRegistry::get_instance(instance_id)
+HandRegistry::deactivate(instance_id)
+HandRegistry::uninstall_hand(home, hand_id)
+HandRegistry::reload_from_disk(home)
+```
+
+## Dependencies
+
+- `tempfile` — creates isolated temporary directories so tests never touch real state.
+- `librefang_hands::registry::HandRegistry` — the system under test.
+- `librefang_hands::HandStatus` — enum for asserting instance status after activation.
 
 ## Running
 
 ```sh
-# Run just these smoke tests
 cargo test -p librefang-hands --test registry_smoke
-
-# Run with output for debugging
-cargo test -p librefang-hands --test registry_smoke -- --nocapture
 ```
 
-No external services, network, or environment variables are required. The tests create isolated temp directories via `tempfile::tempdir()` that are cleaned up automatically on drop.
+No environment variables, external services, or setup required.

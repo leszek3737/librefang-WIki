@@ -1,77 +1,83 @@
 # crates — Wiki
 
-# LibreFang Agent OS
+# LibreFang
 
-LibreFang is a self-hosted **agent operating system** — a runtime platform for building, running, and managing autonomous AI agents. It provides everything from identity management and LLM integration to persistent memory, real-time messaging channels, and a full web dashboard. You interact with agents through a terminal UI, a desktop app, editor integrations, or external chat platforms like Telegram and Discord.
+LibreFang is an open-source agent operating system for building, running, and managing autonomous AI agents. It provides the full stack—from kernel-level orchestration and LLM provider integration to user-facing interfaces across CLI, desktop, web, and messaging platforms.
 
-## Architecture at a Glance
+## Architecture Overview
 
 ```mermaid
 graph TD
-    CLI["CLI & Terminal UI"]
-    DESK["Desktop App"]
-    DASH["Dashboard UI"]
-    CH["Messaging Channels"]
-    ACP["ACP (Editor Bridge)"]
-
+    UI["User Surfaces<br/>CLI · Desktop · Dashboard · API"]
     API["API Server"]
-
-    KERNEL["Kernel Core"]
-    RUNTIME["Agent Runtime"]
-    LLM["LLM Drivers"]
-    MEMORY["Memory System"]
-
-    CLI --> API
-    DESK --> API
-    DASH --> API
+    K["Kernel Core<br/>auth · dispatch · quotas"]
+    RT["Agent Runtime<br/>tools · sandbox · MCP"]
+    MEM["Memory System<br/>knowledge graph · wiki"]
+    LLM["LLM Drivers<br/>multi-provider fallback"]
+    CH["Messaging Channels<br/>Telegram · Slack · Discord"]
+    P2P["P2P Wire Protocol<br/>federation · TOFU"]
+    SK["Skills & Hands"]
+    UI --> API
     CH --> API
-    ACP --> API
-
-    API --> KERNEL
-    API --> RUNTIME
-    API --> MEMORY
-
-    RUNTIME --> LLM
-    RUNTIME --> MEMORY
-    RUNTIME --> KERNEL
-    KERNEL --> RUNTIME
-    KERNEL --> MEMORY
+    P2P --> K
+    API --> K
+    API --> SK
+    API --> MEM
+    K --> RT
+    K --> MEM
+    K --> LLM
+    RT --> LLM
+    RT --> MEM
 ```
 
-## How the System Fits Together
+## How It Works
 
-At the center is the [Kernel Core](librefang-kernel-src.md), which owns agent identity, approval workflows, message routing, cost controls, and shared HTTP infrastructure. Every other layer depends on it.
+At the center sits the **Kernel Core** (`librefang-kernel`), which handles agent identity registration, approval gates (with TOTP and recovery codes), RBAC-based authorization, spending quotas, and message routing to specialist agents. It exposes a clean API surface through 19 focused role traits via the [Kernel Handle](librefang-kernel-handle-src.md), keeping the rest of the system decoupled from internal kernel state.
 
-The [API Server](librefang-api-src.md) wraps the kernel and exposes it through HTTP routes, WebSocket connections, Server-Sent Events, and channel adapters. All user-facing surfaces talk to the system through this API:
+The **Agent Runtime** (`librefang-runtime`) is the execution engine. When an agent needs to act—invoke a tool, run sandboxed code, communicate with an LLM provider—the runtime manages that entire lifecycle. It includes dedicated sub-modules for [MCP connections](librefang-runtime-mcp-src.md), [OAuth flows](librefang-runtime-oauth-src.md), and [WASM sandboxing](librefang-runtime-wasm-src.md).
 
-- The [CLI & Terminal UI](librefang-cli-src.md) — the primary launcher, protocol servers, and a full Ratatui dashboard
-- The [Desktop Application](librefang-desktop-src.md) — a Tauri 2.0 native window with optional embedded kernel
-- The [Dashboard UI](librefang-api-dashboard-src.md) — a React SPA for web-based management and monitoring
-- The [Agent Control Protocol](librefang-acp-src.md) adapter — JSON-RPC 2.0 bridge for editors (Zed, VS Code, JetBrains)
+All LLM communication flows through the **LLM Drivers** layer, which defines a provider-agnostic trait in [librefang-llm-driver](librefang-llm-driver-src.md) and ships concrete implementations with health-aware fallback routing in [librefang-llm-drivers](librefang-llm-drivers-src.md). A typical provider health probe traverses from an API route through the runtime's provider health system, down into the HTTP client layer for TLS configuration and proxy resolution.
 
-External chat platforms (Telegram, Discord, Slack, Bluesky, Feishu, and more) connect through the [Messaging Channels](librefang-channels-src.md) module, which normalizes inbound messages into a common `ChannelMessage` type and routes responses back through each platform's native API.
+Agents persist what they learn in the **Memory System**, which combines a structured knowledge graph with embeddings, decay logic, and ACLs in [librefang-memory](librefang-memory-src.md), alongside a Markdown-based wiki document vault with frontmatter and provenance tracking in [librefang-memory-wiki](librefang-memory-wiki-src.md).
 
-When an agent needs to think, the [Agent Runtime](librefang-runtime-src.md) drives the turn loop: it calls an [LLM Driver](librefang-llm-drivers-src.md), dispatches tools, manages sessions, and handles agent-to-agent delegation. The runtime also manages an [MCP Client](librefang-runtime-mcp-src.md) for external tool servers and the [Skills System](librefang-skills-src.md) for modular, installable agent capabilities.
+External users reach LibreFang through several surfaces: the **API Server** (`librefang-api`) handles HTTP routes, ACP protocol listeners, and streaming events; **Messaging Channels** connect to Telegram, Slack, Discord, and other platforms; the **CLI & Terminal UI** (`librefang-cli`) offers an interactive TUI, diagnostics, and protocol servers for editor integration; and the **Desktop Application** (`librefang-desktop`) wraps everything in a Tauri 2.0 shell supporting both local embedded and remote modes.
 
-Agents persist knowledge through the [Memory System](librefang-memory-src.md), which combines structured key-value storage, semantic vector search, a knowledge graph, and a file-backed markdown wiki for long-form notes.
-
-For peer-to-peer networking between LibreFang instances, the [P2P Wire Protocol](librefang-wire-src.md) (OFP) handles agent discovery, authenticated handshakes, and encrypted message routing over TCP.
-
-Supporting modules round out the platform:
-
-- [Types & Configuration](librefang-types-src.md) — the shared vocabulary used across every crate, with no runtime dependencies
-- [Extensions & Vault](librefang-extensions-src.md) — MCP server template discovery and secure credential storage
-- [Hands Orchestration](librefang-hands-src.md) — pre-built autonomous background agent packages activated from a marketplace
-- [Telemetry & Observability](librefang-telemetry-src.md) — centralized metrics via Prometheus
-- [Migration Tools](librefang-migrate-src.md) — imports agents and data from frameworks like OpenClaw and OpenFang
-- [Testing Framework](librefang-testing-src.md) — mock infrastructure for integration tests against a real kernel with minimal config
+For multi-instance deployments, the **P2P Wire Protocol** (OFP) provides agent-to-agent networking over TCP with multi-layer authentication—HMAC verification, Ed25519 identity with TOFU pinning, and X25519 key exchange—for secure federation between kernel instances.
 
 ## Key End-to-End Flows
 
-**Provider health checks** start at an API route, flow through the runtime's provider health checker, which probes endpoints by building an HTTP client using the kernel's shared TLS configuration — crossing the API → Runtime → Kernel boundary.
+**Provider health probing**: An API route receives a `list_providers` request → the runtime checks its health cache → if stale, probes the provider endpoint → builds an HTTP client with TLS config and proxy settings → returns reachability status to the caller.
 
-**Cross-platform messaging** works like this: an inbound message from Telegram or Discord enters through a channel adapter, gets normalized into `ChannelMessage`, flows through the API to the kernel's message router, which dispatches it to the agent runtime. The runtime processes the turn, calls the LLM, and sends the response back through the same channel adapter.
+**Skill evolution**: A skill route receives a file removal request → the skills system walks the file tree → supporting files are cleaned up → the dashboard React frontend reconciles the change.
 
-**Skill self-evolution** enters through an API route, delegates to the skills module's evolution engine to modify files in place, and propagates asset updates through the dashboard's build pipeline.
+**Plugin loading and benchmarking**: A plugin route triggers a benchmark → the runtime loads the plugin manifest → validates semver compatibility → the plugin hook executes and returns results.
 
-**Scheduled workflows** flow from API route handlers through the runtime's session metrics and token estimation (via the compactor), exercising the LLM driver and memory system to complete the agent's task on a cron schedule.
+## Supporting Infrastructure
+
+- **Skills System** (`librefang-skills`) manages skill definition, evolution, and file-level operations
+- **Hands Orchestration** coordinates multi-agent workflows and complex task delegation
+- **Extensions & Vault** (`librefang-extensions`) provides dotenv management, vault storage, and extension loading
+- **Migration Tools** (`librefang-migrate`) imports agents, configuration, and memory from OpenClaw, OpenFang, and other frameworks with atomic, idempotent, non-destructive operations
+- **Telemetry & Observability** (`librefang-telemetry`) provides OpenTelemetry-compatible metrics with path normalization to prevent cardinality explosions
+- **Testing Framework** (`librefang-testing`) offers mock kernel/app infrastructure with deterministic fakes for networking, LLM providers, and storage
+- **Types & Configuration** and **Dashboard UI** provide shared type definitions, static assets, and the web dashboard respectively
+
+## Getting Started
+
+Clone the repository and build with Cargo:
+
+```bash
+git clone https://github.com/librefang/crates.git
+cd crates
+cargo build
+```
+
+To launch the interactive setup wizard:
+
+```bash
+cargo run --bin librefang-cli
+```
+
+The wizard walks you through provider configuration, storing credentials in a `.env` file via the extensions dotenv module. From there you can start the API server, connect a desktop client, or attach messaging channels.
+
+For testing, the [Testing Framework](librefang-testing-src.md) provides `MockKernelBuilder` and `TestAppState` to spin up real kernel and app instances with faked externals—no network access or LLM keys required.

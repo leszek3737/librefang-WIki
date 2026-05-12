@@ -1,152 +1,172 @@
 # Other — librefang-memory-wiki-tests
 
-# librefang-memory-wiki-tests
+# librefang-memory-wiki Tests
 
-Integration and acceptance tests for the `librefang-memory-wiki` crate, validating the `WikiVault` durable knowledge vault end-to-end against a real on-disk filesystem.
+## Overview
 
-## Purpose
+This module contains the integration and contract tests for the **Memory Wiki** durable knowledge vault (`librefang-memory-wiki`), implementing acceptance criteria from issue #3329. The tests validate two layers:
 
-This module serves two distinct testing roles:
+1. **Acceptance tests** (`wiki_acceptance.rs`) — end-to-end exercises of `WikiVault` against a real on-disk filesystem (tempdir), mirroring the seven acceptance bullets from the issue.
+2. **Handle contract tests** (`wiki_handle_contract.rs`) — JSON-shape stability tests for the `WikiAccess` trait defined in `librefang-kernel-handle`, ensuring the vault's serialized output matches what every caller (tool dispatcher, HTTP routes, dashboard) is allowed to depend on.
 
-1. **Acceptance testing** (`wiki_acceptance.rs`) — Exercises the seven acceptance criteria from issue #3329. Each test creates a `WikiVault` backed by a temporary directory and asserts observable behavior: file layout, frontmatter persistence, hand-edit detection, render-mode link syntax, and backlink topology.
-
-2. **Contract testing** (`wiki_handle_contract.rs`) — Validates that the JSON shapes produced by `wiki_get`, `wiki_search`, and `wiki_write` remain stable across the `WikiAccess` trait boundary defined in `librefang-kernel-handle`. This prevents drift between the kernel-side adaptor and what downstream consumers (tool dispatchers, HTTP routes, dashboards) rely on.
+Both test files live under `librefang-memory-wiki/tests/` because the kernel crate itself cannot build inside the sandboxed CI image (requires `libdbus`/`gdk`). The contract test here mirrors the production kernel-side adaptor verbatim, catching drift at PR time rather than at first production call.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    WA[wiki_acceptance.rs] -->|direct calls| WV[WikiVault]
-    WH[wiki_handle_contract.rs] -->|via WikiAccess trait| WHD[WikiHandle wrapper]
-    WHD -->|delegates to| WV
-    WA -->|asserts on| FS[TempDir filesystem]
-    WHD -->|serializes to| JSON[serde_json::Value]
-    WH -->|imports trait from| KH[librefang-kernel-handle]
-    WA -->|imports types from| LMW[librefang-memory-wiki]
+    subgraph "wiki_acceptance.rs"
+        A1[vault_in] --> V[WikiVault::with_root]
+        A2[provenance] --> PE[ProvenanceEntry]
+        T1[isolated_mode_round_trip] --> A1
+        T1 --> A2
+        T3[provenance_is_populated_on_every_write] --> A1
+        T4[external_hand_edit_is_preserved_under_force] --> A1
+        T5a[obsidian_mode_emits_wiki_link_syntax] --> A1
+        T5b[native_mode_emits_relative_markdown_links] --> A1
+        T7[five_pages_with_links_produce...] --> A1
+        T7 --> BL[vault.backlinks]
+    end
+    subgraph "wiki_handle_contract.rs"
+        H1[vault_handle] --> V
+        WH[WikiHandle] -.implements.-> WA[WikiAccess trait]
+        WH --> V
+        C1[wiki_write_response_shape_is_stable] --> H1
+        C2[wiki_get_returns_topic_frontmatter_body] --> H1
+        C3[wiki_search_returns_array_of_objects] --> H1
+        C4[disabled_handle_returns_unavailable] --> WH2["WikiHandle(None)"]
+    end
 ```
 
-## Test Utilities
+## Test Fixtures
 
-### `vault_in` (acceptance tests)
+### `provenance(agent, turn)` — `wiki_acceptance.rs`
 
-Constructs a `WikiVault` rooted in a temporary directory with the specified `RenderMode` and `MemoryWikiIngestFilter::Tagged`:
-
-```rust
-fn vault_in(dir: &TempDir, render: RenderMode) -> WikiVault
-```
-
-Used by every acceptance test except `default_config_is_disabled_and_construction_short_circuits`.
-
-### `provenance` (acceptance tests)
-
-Builds a `ProvenanceEntry` with a fixed session (`"sess_acceptance"`) and channel (`"test-harness"`), parameterized by agent name and turn number:
+Helper that constructs a `ProvenanceEntry` with a fixed session (`"sess_acceptance"`) and channel (`"test-harness"`). Used by every acceptance test that writes to the vault.
 
 ```rust
 fn provenance(agent: &str, turn: u64) -> ProvenanceEntry
 ```
 
-### `WikiHandle` (contract tests)
+### `vault_in(dir, render)` — `wiki_acceptance.rs`
 
-A thin `Option<Arc<WikiVault>>` wrapper that implements `librefang_kernel_handle::WikiAccess`. When the inner option is `None`, all methods return `KernelOpError::Unavailable`. This mirrors the production kernel-side adaptor where the vault may be disabled.
+Creates a `WikiVault` rooted in the given tempdir with `MemoryWikiIngestFilter::Tagged`. Panics on construction failure.
 
-The implementation maps `WikiError` variants to `KernelOpError` variants:
+```rust
+fn vault_in(dir: &TempDir, render: RenderMode) -> WikiVault
+```
 
-| `WikiError` | `KernelOpError` |
-|---|---|
-| `HandEditConflict` | `Internal` (with actionable message) |
-| `InvalidTopic` | `InvalidInput` |
-| `BodyTooLarge` | `InvalidInput` |
-| `NotFound` | `Internal` |
-| All others | `Internal` |
+### `vault_handle(dir)` — `wiki_handle_contract.rs`
 
-### `vault_handle` (contract tests)
-
-Constructs a `WikiHandle` with an active vault:
+Creates a `WikiHandle(Some(Arc<WikiVault>))` for contract tests. The `WikiHandle` struct wraps `Option<Arc<WikiVault>>` and implements `WikiAccess`, mirroring the production kernel adaptor.
 
 ```rust
 fn vault_handle(dir: &TempDir) -> WikiHandle
 ```
 
-## Acceptance Tests
+### `WikiHandle` — `wiki_handle_contract.rs`
 
-Each test maps to a bullet in the issue #3329 acceptance list, cited in its doc comment.
+A thin adaptor that implements `librefang_kernel_handle::WikiAccess` over `Option<Arc<WikiVault>>`. When the inner option is `None`, all methods return `KernelOpError::Unavailable`. This struct is a faithful replica of the production kernel-side adaptor.
 
-### #1: Default config is disabled
+## Acceptance Tests (`wiki_acceptance.rs`)
 
-`default_config_is_disabled_and_construction_short_circuits` — Asserts `MemoryWikiConfig::default()` has `enabled: false` and that `WikiVault::new` returns `WikiError::Disabled` rather than constructing a vault.
+Each test is annotated with the acceptance bullet it covers.
 
-### #2: Isolated mode round-trip
+| Test | Bullet | What it validates |
+|------|--------|-------------------|
+| `default_config_is_disabled_and_construction_short_circuits` | #1 | `MemoryWikiConfig::default()` has `enabled: false`; `WikiVault::new` returns `WikiError::Disabled` |
+| `isolated_mode_round_trip` | #2 | `write` → `get` → `search` round-trip; `.md` file appears on disk |
+| `provenance_is_populated_on_every_write` | #3 | Multiple writes append to provenance history; order preserved; YAML frontmatter contains `agent`, `provenance`, `content_sha256` |
+| `external_hand_edit_is_preserved_under_force` | #4 | External file edit detected; write without `force` returns `WikiError::HandEditConflict`; write with `force` preserves user's edit body and only appends provenance |
+| `obsidian_mode_emits_wiki_link_syntax` | #5 | `RenderMode::Obsidian` preserves `[[topic]]` syntax in the `.md` file |
+| `native_mode_emits_relative_markdown_links` | #5 | `RenderMode::Native` rewrites `[[topic]]` to `[topic](topic.md)` |
+| `five_pages_with_links_produce_five_files_and_correct_backlinks` | #7 | Five interlinked pages produce five `.md` files plus `index.md`; `vault.backlinks()` returns correct source→target pairs; `index.md` lists all topics |
+| `render_mode_conversion_round_trip` | — | `MemoryWikiRenderMode` ↔ `RenderMode` conversion is lossless |
+| `reserved_modes_return_specific_error` | — | `MemoryWikiMode::Bridge` surfaces `WikiError::ModeNotImplemented("bridge")` rather than silently misbehaving |
 
-`isolated_mode_round_trip` — Writes a page via `vault.write`, verifies the `.md` file exists on disk, reads it back with `vault.get`, and confirms `vault.search` finds it by content. Also asserts `outcome.merged_with_external_edit` is `false` on a fresh write.
+### Hand-edit detection flow
 
-### #3: Provenance accumulates
+The hand-edit test simulates a critical safety property: the vault never silently drops a human's edit.
 
-`provenance_is_populated_on_every_write` — Writes to the same topic three times with different agents and turns. Verifies:
-- `page.frontmatter.provenance` has exactly 3 entries in order.
-- Agent names appear in the correct sequence.
-- The on-disk YAML contains `provenance:`, agent names, and `content_sha256:`.
+1. Agent writes "first version" → file created on disk.
+2. Simulated user appends "hand-typed important caveat" to the `.md` file directly.
+3. Agent write without `force` → `WikiError::HandEditConflict`.
+4. Agent write with `force=true` → vault keeps the user-edited body, ignores the supplied body string, appends provenance. `outcome.merged_with_external_edit` is `true`.
 
-### #4: Hand-edit preservation
+### Backlink topology test
 
-`external_hand_edit_is_preserved_under_force` — Tests the hand-edit detection cycle:
-1. Write a page normally.
-2. Append content directly to the `.md` file (simulating a user editing in their editor).
-3. Assert a subsequent `write` without `force` returns `WikiError::HandEditConflict`.
-4. Assert `write` with `force=true` preserves the user's hand-typed content and appends provenance. The body passed to the forced write is intentionally discarded; `merged_with_external_edit` is `true`.
+The five-page test establishes a DAG:
 
-### #5: Render modes
+```
+alpha → beta, gamma
+beta  → gamma, delta
+gamma → delta
+delta → epsilon
+epsilon → (leaf)
+```
 
-Two tests cover the two render modes:
+The test asserts six backlink edges (sorted by target, then source), verifying that `vault.backlinks()` correctly parses `[[topic]]` references from on-disk files and builds the reverse index.
 
-- `obsidian_mode_emits_wiki_link_syntax` — In `RenderMode::Obsidian`, `[[topic]]` syntax is preserved verbatim in the on-disk file; no rewriting to markdown links occurs.
-- `native_mode_emits_relative_markdown_links` — In `RenderMode::Native`, `[[topic]]` is rewritten to `[topic](topic.md)` plain markdown links.
+## Handle Contract Tests (`wiki_handle_contract.rs`)
 
-### #7: Backlink topology
+These tests lock down the JSON wire shape that all consumers of `WikiAccess` depend on. They prevent accidental serialization changes.
 
-`five_pages_with_links_produce_five_files_and_correct_backlinks` — Creates five pages forming a link chain (alpha → beta → gamma → delta → epsilon). Verifies:
-- Six `.md` files exist (five topics plus auto-generated `index.md`).
-- `vault.backlinks()` returns exactly the expected `BacklinkEntry` set (6 entries, since alpha links to beta and gamma, beta links to gamma and delta, etc.).
-- `index.md` lists every topic and does not contain `_meta`.
+### Error category mapping
 
-### Additional coverage
+The `WikiHandle` implementation maps `WikiError` variants to `KernelOpError` categories:
 
-- `render_mode_conversion_round_trip` — Asserts `RenderMode::from(MemoryWikiRenderMode::*)` round-trips correctly.
-- `reserved_modes_return_specific_error` — Asserts that `MemoryWikiMode::Bridge` produces `WikiError::ModeNotImplemented("bridge")`, preventing silent misconfiguration.
+| `WikiError` | `KernelOpError` | Notes |
+|---|---|---|
+| *(vault absent)* | `Unavailable(method_name)` | `wiki_get`, `wiki_search`, or `wiki_write` |
+| `NotFound(topic)` | `Internal("wiki topic '{topic}' not found")` | Caller should distinguish from vault-off |
+| `HandEditConflict { topic }` | `Internal("wiki page '{topic}' was edited externally...")` | Message guides operator to re-read or force |
+| `InvalidTopic { topic, reason }` | `InvalidInput(...)` | Bad topic name |
+| `BodyTooLarge { topic, size, cap }` | `InvalidInput(...)` | Body exceeds cap |
+| Deserialization failure | `InvalidInput(...)` | Malformed provenance JSON |
 
-## Contract Tests
+### Stable JSON shapes
 
-These tests validate the JSON wire format that any `WikiAccess` consumer can rely on. They exist because `librefang-kernel-handle` defines the trait but has no vault to test against, and `librefang-kernel` has a real impl but cannot build in the sandboxed CI environment due to system dependency constraints (libdbus, gdk).
+**`wiki_write` response** — a JSON object with:
+- `"topic"`: string
+- `"path"`: string (filesystem path)
+- `"content_sha256"`: 64-character hex string
+- `"merged_with_external_edit"`: boolean
 
-### Disabled vault
+**`wiki_get` response** — a JSON object with:
+- `"topic"`: string
+- `"body"`: string
+- `"frontmatter"`: object containing `"topic"`, `"created"`, `"updated"`, `"content_sha256"`, `"provenance"` (array of objects with `"agent"`)
 
-`disabled_handle_returns_per_method_unavailable` — With `WikiHandle(None)`, all three methods (`wiki_get`, `wiki_search`, `wiki_write`) return `KernelOpError::Unavailable` with the method name as context.
+**`wiki_search` response** — a JSON array of objects, each with:
+- `"topic"`: string
+- `"snippet"`: string
+- `"score"`: float
 
-### Write response shape
+### Disabled-vault behavior
 
-`wiki_write_response_shape_is_stable` — Asserts the JSON object returned by `wiki_write` contains:
-- `topic`: string matching the input topic.
-- `path`: string (the on-disk file path).
-- `content_sha256`: 64-character hex string.
-- `merged_with_external_edit`: boolean.
+`WikiHandle(None)` returns `KernelOpError::Unavailable` with the method name (`"wiki_get"`, `"wiki_search"`, `"wiki_write"`) for every call. This mirrors the production behavior when `MemoryWikiConfig::enabled` is `false`.
 
-### Malformed provenance
+## Dependencies
 
-`wiki_write_rejects_malformed_provenance_with_invalid_input` — Passing a JSON object without the required `agent` field surfaces as `KernelOpError::InvalidInput` (not `Internal`), with a message mentioning `"provenance"`.
-
-### Get response shape
-
-`wiki_get_returns_topic_frontmatter_body_object` — Asserts the JSON object has:
-- `topic`: string.
-- `body`: string.
-- `frontmatter`: object containing `topic`, `created`, `updated`, `content_sha256`, and `provenance` (an array of objects each with an `agent` field).
-
-### Search response shape
-
-`wiki_search_returns_array_of_topic_snippet_score_objects` — Asserts the response is a JSON array where each hit is an object with:
-- `topic`: string.
-- `snippet`: string.
-- `score`: number (f64).
+| Crate | Role |
+|-------|------|
+| `librefang-memory-wiki` | System under test — provides `WikiVault`, `WikiError`, config types |
+| `librefang-kernel-handle` | Defines `WikiAccess` trait and `KernelOpError` — contract target |
+| `tempfile` | Creates isolated tempdir per test for on-disk filesystem tests |
+| `chrono` | Constructs timestamps for `ProvenanceEntry` |
+| `serde_json` | Validates serialized JSON shapes in contract tests |
 
 ## Running
 
-These are standard `#[test]` functions executed via `cargo test -p librefang-memory-wiki`. All tests create temporary directories (`tempfile::TempDir`) that are automatically cleaned up on drop. No external services or system dependencies are required.
+```sh
+# All tests in this module
+cargo test -p librefang-memory-wiki
+
+# Acceptance tests only
+cargo test -p librefang-memory-wiki --test wiki_acceptance
+
+# Handle contract tests only
+cargo test -p librefang-memory-wiki --test wiki_handle_contract
+```
+
+No external services, databases, or environment variables are required. Each test creates its own isolated temporary directory.

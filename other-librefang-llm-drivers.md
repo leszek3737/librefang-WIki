@@ -2,161 +2,133 @@
 
 # librefang-llm-drivers
 
-Concrete LLM provider drivers for the LibreFang platform. This crate bridges the abstract driver interface defined in `librefang-llm-driver` with real HTTP integrations for Anthropic, OpenAI, Gemini, Groq, Ollama, and other LLM providers. It also ships production-grade infrastructure for credential management, failover, rate limiting, and stream handling.
+Concrete LLM provider drivers for LibreFang. This crate implements the `LlmDriver` trait (defined in `librefang-llm-driver`) for Anthropic, OpenAI, Gemini, Groq, Ollama, and other providers, along with the infrastructure needed to manage credentials, rate limits, retries, and failover across them.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    subgraph "Consumer crates"
-        A[Application code]
-    end
-
-    subgraph "librefang-llm-drivers"
-        B[FallbackChain]
-        C[Credentials]
-        D[Rate Limit Tracker]
-        E[Provider Drivers]
-        F[Retry / Backoff]
-        G[Stream Helpers]
-    end
-
-    subgraph "Sibling crates"
-        H[librefang-llm-driver<br/>trait + error types]
-        I[librefang-http]
-        J[librefang-types]
-        K[librefang-runtime-oauth]
-    end
-
-    A --> B
-    B --> E
-    E --> C
-    E --> D
-    E --> F
-    E --> G
-    E -.-> H
-    E -.-> I
-    C -.-> K
-    B -.-> H
+    A[Consumer Code] --> B[FallbackChain]
+    B --> C1[Anthropic Driver]
+    B --> C2[OpenAI Driver]
+    B --> C3[Gemini Driver]
+    B --> C4[Groq Driver]
+    B --> C5[Ollama Driver]
+    C1 & C2 & C3 & C4 & C5 --> D[ArcCredentialPool]
+    C1 & C2 & C3 & C4 & C5 --> E[RateLimitTracker]
+    C1 & C2 & C3 & C4 & C5 --> F[HTTP Layer]
+    F --> G[librefang-http]
+    D --> H[librefang-runtime-oauth]
+    C1 & C2 & C3 & C4 & C5 -.-> I[LlmDriver Trait]
+    I -.-> J[librefang-llm-driver]
 ```
 
-Every public driver implements the `LlmDriver` trait re-exported from `librefang-llm-driver`. Consumers interact with drivers through that trait, keeping their code provider-agnostic.
+All drivers implement the same `LlmDriver` trait, making them interchangeable. `FallbackChain` composes multiple drivers behind a single interface, automatically trying the next provider when one fails.
 
-## Public API
+## Provider Drivers
 
-### Provider Drivers
+Each provider lives in its own submodule under `drivers`. They translate the generic `LlmDriver` interface into provider-specific HTTP requests, handling authentication headers, request body formatting, and response parsing.
 
-The `drivers` module contains one sub-module per provider. Each exposes a concrete driver struct that can be instantiated with provider-specific configuration and used through the `LlmDriver` trait.
+| Module | Provider | Auth Method |
+|--------|----------|-------------|
+| `drivers::anthropic` | Anthropic (Claude) | API key (`x-api-key`) |
+| `drivers::openai` | OpenAI (GPT) | Bearer token |
+| `drivers::gemini` | Google Gemini | API key |
+| `drivers::groq` | Groq | Bearer token |
+| `drivers::ollama` | Ollama (local) | None / optional |
 
-Supported providers:
+All drivers depend on `librefang-http` for outbound HTTP calls and `librefang-types` for shared data structures like chat messages and model configurations.
 
-| Module | Provider | Notes |
-|---|---|---|
-| `drivers::anthropic` | Anthropic | Claude family models |
-| `drivers::openai` | OpenAI | GPT family models |
-| `drivers::gemini` | Google Gemini | |
-| `drivers::groq` | Groq | |
-| `drivers::ollama` | Ollama | Local / self-hosted models |
+## Credential Pool
 
-### Fallback Chain
+**Module:** `credential_pool`
+
+Manages a shared pool of API keys, allowing multiple concurrent requests to rotate through available credentials rather than hammering a single key.
+
+### Key Types
+
+- **`CredentialPool`** — Inner pool managing credential state and rotation.
+- **`ArcCredentialPool`** — Thread-safe `Arc` wrapper suitable for sharing across tasks.
+- **`PooledCredential`** — A credential borrowed from the pool, automatically returned on drop.
+- **`PoolStrategy`** — Enum controlling how credentials are selected (e.g., round-robin, random).
+- **`new_arc_pool`** — Constructor that takes a list of credentials and returns an `ArcCredentialPool`.
+
+### Usage Pattern
 
 ```rust
-use librefang_llm_drivers::drivers::fallback_chain::{FallbackChain, ChainEntry};
+let pool = new_arc_pool(vec!["key-1".into(), "key-2".into()], PoolStrategy::RoundRobin);
+
+// Each request borrows a credential; it's returned to the pool when dropped
+let cred = pool.acquire().await?;
+make_request(cred.secret()).await;
+// cred dropped here → key returns to pool
 ```
 
-`FallbackChain` composes multiple driver instances into an ordered failover list. When a request fails for a transient reason (rate limit, network error, server error), the chain advances to the next entry automatically.
+The `zeroize` dependency ensures secrets are securely wiped from memory when no longer in use.
 
-- **`ChainEntry`** — pairs a driver with optional per-entry configuration (priority, weight, or provider-specific overrides).
-- **`FallbackChain`** — iterates entries on failure, reports the `FailoverReason` for each attempt, and returns the first successful response or the last error.
+## Fallback Chain
 
-This is the recommended entry point for production workloads that require resilience across providers.
+**Module:** `drivers::fallback_chain`
 
-### Credential Pool
+Composes multiple `LlmDriver` instances into a single driver that tries providers in order. If a request fails, the chain advances to the next provider.
 
-```rust
-use librefang_llm_drivers::credential_pool::{
-    ArcCredentialPool, CredentialPool, PoolStrategy, PooledCredential, new_arc_pool,
-};
-```
+### Key Types
 
-Manages a shared pool of API keys so multiple concurrent tasks can draw credentials without hard-coding a single key.
+- **`FallbackChain`** — The composite driver. Implements `LlmDriver` itself.
+- **`ChainEntry`** — A single entry in the chain, pairing a driver with its configuration.
+- **`FailoverReason`** — Enum describing why a failover occurred (rate limit, server error, timeout, etc.).
 
-- **`CredentialPool`** / **`ArcCredentialPool`** — thread-safe pool backed by `DashMap`. `ArcCredentialPool` is the `Arc`-wrapped alias for cheap cloning across tasks.
-- **`new_arc_pool`** — convenience constructor that accepts an initial list of credentials and returns a ready-to-use `ArcCredentialPool`.
-- **`PoolStrategy`** — selects how the next credential is chosen (e.g., round-robin, random, least-recently-used). This lets you spread load evenly across keys to avoid per-key rate limits.
-- **`PooledCredential`** — wraps a raw credential string with bookkeeping metadata (last-used timestamp, usage counters) that the strategy consults.
+The chain respects rate-limit signals. When a provider returns a 429, the chain marks that provider as temporarily unavailable and moves to the next.
 
-### Rate Limit Tracking
+## Rate Limit Tracking
 
-```rust
-use librefang_llm_drivers::rate_limit_tracker::{RateLimitBucket, RateLimitSnapshot};
-```
+**Module:** `rate_limit_tracker`
 
-Provides observability into per-provider rate-limit state gleaned from response headers.
+Provides observability into per-provider rate limit windows.
 
-- **`RateLimitBucket`** — represents a single provider's rate-limit window (requests remaining, reset timestamp, etc.). Updated by drivers after each HTTP response.
-- **`RateLimitSnapshot`** — a read-only copy of current bucket state, suitable for logging, metrics emission, or display in dashboards.
+- **`RateLimitBucket`** — Tracks remaining capacity and reset time for a single provider.
+- **`RateLimitSnapshot`** — A point-in-time read of bucket state, used for metrics and logging.
 
-### Supporting Utilities
+Drivers update the tracker based on response headers (`x-ratelimit-remaining`, `x-ratelimit-reset`, etc.). The `shared_rate_guard` utility wraps access to these buckets with proper synchronization (`dashmap`).
 
-These modules are public so that custom driver implementations outside this crate can reuse them.
+## Retry and Backoff
 
-| Module | Purpose |
-|---|---|
-| `backoff` | Exponential backoff calculation with jitter for retries. |
-| `retry_after` | Parses `Retry-After` headers (seconds or HTTP-date) into a `Duration`. |
-| `shared_rate_guard` | RAII-style guard that temporarily marks a rate-limit bucket as occupied, releasing it on drop. Prevents thundering-herd retries. |
-| `stream_backpressure` | Applies backpressure when consuming SSE/token streams so a slow consumer doesn't unboundedly buffer responses. |
-| `think_filter` | Strips or transforms "thinking" tokens that some providers emit during extended reasoning. |
-| `utf8_stream` | Handles partial UTF-8 sequences that can be split across chunk boundaries in byte-oriented streams. Reassembles them into valid `String` chunks. |
+**Module:** `backoff`, `retry_after`, `shared_rate_guard`
 
-### Re-exports
+Handles transient failures with configurable retry strategies:
 
-For convenience, the crate re-exports common types so consumers need fewer explicit dependencies:
+- **`backoff`** — Exponential backoff computation with jitter.
+- **`retry_after`** — Parses `Retry-After` headers (both delta-seconds and HTTP-date formats) and integrates them into the backoff calculation. When a provider sends `Retry-After`, it overrides the computed backoff.
+- **`shared_rate_guard`** — Coordinates retry state across concurrent tasks to avoid thundering-herd behavior.
 
-- **`llm_driver`** — the trait and associated types from `librefang-llm-driver`.
-- **`llm_errors`** — error categories shared across drivers.
-- **`FailoverReason`** — enum describing why a fallback occurred (rate-limited, timed out, server error, etc.).
+## Stream Handling
 
-## How Drivers Work
+**Module:** `stream_backpressure`, `utf8_stream`, `think_filter`
 
-Each provider driver follows the same lifecycle:
+Utilities for processing streaming LLM responses:
 
-1. **Construction** — Instantiate the driver struct with an endpoint URL, a credential source (either a static key or a `CredentialPool`), optional model overrides, and HTTP client configuration via `librefang-http`.
+- **`stream_backpressure`** — Applies backpressure when the consumer can't keep up with the stream, preventing unbounded memory growth.
+- **`utf8_stream`** — Handles partial UTF-8 sequences that can appear when SSE frames split multi-byte characters mid-stream. Reassembles them before yielding to the caller.
+- **`think_filter`** — Strips "thinking" tokens (internal reasoning blocks) from provider responses when the caller only wants the final output.
 
-2. **Request building** — The driver translates the provider-agnostic request type from `librefang-types` into the provider's wire format (JSON body, headers, query parameters).
+## Re-exports
 
-3. **HTTP dispatch** — The request is sent through `librefang-http`, which may inject OAuth tokens from `librefang-runtime-oauth` when the credential pool supplies an OAuth-backed credential.
+The crate re-exports key types from its dependency crates for convenience:
 
-4. **Response handling** — On success, the provider-specific JSON response is parsed back into the shared response type. On failure:
-   - Rate-limit responses update the `RateLimitBucket` and consult `retry_after`.
-   - Transient errors trigger the backoff/retry loop if the driver was constructed with retry enabled.
-   - Permanent errors are returned immediately.
+- **`llm_driver`** — The `LlmDriver` trait and associated types from `librefang-llm-driver`.
+- **`llm_errors`** — Error types for LLM operations.
+- **`FailoverReason`** — Reason enum for fallback events.
 
-5. **Streaming** — For streaming requests, the driver opens an SSE connection and yields tokens through an async stream. `stream_backpressure` and `utf8_stream` ensure correct flow control and encoding.
+## Testing
 
-## Adding a New Provider
+Dev dependencies include `wiremock` for HTTP mocking, `serial_test` for test serialization, and `tempfile` for temporary file management. Each driver has integration tests that mock the provider's HTTP API to verify request formatting and response parsing without hitting real endpoints.
 
-To add support for a new LLM provider:
+## Integration with the Workspace
 
-1. Create a new submodule under `drivers/` (e.g., `drivers::mistral`).
-2. Define a driver struct that holds configuration and an HTTP client.
-3. Implement the `LlmDriver` trait, delegating HTTP work to `librefang-http`.
-4. Use `backoff`, `retry_after`, `shared_rate_guard`, and `rate_limit_tracker` for retry and observability — these are designed to be shared across all drivers.
-5. For streaming, compose `stream_backpressure` and `utf8_stream` into your token pipeline.
-6. Register the driver in `FallbackChain` tests to verify failover behavior.
+This crate sits between the abstract trait layer and the application layer:
 
-## Key Dependencies
-
-| Crate | Role |
-|---|---|
-| `librefang-llm-driver` | Provides the `LlmDriver` trait and error types that every driver implements. |
-| `librefang-types` | Shared request/response types exchanged across the trait boundary. |
-| `librefang-http` | HTTP client construction, middleware, and request execution. |
-| `librefang-runtime-oauth` | OAuth token acquisition for providers that require it. |
-| `reqwest` | Underlying HTTP client. |
-| `tokio` | Async runtime for spawning tasks and timers. |
-| `dashmap` | Concurrent map backing `CredentialPool` and `RateLimitBucket`. |
-| `sha2` / `base64` | Credential hashing and encoding where needed. |
-| `zeroize` | Secure clearing of credential material from memory on drop. |
-| `serde` / `serde_json` | Serialization of provider wire formats. |
+1. **`librefang-llm-driver`** defines the `LlmDriver` trait — this crate implements it.
+2. **`librefang-types`** provides shared types (messages, models, configs) — this crate consumes them.
+3. **`librefang-http`** handles the actual HTTP transport — this crate builds provider-specific requests on top of it.
+4. **`librefang-runtime-oauth`** provides OAuth token management — used by drivers that require OAuth flows (e.g., some Gemini configurations).
+5. Application code depends on this crate (or a facade that re-exports it) to get concrete, ready-to-use driver instances.

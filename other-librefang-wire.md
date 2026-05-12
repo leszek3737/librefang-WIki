@@ -2,94 +2,82 @@
 
 # librefang-wire
 
-LibreFang Protocol (OFP) — agent-to-agent networking over encrypted, authenticated connections.
+LibreFang Protocol (OFP) — agent-to-agent secure networking layer.
 
 ## Purpose
 
-`librefang-wire` implements the wire protocol that LibreFang agents use to communicate with each other. It handles the full lifecycle of an agent-to-agent session: cryptographic handshake, session key derivation, message framing, serialization, and authenticated encryption of payloads.
+`librefang-wire` implements the LibreFang Protocol, the wire-level communication framework that allows LibreFang agents to discover, authenticate, and communicate with each other over untrusted networks. It handles the full lifecycle of agent-to-agent connections: cryptographic handshake, session establishment, message framing, and authenticated transport.
 
-Every message sent between agents flows through this crate.
+This crate sits between `librefang-types` (which defines shared data structures) and the higher-level agent runtime, providing the secure channel that all inter-agent traffic flows through.
+
+## Architecture
+
+```mermaid
+graph TD
+    A[librefang-types] --> B[librefang-wire]
+    B -->|Secure Channel| C[Agent Runtime]
+    B -->|Encrypted Messages| D[Remote Agent]
+    B --> X[x25519 Key Exchange]
+    B --> Y[Ed25519 Signatures]
+    B --> Z[HKDF + HMAC-SHA256]
+```
 
 ## Cryptographic Protocol
 
-The crate implements a Noise-like pattern built from well-known primitives:
+The module combines several well-established cryptographic primitives to establish authenticated, confidential channels between agents. Each dependency maps to a specific role in the protocol stack:
 
-| Stage | Primitive | Crate |
-|---|---|---|
-| Key exchange | X25519 ECDH | `x25519-dalek` |
-| Identity signatures | Ed25519 | `ed25519-dalek` |
-| Session key derivation | HKDF-SHA256 | `hkdf` |
-| Message authentication | HMAC-SHA256 | `hmac` + `sha2` |
-| Constant-time MAC comparison | `subtle::ConstantTimeEq` | `subtle` |
+| Dependency | Role |
+|---|---|
+| `x25519-dalek` | Elliptic-curve Diffie-Hellman key agreement for session establishment |
+| `ed25519-dalek` | Digital signatures for agent identity verification |
+| `hkdf` | HMAC-based key derivation function to expand shared secrets into session keys |
+| `hmac` + `sha2` | HMAC-SHA256 for message authentication and integrity |
+| `subtle` | Constant-time comparison operations to prevent timing side-channel attacks |
+| `rand_core` | Secure random number generation for key material and nonces |
 
 ### Handshake Flow
 
-```mermaid
-sequenceDiagram
-    participant A as Agent A
-    participant B as Agent B
-    A->>B: X25519 ephemeral public key + Ed25519 identity signature
-    B->>A: X25519 ephemeral public key + Ed25519 identity signature
-    Note over A,B: Both sides compute shared secret via X25519 DH
-    Note over A,B: HKDF derives bidirectional session keys from shared secret
-    A->>B: Authenticated message (HMAC-SHA256)
-    B->>A: Authenticated message (HMAC-SHA256)
-```
+The cryptographic handshake follows an authenticated key exchange pattern:
 
-Each side generates an ephemeral X25519 keypair for forward secrecy. Ed25519 signatures bind the ephemeral keys to long-term agent identities. The resulting shared secret feeds into HKDF to produce two session keys (one per direction), which are then used to HMAC every framed message.
+1. **Identity Exchange** — Each agent presents an Ed25519 public key as its long-term identity.
+2. **Key Agreement** — Both agents generate ephemeral X25519 keypairs and perform a Diffie-Hellman exchange to produce a shared secret.
+3. **Key Derivation** — The shared secret is fed through HKDF to derive symmetric encryption keys and HMAC keys for the session.
+4. **Signature Verification** — Each agent signs the handshake transcript with its Ed25519 private key, binding the ephemeral session to the long-term identity.
+5. **Authenticated Transport** — All subsequent messages use the derived session keys with HMAC for authentication.
 
-## Key Dependencies and Their Roles
+## Key Dependencies
 
-### Concurrency and I/O
+### Async Runtime (`tokio`, `async-trait`)
 
-- **`tokio`** — All I/O is async. The crate provides `async trait` interfaces for reading and writing framed messages over any `AsyncRead`/`AsyncWrite` transport.
-- **`dashmap`** — Manages concurrent session state (active handshakes, established sessions, key material) without requiring a dedicated mutex.
+All I/O operations are async. Connection handling, message reading, and writes are designed to run on the Tokio runtime without blocking. The `async-trait` crate enables trait definitions for async connection handlers and transport layers.
 
-### Serialization
+### Serialization (`serde`, `serde_json`, `base64`)
 
-- **`serde` / `serde_json`** — Message payloads are JSON-encoded before framing. This keeps the wire format debuggable and language-agnostic while relying on serde for typed deserialization on the receiving end.
-- **`base64` / `hex`** — Binary data (public keys, signatures, MACs) is encoded in headers or payload fields using one of these encodings.
+Wire messages are serialized as JSON for interoperability and debuggability. Base64 encoding is used where binary data (keys, signatures, ciphertext) needs to be embedded in JSON payloads.
 
-### Identification and Timing
+### Concurrency (`dashmap`)
 
-- **`uuid`** — Every session and every message carries a unique identifier for correlation and deduplication.
-- **`chrono`** — Timestamps in handshake messages for replay-window enforcement.
+Active sessions and connection state are managed in concurrent data structures. `DashMap` provides a lock-free concurrent hashmap for tracking peer connections and routing messages without becoming a bottleneck under load.
 
-### Observability
+### Error Handling (`thiserror`)
 
-- **`tracing`** — Structured logging of handshake progress, session creation, and error conditions. Use `RUST_LOG=librefang_wire=debug` to follow protocol events.
+All fallible operations return structured error types. The crate defines domain-specific error enums covering handshake failures, authentication errors, serialization issues, and protocol violations.
 
-### Error Handling
+### Observability (`tracing`)
 
-- **`thiserror`** — Typed errors for handshake failures, MAC verification failures, deserialization errors, and session-not-found conditions. Consumers can match on specific variants without parsing strings.
+Structured logging via `tracing` spans is used throughout — particularly around connection lifecycle events, handshake progress, and authentication outcomes. This enables production debugging without exposing sensitive key material.
 
-## Relationship to Other Crates
+## Relationship to librefang-types
 
-```
-librefang-types
-       │
-       ▼
- librefang-wire
-       │
-       ▼
-  (agent crates)
-```
+`librefang-wire` depends on `librefang-types` for shared data structures — message envelopes, agent identifiers, and protocol constants. The wire crate adds the transport and security layer on top of those types, handling the mechanics of getting typed messages between agents safely.
 
-- **`librefang-types`** — Provides shared domain types (agent IDs, role definitions, policy objects) that appear as message payloads. `librefang-wire` serializes and deserializes these types but does not define them.
-- **Agent crates** — Consume `librefang-wire` to establish sessions and exchange typed messages with peer agents. They are responsible for transport-layer concerns (TCP, TLS, Unix sockets) and pass a byte stream into this crate's framing layer.
+## Relationship to the Workspace
 
-## Error Model
+As a library crate, `librefang-wire` is consumed by the agent executable or higher-level crates in the workspace. It exposes APIs for:
 
-All fallible operations return typed errors via `thiserror`. The main error categories are:
+- Initiating outbound connections to peer agents
+- Accepting and authenticating inbound connections
+- Sending and receiving protocol messages over established sessions
+- Managing the lifecycle of secure sessions
 
-- **Handshake errors** — Invalid signature, expired timestamp, unsupported protocol version.
-- **MAC errors** — HMAC verification failed (tampering, wrong key, replay). Constant-time comparison via `subtle` prevents timing side-channels.
-- **Serialization errors** — Malformed JSON or unexpected payload structure.
-- **Session errors** — Unknown session ID, expired session, handshake not completed.
-
-## Security Considerations
-
-- **Forward secrecy** — Ephemeral X25519 keys are discarded after the handshake. Compromising a long-term identity key does not reveal past session keys.
-- **Replay protection** — Message UUIDs and timestamps allow receivers to detect and reject duplicated or stale messages.
-- **Constant-time MAC comparison** — The `subtle` crate ensures HMAC verification does not leak timing information.
-- **Random generation** — All key material is generated using `rand_core` with the `getrandom` feature, pulling from the OS CSPRNG.
+It does not depend on any other workspace crates besides `librefang-types`, keeping the networking layer cleanly separated from agent logic.

@@ -2,94 +2,100 @@
 
 # librefang-acp
 
-Agent Client Protocol (ACP) adapter for LibreFang. This crate bridges LibreFang's internal agent/LLM stack and the **Agent Client Protocol**, enabling LibreFang agents to be embedded in editors like Zed, VS Code, and JetBrains over a stdio JSON-RPC transport.
+Agent Client Protocol (ACP) adapter for LibreFang. Bridges LibreFang's kernel and LLM infrastructure to the [Agent Client Protocol](https://github.com/AcpProtocol/acp), allowing LibreFang agents to run inside editors like Zed, VS Code, and JetBrains over stdio JSON-RPC.
+
+## Overview
+
+ACP defines a standard for editor–agent communication. This crate implements the **server side**: it exposes LibreFang as an ACP-compatible agent that any ACP-speaking editor can consume. The transport is stdio-based JSON-RPC, orchestrated by the `agent-client-protocol` and `agent-client-protocol-tokio` workspace crates.
+
+The crate is intentionally thin on protocol logic — it delegates message parsing, framing, and routing to the upstream ACP libraries. Its real job is **adaptation**: translating between ACP's abstract kernel interface (`AcpKernel`) and LibreFang's concrete kernel.
 
 ## Architecture
 
 ```mermaid
-graph TD
-    subgraph External
-        Zed["Zed / VS Code / JetBrains"]
-    end
-
-    subgraph "librefang-acp"
-        ACP["ACP Protocol Layer<br/>(agent-client-protocol)"]
-        ADAPTER["KernelAdapter"]
-        TRAIT["AcpKernel (trait)"]
-    end
-
-    subgraph "LibreFang Core"
-        KERNEL["librefang-kernel<br/>(LibreFangKernel)"]
-        DRIVER["librefang-llm-driver"]
-        HANDLE["librefang-kernel-handle"]
-    end
-
-    Zed -->|stdio JSON-RPC| ACP
-    ACP --> ADAPTER
-    ADAPTER -->|impl| TRAIT
-    ADAPTER -->|"Arc<LibreFangKernel>"| KERNEL
-    KERNEL --> DRIVER
-    KERNEL --> HANDLE
+graph LR
+    Editor[Editor<br/>Zed / VS Code / JetBrains] -->|stdio JSON-RPC| AcpServer[ACP Transport<br/>agent-client-protocol-tokio]
+    AcpServer --> AcpAdapter[librefang-acp]
+    AcpAdapter -->|AcpKernel trait| Kernel[LibreFang Kernel]
+    AcpAdapter --> LLM[librefang-llm-driver]
+    AcpAdapter --> Types[librefang-types]
 ```
 
-## Purpose
+## Key Trait: `AcpKernel`
 
-Editor integrations don't talk LibreFang's internal APIs — they speak the Agent Client Protocol, a JSON-RPC protocol transported over stdio. This crate owns the translation layer between those two worlds:
+The central abstraction in this crate is the `AcpKernel` trait (defined in the `agent-client-protocol` workspace crate). It represents the operations an ACP server needs from its backing agent — session management, message handling, approval requests, and so on.
 
-- **Inbound**: ACP requests (session creation, message turns, approval responses) arrive over stdio and are dispatched to the appropriate kernel operations.
-- **Outbound**: Kernel events (streaming LLM tokens, approval requests, tool calls) are translated back into ACP notifications and written to stdout.
+There are two ways `AcpKernel` gets implemented:
 
-By keeping this translation isolated in its own crate, `librefang-cli` and `librefang-api` can both host an ACP server — one in-process, one daemon-attached — without duplicating the binding logic.
+1. **`KernelAdapter`** (behind the `kernel-adapter` feature) — wraps `Arc<LibreFangKernel>` from `librefang-kernel` and maps each `AcpKernel` method to the corresponding kernel operation. This is the production path, used by `librefang-cli` (in-process) and `librefang-api` (daemon-attached).
 
-## Key Abstractions
-
-### `AcpKernel` trait
-
-The core integration point. `AcpKernel` defines the operations the ACP protocol layer needs from a kernel backend — things like initiating a session, sending a user message, responding to an approval prompt, and tearing down a session. Any type implementing this trait can serve as the backend for the ACP server.
-
-The trait is defined in this crate (it is *not* re-exported from `agent-client-protocol`), which means alternative kernel implementations can implement `AcpKernel` directly without pulling in the full `librefang-kernel` dependency tree.
-
-### `KernelAdapter`
-
-A struct gated behind the `kernel-adapter` feature. It wraps an `Arc<LibreFangKernel>` and implements `AcpKernel` by delegating to the real kernel. This is the production adapter used by `librefang-cli` and `librefang-api`.
+2. **Custom implementations** — integration tests and alternative kernel backends implement `AcpKernel` directly, keeping the test/alternative surface free of the heavy `librefang-kernel` dependency tree.
 
 ## Feature Flags
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `kernel-adapter` | off | Pulls in `librefang-kernel` and provides `KernelAdapter`. Enables production use by CLI and API crates. |
+| Flag | Default | Effect |
+|------|---------|--------|
+| `kernel-adapter` | off | Pulls in `librefang-kernel`. Provides `KernelAdapter` implementing `AcpKernel` over `Arc<LibreFangKernel>`. |
 
-When the feature is off, the crate still compiles — it exports the protocol types, the `AcpKernel` trait, and the stdio transport machinery. This is useful for integration tests and any consumer that wants to provide a mock or alternative kernel.
+### Why `kernel-adapter` is optional
+
+The full kernel dependency tree is heavy. Pure-protocol consumers — integration tests validating JSON-RPC framing, or hypothetical alternative kernel backends — don't need it. They implement `AcpKernel` directly and avoid the compile cost.
+
+The flag is enabled by `librefang-cli` and `librefang-api`, which are the two crates that actually host a running ACP server connected to a real kernel.
 
 ## Dependencies
 
-**Internal (always linked):**
+### Required
 
-- `librefang-types` — shared type definitions (session IDs, message types, etc.)
-- `librefang-llm-driver` — LLM provider abstractions, needed for translating between ACP message formats and internal LLM request/response types
-- `librefang-kernel-handle` — kernel handle abstraction for managing active sessions
+| Crate | Role |
+|-------|------|
+| `librefang-types` | Shared type definitions (messages, session IDs, etc.) |
+| `librefang-llm-driver` | LLM backend abstraction for generating responses |
+| `librefang-kernel-handle` | Lightweight handle to a running kernel instance |
+| `agent-client-protocol` | ACP trait definitions and types |
+| `agent-client-protocol-tokio` | Tokio-based ACP transport (stdio framing, JSON-RPC dispatch) |
+| `tokio`, `tokio-util` | Async runtime and codec utilities |
+| `async-trait` | Trait async methods |
+| `serde`, `serde_json` | Serialization |
+| `tracing` | Structured logging |
+| `dashmap` | Concurrent session/conversation state maps |
+| `uuid` | Session and conversation ID generation |
+| `thiserror` | Error type derivation |
 
-**Internal (optional):**
+### Optional
 
-- `librefang-kernel` — the full kernel implementation, only pulled in via the `kernel-adapter` feature
+| Crate | Flag | Role |
+|-------|------|------|
+| `librefang-kernel` | `kernel-adapter` | Full kernel, used by `KernelAdapter` |
 
-**External:**
+### Dev-only
 
-- `agent-client-protocol` / `agent-client-protocol-tokio` — workspace crates providing ACP type definitions and tokio-based transport primitives
-- `tokio` / `tokio-util` — async runtime and I/O utilities (the transport layer is built on tokio's `AsyncRead`/`AsyncWrite`)
-- `dashmap` — concurrent hashmap used for tracking active ACP sessions across async tasks
-- `serde` / `serde_json` — JSON serialization for the JSON-RPC message wire format
-- `tracing` — structured logging throughout the protocol and transport layers
-- `thiserror` / `uuid` — error derivation and unique ID generation
+`futures` (for duplex transport `AsyncRead`/`AsyncWrite` bounds in tests) and `chrono` (for `ApprovalRequest` test fixtures). Kept out of the production dependency tree.
 
-## How Other Crates Use This
+## Integration Points
 
-**`librefang-cli`** — Enables the `kernel-adapter` feature, constructs a `LibreFangKernel`, wraps it in `KernelAdapter`, and runs the ACP server in-process over stdio. This is the path used when an editor launches LibreFang as a subprocess.
+### librefang-cli
 
-**`librefang-api`** — Similarly enables `kernel-adapter`. Hosts the ACP server in daemon mode, allowing multiple editor instances to connect through a persistent process.
+The CLI enables `kernel-adapter` and starts an in-process ACP server over stdio. When an editor launches the CLI as a language server–style subprocess, it gets a full LibreFang agent.
 
-**Integration tests** (in this crate's `tests/` directory) — Leave `kernel-adapter` off, implement `AcpKernel` directly with lightweight stubs, and exercise the protocol/transport layer in isolation. Test fixtures use `futures` for duplex transport simulation and `chrono` for timestamping `ApprovalRequest` fixtures.
+### librefang-api
 
-## Transport
+The API server enables `kernel-adapter` to host an ACP endpoint attached to a long-running kernel daemon, serving multiple editor connections.
 
-The crate uses stdio as the transport boundary. `agent-client-protocol-tokio` provides the framing layer (length-delimited JSON-RPC messages over `AsyncRead`/`AsyncWrite`), and this crate wires stdin/stdout into that layer. This is the standard transport for editor-hosted agents — the editor spawns LibreFang as a child process and communicates over the child's stdin/stdout.
+### Integration tests
+
+`tests/acp_integration.rs` exercises the full JSON-RPC message flow — handshake, session creation, conversation turns, approval requests — without pulling in `librefang-kernel`. Tests implement `AcpKernel` with stubs or mocks, using the `futures` crate's duplex transport to simulate the stdio pipe.
+
+## Error Handling
+
+Errors are consolidated through `thiserror`. The main error variants cover:
+
+- **Protocol errors** — malformed JSON-RPC, unexpected message types, missing fields.
+- **Kernel errors** — forwarded from `librefang-kernel` or `librefang-kernel-handle` when the backing kernel rejects an operation.
+- **Transport errors** — stdio pipe closed, framing failures, I/O errors.
+
+All errors are logged through `tracing` with structured fields (session ID, conversation ID, method name) for observability in editor logs.
+
+## Session Management
+
+`dashmap` provides the concurrent map backing active sessions. Each editor connection gets a session keyed by UUID. Within a session, conversations are tracked so that approval requests (e.g., "allow this file write?") can be correlated back to the originating editor prompt and surfaced correctly in the ACP protocol.

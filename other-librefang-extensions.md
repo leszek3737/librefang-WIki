@@ -2,135 +2,125 @@
 
 # librefang-extensions
 
-Agent-side infrastructure that doesn't belong in `runtime` or `kernel`. MCP server catalog, credential vault, OAuth2 PKCE flows, provider health probes, plugin installer, and a shared HTTP client.
+Agent-side toolkit that doesn't belong in `runtime` or `kernel`. MCP server catalog, encrypted credential vault, OAuth2 PKCE client, provider health probes, plugin installer, shared HTTP client, and dotenv parsing.
 
-This crate sits **above** `kernel` in the dependency graph. Higher-level crates (`librefang-api`, `librefang-cli`, `librefang-desktop`) consume it, but it never imports them.
+This crate sits **above** `kernel` and **below** `librefang-api` / `librefang-cli` / `librefang-desktop`. It depends on `librefang-types` (and `librefang-runtime` in dev-dependencies only). Nothing in `kernel` depends on extensions.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    API["librefang-api"] --> EXT["librefang-extensions"]
-    CLI["librefang-cli"] --> EXT
-    DESKTOP["librefang-desktop"] --> EXT
-    EXT --> TYPES["librefang-types"]
-    EXT --> RUNTIME["librefang-runtime"]
-    KERNEL["librefang-kernel"]
-    KERNEL -.->|"not depended on"| EXT
+    API["librefang-api"] -->|imports| EXT["librefang-extensions"]
+    CLI["librefang-cli"] -->|imports| EXT
+    DESK["librefang-desktop"] -->|imports| EXT
+    EXT -->|depends on| TYPES["librefang-types"]
+    EXT -.->|dev-dep| RT["librefang-runtime"]
+    KERNEL["librefang-kernel"] -.->|no dependency| EXT
 ```
-
-Extensions provides the building blocks. The API crate owns the user-facing HTTP routes and flow orchestration.
 
 ## Module Map
 
-### `vault` — AES-256-GCM Credential Vault
+| Module | Responsibility |
+|---|---|
+| `catalog` | MCP server catalog at `~/.librefang/mcp/catalog/`. Templates and available servers. |
+| `credentials` | Auth-source unification. Resolves credentials from multiple providers with defined precedence. |
+| `dotenv` | `.env` file parsing for agent workspaces. |
+| `health` | Provider liveness probes. Backed by `provider_health` in runtime. |
+| `http_client` | Shared `reqwest::Client` builder. All HTTP must go through here. |
+| `installer` | MCP server install, update, and uninstall flows. |
+| `oauth` | OAuth2 PKCE client with Dynamic Client Registration (RFC 7591). |
+| `vault` | AES-256-GCM encrypted credential vault with OS keyring integration. |
 
-Encrypted credential storage with per-agent isolation.
+## Credential Vault
 
-**Master key resolution order:**
-1. `LIBREFANG_VAULT_KEY` environment variable (base64, must decode to exactly 32 bytes — `openssl rand -base64 32` produces 44 characters)
-2. OS keyring (Linux `libsecret`, Windows Credential Manager)
-3. File fallback
+The `vault` module stores secrets encrypted at rest using AES-256-GCM. Key derivation uses Argon2. The master key comes from one of three sources, tried in order:
 
-**Platform specifics:**
-- **macOS** skips Keychain by default (see #2766). Enable with `[vault] use_os_keyring = true` in config. On first boot with file fallback, the vault performs one final Keychain read, mirrors the key to the file store, and never touches Keychain again.
-- **File fallback path** on macOS: `~/Library/Application Support/librefang/.keyring` (mode `0600`).
-- **musl-static / Android** targets do not compile the OS keyring backend. The vault transparently uses the file-based AES-256-GCM store instead.
+1. **Environment variable** `LIBREFANG_VAULT_KEY` — base64-encoded, must decode to exactly 32 bytes. Generate with `openssl rand -base64 32` (produces 44 characters).
+2. **OS keyring** — `libsecret` on Linux, Keychain on macOS, Credential Manager on Windows. Not compiled in for musl-static or Android targets; the vault transparently falls back to file storage.
+3. **File fallback** — `~/Library/Application Support/librefang/.keyring` on macOS (mode `0600`). Linux and Windows use the OS keyring.
 
-**Internal caching:** Per-agent vault instances are cached behind a `RwLock<HashMap<AgentId, Arc<Vault>>>`. The cache invalidates on credential changes.
+### macOS Keychain Behavior
 
-**Invariants:**
-- Always interact with the vault through the `Vault` API. Never read the `.keyring` file directly.
-- The `keyring` crate dependency is target-gated to avoid pulling `libdbus-sys` on musl and Android builds.
+macOS skips the Keychain by default (see #2766). Enable it with config:
 
-### `catalog` — MCP Server Catalog
+```toml
+[vault]
+use_os_keyring = true
+```
 
-Manages MCP server templates and available servers at `~/.librefang/mcp/catalog/`.
+The migration path: on first boot, the vault performs one final read from Keychain, mirrors the key to the file fallback, and never touches Keychain again.
 
-### `credentials` — Auth Source Unification
+### Invariants
 
-Single entry point for credential resolution. The `credentials::resolve()` function enforces a fixed precedence:
+- All vault operations go through the `Vault` API. Never read the `.keyring` file directly.
+- Per-agent vault instances are cached behind a `RwLock<HashMap<AgentId, Arc<Vault>>>`. Invalidate on credential change.
+- The master key is held in memory and zeroized on drop via the `zeroize` crate.
 
-1. **Environment variables**
-2. **Vault** (encrypted store)
-3. **CLI login** session
-4. **File**
+## Shared HTTP Client
 
-Do not add new credential providers without accounting for this precedence chain.
-
-### `http_client` — Shared HTTP Client
-
-`http_client::shared_client()` returns a pre-configured `reqwest::Client`:
+Call `http_client::shared_client()` to get a pre-configured `reqwest::Client`. It provides:
 
 - `User-Agent: librefang/<version>` (matches `librefang_runtime::USER_AGENT`)
 - Connection pooling
-- Sensible timeout, redirect, and TLS defaults (backed by `rustls` with `webpki-roots` and `rustls-native-certs`)
+- Sensible timeout, redirect, and TLS defaults (using `rustls` with `webpki-roots` and `rustls-native-certs`)
 
-**Do not create bespoke `reqwest::Client` instances.** Always use `shared_client()`. This will be flagged in review.
+**Do not create bespoke `reqwest::Client` instances.** This is enforced in code review. The shared client ensures consistent behavior across all HTTP traffic and avoids connection-pool proliferation.
 
-### `oauth` — OAuth2 PKCE Client
+## OAuth2 for MCP Servers
 
-Implements OAuth2 with PKCE and Dynamic Client Registration (RFC 7591) for MCP servers.
+The OAuth flow is split across two crates:
 
-The daemon detects a `401` response and sets `NeedsAuth` state on the connection. The API layer (`routes/mcp_auth.rs` in `librefang-api`) then drives the full flow: PKCE generation, callback handling, token exchange, and refresh.
+- **This crate** (`oauth` module): PKCE generation, token exchange, token refresh, Dynamic Client Registration per RFC 7591. These are the building blocks.
+- **`librefang-api`** (`routes/mcp_auth.rs`): The user-facing flow that drives the building blocks — callback handling, redirecting the user's browser, receiving the authorization code.
 
-When an MCP server exposes a `registration_endpoint` but no `client_id`, this module handles Dynamic Client Registration automatically.
+### Flow Overview
 
-This crate exposes the building blocks. The API crate owns the user-facing flow.
+1. The daemon detects a `401` from an MCP server and sets `NeedsAuth` state on the connection.
+2. The API layer initiates PKCE, generates the authorization URL, and redirects the user.
+3. When the MCP server has a `registration_endpoint` but no `client_id`, Dynamic Client Registration (RFC 7591) is used to register one automatically.
+4. The callback endpoint receives the authorization code, exchanges it for tokens, and stores them in the vault.
 
-### `installer` — MCP Server Lifecycle
+### Docker Considerations
 
-Install, update, and uninstall flows for MCP server plugins.
+Do not bind ephemeral localhost ports for OAuth callbacks in daemon code. Inside Docker, that port is unreachable from the host. Route all callbacks through the API server's existing port (the `api` crate handles this).
 
-**Do not use raw `tokio::process` for plugin installs.** Always route through the `installer` module.
+## Credential Resolution
 
-### `health` — Provider Liveness Probes
+The `credentials` module provides a unified `resolve()` function that checks sources in strict precedence:
 
-Provider health checking. Backed by `provider_health` in `librefang-runtime`.
+1. Environment variables
+2. Vault (encrypted store)
+3. CLI login session
+4. File-based credentials
 
-### `dotenv` — Environment Parsing
+When adding a new credential provider, integrate it into this precedence chain rather than bypassing it.
 
-`.env` file parsing for agent workspaces.
+## Plugin Installer
 
-## Dependency Boundaries
+Use `installer` for all MCP server install, update, and uninstall operations. Do not spawn raw `tokio::process` commands for plugin management. The installer handles process lifecycle, error reporting, and catalog updates atomically.
 
-### What this crate owns
-- Vault and encryption
-- MCP catalog
-- OAuth client primitives
-- Shared HTTP client
-- Dotenv parsing
-- Plugin installer
+## Dependency Policy
 
-### What this crate does NOT own
-- Kernel callback wiring — `McpOAuthProvider` trait lives in `runtime`; the implementation lives in `api`
-- HTTP routing
-- Channel adapters
+| Allowed | Forbidden |
+|---|---|
+| `librefang-types` | `librefang-api` |
+| `librefang-runtime` (dev-dep only) | `librefang-cli` |
+| All workspace external crates | `librefang-desktop` |
 
-### Allowed imports
-- `librefang-types`
-- `librefang-runtime`
-- Standard library and third-party crates
+Extensions sit below the application layers. Importing upward creates circular dependency cycles.
 
-### Forbidden imports
-- `librefang-api`
-- `librefang-cli`
-- `librefang-desktop`
+## Platform-Specific Compilation
 
-Extensions sits below all of those layers. Importing them creates circular dependencies.
+The `keyring` crate is conditionally compiled for targets that have a working OS keyring backend:
 
-## Docker Considerations
+```rust
+// Cargo.toml target cfg
+[target.'cfg(any(
+    all(target_os = "linux", not(target_env = "musl")),
+    target_os = "macos",
+    target_os = "windows"
+))'.dependencies]
+keyring = { workspace = true }
+```
 
-Do not bind ephemeral localhost ports for OAuth callbacks in daemon code. The port is unreachable from outside a Docker container. Route all OAuth callbacks through the API server's existing port — the `api` crate handles this.
-
-## Key Dependencies
-
-| Crate | Purpose |
-|-------|---------|
-| `aes-gcm` | AES-256-GCM encryption for the vault |
-| `argon2` | Key derivation |
-| `keyring` | OS keyring access (target-gated) |
-| `reqwest` / `rustls` | HTTP client with Rust TLS |
-| `dashmap` | Concurrent maps for caching |
-| `zeroize` | Secure memory clearing for key material |
-| `sha2` / `hmac` / `subtle` | Cryptographic primitives for OAuth PKCE |
+On musl-static and Android targets, `libdbus-sys` (the secret-service C FFI) has no usable backend and would break the build. The vault module's `os_keyring()` function handles the absent-backend case by falling back to file-based storage.

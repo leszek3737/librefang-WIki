@@ -2,128 +2,114 @@
 
 # librefang-memory
 
-Memory substrate for the LibreFang Agent OS. Provides persistent, queryable memory for agents through a unified trait that abstracts over three storage backends: structured key-value (SQLite), semantic text search, and a knowledge graph.
+Memory substrate for the LibreFang Agent OS. Provides durable, queryable memory across three storage paradigms—structured key/value, semantic text search, and knowledge graph—behind a single `Memory` trait that agents call without knowing the underlying backend.
 
 ## Architecture
 
-Agents interact with a single `Memory` trait rather than individual storage backends. Implementations of this trait compose the three stores into one `MemorySubstrate`.
+```mermaid
+graph TD
+    Agent[Agent Code] --> MT[Memory Trait]
+    MT --> SS[Structured Store<br/>SQLite]
+    MT --> SEM[Semantic Store<br/>LIKE / Qdrant]
+    MT --> KG[Knowledge Graph<br/>SQLite]
 
-```
-┌─────────────────────────────────┐
-│           Memory trait          │
-│  search · add · get · list · …  │
-└──────────────┬──────────────────┘
-               │
-       MemorySubstrate
-               │
-   ┌───────────┼───────────┐
-   ▼           ▼           ▼
-┌──────┐  ┌────────┐  ┌──────────┐
-│Structured│Semantic │  │Knowledge │
-│ (SQLite) │(LIKE /  │  │ (SQLite) │
-│          │Qdrant)  │  │          │
-└──────────┘└────────┘  └──────────┘
+    PM[ProactiveMemory API] --> PMS[ProactiveMemoryStore]
+    PMS --> SUB[MemorySubstrate]
+    SUB --> SS
+    SUB --> SEM
+    SUB --> KG
+
+    PM --> HOOKS[ProactiveMemoryHooks]
+    PM --> CHUNK[chunker / consolidation / decay]
 ```
 
-## Storage Backends
+Agents call the unified `Memory` trait. The `ProactiveMemory` layer sits on top of `MemorySubstrate`, adding mem0-style auto-memorization and retrieval with chunking, consolidation, and decay.
+
+## Three Storage Backends
 
 ### Structured Store (`structured`)
 
 SQLite-backed storage for:
 
-- **Key/value pairs** — arbitrary agent state serialized via serde (JSON or MessagePack via `rmp-serde`).
-- **Sessions** — conversation and interaction context scoped to an agent run or user session.
-- **Audit trail** — append-only log of agent actions for traceability.
+- **Key/value pairs** — arbitrary agent state serialized as JSON or MessagePack (`rmp-serde`)
+- **Sessions** — conversation and interaction state scoped to a session ID
+- **Agent state** — persistent agent configuration and runtime state
+- **Audit trail** — append-only log of agent actions and decisions
 
-Uses `r2d2` connection pooling (`r2d2_sqlite`) for concurrent access.
+This is the primary store for anything that needs exact retrieval by key or range queries over time-ordered records. Uses `r2d2` / `r2d2_sqlite` for connection pooling.
 
 ### Semantic Store (`semantic`, `http_vector_store`)
 
-Full-text search over stored text. Two paths:
+Text search over stored content:
 
-- **Current** — `LIKE`-based search in SQLite. Suitable for development and small deployments.
-- **Vector path** — `http_vector_store` targeting Qdrant for embedding-based similarity search. Not yet the default but available for integration.
+- **Current path** — LIKE-based pattern matching in SQLite, suitable for development and small deployments
+- **Vector path** — designed for Qdrant-backed similarity search via the `http_vector_store` module (uses `reqwest` for HTTP transport)
+
+Agents store natural-language fragments and retrieve them by similarity or keyword match. The semantic store is what powers contextual recall during conversations.
 
 ### Knowledge Graph (`knowledge`)
 
-SQLite-backed entity-relation store. Agents can record entities (nodes) and typed relations (edges) between them, then query the graph for multi-hop reasoning.
+SQLite-backed entity-relation store:
 
-## Proactive Memory (`proactive`)
+- **Entities** — nodes representing concepts, agents, users, or any addressable thing
+- **Relations** — typed, directed edges between entities
 
-Inspired by mem0, proactive memory automatically decides what to store, when to consolidate, and what to forget. This is the primary high-level API agents should use.
+Enables agents to build and query an understanding of how concepts relate to each other across sessions and interactions.
+
+## Proactive Memory (mem0-style)
+
+The `proactive` module implements a mem0-inspired memory layer that automatically decides what to memorize, when to consolidate, and what to forget.
 
 ### Core Types
 
-| Type | Role |
+| Type | Purpose |
 |---|---|
-| `ProactiveMemory` | Unified API: `search`, `add`, `get`, `list`. The main entry point. |
-| `ProactiveMemoryHooks` | Auto-memorize and auto-retrieve hooks. Wire these into an agent's request/response pipeline so memory operations happen transparently. |
-| `ProactiveMemoryStore` | Concrete implementation backed by `MemorySubstrate`. |
+| `ProactiveMemory` | Unified API exposing `search`, `add`, `get`, `list` |
+| `ProactiveMemoryHooks` | Auto-memorize and auto-retrieve hooks that intercept agent I/O |
+| `ProactiveMemoryStore` | Concrete implementation backed by `MemorySubstrate` |
 
 ### Supporting Modules
 
-- **`chunker`** — Splits incoming text into memory-sized chunks before storage.
-- **`consolidation`** — Merges redundant or near-duplicate memories over time to keep the store clean.
-- **`decay`** — Time-based relevance scoring. Older or less-accessed memories lose priority and may be pruned.
-- **`migration`** — Schema migrations for the underlying SQLite databases. Run on startup to bring the store to the current version.
-- **`namespace_acl`** — Access control per namespace. Ensures agents can only read/write memory they are authorized for.
-- **`prompt`** — Prompt templates for memory-related LLM calls (e.g., deciding whether a piece of text is worth storing).
-- **`provider`** — Abstraction over the LLM provider used by consolidation and relevance scoring.
-- **`roster_store`** — Tracks which agents exist and their capabilities, used for cross-agent memory sharing decisions.
-- **`session`** — Session lifecycle management tied to the structured store.
-
-## Dependencies
-
-| Crate | Purpose |
+| Module | Responsibility |
 |---|---|
-| `librefang-types` | Shared domain types exchanged across workspace crates |
-| `tokio` | Async runtime |
-| `rusqlite` (FTS5) | SQLite engine for structured, knowledge, and semantic stores |
-| `r2d2` / `r2d2_sqlite` | Connection pooling |
-| `serde` / `serde_json` / `rmp-serde` | Serialization (JSON and MessagePack) |
-| `chrono` | Timestamps for audit trail and decay |
-| `uuid` | Unique IDs for entities, relations, memory entries |
-| `sha2` | Content hashing for deduplication |
-| `reqwest` | HTTP client for the Qdrant vector store path |
-| `tracing` | Structured logging |
-| `metrics` | Instrumentation counters and histograms |
+| `chunker` | Splits incoming text into memorizable segments |
+| `consolidation` | Merges redundant or overlapping memories over time |
+| `decay` | Applies time-based relevance decay to stored memories |
+| `migration` | Schema migrations for the proactive memory tables |
+| `namespace_acl` | Access control scoped to memory namespaces |
+| `prompt` | Prompt templates for memory-related LLM calls |
+| `provider` | Abstraction over LLM providers used for memory extraction |
+| `roster_store` | Tracks which agents have access to which memory scopes |
+| `session` | Session-scoped memory context |
 
-## Usage
+### Typical Flow
 
-```rust
-use librefang_memory::proactive::{ProactiveMemory, ProactiveMemoryStore, ProactiveMemoryHooks};
+1. Agent receives user input.
+2. `ProactiveMemoryHooks` intercept the input, calling `ProactiveMemory::search` to retrieve relevant context.
+3. Injected context is included in the agent's prompt.
+4. After the agent responds, the hooks call `ProactiveMemory::add` to store new facts extracted from the exchange.
+5. Background processes run `consolidation` and `decay` to keep the store healthy.
 
-// Create the substrate (backed by SQLite on disk)
-let substrate = MemorySubstrate::open("agent.db")?;
-let store = ProactiveMemoryStore::new(substrate);
+## Key Dependencies
 
-// Add a memory
-store.add("agent-1", "The user prefers dark mode", None).await?;
+| Dependency | Role in this crate |
+|---|---|
+| `librefang-types` | Shared domain types (memory keys, entity IDs, relation types) |
+| `rusqlite` + `r2d2` / `r2d2_sqlite` | SQLite storage with connection pooling; FTS5 enabled for full-text search |
+| `serde` / `serde_json` / `rmp-serde` | Serialization of stored values (JSON for inspection, MessagePack for compactness) |
+| `tokio` + `async-trait` | Async `Memory` trait definition |
+| `reqwest` | HTTP client for `http_vector_store` (Qdrant communication) |
+| `sha2` | Content hashing for deduplication and integrity |
+| `chrono` / `uuid` | Timestamps and unique identifiers |
+| `tracing` / `metrics` | Observability |
+| `thiserror` | Error type definitions |
 
-// Search
-let results = store.search("agent-1", "user preferences").await?;
+## Integration with LibreFang
 
-// Wire hooks into your agent pipeline for automatic memory
-let hooks = ProactiveMemoryHooks::new(store);
-// hooks.on_request(...) → auto-retrieve
-// hooks.on_response(...) → auto-memorize
-```
+`librefang-memory` sits below the agent runtime and above the persistence layer:
 
-## Database Schema
+- **Upstream consumers** — agent implementations import the `Memory` trait and `ProactiveMemory` API. They never interact with SQLite or Qdrant directly.
+- **Downstream dependencies** — only `librefang-types` (shared type definitions). The crate is otherwise self-contained, managing its own schema and connections.
+- **Schema ownership** — the `migration` module owns all database schema changes. No other crate should write to the same SQLite files.
 
-All SQLite-backed stores are initialized via the `migration` module on first open. The module tracks the current schema version in a `_meta` table and applies pending migrations sequentially. No manual setup is required — calling `MemorySubstrate::open(path)` handles everything.
-
-## Testing
-
-Tests use the `tempfile` crate to create throwaway database files:
-
-```rust
-let dir = tempfile::tempdir()?;
-let db_path = dir.path().join("test.db");
-let substrate = MemorySubstrate::open(&db_path)?;
-// ... run assertions
-```
-
-## Relationship to Other Crates
-
-`librefang-memory` sits below the agent runtime and above `librefang-types`. Agents import the `Memory` trait or `ProactiveMemory` and remain unaware of which backend handles their request. The `librefang-types` crate defines the data structures (entries, entities, relations) that flow through the memory API.
+When adding a new storage backend or modifying an existing one, ensure the `Memory` trait remains the single entry point for agent code. The trait abstraction is what allows swapping LIKE-based search for Qdrant without changing any agent logic.

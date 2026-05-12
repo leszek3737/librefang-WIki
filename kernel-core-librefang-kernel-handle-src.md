@@ -1,279 +1,208 @@
 # Kernel Core — librefang-kernel-handle-src
 
-# librefang-kernel-handle — Kernel Role Traits
+# Kernel Handle — `librefang-kernel-handle`
+
+Role-trait surface for the agent runtime ↔ kernel seam.
 
 ## Purpose
 
-This crate defines the **seam between the agent runtime and the kernel**: a set of role traits that express every capability the runtime needs from the kernel (agent lifecycle, memory, task queues, approvals, channel I/O, ACP bridges, etc.).
+This crate defines the abstract interface that the agent runtime uses to interact with the LibreFang kernel. Rather than coupling the runtime to a concrete kernel type, every operation crosses this trait boundary — agent lifecycle, memory, task queues, channel adapters, approval gates, and more.
 
-Prior to issue #3746, the entire surface was crammed into a single 50+ method `KernelHandle` god-trait. This crate now exposes **18 independent role traits** plus a `KernelHandle` supertrait alias that combines them all. Callers can express narrow bounds — `T: ApprovalGate` — instead of pulling the entire kernel surface into scope.
-
-## Architecture
+Historically this was a single `KernelHandle` god-trait with 50+ methods mixing 14 unrelated domains (issue #3746). The current design splits that into **19 focused role traits**, each covering one capability domain. `KernelHandle` survives as a supertrait alias with a blanket impl so the existing 117+ call sites taking `Arc<dyn KernelHandle>` keep working unchanged.
 
 ```mermaid
-graph BT
-    AC[AgentControl] --> KH
-    MA[MemoryAccess] --> KH
-    WA[WikiAccess] --> KH
-    TQ[TaskQueue] --> KH
-    EB[EventBus] --> KH
-    KG[KnowledgeGraph] --> KH
-    CC[CronControl] --> KH
-    AG[ApprovalGate] --> KH
-    HC[HandsControl] --> KH
-    A2A[A2ARegistry] --> KH
-    CS[ChannelSender] --> KH
-    PS[PromptStore] --> KH
-    WR[WorkflowRunner] --> KH
-    GC[GoalControl] --> KH
-    TP[ToolPolicy] --> KH
-    AA[ApiAuth] --> KH
-    SW[SessionWriter] --> KH
-    AFB[AcpFsBridge] --> KH
-    ATB[AcpTerminalBridge] --> KH
-
-    KH[KernelHandle<br/>supertrait alias] --> Impl["LibreFangKernel<br/>(blanket impl)"]
-
-    style KH fill:#f9f,stroke:#333
-    style Impl fill:#bbf,stroke:#333
+graph TD
+    KH["KernelHandle<br/>(supertrait alias)"]
+    KH --> AC[AgentControl]
+    KH --> MA[MemoryAccess]
+    KH --> WA[WikiAccess]
+    KH --> TQ[TaskQueue]
+    KH --> EB[EventBus]
+    KH --> KG[KnowledgeGraph]
+    KH --> CC[CronControl]
+    KH --> AG[ApprovalGate]
+    KH --> HC[HandsControl]
+    KH --> A2A[A2ARegistry]
+    KH --> CS[ChannelSender]
+    KH --> PS[PromptStore]
+    KH --> WR[WorkflowRunner]
+    KH --> GC[GoalControl]
+    KH --> TP[ToolPolicy]
+    KH --> AA[ApiAuth]
+    KH --> SW[SessionWriter]
+    KH --> AFB[AcpFsBridge]
+    KH --> ATB[AcpTerminalBridge]
+    KH --> CQ[CatalogQuery]
 ```
 
-The blanket `impl KernelHandle for T` means any concrete type that implements all 18 role traits automatically satisfies `KernelHandle`. Existing `Arc<dyn KernelHandle>` call sites (117 at split time) keep working unchanged.
+## Error Handling
 
-## Error Model
-
-All trait methods return `KernelResult<T>`, an alias for `Result<T, KernelOpError>`:
+All trait methods return [`KernelResult<T>`], an alias for `Result<T, KernelOpError>`. `KernelOpError` re-exports `librefang_types::error::LibreFangError` — the canonical structured error enum shared across runtime, kernel, and API layers (issue #3541). This means callers can pattern-match directly on variants (`AgentNotFound`, `CapabilityDenied`, `Unavailable`, etc.) instead of substring-matching error strings.
 
 ```rust
-pub use librefang_types::error::LibreFangError as KernelOpError;
-pub type KernelResult<T> = Result<T, KernelOpError>;
-```
+use librefang_kernel_handle::KernelResult;
 
-`KernelOpError` is a re-export of the workspace's canonical `LibreFangError` enum. This gives callers structured pattern-matching across the runtime↔kernel seam instead of substring-matching on `String` errors:
-
-```rust
-match err {
-    KernelOpError::AgentNotFound(_) => /* 404 */,
-    KernelOpError::CapabilityDenied(_) => /* 403 */,
-    KernelOpError::Unavailable(_) => /* 503 */,
-    // ...
+async fn do_work(kernel: &dyn AgentControl) -> KernelResult<String> {
+    kernel.send_to_agent("agent-123", "hello").await
 }
 ```
 
-Use `KernelResult<T>` in all new method signatures rather than spelling out the full type.
+## Role Traits
 
-## Role Trait Reference
+### AgentControl — Agent Lifecycle & Inter-Agent Communication
 
-### Agent Lifecycle & Communication
-
-**`AgentControl`** *(async)* — Agent spawning, inter-agent messaging, listing, heartbeats, and forked one-shot calls.
+Spawning, killing, listing, and messaging agents. Key methods:
 
 | Method | Purpose |
 |--------|---------|
 | `spawn_agent` | Create an agent from a TOML manifest |
-| `spawn_agent_checked` | Spawn with capability inheritance enforcement |
-| `send_to_agent` | Send a message and await the response |
-| `send_to_agent_as` | Send on behalf of a parent (enables cancel cascade) |
-| `list_agents` | Return all running agents as `Vec<AgentInfo>` |
-| `kill_agent` | Terminate an agent by ID |
-| `find_agents` | Search by name, tag, or tool (case-insensitive) |
-| `touch_heartbeat` | Refresh `last_active` during long LLM calls |
-| `fire_agent_step` | Emit `agent:step` hook event |
-| `run_forked_agent_oneshot` | Forked turn collapsing to a single text response |
-| `max_agent_call_depth` | Config-derived inter-agent depth limit (default: 5) |
+| `spawn_agent_checked` | Create with capability inheritance enforcement (parent caps must cover child caps) |
+| `send_to_agent` / `send_to_agent_as` | Inter-agent messaging; `_as` variant records parent for cancel-cascade (issue #3044) |
+| `run_forked_agent_oneshot` | Forked single-turn call used for structured output via prompt-cache-aligned LLM calls |
+| `touch_heartbeat` | Prevent heartbeat false-positives during long LLM calls |
+| `max_agent_call_depth` | Config-sourced inter-agent call depth limit (default: 5) |
 
-`spawn_agent_checked` defaults to delegating to `spawn_agent` without enforcement. The real kernel overrides this to verify every capability in the child manifest is covered by `parent_caps`.
+### MemoryAccess — Shared Cross-Agent Memory
 
-`send_to_agent_as` has a default impl that falls back to `send_to_agent` with a trace-level log, so handles that don't support cancel cascading are discoverable at runtime.
+Key-value store with optional per-peer namespace isolation and RBAC ACL resolution (issue #3054 Phase 2):
 
-`run_forked_agent_oneshot` errors by default. It exists for the proactive memory extractor: the fork shares the parent's prompt prefix for cache alignment rather than starting a cold `driver.complete()` call.
+- `memory_store` / `memory_recall` / `memory_list` — CRUD with optional `peer_id` scoping
+- `memory_acl_for_sender` — Resolves per-user `UserMemoryAccess` for RBAC gating; returns `None` when RBAC is disabled
 
-### Memory
+### WikiAccess — Durable Markdown Knowledge Vault
 
-**`MemoryAccess`** *(sync)* — Shared cross-agent key/value store with optional per-peer namespace isolation.
+Targets the `librefang-memory-wiki` vault (issue #3329). All results cross the seam as `serde_json::Value` to avoid a dependency on the wiki crate:
 
-| Method | Notes |
-|--------|-------|
-| `memory_store` | Write a value; `peer_id` scopes the key namespace |
-| `memory_recall` | Read a value; respects peer scoping |
-| `memory_list` | List keys; respects peer scoping |
-| `memory_acl_for_sender` | Resolve per-user RBAC ACL; returns `None` when RBAC is off |
+- `wiki_get` — Fetch a page; returns `Unavailable` when vault is disabled, `NotFound` when topic missing
+- `wiki_search` — Case-insensitive substring search; topic-name hits outrank body hits
+- `wiki_write` — Write with monotonic provenance and optional conflict detection (`force = false` refuses silent overwrites when on-disk content has drifted)
 
-**`WikiAccess`** *(sync)* — Durable markdown knowledge vault (`librefang-memory-wiki`). All methods default to `Unavailable` so stubs compile unchanged when the wiki feature is off.
+### TaskQueue — Shared Task Queue
 
-| Method | Notes |
-|--------|-------|
-| `wiki_get` | Fetch a page as JSON; `not_found` vs `unavailable` |
-| `wiki_search` | Substring search across page bodies |
-| `wiki_write` | Write with `[[topic]]` cross-refs and monotonic provenance |
+Full task lifecycle: `task_post`, `task_claim`, `task_complete`, `task_list`, `task_delete`, `task_retry`, `task_get`, `task_update_status`.
 
-`wiki_write` with `force = false` refuses silent overwrites when the on-disk file has drifted (mtime or sha256), returning `KernelOpError::conflict(...)`. Provenance is append-only — the vault never overwrites the provenance list.
+### EventBus — Fire-and-Forget Custom Events
 
-### Coordination
+Single method: `publish_event`. Used for proactive agent triggers.
 
-**`TaskQueue`** *(async)* — Shared task lifecycle: post, claim, complete, list, delete, retry, get, update status.
+### KnowledgeGraph — Entity/Relation Graph
 
-**`EventBus`** *(async)* — Fire-and-forget custom events for proactive agent triggers. Single method: `publish_event`.
+- `knowledge_add_entity` / `knowledge_add_relation` — Takes arguments by reference so callers that may retry avoid forced moves (issue #3553)
+- `knowledge_query` — Pattern-based graph query returning `GraphMatch` results
 
-**`KnowledgeGraph`** *(async)* — Entity/relation insert and pattern query. `knowledge_add_entity` and `knowledge_add_relation` take their arguments by reference so callers that may retry avoid forced moves.
+### CronControl — Agent-Owned Scheduled Jobs
 
-**`CronControl`** *(async)* — Agent-owned scheduled jobs: `cron_create`, `cron_list`, `cron_cancel`. All default to `Unavailable`.
+`cron_create`, `cron_list`, `cron_cancel`. All default to `Unavailable` when the cron scheduler is not wired.
 
-**`GoalControl`** *(sync)* — List active goals and update goal status/progress.
+### ApprovalGate — Approval Policy & Deferred Tool Execution
 
-### Approval & Policy
+The most complex role trait. Covers:
 
-**`ApprovalGate`** *(async + sync)* — Tool approval policy queries and the pending-approval lifecycle.
+- `requires_approval` / `requires_approval_with_context` — Policy checks, optionally scoped to sender + channel
+- `is_tool_denied_with_context` — Hard deny check per sender/channel
+- `resolve_user_tool_decision` — RBAC M3 gate (issue #3054 Phase 2); returns `Allow`, `Deny`, or `NeedsApproval`
+- `request_approval` — Blocking approval request
+- `submit_tool_approval` — Non-blocking submission returning a UUID immediately, paired with a `DeferredToolExecution` payload
+- `resolve_tool_approval` — Resolve a pending request, returning the deferred payload for replay
+- `get_approval_status` — Poll current status
 
-| Method | Notes |
-|--------|-------|
-| `requires_approval` | Simple policy check |
-| `requires_approval_with_context` | Policy check with sender/channel context |
-| `is_tool_denied_with_context` | Hard-deny check for sender/channel |
-| `resolve_user_tool_decision` | Per-user RBAC gate → `Allow`/`Deny`/`NeedsApproval` |
-| `request_approval` | Blocking approval wait |
-| `submit_tool_approval` | Non-blocking submission with deferred payload |
-| `resolve_tool_approval` | Resolve and retrieve deferred payload |
-| `get_approval_status` | Poll current status |
+### HandsControl — Specialized Agent (Hand) Lifecycle
 
-`resolve_user_tool_decision` defaults to `Allow` to preserve pre-M3 behaviour for stubs and embedded callers without an `AuthManager`. The real kernel always overrides this.
+Install, activate, deactivate, and query status of Hands — autonomous specialized agents. All methods default to `Unavailable`.
 
-**`ToolPolicy`** *(sync)* — Read-side configuration for tool execution: timeouts, env passthrough policy, workspace prefixes (read-only and named), channel file download directory, and upload directory.
+### A2ARegistry — External A2A Agent Directory
 
-Timeout resolution order for `tool_timeout_secs_for`:
-1. Exact match in `config.tool_timeouts`
-2. Longest glob match in `config.tool_timeouts`
-3. Global `config.tool_timeout_secs`
+Read-only discovery of external A2A (Agent-to-Agent) agents: `list_a2a_agents`, `get_a2a_agent_url`.
 
-### Agents & Hands
+### ChannelSender — Outbound Channel Adapters
 
-**`HandsControl`** *(async)* — Specialized agent ("Hand") lifecycle: list, install, activate, status, deactivate. All default to `Unavailable`.
+Send text, media, files, and polls through channel adapters (Telegram, Email, etc.):
 
-**`A2ARegistry`** *(sync)* — Read-only directory of discovered external A2A agents. Returns `(name, url)` pairs.
+- `send_channel_message` / `send_channel_media` / `send_channel_file_data` / `send_channel_poll`
+- `roster_upsert` / `roster_members` / `roster_remove_member` — Group roster management
+- `resolve_channel_owner` — Maps a `(channel, chat_id)` pair to the owning `AgentId`
 
-### Channels & Messaging
+`send_channel_file_data` takes `bytes::Bytes` so wrapping layers (metering, retry, fan-out) can clone the handle cheaply instead of copying the underlying buffer (issue #3553).
 
-**`ChannelSender`** *(async + sync)* — Outbound channel adapters for text, media, file data, and polls, plus group roster management.
+### PromptStore — Prompt Versioning & Experiments
 
-| Method | Notes |
-|--------|-------|
-| `send_channel_message` | Text to a recipient via named adapter |
-| `send_channel_media` | Image/file with optional caption |
-| `send_channel_file_data` | Raw bytes (`bytes::Bytes` for zero-copy cloning) |
-| `send_channel_poll` | Poll/quiz creation |
-| `roster_upsert` / `roster_members` / `roster_remove_member` | Group roster CRUD |
+Full CRUD for prompt versions and A/B experiments: `create_prompt_version`, `set_active_prompt_version`, `list_prompt_versions`, `create_experiment`, `update_experiment_status`, `get_experiment_metrics`, `auto_track_prompt_version`, etc.
 
-All send methods accept `thread_id` and `account_id` for thread replies and multi-bot routing. File data uses `bytes::Bytes` to avoid buffer copies in wrapping layers (metering, retry, fan-out) — significant with the 10 MiB upload bump (#3514).
+### WorkflowRunner — Declarative Workflow Execution
 
-### Prompt Management
+- `run_workflow` — Synchronous (blocking) execution, returns `(run_id, output)`
+- `start_workflow_async` — Fire-and-forget, returns `run_id` immediately
+- `cancel_workflow_run` — Cancel a running or paused workflow
+- `get_workflow_run` / `list_workflows` — Status queries
 
-**`PromptStore`** *(sync)* — Prompt version CRUD, experiment lifecycle, metric recording, and auto-tracking of system prompt changes. Methods that accept owned types (`create_prompt_version`, `create_experiment`) take them by reference so callers keep a copy for response JSON without double-cloning.
+### GoalControl — Agent Goals
 
-### Workflow
+`goal_list_active` and `goal_update` for managing agent goal state.
 
-**`WorkflowRunner`** *(async)* — Single method: `run_workflow`. Takes a workflow ID (UUID or name) and an input string; returns `(run_id, output)`.
+### ToolPolicy — Read-Side Tool & Workspace Configuration
 
-### API Auth
+Pure read-side surface used by the runtime to parameterize tool execution:
 
-**`ApiAuth`** *(sync)* — Single method returning an `ApiAuthSnapshot`:
+| Method | Purpose |
+|--------|---------|
+| `tool_timeout_secs` / `tool_timeout_secs_for` | Global and per-tool timeout (glob matching supported) |
+| `skill_env_passthrough_policy` | Operator gate over skill `env_passthrough` requests |
+| `readonly_workspace_prefixes` | Paths where writes are denied |
+| `named_workspace_prefixes` | Full workspace allowlist with access modes |
+| `channel_file_download_dir` | Directory bridges write attachments to |
+| `effective_upload_dir` | Directory for runtime-generated uploads |
 
-```
-ApiAuthSnapshot
-├── api_key: String
-├── dashboard: DashboardRawConfig { user, pass, pass_hash }
-├── home_dir: PathBuf
-├── device_api_keys: Vec<(device_id, api_key_hash)>
-└── config_users: Vec<ApiUserConfigSnapshot>
-```
+### ApiAuth — Raw Auth Config Snapshots
 
-Implementations must acquire all values from a single config snapshot so callers see a consistent view across hot-reload boundaries.
+Returns `ApiAuthSnapshot` — a one-shot, self-contained snapshot of every auth-relevant config field (`api_key`, dashboard credentials, device keys, per-user entries) from a single config load. This prevents middleware from mixing pre-reload and post-reload config during hot-reload races.
 
-### Session Injection
+### SessionWriter — Pre-Inject Session Content
 
-**`SessionWriter`** *(sync)* — Pre-inject content blocks into an agent session before an LLM turn (used by HTTP attachment uploads). The production implementation calls `MemorySubstrate::save_session` synchronously (blocking SQLite write). Callers in async contexts should wrap in `tokio::task::spawn_blocking` until #3579 lands async substrate support.
+Used by the HTTP attachment upload path (issue #3744) and channel-send message mirroring:
 
-### ACP Bridges
+- `inject_attachment_blocks` — Insert `ContentBlock`s as a User-role message before the next LLM turn
+- `append_to_session` — Append a message to an existing session
 
-**`AcpFsBridge`** *(async + sync)* — Routes file I/O through an attached ACP editor instead of the local filesystem.
+Both are **blocking I/O** (SQLite writes under the hood). Callers inside async contexts must wrap in `tokio::task::spawn_blocking` until issue #3579 lands.
 
-Client registration model:
-- `register_acp_fs_client(session_id, client)` — called on editor connect
-- `unregister_acp_fs_client(session_id)` — called on disconnect
-- `acp_fs_client(session_id) → Option<Arc<dyn AcpFsClient>>` — lookup
+### AcpFsBridge / AcpTerminalBridge — Editor-Backed File I/O & Terminal
 
-Convenience methods `acp_read_text_file` and `acp_write_text_file` dispatch through the bound client, returning `Unavailable` when no editor is attached. Runtime tools should fall back to local fs in that case.
+Route `fs/*` and `terminal/*` operations through an attached ACP editor (issue #3313) instead of the agent's local filesystem:
 
-**`AcpTerminalBridge`** *(async + sync)* — Same registration model for terminal commands. `acp_run_terminal_command` runs a command through the editor's PTY (create → wait → output → release) and returns `AcpTerminalRunResult` with output, truncation flag, exit code, and signal.
+- `AcpFsClient` / `AcpTerminalClient` — Object-safe client traits implemented by `librefang-acp`
+- `register_acp_fs_client` / `register_acp_terminal_client` — Bind a client to a session
+- `acp_read_text_file` / `acp_write_text_file` / `acp_run_terminal_command` — Convenience dispatchers
 
-**`AcpFsClient`** and **`AcpTerminalClient`** are object-safe traits implemented by `librefang-acp` handles. The kernel stores `Arc<dyn AcpFsClient>` / `Arc<dyn AcpTerminalClient>` per session.
+Runtime tools should treat `Unavailable` as "fall back to local fs/process spawning", not as a hard error.
 
-## Data Types
+### CatalogQuery — Model Catalog Metadata
 
-### `AgentInfo`
+Read-side projection for model-catalog lookups. Currently surfaces `reasoning_echo_policy_for(model)` so the OpenAI-compatible driver can dispatch the correct wire shape for `reasoning_content` without substring matching (issue #4842).
+
+## Using Narrow Bounds
+
+New code should express only the capabilities it needs:
 
 ```rust
-pub struct AgentInfo {
-    pub id: String,
-    pub name: String,
-    pub state: String,
-    pub model_provider: String,
-    pub model_name: String,
-    pub description: String,
-    pub tags: Vec<String>,
-    pub tools: Vec<String>,
-}
+// PREFER THIS — narrow bounds
+fn approve_and_run<T: ApprovalGate + TaskQueue + Send + Sync>(kernel: &T) { ... }
+
+// AVOID THIS — pulls in the full kernel surface
+fn approve_and_run<T: KernelHandle>(kernel: &T) { ... }
 ```
 
-Returned by `list_agents` and `find_agents`.
+Existing call sites using `Arc<dyn KernelHandle>` still compile because the blanket impl covers any type implementing all 19 role traits plus `Send + Sync`.
 
-### `AcpTerminalRunResult`
+## Default Implementations
 
-```rust
-pub struct AcpTerminalRunResult {
-    pub output: String,
-    pub truncated: bool,
-    pub exit_code: Option<i32>,
-    pub signal: Option<String>,
-}
-```
+Many methods have defaults that return `Err(KernelOpError::unavailable(...))` or empty results. This is intentional — it allows test stubs and partial kernel implementations to compile without boilerplate. The real kernel overrides these with actual implementations. Missing capabilities surface as compile errors in the role-trait impl (not silent runtime failures), which was the core motivation for the split.
 
-## Usage Patterns
+## Prelude
 
-### Narrowing bounds on new code
-
-Instead of accepting the full `KernelHandle`, express only what you need:
-
-```rust
-// Old (pulls in everything):
-fn dispatch(h: &dyn KernelHandle) { ... }
-
-// New (only what's needed):
-fn dispatch(h: &dyn ApprovalGate) { ... }
-fn tool_executor(h: &(dyn ToolPolicy + ApprovalGate)) { ... }
-```
-
-### Implementing test stubs
-
-Role traits with default methods that return `Unavailable` or no-ops can be satisfied with an empty `impl`:
-
-```rust
-struct MyStub;
-impl CronControl for MyStub {}        // all methods → Unavailable
-impl ApprovalGate for MyStub {}       // requires_approval → false, etc.
-impl ToolPolicy for MyStub {}         // tool_timeout_secs → 120, etc.
-impl AcpFsBridge for MyStub {}        // register/unregister → no-op
-```
-
-Traits with required methods (`AgentControl`, `MemoryAccess`, `TaskQueue`, `EventBus`, `KnowledgeGraph`, `ApiAuth`, `SessionWriter`) need explicit stub implementations. Missing a required method is a compile error, not a silent runtime failure.
-
-### Importing everything
+Glob-import the prelude to bring `KernelHandle` and every role trait into scope:
 
 ```rust
 use librefang_kernel_handle::prelude::*;
 ```
 
-Brings in `KernelHandle`, all 18 role traits, and the associated data types.
-
-## Default Implementation Strategy
-
-Defaults that hide a missing capability behind `Err("X not available")` are preserved as-is to keep the role-trait split a pure structural refactor with zero behavior change. They are gathered onto the owning role trait so future PRs can tighten each contract independently — removing defaults one role at a time rather than landing 30+ removals atomically.
+This replaces the pre-#3746 pattern of importing only `KernelHandle`.

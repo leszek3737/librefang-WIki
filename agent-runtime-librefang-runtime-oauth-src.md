@@ -2,236 +2,188 @@
 
 # librefang-runtime-oauth
 
-OAuth 2.0 authentication runtime for ChatGPT and GitHub Copilot providers. This crate implements two independent auth modules—browser/device flow for OpenAI and RFC 8628 device authorization grant for GitHub—exposing async functions consumed by the HTTP route layer in `src/routes/providers.rs`.
+OAuth 2.0 authentication runtime for LibreFang, providing browser-based and device-flow login for both ChatGPT (OpenAI) and GitHub Copilot providers.
+
+## Module Layout
+
+```
+librefang-runtime-oauth/
+├── lib.rs              # Re-exports chatgpt_oauth and copilot_oauth
+├── chatgpt_oauth.rs    # OpenAI/ChatGPT OAuth 2.0 + PKCE
+└── copilot_oauth.rs    # GitHub Copilot device authorization grant
+```
 
 ## Architecture
 
 ```mermaid
-graph LR
-    subgraph "librefang-runtime-oauth"
-        CG[chatgpt_oauth]
-        CO[copilot_oauth]
+graph TD
+    subgraph "chatgpt_oauth"
+        A[start_oauth_flow] -->|browser| B[run_oauth_callback_server]
+        A --> C[build_authorization_url]
+        B --> D[exchange_code_for_tokens]
+        E[start_device_auth_flow] -->|headless| F[poll_device_auth_flow]
+        F --> G[exchange_code_for_tokens_with_redirect_uri]
+        H[refresh_access_token]
+        I[fetch_best_codex_model]
+    end
+    subgraph "copilot_oauth"
+        J[start_device_flow] --> K[poll_device_flow]
     end
     subgraph "Consumers"
-        RP[src/routes/providers.rs]
+        L["routes/providers"]
     end
-    subgraph "Dependencies"
-        HTTP[librefang-http]
-        TYPES[librefang-types]
-    end
-    RP -->|copilot_oauth_start| CO
-    RP -->|copilot_oauth_poll| CO
-    RP -->|OAuth entry points| CG
-    CG --> HTTP
-    CG --> TYPES
-    CO --> HTTP
+    L -->|copilot_oauth_start| J
+    L -->|copilot_oauth_poll| K
 ```
 
----
+## chatgpt_oauth
 
-## Module: `chatgpt_oauth`
+Implements two OAuth 2.0 flows for ChatGPT authentication using OpenAI's Codex CLI endpoints.
 
-OpenAI ChatGPT authentication using the Codex OAuth endpoints. Supports two mutually exclusive flows:
-
-| Flow | Use case | Entry point |
-|------|----------|-------------|
-| **Browser + localhost callback** | Desktop environments with a browser | `start_oauth_flow` → `run_oauth_callback_server` → `exchange_code_for_tokens` |
-| **Device authorization** | Headless / remote / CI environments | `start_device_auth_flow` → `poll_device_auth_flow` |
-
-Both flows use PKCE (S256) and produce a `ChatGptAuthResult` containing the access token, optional refresh token, and expiry.
-
-### Key Constants
+### Constants
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `CHATGPT_BASE_URL` | `https://chatgpt.com/backend-api` | Backend API base for OAuth-token-authenticated calls |
-| `DEVICE_AUTH_URL` | `https://auth.openai.com/codex/device` | Verification page shown to users during device flow |
-| `DEVICE_AUTH_REDIRECT_URI` | `https://auth.openai.com/deviceauth/callback` | Redirect URI used in device flow token exchange |
+| `CHATGPT_BASE_URL` | `https://chatgpt.com/backend-api` | Backend API base for OAuth-token requests. **Note:** OAuth tokens with `api.connectors` scopes work with the Responses API at this endpoint, not `/v1/chat/completions`. |
+| `CLIENT_ID` | `app_EMoamEEZ73f0CkXaXp7hrann` | OpenAI Codex CLI OAuth client ID |
+| `DEVICE_AUTH_URL` | `https://auth.openai.com/codex/device` | Verification page shown to users during device auth |
+| `DEVICE_AUTH_REDIRECT_URI` | `https://auth.openai.com/deviceauth/callback` | Redirect URI used in device auth token exchange |
 
-The callback server binds to `127.0.0.1:1455` (matching OpenAI's registered redirect URI). Browser flow times out after 5 minutes; device flow after 15 minutes.
+### Core Types
 
-### Public Types
+**`ChatGptAuthResult`** — Returned by every successful auth flow. Holds the bearer access token, optional refresh token (both wrapped in `Zeroizing<String>` for in-memory protection), and the token's TTL in seconds.
 
-#### `ChatGptAuthResult`
+**`DeviceAuthPrompt`** — Contains the `device_auth_id` and `user_code` that must be displayed to the user, plus the server-recommended poll interval.
 
-Returned by every token-acquisition function. Fields use `Zeroizing<String>` to minimize credential lifetime in memory:
+**`DeviceAuthFlowError`** — Discriminated error enum:
+- `BrowserFallback` — device auth isn't enabled for the account/workspace; caller should fall back to browser flow
+- `Fatal` — unrecoverable failure
 
-```rust
-pub struct ChatGptAuthResult {
-    pub access_token: Zeroizing<String>,
-    pub refresh_token: Option<Zeroizing<String>>,
-    pub expires_in: Option<u64>,
-}
+**`PkceChallenge`** — Holds a `verifier` (64 random bytes, base64url-encoded to 86 chars) and a `challenge` (SHA-256 of verifier, base64url-encoded).
+
+### Browser-Based OAuth Flow
+
+```
+start_oauth_flow()
+  → bind TcpListener on 127.0.0.1:1455
+  → generate PKCE pair + state
+  → build authorization URL
+  → return (auth_url, port, pkce.verifier, state)
+      ↓
+  user opens auth_url in browser
+      ↓
+run_oauth_callback_server(port, expected_state)
+  → listen for GET /auth/callback?code=...&state=...
+  → validate state matches (CSRF protection)
+  → return authorization code
+      ↓
+exchange_code_for_tokens(code, code_verifier, port)
+  → POST to TOKEN_URL with authorization_code grant
+  → return ChatGptAuthResult
 ```
 
-#### `DeviceAuthPrompt`
+**`start_oauth_flow()`** — Binds a local TCP socket on `127.0.0.1:1455` (matching OpenAI's registered redirect URI), generates a PKCE challenge and random state, then returns the fully-constructed authorization URL along with the port, PKCE verifier, and state. The listener is dropped immediately so it can be re-bound by the async callback server.
 
-Server-issued details that must be displayed to the user before polling begins:
+**`build_authorization_url(port, code_challenge, state)`** — Constructs the full authorize URL with query parameters including `response_type=code`, PKCE S256 challenge, scopes (`openid profile email offline_access api.connectors.read api.connectors.invoke`), and Codex-specific flags (`codex_cli_simplified_flow`, `originator=codex_cli_rs`).
 
-```rust
-pub struct DeviceAuthPrompt {
-    pub device_auth_id: String,
-    pub user_code: String,         // e.g. "ABCD-EFGH"
-    pub interval_secs: u64,        // recommended poll interval (default: 5s)
-}
+**`run_oauth_callback_server(port, expected_state)`** — Spawns a tokio TCP server that handles a single request on `GET /auth/callback`. Validates the `state` parameter, extracts the `code`, and sends it through a oneshot channel. Serves an HTML success or error page to the browser. Times out after 300 seconds (`AUTH_TIMEOUT_SECS`).
+
+**`exchange_code_for_tokens(code, code_verifier, port)`** — Delegates to `exchange_code_for_tokens_with_redirect_uri` using `http://localhost:{port}/auth/callback` as the redirect URI.
+
+### Device Auth Flow (Headless)
+
+```
+start_device_auth_flow()
+  → POST to DEVICE_AUTH_USERCODE_URL
+  → parse DeviceAuthPrompt (device_auth_id, user_code, interval)
+      ↓
+  user visits https://auth.openai.com/codex/device
+  user enters user_code
+      ↓
+poll_device_auth_flow(prompt)
+  → loop: POST to DEVICE_AUTH_TOKEN_URL
+     - 200 OK → extract authorization_code + code_verifier → exchange tokens
+     - 403/404 → still pending, sleep interval_secs
+     - timeout after 15 minutes
+  → return ChatGptAuthResult
 ```
 
-#### `DeviceAuthFlowError`
+**`start_device_auth_flow()`** — Requests a one-time user code from OpenAI. Returns `DeviceAuthFlowError::BrowserFallback` on HTTP 404 (device auth not enabled for the account), allowing callers to transparently fall back to the browser flow.
 
-Discriminated error enum that lets callers decide whether to fall back to browser auth:
+**`poll_device_auth_flow(prompt)`** — Polls `DEVICE_AUTH_TOKEN_URL` in a loop using the prompt's `interval_secs`. On success (HTTP 200), the server returns an `authorization_code` and `code_verifier`, which are immediately exchanged for tokens via `exchange_code_for_tokens_with_redirect_uri` using `DEVICE_AUTH_REDIRECT_URI`. HTTP 403 and 404 are treated as "still pending." The poll loop times out after 15 minutes.
 
-- **`BrowserFallback`** — device auth is not enabled for the account/workspace (HTTP 404). The caller should transparently retry with the browser flow.
-- **`Fatal`** — unrecoverable error that should be surfaced to the user.
+### Token Management
 
-#### `PkceChallenge`
+**`refresh_access_token(refresh_token)`** — POSTs a `refresh_token` grant to `TOKEN_URL`. Returns a new `ChatGptAuthResult` with fresh tokens.
 
-PKCE verifier/challenge pair produced by `generate_pkce()`:
+**`fetch_best_codex_model(access_token)`** — Calls `GET {CHATGPT_BASE_URL}/codex/models?client_version={VERSION}` with the bearer token, sorts returned models by `priority` descending, and returns the highest-priority model slug. Falls back to `gpt-5.1-codex-mini` on any failure (network error, non-200 status, malformed JSON, empty model list).
 
-```rust
-pub struct PkceChallenge {
-    pub verifier: String,    // 64 random bytes → 86-char base64url string
-    pub challenge: String,   // SHA-256(verifier) → base64url
-}
-```
+**`chatgpt_session_available()`** — Checks whether the `CHATGPT_SESSION_TOKEN` environment variable is set and non-empty, indicating that a direct session auth path is available.
 
-### Browser Flow
+### PKCE and State Helpers
 
-```mermaid
-sequenceDiagram
-    participant App
-    participant start_oauth_flow
-    participant Browser
-    participant CallbackServer as run_oauth_callback_server
-    participant OpenAI as Token Endpoint
+**`generate_pkce()`** — Generates a `PkceChallenge` from 64 random bytes. Verifier is base64url-encoded; challenge is SHA-256 of the verifier, also base64url-encoded (S256 method).
 
-    App->>start_oauth_flow: bind port 1455, generate PKCE + state
-    start_oauth_flow-->>App: (auth_url, port, verifier, state)
-    App->>Browser: open auth_url
-    Browser->>OpenAI: user authorizes
-    OpenAI->>CallbackServer: redirect to localhost:1455/auth/callback?code=...&state=...
-    CallbackServer-->>App: authorization code
-    App->>OpenAI: exchange_code_for_tokens(code, verifier, port)
-    OpenAI-->>App: ChatGptAuthResult
-```
+**`create_state()`** — Generates a 32-character hex string from 16 random bytes.
 
-**`start_oauth_flow()`** — Binds `127.0.0.1:1455` to verify availability, generates PKCE and state, and returns the fully-constructed authorization URL along with the verifier and state for later validation. The TCP listener is dropped immediately so the async callback server can re-bind.
+## copilot_oauth
 
-**`run_oauth_callback_server(port, expected_state)`** — Starts an async HTTP server that handles `GET /auth/callback`. It validates the `state` parameter against the expected value (CSRF protection), extracts the `code`, sends it through a oneshot channel, and serves either a success or error HTML page to the browser.
+Implements GitHub's OAuth 2.0 Device Authorization Grant (RFC 8628) for obtaining a GitHub personal access token via the Copilot extension's client ID.
 
-**`exchange_code_for_tokens(code, code_verifier, port)`** — Posts the authorization code, PKCE verifier, and redirect URI to OpenAI's token endpoint and returns parsed tokens. Delegates to `exchange_code_for_tokens_with_redirect_uri` with the browser redirect URI.
+### Core Types
 
-### Device Flow
+**`DeviceCodeResponse`** — Deserialized response from the device code initiation. Fields: `device_code`, `user_code`, `verification_uri`, `expires_in`, `interval`.
 
-```mermaid
-sequenceDiagram
-    participant App
-    participant SDA as start_device_auth_flow
-    participant User
-    participant PDA as poll_device_auth_flow
-    participant OpenAI
-
-    App->>SDA: request user code
-    SDA->>OpenAI: POST /api/accounts/deviceauth/usercode
-    OpenAI-->>SDA: device_auth_id + user_code
-    SDA-->>App: DeviceAuthPrompt
-    App->>User: display user_code, open DEVICE_AUTH_URL
-    loop Poll every interval_secs (max 15 min)
-        App->>PDA: poll with device_auth_id
-        PDA->>OpenAI: POST /api/accounts/deviceauth/token
-        alt Still pending (403/404)
-            OpenAI-->>PDA: pending
-        else User completed
-            OpenAI-->>PDA: authorization_code + code_verifier
-            PDA->>OpenAI: exchange with DEVICE_AUTH_REDIRECT_URI
-            OpenAI-->>PDA: tokens
-            PDA-->>App: ChatGptAuthResult
-        end
-    end
-```
-
-**`start_device_auth_flow()`** — Requests a one-time user code from OpenAI. Returns `DeviceAuthFlowError::BrowserFallback` on HTTP 404 (account/workspace doesn't support device auth), allowing callers to silently fall back to the browser flow.
-
-**`poll_device_auth_flow(prompt)`** — Polls `DEVICE_AUTH_TOKEN_URL` at the recommended interval. HTTP 403 and 404 are treated as "authorization pending." On success, the returned `authorization_code` and `code_verifier` are immediately exchanged for tokens via `exchange_code_for_tokens_with_redirect_uri` using `DEVICE_AUTH_REDIRECT_URI`.
-
-### Token Refresh
-
-**`refresh_access_token(refresh_token)`** — Posts a `refresh_token` grant to the token endpoint. Returns a new `ChatGptAuthResult`. Callers should persist the new refresh token if one is returned.
-
-### Model Discovery
-
-**`fetch_best_codex_model(access_token)`** — Queries `{CHATGPT_BASE_URL}/codex/models` with the access token, sorts the response by `priority` descending, and returns the highest-priority model slug. Falls back to `"gpt-5.1-codex-mini"` on any failure.
-
-### Utility Functions
-
-| Function | Description |
-|----------|-------------|
-| `generate_pkce()` | Generates a `PkceChallenge` (64-byte random verifier, SHA-256 challenge) |
-| `create_state()` | Generates a 16-byte random hex state parameter |
-| `build_authorization_url(port, code_challenge, state)` | Constructs the full authorization URL with all query parameters |
-| `chatgpt_session_available()` | Checks whether the `CHATGPT_SESSION_TOKEN` env var is set and non-empty |
-
----
-
-## Module: `copilot_oauth`
-
-GitHub Copilot authentication via OAuth 2.0 Device Authorization Grant (RFC 8628). Uses the VSCode Copilot extension's public client ID (`Iv1.b507a08c87ecfe98`).
-
-### Public Types
-
-#### `DeviceCodeResponse`
-
-Deserialized response from the device code initiation:
-
-```rust
-pub struct DeviceCodeResponse {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_uri: String,
-    pub expires_in: u64,
-    pub interval: u64,           // recommended poll interval in seconds
-}
-```
-
-#### `DeviceFlowStatus`
-
-Discriminated result of each poll attempt:
-
-| Variant | Meaning |
-|---------|---------|
-| `Pending` | User hasn't completed authorization yet |
-| `Complete { access_token }` | Success — contains the GitHub PAT |
-| `SlowDown { new_interval }` | Server requests longer poll interval |
-| `Expired` | Device code expired, must restart |
-| `AccessDenied` | User denied the authorization |
-| `Error(String)` | Unexpected error |
+**`DeviceFlowStatus`** — Enum representing the result of a polling attempt:
+- `Pending` — user hasn't completed authorization yet
+- `Complete { access_token }` — success, contains the `Zeroizing<String>` token
+- `SlowDown { new_interval }` — server requested longer poll interval
+- `Expired` — device code expired, flow must restart
+- `AccessDenied` — user explicitly denied
+- `Error(String)` — unexpected failure
 
 ### Flow
 
-**`start_device_flow()`** — POSTs to `https://github.com/login/device/code` with the Copilot client ID and `read:user` scope. Returns a `DeviceCodeResponse` containing the `user_code` and `verification_uri` to display to the user.
+```
+start_device_flow()
+  → POST https://github.com/login/device/code
+  → return DeviceCodeResponse (device_code, user_code, verification_uri)
+      ↓
+  user visits verification_uri, enters user_code
+      ↓
+poll_device_flow(device_code)
+  → POST https://github.com/login/oauth/access_token
+  → return DeviceFlowStatus
+```
 
-**`poll_device_flow(device_code)`** — POSTs to `https://github.com/login/oauth/access_token` with the device code. GitHub returns HTTP 200 with an `error` field while pending (per RFC 8628), so error handling inspects the JSON body rather than the HTTP status. Returns `DeviceFlowStatus::Complete` with a `Zeroizing<String>` access token on success.
+**`start_device_flow()`** — Posts to GitHub's device code endpoint with the Copilot VSCode extension client ID (`Iv1.b507a08c87ecfe98`) and `read:user` scope. Returns a `DeviceCodeResponse` with the user code and verification URI.
 
-Called from `src/routes/providers.rs` via the `copilot_oauth_start` and `copilot_oauth_poll` route handlers.
+**`poll_device_flow(device_code)`** — Polls the GitHub token endpoint with `grant_type=urn:ietf:params:oauth:grant-type:device_code`. GitHub returns HTTP 200 with an `error` field while authorization is pending, so error checking takes priority over success extraction.
 
-### HTTP Client Configuration
+### Integration Point
 
-Both functions build a dedicated HTTP client via `librefang_http::proxied_client_builder()` with a 15-second timeout, separate from the default proxied client used in `chatgpt_oauth`. This avoids propagating OAuth request latencies to other HTTP operations.
+The routes layer calls these functions:
 
----
+```rust
+// src/routes/providers.rs
+copilot_oauth_start() → copilot_oauth::start_device_flow()
+copilot_oauth_poll()  → copilot_oauth::poll_device_flow()
+```
 
-## Integration with the Codebase
+## HTTP Client Usage
 
-**HTTP client**: All outbound requests use `librefang_http::proxied_client()` or `proxied_client_builder()`, ensuring proxy settings and TLS configuration are applied consistently.
+All outbound HTTP requests use `librefang_http` for proxy-aware clients:
 
-**Version stamping**: `fetch_best_codex_model` includes `librefang_types::VERSION` as a `client_version` query parameter so OpenAI can track client versions.
+- `chatgpt_oauth` uses `librefang_http::proxied_client()` — a pre-built client respecting system proxy settings
+- `copilot_oauth` uses `librefang_http::proxied_client_builder()` with a 15-second timeout, giving finer control over request timeouts
 
-**Route layer**: `src/routes/providers.rs` is the primary consumer:
-- `copilot_oauth_start` → `copilot_oauth::start_device_flow`
-- `copilot_oauth_poll` → `copilot_oauth::poll_device_flow`
-- ChatGPT OAuth entry points are called from provider setup flows
+## Token Security
 
-**Security considerations**:
-- All tokens are wrapped in `Zeroizing<String>` to reduce exposure in memory dumps
-- PKCE with S256 is mandatory for the browser flow
-- State parameter validation prevents CSRF on the callback endpoint
-- The callback server only binds to `127.0.0.1`
+Sensitive tokens are wrapped in `Zeroizing<String>` from the `zeroize` crate, ensuring they are overwritten in memory when dropped. This applies to:
+- `ChatGptAuthResult::access_token`
+- `ChatGptAuthResult::refresh_token`
+- `DeviceFlowStatus::Complete::access_token`
+
+## Error Handling
+
+Both modules use `Result<_, String>` for their public APIs, with `chatgpt_oauth::start_device_auth_flow` being the exception — it returns `Result<_, DeviceAuthFlowError>` to distinguish retriable browser fallbacks from fatal failures.

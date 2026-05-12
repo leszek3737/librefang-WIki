@@ -6,55 +6,57 @@ Cost metering and quota enforcement for the LibreFang kernel.
 
 ## Overview
 
-This module is responsible for tracking resource consumption and enforcing quota limits within the LibreFang kernel. It provides the accounting layer that ensures operations stay within defined budgetary constraints, enabling fair resource allocation and preventing runaway costs.
+This crate provides the accounting layer that tracks resource consumption and enforces quotas within the LibreFang kernel. It is responsible for ensuring that operations against the kernel stay within defined cost boundaries, preventing runaway resource usage or unbounded computation.
 
 ## Purpose
 
-LibreFang requires a mechanism to measure the computational cost of operations and enforce quotas on resource usage. This module serves that role by:
+Metering serves as the bridge between kernel operations and resource governance. Every meaningful action—query execution, memory allocation, API call—carries an associated cost. This module:
 
-- **Metering**: Tracking resource consumption as operations execute.
-- **Quota enforcement**: Blocking or throttling operations that exceed their allocated budget.
+- **Tracks** cumulative resource consumption per context (tenant, session, request, etc.)
+- **Enforces** quotas by rejecting or throttling operations that would exceed limits
+- **Reports** usage data for observability and billing
 
 ## Dependencies
 
-The module's dependencies reveal its integration points within the LibreFang ecosystem:
-
 | Dependency | Role |
 |---|---|
-| `librefang-types` | Shared type definitions used across the kernel for consistent metering data structures |
-| `librefang-memory` | Memory tracking and allocation — likely the primary resource being metered |
-| `librefang-runtime` | Runtime infrastructure for hooking into execution lifecycle events |
-| `serde` | Serialization support, enabling metering data to be persisted, transmitted, or inspected |
+| `librefang-types` | Shared type definitions for metering units, quota configurations, and cost descriptors |
+| `librefang-memory` | Memory accounting integration—tracking allocation-based costs |
+| `librefang-runtime` | Runtime context for binding metering state to execution scopes |
+| `serde` | Serialization support for persisting metering snapshots or transmitting usage data |
 
 ## Architecture
 
-Based on the dependency graph, the metering module sits between the runtime execution layer and the resource layers (memory, types):
-
 ```
-┌─────────────────────┐
-│   librefang-runtime │
-└────────┬────────────┘
-         │ execution hooks / lifecycle
-         ▼
-┌─────────────────────────────┐
-│ librefang-kernel-metering   │
-│                             │
-│  • cost tracking            │
-│  • quota enforcement        │
-└────┬───────────────┬────────┘
-     │               │
-     ▼               ▼
-┌──────────┐  ┌──────────────┐
-│  types   │  │   memory     │
-└──────────┘  └──────────────┘
+┌─────────────────────────────────┐
+│       Caller (kernel ops)       │
+└──────────────┬──────────────────┘
+               │ check / record
+               ▼
+┌─────────────────────────────────┐
+│     librefang-kernel-metering   │
+│                                 │
+│  ┌───────────┐  ┌────────────┐  │
+│  │  Cost      │  │   Quota    │  │
+│  │  Tracking  │  │ Enforcement│  │
+│  └───────────┘  └────────────┘  │
+│                                 │
+└──────┬──────────┬───────────────┘
+       │          │
+       ▼          ▼
+  ┌─────────┐  ┌──────────┐
+  │ memory  │  │ runtime  │
+  └─────────┘  └──────────┘
 ```
 
-The runtime provides the execution context where metering needs to occur. The types crate defines the shared structures for representing costs and quotas. The memory crate supplies the resource primitives being measured.
+## Relationship to the Kernel
 
-## Integration Notes
+This module sits as a cross-cutting concern within the LibreFang kernel. Other kernel subsystems are expected to call into this crate before performing expensive operations, allowing metering to approve or deny the action. The module is consumed by higher-level kernel orchestration code rather than exposing a public API to end users.
 
-When consuming or contributing to this module:
+## Key Concepts
 
-- **Adding new metered resources**: Import the relevant types from `librefang-types` and wire measurement through the runtime's execution hooks.
-- **Persisting metering data**: The `serde` dependency means metering structures are expected to be serializable. Any new metering data structures should derive `Serialize` and `Deserialize`.
-- **Quota policies**: Quota thresholds and enforcement behavior should be configurable rather than hardcoded, allowing different deployment contexts to set appropriate limits.
+**Cost** — A numerical representation of resource consumption. Costs may be expressed in abstract units or tied to concrete resources (bytes allocated, rows scanned, CPU ticks).
+
+**Quota** — A ceiling on cumulative cost within a given scope. Quotas are defined externally and fed into this module through configuration types from `librefang-types`.
+
+**Metering Context** — The scope against which costs accumulate. Tied to the runtime via `librefang-runtime`, a context typically maps to a tenant, session, or request lifecycle.

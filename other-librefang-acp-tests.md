@@ -4,201 +4,155 @@
 
 ## Overview
 
-`acp_integration.rs` contains end-to-end integration tests for the ACP (Agent Client Protocol) adapter. Each test wires `librefang_acp::run_with_transport` to one end of a `tokio::io::duplex` pipe and drives the matching `agent_client_protocol::Client` on the other end against a stub `AcpKernel` implementation. This validates on-the-wire JSON-RPC behavior — request/response correctness, notification ordering, permission round-trips, and reverse-RPC paths — without booting a real LibreFang kernel or LLM provider.
+The `acp_integration.rs` test module provides end-to-end integration tests for the LibreFang Agent Client Protocol (ACP) adapter. These tests validate on-the-wire JSON-RPC behavior — request/response correctness, notification ordering, permission round-trips, reverse-RPC paths, and error handling — without requiring a running LibreFang kernel or a real LLM provider.
 
-All tests run on `tokio::test(flavor = "current_thread")` inside a `LocalSet` to support `spawn_local` for the server task.
+Each test constructs an in-memory duplex pipe, wires `librefang_acp::run_with_transport` to one end and an `agent_client_protocol::Client` to the other, then drives both sides through a `MockKernel` implementation.
 
-## Test Architecture
+## Architecture
 
 ```mermaid
 graph LR
-    subgraph Client Side
-        CB[Client.builder]
-        CX[ConnectionTo]
+    subgraph Test Process
+        A[Client builder<br/>+ handlers] <-->|duplex pipes| B[run_with_transport]
+        B --> C[MockKernel<br/>implements AcpKernel]
+        A --> D[Test assertions]
     end
-    subgraph Server Side
-        RWT[run_with_transport]
-        MK[MockKernel]
-    end
-    subgraph Transport
-        DP[duplex_pair]
-    end
-
-    CB -->|client_reader/writer| DP
-    DP -->|server_reader/writer| RWT
-    RWT --> MK
-    MK -.->|FsClientHandle / TerminalClientHandle| CX
 ```
 
-The `duplex_pair()` function creates two cross-wired `tokio::io::duplex` streams wrapped with `tokio_util::compat` to produce four futures-compatible I/O halves. The server reads from `a` and writes to `d`; the client reads from `c` and writes to `b`. This simulates a full bidirectional JSON-RPC connection in-process.
+The `run_with_transport` server reads/writes JSON-RPC frames on one side of the duplex pair while the `Client` builder does the same on the opposite side. The `MockKernel` supplies canned `StreamEvent`s and captures approval decisions, allowing tests to assert both directions of the protocol.
 
-## MockKernel
+## Test Harness
 
-`MockKernel` implements the `AcpKernel` trait with canned, controllable behavior:
+### `MockKernel`
 
-| Field | Purpose |
-|---|---|
-| `canned_events` | Pre-loaded `StreamEvent` sequence returned by `send_prompt` (consumed on first call via `std::mem::take`) |
-| `approval_tx` | Broadcast channel for injecting synthetic `ApprovalEvent::Created` messages via `fire_approval()` |
-| `resolves` | Records `(Uuid, ApprovalDecision)` pairs from `resolve_approval` calls for test assertions |
-| `last_session_id` | Captures the `LfSessionId` passed to `send_prompt` so tests can correlate ACP sessions with kernel sessions |
-| `fs_client` | Stores the `FsClientHandle` injected by `set_fs_client` (called at `initialize` time) for reverse-RPC testing |
-| `terminal_client` | Same pattern for `TerminalClientHandle` |
-| `canned_history` | Pre-loaded `(Role, String)` pairs returned by `fetch_session_history` for session-load replay tests |
+A stub implementation of the `AcpKernel` trait (`librefang_acp::AcpKernel`) that replaces the real kernel for testing.
 
-Key trait method behaviors:
+**Key fields:**
 
-- **`resolve_agent`** — returns `AgentId(Uuid::nil())` unconditionally.
-- **`send_prompt`** — drains `canned_events` into an `mpsc::channel`, spawning a task that forwards each event. Records `last_session_id`.
-- **`subscribe_approvals`** — returns a new broadcast receiver from `approval_tx`.
-- **`resolve_approval`** — pushes `(request_id, decision)` into `resolves`.
-- **`fetch_session_history`** — returns a clone of `canned_history`.
+| Field | Type | Purpose |
+|---|---|---|
+| `canned_events` | `AsyncMutex<Vec<StreamEvent>>` | Events emitted by `send_prompt`, consumed once |
+| `approval_tx` | `broadcast::Sender<ApprovalEvent>` | Injects approval requests into the broadcast stream |
+| `resolves` | `AsyncMutex<Vec<(Uuid, ApprovalDecision)>>` | Captures calls to `resolve_approval` for assertion |
+| `last_session_id` | `AsyncMutex<Option<LfSessionId>>` | Records the session ID from the last `send_prompt` call |
+| `fs_client` | `std::sync::Mutex<Option<FsClientHandle>>` | Stores the `FsClientHandle` set during `initialize` |
+| `terminal_client` | `std::sync::Mutex<Option<TerminalClientHandle>>` | Stores the `TerminalClientHandle` set during `initialize` |
+| `canned_history` | `AsyncMutex<Vec<(Role, String)>>` | History returned by `fetch_session_history` |
 
-### fire_approval()
+**Helper methods:**
 
-Injects a synthetic `ApprovalEvent::Created` into the broadcast channel with a deterministic shape:
+- **`new(canned: Vec<StreamEvent>)`** — Constructs an `Arc<MockKernel>` with pre-loaded stream events.
+- **`set_history(history)`** — Sets canned conversation history for session load tests.
+- **`fs_client_handle()`** / **`terminal_client_handle()`** — Retrieves the client handles stashed during initialization.
+- **`fire_approval(lf_session_id)`** — Injects an `ApprovalEvent::Created` into the broadcast channel, simulating the kernel queuing an approval request. Returns the `Uuid` of the created request for later assertion.
 
-```rust
-fn fire_approval(&self, lf_session_id: LfSessionId) -> Uuid
-```
+**`AcpKernel` trait methods:**
 
-The generated `ApprovalRequest` has `tool_name: "bash"`, `risk_level: Medium`, and `tool_use_id: Some("toolu_acp_integration_test")` to exercise the primary path where the bridge uses the LLM-assigned ID as the `ToolCallId` rather than the `approval-{req_id}` fallback. Returns the `Uuid` of the created request for later assertion in `wait_for_resolve`.
+- `resolve_agent` — Returns a nil `AgentId`.
+- `send_prompt` — Records the session ID, drains `canned_events` into a channel, and returns the receiver.
+- `subscribe_approvals` — Returns a new broadcast receiver.
+- `resolve_approval` — Appends `(request_id, decision)` to `resolves`.
+- `set_fs_client` / `set_terminal_client` — Stash the handles passed by the adapter at initialization time.
+- `fetch_session_history` — Returns the canned history.
 
-## Test Utilities
+### `duplex_pair()`
 
-### recv\<T\>()
+Creates two `tokio::io::duplex` pipes and adapts them with `tokio_util::compat` for use with the `futures`-based `agent_client_protocol::ByteStreams` transport. Returns four values: `(server_reader, server_writer, client_reader, client_writer)`.
 
-```rust
-async fn recv<T: JsonRpcResponse + Send + 'static>(sent: SentRequest<T>) -> Result<T, Error>
-```
+### `recv<T>(sent: SentRequest<T>)`
 
-Bridges the ACP `SentRequest::on_receiving_result` callback-based API into a simple `await`-able future using a oneshot channel. Every request-response interaction in the tests goes through this.
+Awaits the result of a `SentRequest` by bridging it through a `oneshot` channel. Used throughout the tests to convert the callback-based `SentRequest::on_receiving_result` API into a direct `.await`.
 
-### poll_for()
+### `poll_for<T>(f)`
 
-```rust
-async fn poll_for<T, F: FnMut() -> Option<T>>(f: F) -> T
-```
+Polls a closure every 25ms for up to 1 second until it returns `Some(T)`. Used to wait for handles that the server side sets asynchronously during initialization.
 
-Polls a closure up to 40 times (25ms sleep between attempts ≈ 1s total) until it returns `Some`. Used to wait for handles that the server sets asynchronously during `initialize`.
+### `wait_for_session_id(kernel)` / `wait_for_resolve(kernel, req_id)`
 
-### wait_for_session_id()
+Polling helpers that wait for the kernel to record a session ID from `send_prompt` or an approval resolution, respectively. Both panic after ~1 second if the condition is never met.
 
-Polls `kernel.last_session_id` until the server has processed a `send_prompt` call and recorded the kernel-side session ID. Returns the `LfSessionId`.
+## Test Cases
 
-### wait_for_resolve()
+All tests use `#[tokio::test(flavor = "current_thread")]` and wrap their bodies in a `LocalSet` to support `spawn_local` for the server task.
 
-Polls `kernel.resolves` for a specific `Uuid`, returning the associated `ApprovalDecision`. Used in the permission round-trip test to confirm the bridge forwarded the client's decision back to the kernel.
+### `initialize_and_prompt_emits_text_chunks_and_end_turn`
 
-### duplex_pair()
+Validates the core prompt flow:
 
-Creates four I/O halves suitable for `agent_client_protocol::ByteStreams`:
+1. Client sends `InitializeRequest`, asserts `agent_info.name == "librefang"`.
+2. Client creates a new session via `NewSessionRequest`.
+3. Client sends `PromptRequest` with text content.
+4. MockKernel emits two `TextDelta` events followed by `ContentComplete` with `EndTurn`.
+5. Asserts the `PromptResponse.stop_reason` is `EndTurn`.
+6. Asserts the client received two `AgentMessageChunk` notifications with the concatenated text "Hello world".
 
-```rust
-fn duplex_pair() -> (
-    impl AsyncRead,        // server_reader
-    impl AsyncWrite,       // server_writer
-    impl AsyncRead,        // client_reader
-    impl AsyncWrite,       // client_writer
-)
-```
+### `permission_round_trip_resolves_kernel_approval`
 
-Internally creates two `tokio::io::duplex(8192)` pipes cross-wired so server↔client communication flows through in-memory buffers.
+Validates the approval reverse-RPC path:
 
-## Integration Tests
+1. Initialize and create a session, then kick off a prompt (keeps the bridge alive).
+2. Wait for `send_prompt` to record the `LfSessionId`.
+3. Call `kernel.fire_approval(lf_id)` to inject an `ApprovalEvent::Created`.
+4. The bridge dispatches `session/request_permission` to the client.
+5. Client handler always responds with `allow_once`.
+6. Asserts the kernel's `resolve_approval` was called with `ApprovalDecision::Approved` for the correct request UUID.
 
-### initialize_and_prompt_emits_text_chunks_and_end_turn
+The client handler also asserts that exactly 4 permission options are presented (matching the standard permission set).
 
-**What it verifies:** The basic prompt flow — initialize → new session → prompt — produces correctly ordered `AgentMessageChunk` notifications and a final `StopReason::EndTurn`.
+### `unknown_session_id_returns_invalid_params`
 
-The `MockKernel` is pre-loaded with two `TextDelta` events followed by a `ContentComplete`. The test:
+Validates error handling for invalid sessions:
 
-1. Connects the client with an `on_receive_notification` handler that captures `SessionNotification`s.
-2. Sends `InitializeRequest`, asserts `agent_info.name == "librefang"`.
-3. Sends `NewSessionRequest` with `/tmp/proj`.
-4. Sends `PromptRequest` with text "hi".
-5. Asserts `stop_reason == EndTurn` on the `PromptResponse`.
-6. After a 50ms flush delay, inspects captured notifications for the two text chunks `"Hello"` and `" world"`.
+1. Initialize but do **not** create a session.
+2. Send a `PromptRequest` with a fabricated session ID `"does-not-exist"`.
+3. Asserts the result is an error.
 
-### permission_round_trip_resolves_kernel_approval
+### `fs_read_text_file_round_trip`
 
-**What it verifies:** When the kernel broadcasts an `ApprovalEvent::Created`, the bridge dispatches a `session/request_permission` reverse-RPC to the client, and the client's response (e.g., `allow_once`) propagates back as a `resolve_approval` call on the kernel.
+Validates the reverse-RPC path for filesystem operations:
 
-Test flow:
+1. Client declares `fs.read_text_file` capability in the `InitializeRequest`.
+2. After initialization, the test retrieves the `FsClientHandle` from the mock kernel.
+3. Calls `handle.read_text_file(session_id, "/tmp/hello.txt", None, None)`.
+4. The adapter issues an `fs/read_text_file` request to the client.
+5. Client handler asserts the path matches and responds with `"canned editor content"`.
+6. Asserts the handle returns the canned content.
 
-1. Connects the client with an `on_receive_request` handler for `RequestPermissionRequest` that always responds with `allow_once` and asserts 4 permission options.
-2. Sends initialize + new session + prompt (the prompt keeps the bridge pump alive).
-3. Waits for `last_session_id` to appear on the kernel.
-4. Calls `kernel.fire_approval(lf_id)` to inject a synthetic approval.
-5. Polls `wait_for_resolve` to confirm the kernel received `ApprovalDecision::Approved` with the matching `Uuid`.
+### `terminal_run_command_round_trip`
 
-### unknown_session_id_returns_invalid_params
+Validates the full terminal lifecycle through four reverse-RPCs:
 
-**What it verifies:** Sending a `PromptRequest` with a nonexistent `SessionId` produces an error response from the server.
-
-Minimal test: initialize, then send a prompt with session ID `"does-not-exist"` and assert the result is `Err`.
-
-### fs_read_text_file_round_trip
-
-**What it verifies:** The reverse-RPC path for filesystem operations. The server-side `FsClientHandle` (captured at `initialize` time) issues a `fs/read_text_file` request to the connected client, which responds with canned content.
-
-Test flow:
-
-1. Client builder registers an `on_receive_request` handler for `ReadTextFileRequest` that asserts the path is `/tmp/hello.txt` and responds with `"canned editor content"`.
-2. Sends `InitializeRequest` with `client_capabilities.fs.read_text_file = true`.
-3. Polls `kernel.fs_client_handle()` to get the handle injected by the server at init time.
-4. Calls `handle.read_text_file(session_id, path, None, None)` — this issues a real JSON-RPC request through the transport.
-5. Asserts the returned content matches the canned response.
-
-### terminal_run_command_round_trip
-
-**What it verifies:** The full terminal lifecycle — create → wait_for_exit → output → release — works as a sequence of reverse-RPCs, and the `AcpTerminalClient::run_command` helper produces the correct `AcpTerminalRunResult`.
-
-Client builder registers four `on_receive_request` handlers:
-
-| Request | Response |
-|---|---|
-| `CreateTerminalRequest` | `TerminalId("term-1")` |
-| `WaitForTerminalExitRequest` | `exit_code: Some(0)` |
-| `TerminalOutputRequest` | `"hello world\n"`, not truncated |
-| `ReleaseTerminalRequest` | default |
-
-Test flow:
-
-1. Sends `InitializeRequest` with `client_capabilities.terminal = true`.
-2. Polls `kernel.terminal_client_handle()`.
+1. Client declares `terminal` capability in initialization.
+2. Test retrieves the `TerminalClientHandle` from the mock kernel.
 3. Calls `handle.run_command("echo", ["hello"], [], None, None)` via the `AcpTerminalClient` trait.
-4. Asserts `output == "hello world\n"`, `exit_code == Some(0)`, not truncated, no signal.
+4. The adapter issues these requests in sequence:
+   - `terminal/create` → client responds with `TerminalId("term-1")`
+   - `terminal/wait_for_exit` → client responds with exit code `0`
+   - `terminal/output` → client responds with `"hello world\n"`, not truncated
+   - `terminal/release` → client responds with default
+5. Asserts the `AcpTerminalRunResult` contains the expected output, exit code, and truncation flag.
 
-### session_load_replays_history_to_client
+### `session_load_replays_history_to_client`
 
-**What it verifies:** When a client reconnects via `LoadSessionRequest`, the kernel's stored message history is emitted as `SessionNotification` updates (issue #3313).
+Validates session reconnection and history replay:
 
-Test flow:
-
-1. Pre-loads `canned_history` with two turns: `(User, "previous question")` and `(Assistant, "previous answer")`.
-2. Connects the client with a notification capture handler.
-3. Sends `LoadSessionRequest` with session ID `"reconnecting-session"`.
-4. Polls until at least 2 notifications arrive.
-5. Asserts the first is a `UserMessageChunk` with `"previous question"` and the second is an `AgentMessageChunk` with `"previous answer"`.
+1. Mock kernel is pre-loaded with two history turns: a user message and an assistant response.
+2. Client sends a `LoadSessionRequest` with a stable session ID `"reconnecting-session"`.
+3. The adapter calls `fetch_session_history`, then emits two `session/update` notifications.
+4. Asserts the first notification is a `UserMessageChunk` with `"previous question"` and the second is an `AgentMessageChunk` with `"previous answer"`.
 
 ## Relationship to the Codebase
 
-This module depends on:
+- **`librefang_acp::run_with_transport`** — The server entry point under test. It accepts an `AcpKernel` impl, an `AgentId`, and a `ByteStreams` transport, then serves the ACP JSON-RPC protocol.
+- **`agent_client_protocol`** — Provides the `Client` builder, `ByteStreams` transport, all schema types (`InitializeRequest`, `PromptRequest`, etc.), and the `ConnectionTo` context for sending requests.
+- **`librefang_llm_driver::StreamEvent`** — Defines the streaming event variants (`TextDelta`, `ContentComplete`) that the mock kernel emits.
+- **`librefang_types`** — Core domain types: `AgentId`, `SessionId`, `ApprovalDecision`, `ApprovalEvent`, `ApprovalRequest`, `RiskLevel`, `TokenUsage`, and `StopReason`.
+- **`librefang_kernel_handle::AcpTerminalClient`** — The trait that exposes `run_command` on `TerminalClientHandle`. The terminal test exercises the same path the runtime's `shell_exec` arm uses.
 
-- **`librefang_acp`** — the ACP adapter under test, specifically `run_with_transport`, `AcpKernel`, `FsClientHandle`, and `TerminalClientHandle`.
-- **`agent_client_protocol`** — the ACP protocol crate providing `Client`, `ByteStreams`, all request/response schema types, `ConnectionTo`, `SentRequest`, and `Responder`.
-- **`librefang_llm_driver`** — `StreamEvent` variants used as canned kernel output.
-- **`librefang_types`** — domain types (`AgentId`, `SessionId`, `ApprovalEvent`, `ApprovalRequest`, `RiskLevel`, `TokenUsage`, `StopReason`).
-- **`librefang_kernel_handle`** — the `AcpTerminalClient` trait, exercised by `terminal_run_command_round_trip` to test the same code path the runtime's `shell_exec` arm uses.
+## Running the Tests
 
-## Adding New Tests
+```bash
+cargo test -p librefang-acp --test acp_integration
+```
 
-Follow the established pattern:
-
-1. Create a `MockKernel::new(...)` with appropriate canned events.
-2. Call `duplex_pair()` and build `ByteStreams` for both sides.
-3. `spawn_local` the server: `librefang_acp::run_with_transport(kernel, agent_id, server_transport)`.
-4. Build a `Client.builder()` registering handlers for any notifications or reverse-RPC requests your test needs.
-5. Call `client.connect_with(client_transport, async |cx| { ... })` and use `recv(cx.send_request(...))` for each request.
-6. Assert on responses, captured notifications, or kernel-side state (`resolves`, `last_session_id`, etc.).
+All tests run on a single tokio thread (`flavor = "current_thread"`) with `LocalSet` to support intra-task spawning. No external services, ports, or files are required.

@@ -2,55 +2,57 @@
 
 # Agent Runtime
 
-The Agent Runtime is the execution backbone of LibreFang. It owns the agent turn loop, tool dispatch, session persistence, and all infrastructure between the HTTP API surface and the underlying LLM/memory/storage drivers. Four specialized sub-modules handle distinct concerns and converge at the central `tool_runner`.
+The Agent Runtime is the execution layer of LibreFang. It orchestrates agent identity, tool invocation, sandboxed code execution, provider communication, and authentication — the full lifecycle from "an agent needs to do something" to "it happened safely and was recorded."
 
-## Sub-Module Map
+## Sub-modules
 
 | Sub-module | Responsibility |
 |---|---|
-| [Core Runtime](librefang-runtime-src.md) | Agent loop, LLM driver, tool dispatch, A2A delegation, provider health, workspace sandbox, tracing, plugin management |
-| [MCP Client](librefang-runtime-mcp-src.md) | Model Context Protocol client — transport lifecycle, tool discovery, namespaced registration, invocation with taint scanning |
-| [OAuth](librefang-runtime-oauth-src.md) | OAuth 2.0 flows for ChatGPT (browser/PKCE) and GitHub Copilot (RFC 8628 device authorization grant) |
-| [WASM Sandbox](librefang-runtime-wasm-src.md) | Secure Wasmtime sandbox for untrusted skills — deny-by-default capability control, CPU fuel / memory / timeout limits |
+| [Core Runtime](librefang-runtime-src.md) | Agent context, plugin management, provider health probing, audit logging, patch application |
+| [MCP Runtime](librefang-runtime-mcp-src.md) | Model Context Protocol connections, argument taint scanning, MCP-specific OAuth, tool registration |
+| [OAuth Runtime](librefang-runtime-oauth-src.md) | Browser-based and device-flow OAuth 2.0 for ChatGPT (OpenAI) and GitHub Copilot providers |
+| [WASM Runtime](librefang-runtime-wasm-src.md) | WebAssembly sandboxing — host functions for filesystem, shell, and KV with enforcement of size limits, symlink rejection, and child process scoping |
 
-## How They Fit Together
+## How they fit together
 
 ```mermaid
-graph TD
-    API["HTTP API (librefang-api)"] -->|user message| AL["agent_loop"]
-    AL -->|completion| LLM["LLM Driver"]
-    AL -->|tool calls| TR["tool_runner"]
-    AL -->|session| MEM["librefang-memory"]
+graph LR
+    subgraph "Inbound"
+        A[HTTP Routes]
+    end
 
-    TR -->|internal tools| Internal["file ops, patch, web search, knowledge, scheduling"]
-    TR -->|MCP tools| MCP["McpConnection"]
-    TR -->|WASM skills| WASM["Wasmtime Sandbox"]
-    TR -->|delegation| A2A["A2A Module"]
+    subgraph "Agent Runtime"
+        CORE[Core Runtime]
+        MCP[MCP Runtime]
+        OAUTH[OAuth Runtime]
+        WASM[WASM Sandbox]
+    end
 
-    MCP --> Taint["Outbound Taint Scan"]
-    WASM -->|host_call| CapCheck["Capability Check"]
+    subgraph "Downstream"
+        HTTP[librefang-http]
+    end
 
-    OAuth["OAuth Modules"] -->|provider tokens| AL
+    A -->|list_providers, plugin hooks| CORE
+    CORE -->|plugin loading, version checks| CORE
+    CORE -->|probe_provider_cached| HTTP
+    MCP -->|McpConnection, taint scanning| CORE
+    MCP -->|mcp_oauth, SSRF checks| OAUTH
+    OAUTH -->|token exchange| CORE
+    CORE -->|sandboxed execution| WASM
 ```
 
-The **core runtime** owns the main agent loop (`agent_loop`), which processes each user turn by requesting completions from the LLM driver, dispatching any tool calls through `tool_runner`, persisting session state to memory, and optionally delegating sub-tasks via A2A.
+The **Core Runtime** is the hub. It owns agent identity (`agent_context`), audit trails (`audit`), plugin lifecycle (`plugin_manager`), and provider health (`provider_health`). When an incoming route needs to check provider availability or load a plugin, it flows through core.
 
-`tool_runner` is the convergence point. It routes each tool invocation to the correct backend:
+**MCP Runtime** extends the agent with external tool servers. It manages `McpConnection` instances and applies `scan_mcp_arguments_for_taint_with_policy` to every inbound tool argument. Its own OAuth implementation (`mcp_oauth`) handles MCP-specific authorization server metadata discovery and SSRF-protected endpoint validation — distinct from the user-facing OAuth module.
 
-- **Internal tools** — file reads, patch application, web search/content, knowledge graph operations, scheduled task management — are handled directly.
-- **MCP tools** are forwarded to an `McpConnection` discovered at startup. Every outbound call passes through the MCP module's taint scanner before hitting the transport layer, blocking credential exfiltration.
-- **WASM skills** execute inside the sandbox, where every privileged operation (`host_net_fetch`, `host_fs_write`, etc.) goes through `host_call` → capability check. No WASI, filesystem, or network access is granted unless explicitly allowed.
+**OAuth Runtime** handles user authentication. It provides two flows: a browser-based PKCE flow (ChatGPT) and a device authorization grant (Copilot). The MCP module's OAuth is self-contained for server-to-server metadata and token exchange, while this module handles the interactive user login.
 
-The **OAuth** module sits slightly outside this loop. It provides async auth entry points (`chatgpt_oauth_start`, `copilot_oauth_start`, `copilot_oauth_poll`) consumed by the HTTP route layer, producing tokens that feed back into the LLM driver configuration for authenticated provider connections.
+**WASM Runtime** is the execution sandbox. Core delegates untrusted code to it, and it exposes tightly scoped host functions — `host_fs_write` (with `safe_resolve_parent`), `host_shell_exec` (with child process killing on output cap, parent env secret stripping), and `host_kv_set` (with oversized key/value rejection). Timeouts are enforced at the store level via `per_store_callback_traps_on_real_timeout`.
 
-## Key Cross-Module Workflows
+## Key cross-module workflows
 
-**Provider probe and authentication** — A provider list request flows from the API route through `provider_health` → `probe_provider` → `proxied_client_builder` → TLS config in `librefang-http`. When the provider requires OAuth (ChatGPT, Copilot), the corresponding OAuth module handles the interactive flow, returning tokens that enable subsequent completions.
+**Provider health check** — `list_providers` → `probe_provider_cached` → `probe_provider` → `try_probe_endpoint` → `probe_client` → `proxied_client_builder` → `build_http_client` → `tls_config`. Core drives the probe; the HTTP module builds the transport.
 
-**MCP tool invocation** — `tool_runner` matches a namespaced tool name to an active `McpConnection`, calls `call_tool`, which passes arguments through the taint scanner (blocking if secrets are detected), then dispatches to the MCP server over stdio or HTTP transport.
+**Plugin hook** — `benchmark_plugin_hook` → `get_plugin_info` → `load_plugin_manifest` → `version_satisfies` → `semver_parts`. Core owns the entire plugin resolution chain.
 
-**Plugin/Skill execution** — `plugin_manager` loads a manifest, validates semver constraints, then dispatches the skill through the WASM sandbox. The sandbox enforces fuel, memory, and wall-clock limits, and rejects any `host_call` that lacks an explicit capability grant.
-
-**Outbound taint protection** — Taint scanning spans both the MCP module (for MCP tool calls) and the core runtime (for `agent_send` and network fetch tools), providing a uniform defense against credential leaks regardless of the execution path.
-
-See the individual sub-module pages for implementation details, configuration options, and transport-specific behavior.
+**MCP tool invocation** — A tool call enters through MCP Runtime, arguments are scanned for taint, OAuth metadata is validated with SSRF checks, and the connection (`McpConnection`) routes the call to the external tool server.

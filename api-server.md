@@ -2,175 +2,200 @@
 
 # API Server (`librefang-api`)
 
-The API server is the daemon's external interface layer. It exposes the LibreFang kernel to editors, messaging platforms, web dashboards, and programmatic consumers through multiple transport protocols, all backed by a shared kernel instance.
+The API server is the gateway between external interfaces—channel adapters, the ACP protocol, and HTTP routes—and the core `LibreFangKernel`. It owns transport-layer security, connection lifecycle, streaming event adaptation, and user-facing error sanitization.
 
 ## Architecture Overview
 
 ```mermaid
 graph TD
-    subgraph Transports
-        UDS[ACP Unix Socket]
-        PIPE[ACP Named Pipe]
-        WS[WebSocket]
-        HTTP[HTTP API Routes]
-        CH[Channel Adapters]
+    subgraph "External Interfaces"
+        CLI["CLI / Editor (ACP)"]
+        CH["Channel Adapters<br/>Telegram, Slack, Discord, ..."]
+        HTTP["HTTP API Routes"]
     end
 
-    subgraph API Layer
-        CB[channel_bridge]
-        BR[KernelBridgeAdapter]
-        SL[Streaming Bridge]
-        AUTH[Auth / Rate Limiting]
+    subgraph "librefang-api"
+        ACP["ACP Listeners<br/>acp_uds / acp_pipe"]
+        BRIDGE["Channel Bridge<br/>KernelBridgeAdapter"]
+        STREAM["Streaming Bridge<br/>start_stream_text_bridge"]
     end
 
-    subgraph Kernel
-        KAPI[KernelApi]
-        REG[Agent Registry]
-        MEM[Memory Substrate]
-        WF[Workflow Engine]
-        CRON[Cron Scheduler]
+    subgraph "Core"
+        KERNEL["LibreFangKernel"]
     end
 
-    UDS -->|JSON-RPC| KAPI
-    PIPE -->|JSON-RPC| KAPI
-    WS -->|bidirectional| KAPI
-    HTTP -->|REST| KAPI
-    CH -->|ChannelBridgeHandle| BR
-    BR --> KAPI
-    SL -->|StreamEvent| KAPI
+    CLI -->|UDS / Named Pipe| ACP
+    CH -->|ChannelBridgeHandle trait| BRIDGE
+    HTTP -->|KernelApi trait| KERNEL
+    ACP -->|KernelAdapter| KERNEL
+    BRIDGE -->|KernelApi| KERNEL
+    BRIDGE -->|mpsc events| STREAM
 ```
 
-## Core Submodules
+---
 
-### ACP Listeners — Editor-to-Daemon Protocol
+## ACP Listeners — Daemon-Attached Protocol
 
-ACP (Agent Client Protocol) allows editors and CLI tools to connect to a long-running daemon, sharing one kernel across multiple sessions. The protocol uses JSON-RPC framing with a `KernelAdapter` per connection, backed by the daemon's shared `LibreFangKernel`.
+ACP lets multiple CLI/editor sessions share a single long-running daemon kernel. Each connection gets its own `KernelAdapter` backed by the same `LibreFangKernel`, so approval decisions, agent state, and `allow_always` rules persist across sessions.
 
-Two platform-specific transports exist with identical wire protocol:
+Both implementations use identical JSON-RPC framing over their respective transports. Only the I/O layer differs.
 
-**Unix Domain Socket** (`acp_uds.rs`, `#[cfg(unix)]`):
-- Listens on `~/.librefang/acp.sock`
-- Entry point: `run_listener(kernel, sock_path)`
-- Atomic bind with mode `0o600` via `bind_atomic_owner_only()` — binds to a randomized tempfile, chmods, then renames into place to eliminate the TOCTOU window between `bind()` and `chmod()`
-- `SO_PEERCRED` peer-uid validation on every accepted connection — mismatches are dropped before any ACP bytes are read
+### Unix Domain Socket (`acp_uds.rs`)
 
-**Windows Named Pipe** (`acp_pipe.rs`, `#[cfg(windows)]`):
-- Listens on `\\.\pipe\librefang-acp` (`PIPE_NAME`)
-- Entry point: `run_listener(kernel)`
-- Owner-only DACL via SDDL `D:P(A;;GA;;;OW)` — only the daemon's own user SID gets access, with the `P` flag blocking inheritance from the parent pipe directory
-- `first_pipe_instance(true)` on initial bind prevents name-squatting races from crashed daemon remnants
-- `reject_remote_clients(true)` enforced explicitly
+**Entry point:** `run_listener(kernel, sock_path)`
 
-**Trust model**: same-user, same-host. Both transports harden against multi-user host scenarios — Unix via filesystem permissions + peer credentials, Windows via explicit DACL.
+Socket path defaults to `~/.librefang/acp.sock`. The listener loop accepts connections, validates peer credentials, and spawns a per-connection task running `librefang_acp::run_with_transport`.
 
-Each connection spawns a background task calling `librefang_acp::run_with_transport` with a `KernelAdapter` that resolves the default agent `"assistant"`.
+#### Trust model: same-user, same-host
 
-### Channel Bridge — Messaging Platform Integration
+Two layered defenses prevent cross-user hijacking on multi-user hosts:
 
-`channel_bridge.rs` connects the kernel to 30+ messaging platforms (Telegram, Discord, Slack, WhatsApp, Signal, Matrix, IRC, Teams, and many more). Each platform is feature-gated (`channel-telegram`, `channel-discord`, etc.).
+1. **Atomic `0o600` bind** — `bind_atomic_owner_only()` binds to a randomized tempfile in the parent directory, `chmod`s it to `0o600`, then `rename`s into the final path. This closes the TOCTOU window between `bind()` and `chmod()` where another local user could `connect()`.
 
-**Entry points**:
-- `start_channel_bridge(kernel)` — reads kernel config, returns `(Option<BridgeManager>, axum::Router)` where the router holds webhook routes
-- `start_channel_bridge_with_config(kernel, config)` — for hot-reload scenarios
+2. **`SO_PEERCRED` UID match** — Every accepted connection's `peer_cred().uid()` is compared against the daemon's `geteuid()`. Mismatches are dropped before any ACP bytes are read.
 
-**`KernelBridgeAdapter`** implements `ChannelBridgeHandle` and is the central dispatch for all channel operations:
+#### Stale orphan cleanup
 
-- **Messaging**: `send_message`, `send_message_with_blocks`, `send_message_streaming`, `send_message_with_sender` — all route through `KernelApi` methods. Silent responses (NO_REPLY) return empty strings so the bridge skips sending.
-- **Streaming**: `send_message_streaming_with_sender_status` returns both an `mpsc::Receiver<String>` and a oneshot status channel. The streaming bridge (`start_stream_text_bridge_with_status`) translates `StreamEvent` variants into user-facing text.
-- **Agent management**: `find_agent_by_name`, `list_agents`, `spawn_agent_by_name`
-- **Workflow execution**: `run_workflow_text` — resolves workflow by name, creates a run, and executes steps through the kernel's workflow engine
-- **Cron/scheduling**: `manage_schedule_text` handles add/del/run for cron jobs
-- **Approvals**: `resolve_approval_text` — supports TOTP verification with replay protection and lockout
-- **Budget**: `budget_text` — displays hourly/daily/monthly spend against limits
-- **RBAC**: `authorize_channel_user` — gates actions by channel user identity
-- **Reply intent classification**: `classify_reply_intent` — uses a one-shot LLM call to determine if a group message is directed at the bot
+On macOS Docker Desktop bind-mount volumes, `rename(2)` succeeds on the host but the source file persists in the container view. `sweep_stale_orphans()` removes `.<stem>.<pid>.<nanos>` tempfiles from previous daemon runs, guarded by:
 
-### Streaming Bridge Internals
+- **UID equality** — file must be owned by daemon's euid
+- **Recency window** — files modified within the last 10 seconds are skipped (protects concurrent bind→rename)
+- **PID liveness** — `kill(pid, 0)` probe; only files whose PID returns `ESRCH` are removed
 
-The `start_stream_text_bridge_with_status` function translates kernel `StreamEvent`s into a text channel:
+### Windows Named Pipe (`acp_pipe.rs`)
 
-| Event | Behavior |
-|-------|----------|
-| `TextDelta` | Buffered per iteration |
-| `ContentComplete` | Flushes buffer; suppresses tool-call leaks, NO_REPLY sentinels |
-| `ToolUseStart` | Emits `🔧 Pretty Tool Name` progress line (if `show_progress`) |
-| `ToolExecutionResult` (error) | Emits `⚠️ Tool Name failed` (localized) |
-| `PhaseChange` (`context_warning`) | Emits context window warning |
+**Entry point:** `run_listener(kernel)`
 
-**Tool call leak detection** (`looks_like_tool_call` and helpers) prevents raw LLM tool-call syntax from being forwarded to users. This includes JSON arrays/objects starting with `[{`, `<function=` tags, `[TOOL_CALL]` markers, markdown code blocks containing tool calls, and backtick-wrapped tool invocations. Long responses (>2000 chars) only match start-of-text patterns to avoid false positives on natural language that discusses tools.
+Pipe name: `\\.\pipe\librefang-acp` (local-only namespace). The CLI side (`librefang-cli::acp::run_pipe_proxy`) hard-codes the same name.
 
-**Error sanitization** (`sanitize_channel_error`) converts technical error messages into user-friendly text for channel delivery, preventing stack traces and driver internals from leaking to end users on WhatsApp, Telegram, etc.
+#### Trust model: owner-only DACL
 
-### Approval Module
+`create_owner_only_instance(first)` builds each pipe instance with SDDL `D:P(A;;GA;;;OW)` — a protected DACL granting `GENERIC_ALL` to the owner only. The `P` flag blocks inheritance from `\\.\pipe\`.
 
-`approval.rs` re-exports `librefang_kernel::approval::ApprovalManager` to keep kernel internals out of the API crate's import surface. Route modules should use this re-export rather than importing from the kernel directly.
+Key details:
+- `first_pipe_instance(true)` is set only on the very first instance to prevent name-squatting races during daemon restart
+- Every subsequent rebind (after handing a connected pipe to a worker) passes `false`
+- `reject_remote_clients(true)` is explicitly set
 
-## Supporting Infrastructure
+#### Connection lifecycle
 
-### WebSocket Layer (`ws.rs`)
-- `WsConnectionGuard` manages connection slot limits via `try_acquire_ws_slot`
-- Origin validation through `validate_ws_origin` → `normalize_origin_host`
-- Agent WebSocket handler `handle_agent_ws` subscribes to kernel changes and streams updates
-- Bearer token authentication via `ws_bearer_protocol` / `ws_auth_token`
-- Think-tag stripping (`strip_think_tags`) for extended thinking model output
+```
+create_owner_only_instance(true) → loop {
+    await connect()
+    spawn handle_connection(connected)
+    create_owner_only_instance(false)  // next listener
+}
+```
 
-### HTTP Server (`server.rs`)
-- `build_router` assembles the full Axum router from all route modules
-- `DaemonInfo` serialization for daemon lifecycle management (PID, bind address, startup time)
-- `evaluate_bind_auth_safety` / `resolve_dashboard_credential` for bind-address security checks
-- Dashboard authentication, password management (`hash_password` / `verify_password` via `password_hash.rs`)
+### Per-connection handling (both platforms)
 
-### Rate Limiting (`rate_limiter.rs`)
-- Token-bucket rate limiter for API and auth endpoints
-- `create_rate_limiter` / `request_from` for per-identity throttling
+`handle_connection` creates a `KernelAdapter`, resolves the default agent (`"assistant"`), splits the stream, adapts tokio↔futures via `tokio_util::compat`, and runs `librefang_acp::run_with_transport`.
 
-### Versioning (`versioning.rs`)
-- API version negotiation via `requested_version_from_accept_header` and `version_from_path`
-- Supports both header-based (`Accept`) and path-based (`/v1/...`, `/v2/...`) versioning
+---
 
-### Validation (`validation.rs`)
-- `check_identifier` for sanitizing user-supplied identifiers
-- JSON depth checking (`check_json_depth`) to prevent deeply nested payload attacks
+## Channel Bridge (`channel_bridge.rs`)
 
-### Webhook Store (`webhook_store.rs`)
-- CRUD for outgoing webhook registrations
-- Private IP / localhost URL rejection (`is_private_ip` → `canonical_ip`) to prevent SSRF
-- Secret redaction (`redact_webhook_secret`) in responses
+The channel bridge connects the kernel to ~40+ messaging platform adapters. `KernelBridgeAdapter` wraps `Arc<dyn KernelApi>` and implements `ChannelBridgeHandle`.
 
-### Web Chat / Dashboard (`webchat.rs`)
-- Embedded dashboard asset serving
-- `embedded_only_mode` for locked-down deployments
-- Dashboard sync via `proxied_client_builder` for remote dashboard proxying
+### Streaming Text Bridge
 
-### Streaming Utilities
-- `stream_dedup.rs` — deduplication of streamed text chunks (`record_sent`)
-- `stream_chunker.rs` — sentence-boundary-aware chunking for streaming delivery
+`start_stream_text_bridge_with_status` adapts the kernel's `StreamEvent` channel into a consumer-friendly `mpsc::Receiver<String>`. It handles:
 
-### Telemetry (`telemetry.rs`)
-- Prometheus metrics initialization (`init_prometheus`)
+**Tool call filtering** — Some providers emit tool calls as plain text. The bridge detects and suppresses these using `looks_like_tool_call()`, which checks:
+- Start-of-text patterns (`[{`, `functions.`, `{"type":"function"}`, etc.)
+- Bare JSON tool call objects (`contains_bare_json_tool_call`)
+- Tag-based patterns (`<function=`, `<tool>`, `[TOOL_CALL]`, `_PROTO_`)
+- Markdown code blocks and backtick-wrapped tool calls
 
-### Types (`types.rs`)
-- Shared API types: `PaginationQuery`, error envelopes (`not_found`, `with_code`, `with_request_id`)
-- `WorkflowId` and `StepAgent` for workflow execution routing
+For responses longer than 2000 characters, only start-of-text patterns are applied—natural language that discusses tools shouldn't be suppressed.
 
-### Triggers (`triggers.rs`)
-- `TriggerPattern` enum: `Lifecycle`, `AgentSpawned`, `AgentTerminated`, `System`, `SystemKeyword`, `MemoryUpdate`, `MemoryKeyPattern`, `ContentMatch`, `All`
-- Parsed from chat commands via `parse_trigger_pattern`
+**Progress injection** — When `show_progress` is enabled on the agent manifest:
+- `🔧 {Pretty Tool Name}` lines appear at each `ToolUseStart`
+- `⚠️ {Pretty Tool Name} {localized "failed"}` appears on tool execution errors
+- `⚠️ {context warning detail}` appears on `context_warning` phase changes
 
-## Adding a New Channel Adapter
+Progress lines use `\n\n…\n\n` formatting so adjacent markers render with blank-line separation. Tool names within one iteration are deduplicated—repeated calls to the same tool collapse into a single progress line.
 
-1. Gate the adapter with a Cargo feature (e.g., `channel-foobar`)
-2. Add the config struct to `ChannelsConfig` in `librefang-types`
-3. In `channel_bridge.rs`:
-   - Add a `#[cfg(feature = "channel-foobar")] use librefang_channels::foobar::FoobarAdapter;`
-   - Add a `check_channel!` macro call for feature-gate warnings
-   - Add an initialization block reading config and constructing the adapter with `read_token`
-   - Push `(adapter, default_agent, account_id)` into the `adapters` vector
-4. Implement `ChannelAdapter` for the adapter in `librefang-channels`
+**Silent response suppression** — `is_silent_response()` catches `NO_REPLY` / `[[silent]]` sentinels and suppresses them from the output stream.
 
-## Platform-Specific Compilation
+**Error handling flow** — The status bridge distinguishes:
+- **Timeout with partial output** — treated as soft success (user already saw streamed content)
+- **Group context errors** — fully suppressed (no leaked internals)
+- **DM errors** — sanitized via `sanitize_channel_error()` which maps timeouts, rate limits, auth failures, and content filters to user-friendly messages
+- **Kernel panic** — generic "something went wrong" message
 
-- `acp_uds.rs` compiles only on `#[cfg(unix)]`
-- `acp_pipe.rs` compiles only on `#[cfg(windows)]`
-- Channel adapters compile only when their feature flag is enabled
-- At runtime, channels configured but missing their feature flag emit a warning and are skipped
+### `ChannelBridgeHandle` trait implementation
+
+The `KernelBridgeAdapter` implements the full bridge trait, delegating to kernel APIs:
+
+| Method group | Purpose |
+|---|---|
+| `send_message*` | Synchronous and streaming message dispatch, with optional `SenderContext` and `ContentBlock` support |
+| `find_agent_by_name` / `list_agents` / `spawn_agent_by_name` | Agent registry queries |
+| `reset_session` / `reboot_session` / `compact_session` | Session lifecycle, scoped by agent or channel session |
+| `set_model` / `stop_run` / `session_usage` | Runtime controls |
+| `list_models_text` / `list_providers_text` / `list_skills_text` | Human-readable catalog summaries |
+| `list_workflows_text` / `run_workflow_text` | Workflow engine access |
+| `list_triggers_text` / `create_trigger_text` / `delete_trigger_text` | Trigger CRUD |
+| `list_schedules_text` / `manage_schedule_text` | Cron job management |
+| `list_approvals_text` / `resolve_approval_text` | Approval queue with TOTP verification |
+| `classify_reply_intent` | LLM-based reply/no-reply classifier for group chats |
+| `channel_overrides` / `agent_channel_overrides` | Per-channel and per-agent configuration |
+| `authorize_channel_user` | RBAC check via `auth_manager` |
+| `record_delivery` | Delivery tracking and last-channel persistence |
+| `budget_text` / `peers_text` / `a2a_agents_text` | Budget, OFP network, and A2A status |
+
+### TOTP approval flow (channel path)
+
+`resolve_approval_text` handles approval/rejection through channel commands (`/approve`, `/reject`). When TOTP is required for a tool:
+
+1. Check lockout status (`is_totp_locked_out`)
+2. If recovery code format matches → `vault_redeem_recovery_code` (atomic consume under mutex, prevents #3560/#3943 double-spend)
+3. If TOTP code → replay check (`is_totp_code_used`, #3952), then verify, then record consumption
+4. Failed attempts atomically check+record via `check_and_record_totp_failure` (#3584)
+
+### Supported channel adapters
+
+All adapters are feature-gated:
+
+- **Wave 1:** Discord, Email, Google Chat, IRC, Matrix, Mattermost, RocketChat, Signal, Slack, Teams, Telegram, Twitch, Voice, Webhook, WhatsApp, XMPP, Zulip
+- **Wave 2:** Bluesky, Feishu, Line, Mastodon, Messenger, Reddit, Revolt, Viber
+- **Wave 3:** Flock, Guilded, Keybase, Nextcloud, Nostr, Pumble, Threema, Twist, Webex
+- **Wave 4:** DingTalk, Discourse, Gitter, Gotify, LinkedIn, Mumble, Ntfy, QQ, WeChat, WeCom
+
+### Reply intent classification
+
+`classify_reply_intent` uses a one-shot LLM call to decide whether a group message is directed at the bot. It constructs a classification prompt with:
+- Sanitized message text (truncated to 500 chars, backticks/newlines/brackets stripped)
+- Sanitized sender name (64 char limit)
+- Bot identity section (name + aliases from agent manifest routing metadata)
+- Regex-escaped alias patterns merged into `group_trigger_patterns`
+
+The classifier fails open—if the LLM call errors, the message is treated as requiring a reply.
+
+---
+
+## Supporting Modules
+
+### Approval Re-export (`approval.rs`)
+
+Re-exports `librefang_kernel::approval::ApprovalManager` so API route modules don't depend on kernel internal paths directly. The kernel owns the manager; API routes only call static helpers like `verify_totp_code_with_issuer`.
+
+### Integration Points (from call graph)
+
+The API server connects outward to:
+
+- **`librefang-kernel`** — `KernelApi` trait, `LibreFangKernel`, registries, auth, metering
+- **`librefang-acp`** — `KernelAdapter`, `AcpKernel`, `run_with_transport`
+- **`librefang-channels`** — `BridgeManager`, `ChannelBridgeHandle`, adapter types, `AgentRouter`, `SidecarAdapter`
+- **`librefang-types`** — Agent/Session/Model types, i18n, config structs, event types
+- **`librefang-http`** — TLS config, proxy-aware HTTP client builders
+- **`librefang-runtime`** — Provider health probing, plugin management, silent response detection
+
+### Key design invariants
+
+1. **No raw error leakage to channels** — All kernel/LLM errors pass through `sanitize_channel_error` before reaching end users
+2. **TOCTOU-free socket creation** — Atomic bind-chmod-rename on Unix; owner-only DACL on Windows
+3. **TOTP atomicity** — Recovery code redemption and lockout recording are mutex-protected to prevent concurrent double-spend
+4. **Fail-open classification** — Reply intent and provider probing default to permissive on errors, avoiding silent message drops
+5. **Streaming deduplication** — Tool progress lines are deduplicated within an iteration but re-emit across iteration boundaries

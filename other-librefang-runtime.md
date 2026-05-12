@@ -2,173 +2,184 @@
 
 # librefang-runtime
 
-Agent execution engine for LibreFang. Runs the turn-by-turn agent loop, dispatches tools, manages conversation context, and provides sandboxed execution environments.
+Agent runtime and execution environment for LibreFang. Hosts the turn-by-turn agent loop, tool dispatch, context management, audit trail, A2A peer protocol, channel registry, sandboxed execution backends, and re-exports OAuth subsystems.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    API["librefang-api"]
-    K["librefang-kernel"]
-    KH["librefang-kernel-handle<br/>(KernelHandle trait)"]
-    R["librefang-runtime"]
-    T["librefang-types"]
-    H["librefang-http"]
-    M["librefang-runtime-mcp"]
-    O["librefang-runtime-oauth"]
-    W["librefang-runtime-wasm"]
-    S["librefang-skills"]
-    C["librefang-channels"]
-
-    API --> R
-    K --> R
-    R --> KH
-    R --> T
-    R --> H
-    R --> M
-    R --> O
-    R --> W
-    R --> S
-    R --> C
-
-    style R fill:#f9f,stroke:#333,stroke-width:2px
+    API["librefang-api"] -->|calls| RT["librefang-runtime"]
+    K["librefang-kernel"] -->|spawns agents via| RT
+    RT -.->|KernelHandle trait| KKH["librefang-kernel-handle"]
+    RT --> TYPES["librefang-types"]
+    RT --> HTTP["librefang-http"]
+    RT --> MCP["librefang-runtime-mcp"]
+    RT --> OAUTH["librefang-runtime-oauth"]
+    RT --> WASM["librefang-runtime-wasm"]
+    RT --> LLM_D["librefang-llm-drivers"]
+    RT --> LLM["librefang-llm-driver"]
+    RT --> CH["librefang-channels"]
+    RT --> MEM["librefang-memory"]
+    RT --> SK["librefang-skills"]
 ```
 
-The kernel invokes the runtime when an agent receives a message. The runtime never depends on the kernel directly — all communication flows through the `KernelHandle` trait (defined in the sibling `librefang-kernel-handle` crate). The kernel implements `KernelHandle`; the runtime consumes it. This breaks what would otherwise be a circular dependency.
+The runtime is called by `librefang-kernel` when an agent receives a message. It never depends on `librefang-kernel` directly — all kernel communication goes through the `KernelHandle` trait defined in `librefang-kernel-handle`. This avoids a circular dependency since kernel depends on runtime, not the reverse.
 
-## Owned Modules
+## Module Map
 
-| Module | Responsibility |
+### Core Execution
+
+| Module | Role |
 |---|---|
-| `agent_loop` | Turn-by-turn agent execution. ~10k LOC. Slated for extraction (#3710). |
-| `tool_runner` | Tool execution path. ~9.7k LOC. Also targeted by #3710. |
-| `compactor` | Conversation history compaction. |
-| `context_budget` | Token budget tracking for context windows. |
-| `context_compressor` | Context compression strategies. |
-| `context_overflow` | Overflow handling when context exceeds limits. |
+| `agent_loop` | Turn-by-turn agent execution. ~10k LOC. God module — do not grow it without coordination (see #3710). |
+| `tool_runner` | Tool execution path. ~9.7k LOC. Also targeted for extraction by #3710. |
+| `apply_patch` | Tool-level patch application. |
+| `prompt_builder` | Assembles the prompt sent to the LLM. |
+
+### Context Management
+
+| Module | Role |
+|---|---|
+| `compactor` | Compacts conversation history when context grows. |
+| `context_budget` | Allocates and tracks token budget across context windows. |
+| `context_compressor` | Compresses context segments. |
+| `context_overflow` | Handles overflow when context exceeds limits. |
+
+### Model & Catalog
+
+| Module | Role |
+|---|---|
+| `model_catalog::ModelCatalog` | Registry of 130+ models across 28 providers. Kernel wraps it in `arc_swap::ArcSwap` (see #3384). Updates go through `kernel.model_catalog_update(\|cat\| ...)`. |
+| `catalog_sync` | Synchronizes model catalog state. |
+
+### MCP & A2A
+
+| Module | Role |
+|---|---|
+| `mcp` | MCP client. OAuth state lives in `mcp_auth_states`. The `McpOAuthProvider` trait is implemented on the kernel side. |
+| `a2a` | Agent-to-Agent peer protocol. |
+
+### Sandboxes & Execution Backends
+
+| Module | Role |
+|---|---|
+| `browser` | Browser sandbox. |
+| `docker_sandbox` | Docker container sandbox. |
+| `dangerous_command` | Validation and policy for dangerous shell commands. |
+
+Optional backends enabled by Cargo features:
+
+| Feature flag | Backend |
+|---|---|
+| `ssh-backend` | Remote SSH tool-execution (`russh` / `russh-keys`). #3332. |
+| `daytona-backend` | Daytona managed-sandbox execution. Uses existing reqwest stack — no new deps. #3332. |
+| `landlock-sandbox` | Linux Landlock-based sandboxing. |
+| `seccomp-sandbox` | seccomp-bpf syscall filtering. |
+
+### Other Subsystems
+
+| Module | Role |
+|---|---|
 | `audit` | Audit trail for agent actions. |
 | `auth_cooldown` | Rate-limiting for authentication attempts. |
-| `aux_client` | Auxiliary HTTP client for internal calls. |
-| `browser` | Browser sandbox execution. |
-| `catalog_sync` | Model catalog synchronization. |
-| `channel_registry` | Registry of available channels. |
+| `aux_client` | Auxiliary HTTP client for internal service calls. |
+| `channel_registry` | Registry of available channel types. |
 | `checkpoint_manager` | Agent state checkpointing. |
-| `dangerous_command` | Detection and handling of dangerous shell commands. |
-| `docker_sandbox` | Docker container sandboxing for tool execution. |
-| `media` | Media processing (PDF extraction, images). |
-| `model_catalog` | `ModelCatalog` type — registry of 130+ models across 28 providers. |
-| `mcp` | MCP (Model Context Protocol) client. |
-| `prompt_builder` | Prompt assembly from context, tools, and capabilities. |
-| `a2a` | Agent-to-Agent peer protocol. |
-| `apply_patch` | Tool-level patch application. |
+| `media` | Media handling and processing. |
 
-### What is NOT owned here
+### Re-exports
 
+OAuth subsystems from `librefang-runtime-oauth` are re-exported:
+- `chatgpt_oauth`
+- `copilot_oauth`
+
+### Public Constant
+
+`USER_AGENT` — mandatory on every outbound HTTP call. The audit hook flags requests missing this header.
+
+## Dependency Boundary
+
+**Owned by this crate:**
+`agent_loop`, `tool_runner`, `compactor`, `context_budget`, `context_compressor`, `context_overflow`, `audit`, `auth_cooldown`, `aux_client`, `browser`, `catalog_sync`, `channel_registry`, `checkpoint_manager`, `dangerous_command`, `docker_sandbox`, `media`, `model_catalog` (the type), `mcp` (client), `prompt_builder`.
+
+**NOT owned — belongs elsewhere:**
 - Agent registry, scheduler, cron, orchestration → `librefang-kernel`
 - HTTP routing → `librefang-api`
 - Channel transport adapters → `librefang-channels`
-- Skill loading → `librefang-skills`
+- Skill loader → `librefang-skills`
+
+**Dependencies:**
+- `librefang-types`, `librefang-http`, `librefang-kernel-handle` (NOT `librefang-kernel`)
 
 ## KernelHandle
 
-The `KernelHandle` trait lives in `librefang-kernel-handle`, not in this crate. Whenever runtime code needs a kernel callback (persisting state, emitting events, accessing shared services), it goes through `KernelHandle`.
+The `KernelHandle` trait lives in `librefang-kernel-handle`, not here. Kernel implements it; runtime and API consume it. Use `KernelHandle` whenever you need a kernel callback from runtime code. Never depend on `librefang-kernel` directly — that creates a circular dependency.
 
-```rust
-// Correct: accept KernelHandle as a parameter
-pub async fn run_agent<H: KernelHandle>(handle: &H, ...) { ... }
-```
-
-Never depend on `librefang-kernel` directly. Never mock `KernelHandle` by hand — use `librefang-testing::MockKernelBuilder`.
-
-## ModelCatalog
-
-`model_catalog::ModelCatalog` is the type definition for the model registry. It tracks 130+ models across 28 providers.
-
-The kernel wraps `ModelCatalog` in `arc_swap::ArcSwap` (#3384) for lock-free reads. All mutations must go through the kernel's `model_catalog_update(|cat| ...)` callback on `KernelHandle`. The runtime does not mutate the catalog directly.
-
-## MCP Client and OAuth
-
-The `mcp` module provides the MCP client. OAuth state for MCP servers is stored in `mcp_auth_states`. The `McpOAuthProvider` trait is implemented on the kernel side; the runtime calls it through `KernelHandle`.
-
-OAuth subsystems (`chatgpt_oauth`, `copilot_oauth`) are re-exported from `librefang-runtime-oauth`.
-
-## Feature Flags
-
-| Feature | Enables |
-|---|---|
-| `landlock-sandbox` | Linux Landlock-based sandboxing via the `landlock` crate. |
-| `seccomp-sandbox` | Seccomp-based sandboxing via `seccompiler`. |
-| `ssh-backend` | Remote SSH tool-execution backend via `russh` / `russh-keys` (#3332). |
-| `daytona-backend` | Daytona managed-sandbox backend (#3332). No additional deps — uses existing `reqwest`. |
+For testing, use `librefang-testing::MockKernelBuilder`. Do not fake `KernelHandle` inline.
 
 ## Cross-Cutting Invariants
 
-### Deterministic prompt ordering (#3298)
+### Deterministic Prompt Ordering (#3298)
 
-Tool definitions, MCP server summaries, and capability lists must be sorted before stringification. Use `BTreeMap` / `BTreeSet`, never `HashMap`. Non-deterministic ordering causes flaky tests and reproducibility failures.
+Tool definitions, MCP server summaries, and capability lists must be sorted before stringifying. Use `BTreeMap` / `BTreeSet`, not `HashMap`. This ensures deterministic prompts across runs.
 
-### Identity files
+### Identity Files
 
-Workspace identity files live at `{workspace}/.identity/`, not the workspace root. `read_identity_file()` falls back to the root for pre-migration workspaces. `migrate_identity_files()` runs on every agent spawn to handle legacy locations.
+Identity files live at `{workspace}/.identity/`, not the workspace root. `read_identity_file()` falls back to root for pre-migration workspaces. `migrate_identity_files()` runs on every agent spawn.
 
-### USER_AGENT constant
+### USER_AGENT
 
-Every outbound HTTP request must include the `USER_AGENT` constant:
-
-```rust
-use librefang_runtime::USER_AGENT;
-req.header("User-Agent", USER_AGENT)
-```
-
-The audit hook flags any request missing this header.
-
-## Async Pitfalls
-
-### ErrorTranslator is !Send
-
-`ErrorTranslator` (from `RequestLanguage`) is `!Send`. Any `.await` that follows construction of an `ErrorTranslator` must happen after `drop(t)`, or you will hit a cryptic axum `Handler<_, _>` trait-bound error:
+Every outbound HTTP request must include:
 
 ```rust
-// Wrong — compiler error
-let t = ErrorTranslator::new(lang);
-let result = some_async_call().await;
-t.translate(result)
-
-// Right — drop before await
-let result = some_async_call().await;
-let t = ErrorTranslator::new(lang);
-t.translate(result)
+req.header("User-Agent", librefang_runtime::USER_AGENT);
 ```
 
-### No blocking primitives in async context
+The audit hook flags missing `User-Agent` headers.
 
-- Use `tokio::fs`, not `std::fs`.
-- Use `arc_swap` or `parking_lot`, not `std::sync::RwLock`.
-- Never call `tokio::block_on` from within this crate.
+## Async Constraints
+
+### ErrorTranslator is `!Send`
+
+`ErrorTranslator` (from `RequestLanguage`) is `!Send`. Any `.await` must happen **after** `drop(t)`, otherwise you get a cryptic axum `Handler<_, _>` trait-bound error.
+
+```rust
+// WRONG — ErrorTranslator alive across await
+let t = ErrorTranslator::new(lang);
+let result = some_async_call().await; // compile error
+drop(t);
+
+// RIGHT — drop before await
+let t = ErrorTranslator::new(lang);
+let msg = t.translate(error);
+drop(t);
+let result = some_async_call().await;
+```
+
+### No blocking in async context
+
+- No `std::fs` or `std::sync::RwLock` inside async handlers. Use `tokio::fs`, `arc_swap`, or `parking_lot` (#3579).
+- No `tokio::task::block_on`. Ever.
 
 ## Testing
 
-This crate historically had zero integration tests (#3696). Any new runtime work **must** include at least one `#[tokio::test]` exercising the new code path.
+This crate has historically had **zero** integration tests (#3696). All new runtime work **should** include at least one `#[tokio::test]` exercising the new code path.
 
-Run the test suite:
+Run tests:
 
-```bash
+```sh
 cargo test -p librefang-runtime
 ```
 
-For type-checking without a full build:
+Do not use raw `cargo build` — use `cargo check --workspace --lib`. Real builds run in CI.
 
-```bash
-cargo check --workspace --lib
-```
+## Taboos
 
-Do not run `cargo build` locally — real builds run in CI.
-
-## Restrictions
-
-- **No `librefang-kernel` import.** Use `KernelHandle`.
-- **No `librefang-api` import.** The API layer consumes runtime; never the reverse.
-- **No additions to `agent_loop.rs` or `tool_runner.rs`.** Both are slated to shrink via #3710. Extract new functionality into separate modules.
-- **No `unwrap()` / `panic!()` on wire values.** Everything from external input must be handled with proper error propagation.
-- **No inline `KernelHandle` mocks.** Use `librefang-testing::MockKernelBuilder`.
-- **No `cargo build`.** Use `cargo check --workspace --lib`.
+| Prohibited | Reason |
+|---|---|
+| `use librefang_kernel::*` | Circular dependency. Use `KernelHandle`. |
+| `use librefang_api::*` | API consumes runtime, not the reverse. |
+| Adding files to `agent_loop.rs` / `tool_runner.rs` | Both are slated to shrink (#3710). |
+| `unwrap()` / `panic!()` on wire values | These are untrusted inputs. |
+| Inlining a fake `KernelHandle` | Use `librefang-testing::MockKernelBuilder`. |
+| `cargo build` | Use `cargo check --workspace --lib`. |
