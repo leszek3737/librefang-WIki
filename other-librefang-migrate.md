@@ -2,72 +2,70 @@
 
 # librefang-migrate
 
-Migration engine for importing configurations and data from other agent frameworks into LibreFang.
+Migration engine for importing agent configurations and data from other agent frameworks into LibreFang's native format.
 
 ## Purpose
 
-`librefang-migrate` provides tooling to bring existing agent framework configurations into the LibreFang ecosystem. Rather than requiring users to rebuild their agent setups from scratch, this module reads foreign configuration formats, translates them into LibreFang-native types (`librefang-types`), and writes them out in the expected structure.
+When adopting LibreFang, teams often have existing agent configurations, prompt libraries, and tool definitions spread across other frameworks. `librefang-migrate` provides the tooling to discover, parse, and convert those external assets into LibreFang-compatible types defined in `librefang-types`.
 
 ## Supported Input Formats
 
-The module handles a range of common configuration serialization formats, covering most agent frameworks in the wild:
+The crate pulls in parsers for the most common configuration formats found in agent frameworks:
 
 | Format | Crate | Typical Use |
 |---|---|---|
-| JSON | `serde_json` | Default for many frameworks |
-| YAML | `serde_yaml` | Common in Kubernetes-oriented agents |
-| JSON5 | `json5` | Human-friendly JSON with comments |
-| TOML | `toml` | Popular in Rust-based tooling |
+| JSON | `serde_json` | Standard structured data, API responses |
+| YAML | `serde_yaml` | Human-editable config files (common in LangChain, AutoGen) |
+| JSON5 | `json5` | Lenient JSON with comments and trailing commas |
+| TOML | `toml` | Rust-ecosystem configs, lightweight agent definitions |
 
-## Key Dependencies
+## Key Dependencies and Their Roles
 
-- **`librefang-types`** — Defines the target data structures. All migrated output conforms to these types.
-- **`walkdir`** — Recursively traverses directories to locate configuration files from source frameworks.
-- **`dirs`** — Resolves standard platform directories (e.g., locating a source framework's default config path on Linux, macOS, or Windows).
-- **`chrono`** — Handles timestamp conversion and migration metadata.
-- **`thiserror`** — Derives typed errors for migration failures.
-- **`tracing`** — Emits structured logs during the migration process, useful for diagnosing conversion issues in large imports.
+- **`librefang-types`** — Target type definitions. All migration output is expressed through these types, ensuring consistency with the rest of the LibreFang ecosystem.
+- **`walkdir`** — Recursive directory traversal for scanning existing agent project directories and locating migration-eligible files.
+- **`chrono`** — Timestamp handling for migration metadata, creation-date preservation, and audit logging.
+- **`dirs`** — Resolves standard platform directories (config home, data home) so migration can auto-discover agent installations in conventional locations.
+- **`thiserror`** — Derives structured error types for migration failures (parse errors, validation errors, I/O errors).
+- **`tracing`** — Structured logging throughout the migration pipeline for progress reporting and diagnostics.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    A[Source Framework Configs] -->|walkdir discovers files| B[Parse]
-    B -->|json/yaml/json5/toml| C[Intermediate Representation]
-    C -->|validate + transform| D[librefang-types]
-    D --> E[LibreFang Config Output]
+    A[Source Framework Files] --> B[Directory Scanner]
+    B --> C[Format Parser]
+    C --> D[Type Converter]
+    D --> E[librefang-types]
+    D --> F[Migration Report]
 ```
 
-The migration pipeline follows three phases:
+The migration pipeline has four conceptual stages:
 
-1. **Discovery** — `walkdir` scans a source directory for configuration files. The `dirs` crate can auto-locate well-known framework config paths if the user doesn't supply one explicitly.
-
-2. **Parse & Translate** — Each file is deserialized from its native format into an intermediate representation, then transformed into `librefang-types` structures. Validation occurs at this boundary; incompatible or unrecognized fields produce typed errors via `thiserror`.
-
-3. **Emit** — The resulting LibreFang-native structures are written to the target location.
+1. **Discovery** — `walkdir` and `dirs` locate candidate files on disk.
+2. **Parsing** — The appropriate serde-based deserializer converts raw files into intermediate representations.
+3. **Conversion** — Intermediate data maps into `librefang-types` structs, applying any necessary schema transformations.
+4. **Reporting** — Migration results, warnings, and errors are collected and surfaced via `tracing` and structured migration reports.
 
 ## Error Handling
 
-All errors are derived through `thiserror`, providing:
+All errors are derived through `thiserror`, producing a typed error enum that covers:
 
-- **Parse errors** — Malformed source files (invalid JSON, bad YAML indentation, etc.)
-- **Conversion errors** — Semantically valid source configs that don't map cleanly to LibreFang concepts.
-- **I/O errors** — Filesystem issues during discovery or output.
+- File I/O failures during discovery or reading
+- Parse failures across any supported format
+- Schema validation errors when source data doesn't map cleanly to LibreFang types
+- Path resolution failures from `dirs`
 
-Callers should expect `Result<T, MigrationError>` (or similar) as the standard return type from migration entry points. Inspect the error variants to determine whether a failure is recoverable (skip and continue) or fatal.
-
-## Logging
-
-The module uses `tracing` spans and events rather than `println` or `log`. To capture migration output, initialize a `tracing` subscriber in the calling binary or test. Key events include:
-
-- Files discovered and skipped
-- Per-file parse success or failure
-- Field-level conversion warnings (e.g., dropped unsupported fields)
+Callers should expect `Result<T, MigrationError>` (or equivalent) from migration entry points and handle errors appropriate to their context—whether that's CLI output, log aggregation, or programmatic retry.
 
 ## Testing
 
-Tests use `tempfile` to create isolated directory trees that mimic source framework layouts. This avoids depending on real agent installations and keeps tests hermetic across platforms.
+The crate uses `tempfile` in dev-dependencies for isolated filesystem-based tests. Migration tests typically:
 
-## Relationship to the Rest of LibreFang
+1. Create a temporary directory structure mimicking a source framework layout.
+2. Populate it with fixture files in various formats.
+3. Run migration against the temp directory.
+4. Assert the output matches expected `librefang-types` structures.
 
-`librefang-migrate` is a standalone utility crate. It depends on `librefang-types` for its output shapes but does not depend on the runtime agent, server, or protocol crates. Other modules do not call into it; it is invoked directly (likely from a CLI binary or a one-shot migration script) and produces static configuration that the rest of the system consumes.
+## Integration with LibreFang
+
+`librefang-migrate` is a utility crate. It has no inbound or outbound runtime dependencies on other LibreFang crates beyond `librefang-types`, meaning it can be used standalone in one-off migration scripts or embedded in a larger LibreFang deployment tool.

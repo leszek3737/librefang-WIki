@@ -1,108 +1,104 @@
 # Other — librefang-memory-src
 
-# Roster Store (`librefang-memory/src/roster_store.rs`)
+# RosterStore — SQLite-Backed Group Roster
 
 ## Purpose
 
-`RosterStore` persists the membership of group chats in SQLite so that agents can look up who is present in a room without the full roster being injected into the system prompt. This saves tokens on every request while still letting the agent answer questions like "who is in this chat?" through the `group_members` tool.
+`RosterStore` tracks which users have been seen in each group chat, persisting membership data across daemon restarts. Agents query this store through the `group_members` tool rather than having the full roster injected into the system prompt, which saves tokens on large groups.
+
+The store lives in `librefang-memory/src/roster_store.rs` and operates on the same SQLite database managed by `MemorySubstrate`.
 
 ## Architecture
 
 ```mermaid
-graph LR
-    A[MemorySubstrate::open] -->|runs migrations| B[migration::migrate_v28]
-    A -->|passes Pool| C[RosterStore::new]
-    C -->|upsert / members / remove| D[(group_roster table)]
-    E[Agent group_members tool] -->|queries| C
-    F[Chat presence events] -->|calls upsert| C
+graph TD
+    MS["MemorySubstrate::open"] -->|"runs migrations"| MIG["migration::run_migrations"]
+    MS -->|"constructs"| RS["RosterStore"]
+    MIG -->|"creates group_roster table"| DB[(SQLite)]
+    RS -->|"reads/writes via"| DB
+    AGENT["Agent (group_members tool)"] -->|"queries"| RS
 ```
 
-The store is intentionally a thin wrapper around an `r2d2` connection pool. It does **not** own its schema — `group_roster` is created by the shared migration ladder (`migration::migrate_v28`), which runs inside `MemorySubstrate::open` before the store is constructed. This design means:
+## Key Design Decisions
 
-- All schema changes flow through a single migration path.
-- Constructing a `RosterStore` can never panic on a locked or read-only database; failures surface earlier, at boot.
+**No schema DDL in the constructor.** `RosterStore::new` only wraps an existing connection pool. The `group_roster` table is created by `migration::migrate_v28`, which `MemorySubstrate::open` runs before constructing the store. This ensures:
 
-## Data Model
+1. Every memory table goes through the single migration ladder — no divergent schema paths.
+2. Constructing a `RosterStore` can never panic on a locked or read-only database. Schema failures surface from `MemorySubstrate::open` at boot instead.
 
-The underlying `group_roster` table is keyed on a composite of `(channel_type, chat_id, user_id)`:
+**Graceful degradation on pool exhaustion.** Every method that acquires a connection handles pool exhaustion by logging a warning, incrementing a failure metric, and returning a safe default (empty vec, zero count, or no-op). The store never panics due to contention.
+
+## Schema
+
+The underlying `group_roster` table (created by migration v28):
 
 | Column | Type | Notes |
 |---|---|---|
-| `channel_type` | text | Protocol/network identifier (e.g. `"telegram"`) |
-| `chat_id` | text | Platform-specific group identifier |
-| `user_id` | text | Platform-specific user identifier |
-| `display_name` | text | Current display name — overwritten on every upsert |
-| `username` | text | Optional handle — preserved if a later upsert supplies `None` |
-| `first_seen` | integer | Unix timestamp set on `INSERT` |
-| `last_seen` | integer | Unix timestamp updated on every upsert |
+| `channel_type` | text | e.g. `"telegram"` |
+| `chat_id` | text | Group/chat identifier |
+| `user_id` | text | User identifier within the channel |
+| `display_name` | text | Current display name |
+| `username` | text | Nullable handle/username |
+| `first_seen` | integer | Unix timestamp of first insertion |
+| `last_seen` | integer | Unix timestamp, updated on every upsert |
+
+The unique constraint is **(channel_type, chat_id, user_id)**.
 
 ## API
 
-### `RosterStore::new(pool)`
+### `RosterStore::new(pool: Pool<SqliteConnectionManager>) -> Self`
 
-Wraps an existing `r2d2::Pool<SqliteConnectionManager>`. No DDL is executed here.
+Wraps an existing r2d2 connection pool. Call this only after migrations have been applied.
 
 ### `upsert(channel, chat_id, user_id, display_name, username)`
 
-Inserts a new member or updates an existing one. On conflict:
+Inserts a new member or updates an existing one. On conflict (same channel + chat + user), it:
 
-- `display_name` is **always** overwritten with the latest value.
-- `username` uses `COALESCE(excluded.username, group_roster.username)` — a `None` will not erase a previously known username.
-- `last_seen` is refreshed to the current Unix timestamp.
-- `first_seen` is set once on insert and never changed.
+- Overwrites `display_name` with the new value.
+- Updates `username` only if a non-null value is provided (`COALESCE` preserves the existing username).
+- Refreshes `last_seen` to the current Unix timestamp.
+- Leaves `first_seen` unchanged.
 
-**Guard:** If `chat_id` or `user_id` is empty, the call returns immediately without touching the database. This prevents garbage rows from malformed events.
+Silently returns if `chat_id` or `user_id` is empty — these are treated as invalid identifiers.
 
-### `members(channel, chat_id) → Vec<(user_id, display_name, username)>`
+### `members(channel, chat_id) -> Vec<(String, String, Option<String>)>`
 
-Returns all known members of a group, ordered alphabetically by `display_name`. Returns an empty `Vec` if the chat is unknown or the pool is exhausted.
+Returns all members for the given chat as `(user_id, display_name, username)` tuples, ordered alphabetically by `display_name`. Returns an empty `Vec` on pool exhaustion or if no members exist.
 
 ### `remove_member(channel, chat_id, user_id)`
 
-Deletes a single member row. Used when a leave/part/kick event is received.
+Deletes a single member from the roster. No-op on pool exhaustion.
 
-### `member_count(channel, chat_id) → usize`
+### `member_count(channel, chat_id) -> usize`
 
-Returns `COUNT(*)` for the given group. Returns `0` on unknown chats or pool exhaustion.
+Returns the number of members in a chat. Returns `0` on pool exhaustion or if no members exist.
 
-## Error Handling Strategy
+## Error Handling & Observability
 
-None of the public methods return `Result`. Instead, they follow a **degrade gracefully** pattern:
+All pool acquisition failures emit:
 
-1. **Empty inputs** — `upsert` silently ignores rows with empty `chat_id` or `user_id`.
-2. **Pool exhaustion** — Every method catches a failed `pool.get()`, emits a `tracing::warn!`, increments the `librefang_memory_pool_get_failed_total` counter (labelled with `store => "roster"` and the `op` name), and returns a safe default (`None`, `0`, or `Vec::new()`).
-3. **SQL errors** — `let _ = c.execute(...)` discards insertion failures. Query methods use `.unwrap()` on the prepared statement under the assumption that the schema has been validated by migrations at boot.
+- A `tracing::warn` log identifying the store (`roster`), the operation, and the channel/chat identifiers.
+- A counter increment on `librefang_memory_pool_get_failed_total` with labels `store => "roster"` and `op => <operation>`.
 
-This makes the store safe to call from hot paths (presence floods) without propagating transient DB pressure upward.
+SQL execution errors from `execute` and `query_row` are silently consumed (`let _ = ...` / `.unwrap_or(...)`). This is intentional — the roster is best-effort metadata, and transient SQLite errors should not crash the agent loop.
 
-## Metrics
+## Isolation Model
 
-All pool-get failures emit a counter:
-
-```
-librefang_memory_pool_get_failed_total{store="roster",op="<operation>"}
-```
-
-Where `<operation>` is one of `upsert`, `members`, `remove_member`, or `member_count`. Monitoring this metric is the primary way to detect connection-pool saturation.
+Each `(channel_type, chat_id)` pair is fully isolated. There is no cross-chat leakage: members in `("telegram", "-100")` are invisible to queries for `("telegram", "-200")` or `("discord", "100")`. This is enforced by the `WHERE` clause in every query.
 
 ## Testing
 
-Tests use `SqliteConnectionManager::memory()` with a single-connection pool. The helper `in_memory_store()` runs `migration::run_migrations` against the in-memory database before constructing the store, ensuring the test schema matches production.
+Tests create an in-memory SQLite database via `in_memory_store()`, which:
 
-Key test cases:
+1. Builds a single-connection pool (`max_size(1)`).
+2. Runs `migration::run_migrations` to create the full schema.
+3. Constructs and returns a `RosterStore`.
 
-| Test | Validates |
-|---|---|
-| `upsert_and_list` | Basic insert and retrieval; username `Option` handling |
-| `idempotent_upsert_updates_display_name` | Repeated upserts update display name without duplicating rows |
-| `remove_member` | Deletion removes the correct row; count decreases |
-| `empty_chat_returns_nothing` | Unknown chats yield empty results, not errors |
-| `different_chats_are_isolated` | Members in one chat don't leak into another |
-| `empty_ids_are_ignored` | Empty `chat_id` or `user_id` produces no rows |
+Covered scenarios:
 
-## Integration Notes
-
-- **Instantiation:** Call `RosterStore::new(pool)` with the same pool used by `MemorySubstrate`. The migrations must have already been applied.
-- **Write path:** Chat adapters should call `upsert` on every presence, join, or profile-update event.
-- **Read path:** The `group_members` agent tool calls `members` to satisfy queries about who is in the current chat.
-- **Thread safety:** `r2d2::Pool` is `Send + Sync`; `RosterStore` can be freely shared across threads (e.g. cloned into async tasks).
+- **`upsert_and_list`** — basic insertion and alphabetical ordering.
+- **`idempotent_upsert_updates_display_name`** — repeated upserts update display_name but don't duplicate rows.
+- **`remove_member`** — deletion reduces count and the removed member is absent from listings.
+- **`empty_chat_returns_nothing`** — querying a nonexistent chat returns empty/zero.
+- **`different_chats_are_isolated`** — members in one chat don't appear in another.
+- **`empty_ids_are_ignored`** — upserts with empty `chat_id` or `user_id` are silently dropped.

@@ -2,142 +2,110 @@
 
 # librefang-types
 
-Shared data structures for the LibreFang Agent OS. Every other workspace crate depends on this one. **Contains no business logic** — pure types, derives, and small serialization helpers.
+Shared data structures for the LibreFang Agent OS. Pure types, zero business logic. Every other workspace crate depends on this one; it depends on nothing in the workspace.
 
-## Position in the dependency graph
+## Position in the workspace
 
 ```mermaid
-graph BT
-    types["librefang-types"]
-    kernel["librefang-kernel"] --> types
-    runtime["librefang-runtime"] --> types
-    api["librefang-api"] --> types
-    memory["librefang-memory"] --> types
-    comms["librefang-comms"] --> types
+graph TD
+    T[librefang-types] --> K[librefang-kernel]
+    T --> A[librefang-api]
+    T --> R[librefang-runtime]
+    T --> M[librefang-memory]
+    T --> O[other crates...]
 ```
 
-`librefang-types` sits at the bottom. It imports **zero** workspace crates. All dependencies are external: `serde`, `serde_json`, `chrono`, `uuid`, `thiserror`, `dirs`, `toml`, `schemars`, `url`, `ed25519-dalek`, `sha2`, `hex`, `zeroize`, `fluent`, `unic-langid`, `regex-lite`, `tracing`.
+`librefang-types` sits at the bottom of the dependency DAG. It imports **no** other `librefang-*` crate. If you need a type shared across two or more crates, it belongs here or you reverse the dependency.
 
-## Public modules
+## What goes here
 
-Each submodule is a domain-oriented collection of structs and enums:
+Cross-crate data structures only: structs, enums, type aliases, and small derive-only helpers. If a function body exceeds five lines, it belongs in a consumer crate.
+
+### Public modules
 
 | Module | Domain |
 |---|---|
 | `agent` | Agent identity and descriptor types |
-| `approval` | Human-approval workflow types |
-| `capability` | Capability tokens and permission models |
+| `approval` | Approval / human-in-the-gate flow types |
+| `capability` | Permission and capability tokens |
 | `comms` | Inter-agent communication primitives |
-| `config` | `KernelConfig` and all configuration structs |
-| `error` | `LibreFangError` and error enumerations |
-| `event` | System event types |
+| `config` | `KernelConfig` and related configuration structs |
+| `error` | `LibreFangError` and error enums (see below) |
+| `event` | Event types emitted by the kernel |
 | `goal` | Goal and objective types |
 | `i18n` | Internationalization types (backed by `fluent`) |
-| `manifest_signing` | Manifest signing and verification types (ed25519) |
-| `media` | Media attachment types |
+| `manifest_signing` | Ed25519 manifest signing types |
+| `media` | Media content types |
 | `memory` | Memory substrate types |
-| `message` | Message envelope and payload types |
-| `model_catalog` | LLM model catalog entries |
-| `oauth` | OAuth credential types |
-| `registry_schema` | Registry schema definitions |
-| `scheduler` | Task scheduler types |
-| `serde_compat` | Serde helper types and compatibility shims |
-| `subagent` | Sub-agent spawn and lifecycle types |
-| `taint` | Data taint-tracking types |
-| `tool` | Tool invocation types |
-| `tool_class` | Tool classification and taxonomy |
+| `message` | Message envelope types |
+| `model_catalog` | Model registry / catalog types |
+| `oauth` | OAuth flow types |
+| `registry_schema` | Registry schema types |
+| `scheduler` | Scheduling types |
+| `serde_compat` | Serde helpers and compat shims |
+| `subagent` | Sub-agent spawn / management types |
+| `taint` | Taint tracking types |
+| `tool` | Tool descriptor types |
+| `tool_class` | Tool classification types |
 
-## Public constants
+### Public constants
 
-- **`VERSION: &str`** — workspace version injected at compile time from `CARGO_PKG_VERSION`.
+- **`VERSION: &str`** — workspace version, compiled from `CARGO_PKG_VERSION`.
+
+## Dependencies
+
+External only. No workspace crate imports.
+
+`serde`, `serde_json`, `chrono`, `uuid`, `thiserror`, `dirs`, `toml`, `schemars`, `async-trait`, `ed25519-dalek`, `sha2`, `hex`, `zeroize`, `fluent`, `unic-langid`, `regex-lite`, `tracing`, `url`.
 
 ## Adding a new type
 
-### 1. Choose the right submodule
+1. **Choose the module.** Place the type in the matching submodule above. If no module fits, create a new one — but first verify the type is truly cross-crate and doesn't belong in the single crate that consumes it.
+2. **Derive the standard quartet:** `Debug`, `Clone`, `Serialize`, `Deserialize`.
+3. **Add `PartialEq` / `Eq` / `Hash`** only when a downstream consumer needs them.
+4. **OpenAPI surface types:** also derive `utoipa::ToSchema`.
+5. **Configuration types:** also derive `schemars::JsonSchema` (required for the kernel-config golden fixture — see below).
 
-Place the type under the matching domain module. If no module fits, decide whether it is genuinely cross-crate or belongs in the single consuming crate instead. New submodules are rare and require justification.
+## Adding a field to a config struct
 
-### 2. Derive the standard quartet
+Every config field must follow this ritual:
 
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MyType {
-    // ...
-}
-```
+1. Add the field with `#[serde(default)]` for forward-compatibility with existing TOML files.
+2. Add the corresponding entry in the manual `Default` impl. The build will fail otherwise.
+3. Write a doc comment. `schemars` surfaces doc comments as the field's `description` in the generated JSON Schema.
+4. Regenerate the golden fixture in `librefang-api` tests. CI enforces this.
 
-Add `PartialEq`, `Eq`, or `Hash` only when a downstream consumer requires them. Do not derive them speculatively.
+### Schema-mirror invariant
 
-### 3. OpenAPI surface types
+`librefang-types` defines the schema. The golden-file guard (`kernel_config_schema_matches_golden_fixture`) lives in `librefang-api`'s test suite. The canonical OpenAPI and TOML baselines are tracked under `xtask/baselines/`.
 
-Types that appear in the HTTP API must also derive:
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-```
-
-### 4. Configuration types
-
-Types that form part of `KernelConfig` (or any TOML-loaded config) must also derive:
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-```
-
-The JSON Schema output feeds the golden-file fixture in `librefang-api`.
-
-### 5. Deterministic ordering for LLM-bound data
-
-Any field whose serialized form may end up in an LLM prompt **must** use `BTreeMap` / `BTreeSet` instead of `HashMap` / `HashSet`. Deterministic serialization produces stable prompts and reproducible outputs (refs #3298).
-
-## Configuration field ritual
-
-When adding a field to a config struct, follow all four steps:
-
-```rust
-/// Maximum concurrent tool invocations per agent.
-#[serde(default = "default_max_concurrent_tools")]
-pub max_concurrent_tools: usize,
-```
-
-1. **`#[serde(default)]`** (or `default = "..."`) — ensures forward-compatibility with existing TOML files that lack the new field.
-2. **Update the `Default` impl** — the build breaks silently if you forget.
-3. **Write a doc comment** — `schemars` surfaces it as the field's `description` in the generated JSON Schema.
-4. **Regenerate the golden fixture** — run the `kernel_config_schema_matches_golden_fixture` test in `librefang-api`. CI will fail until you do.
+CI uses a changed-lanes rule: any PR touching `librefang-types` automatically pulls `librefang-api` into the affected test set. A schema change without a regenerated golden will fail CI.
 
 ## Error types
 
-The crate exports `LibreFangError` and related error enums. The project is migrating away from `Result<_, String>` and `anyhow::Error` in trait boundaries (refs #3541, #3711). New error variants belong here.
+This crate exports `LibreFangError` and related error enums. The workspace is migrating away from `Result<_, String>` and `anyhow::Error` in trait boundaries (#3541, #3711). New error variants belong here.
 
-### Adding an error variant
+When adding a variant:
 
-Preserve the `source()` chain so that downstream callers can inspect causes (refs #3745):
+- Preserve the `source()` chain (#3745).
+- Use `#[from]` on a wrapped enum — this is the standard idiom for automatic `From` conversion while keeping the error chain intact.
 
 ```rust
 #[derive(Debug, thiserror::Error)]
 pub enum LibreFangError {
-    // ...existing variants...
-
-    #[error("tool execution failed")]
-    ToolExecution(#[from] ToolError),
+    #[error("configuration error")]
+    Config(#[from] ConfigError),
+    // ...
 }
 ```
 
-Use `#[from]` on the wrapped type. Do not flatten error information into a `String`.
-
-## Schema-mirror invariant
-
-`librefang-types` defines the schema. `librefang-api` owns the golden-file guard (`kernel_config_schema_matches_golden_fixture`). Any change to a `KernelConfig` field — addition, rename, or type change — requires regenerating the golden fixture under `api/tests`.
-
-CI enforces this via the changed-lanes rule: a `librefang-types`-only PR automatically pulls `librefang-api` into the affected test set. The canonical OpenAPI and TOML baselines are tracked under `xtask/baselines/`.
-
-## Constraints (taboos)
+## Hard rules (taboos)
 
 | Rule | Reason |
 |---|---|
-| No `tokio` | This crate is synchronous. Async runtime belongs in consumers. |
-| No `reqwest` | HTTP client code belongs in consuming crates. Wire types here are data-only. |
+| No `tokio` | Sync types only. Async runtime belongs in consumers. |
+| No `reqwest` | HTTP code lives in consumer crates. Wire types are data-only. |
 | No `librefang-*` imports | This crate is the bottom of the DAG. Reverse the dependency instead. |
-| No function bodies longer than ~5 lines | Business logic belongs in consumer crates. Types only. |
-| No `HashMap`/`HashSet` for prompt-bound fields | Use `BTreeMap`/`BTreeSet` for deterministic serialization (#3298). |
-| No silently dropping serde fields | Use `#[serde(default)]` for optional fields, or let deserialization fail explicitly. |
+| No functions > 5 lines | Business logic belongs in the crate that uses the type. |
+| No `HashMap` in prompt-bound types | Use `BTreeMap` / `BTreeSet` for deterministic serialization (#3298). |
+| No silently dropped serde fields | Use `#[serde(default)]` explicitly, or let it fail at compile time. |

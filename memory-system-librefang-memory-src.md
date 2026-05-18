@@ -4,205 +4,240 @@
 
 ## Overview
 
-`librefang-memory` is the persistent memory substrate for the LibreFang Agent Operating System. It provides a unified API over three storage paradigms — structured key-value, semantic vector search, and a knowledge graph — all backed by SQLite via a shared `r2d2` connection pool. Agents, the kernel, and the HTTP API layer interact with a single `MemorySubstrate` rather than individual stores.
+`librefang-memory` is the persistence substrate for the LibreFang Agent Operating System. It provides a unified memory API over three storage backends and a collection of supporting services (decay, consolidation, idempotency, usage metering) that agents consume through a single `MemorySubstrate` entry point.
+
+All primary state lives in SQLite (via `r2d2` + `rusqlite` with WAL mode), which keeps the deployment footprint to a single file and eliminates external database dependencies. Vector search delegates to pluggable `VectorStore` backends — either an in-process SQLite approximation (`SqliteVectorStore`) or a remote service (`HttpVectorStore`).
 
 ## Architecture
 
 ```mermaid
 graph TD
-    API["HTTP API routes"] --> PS["ProactiveMemoryStore"]
-    Kernel["Kernel (cron, tasks)"] --> Sub["MemorySubstrate"]
-    PS --> Sub
+    subgraph "Agent-Facing APIs"
+        Proactive[ProactiveMemoryStore]
+        Structured[StructuredStore]
+        Knowledge[KnowledgeStore]
+        Sessions[SessionStore]
+        Usage[UsageRecord]
+    end
 
-    Sub --> Structured["StructuredStore (KV)"]
-    Sub --> Semantic["SqliteVectorStore"]
-    Sub --> KG["KnowledgeStore"]
-    Sub --> Session["SessionStore"]
-    Sub --> Usage["UsageTracker"]
-    Sub --> Prompt["PromptStore"]
-    Sub --> Idem["IdempotencyStore"]
+    subgraph "Internal Services"
+        Chunker[chunker]
+        Consolidation[ConsolidationEngine]
+        Decay[decay]
+        Migrations[migration v1-v40]
+        ACL[NamespaceGate]
+        Idempotency[SqliteIdempotencyStore]
+        Workflow[WorkflowStore]
+        Prompt[PromptStore]
+    end
 
-    Semantic -->|"delegates to"| HttpVS["HttpVectorStore"]
-    Consolidation["ConsolidationEngine"] --> Sub
-    Decay["decay module"] --> Sub
+    subgraph "Vector Backends"
+        SQLiteVec[SqliteVectorStore]
+        HttpVec[HttpVectorStore]
+    end
 
-    Structured --> SQLite["SQLite (r2d2 pool)"]
-    Semantic --> SQLite
-    KG --> SQLite
-    Session --> SQLite
-    Usage --> SQLite
-    Prompt --> SQLite
-    Idem --> SQLite
+    Substrate[MemorySubstrate]
+
+    Substrate --> Proactive
+    Substrate --> Structured
+    Substrate --> Sessions
+    Substrate --> Knowledge
+    Substrate --> Usage
+    Substrate --> Workflow
+    Substrate --> Prompt
+    Substrate --> Migrations
+
+    Proactive --> Consolidation
+    Proactive --> Decay
+    Proactive --> Chunker
+    Proactive --> SQLiteVec
+    Proactive --> HttpVec
+    Proactive --> ACL
+
+    Sessions --> Idempotency
 ```
 
-## Core Type: `MemorySubstrate`
+## Key Components
 
-`MemorySubstrate` (in `substrate.rs`) is the central facade. It holds the `r2d2::Pool<SqliteConnectionManager>` and exposes methods for every subsystem: KV get/set, session save/load, task queue operations, memory recall, consolidation, and agent removal. It is `Clone`-safe (the pool is `Arc`-wrapped internally).
+### `MemorySubstrate` (`substrate.rs`)
 
-Create an in-memory instance for testing:
+The top-level object that owns the `r2d2::Pool<SqliteConnectionManager>` and wires together all sub-stores. Created once at daemon startup; clones share the same pool. Handles schema migration on construction via `run_migrations`, then hands out references to each sub-store.
 
-```rust
-let substrate = MemorySubstrate::open_in_memory();
-```
+Re-exports the `Memory` trait from `librefang_types` so consumers don't need to depend on the types crate separately.
 
-The kernel creates a file-backed instance at startup, running `migration::run_migrations` on the connection before serving requests.
+### `ProactiveMemoryStore` (`proactive.rs`)
 
-## Storage Subsystems
+mem0-style proactive memory — the primary API agents use for search, add, update, delete, and list operations. Internally:
 
-### Structured Store (`structured.rs`)
+- Embeds text via a configured embedding provider
+- Chunks long documents with `chunker::chunk_text` before embedding
+- Persists memories in the `memories` table with vector embeddings
+- Enforces namespace ACLs via `NamespaceGate`
 
-Per-agent key-value storage. Keys are scoped to an `(agent_id, key)` pair with versioning. Namespace ACL guards (`namespace_acl.rs`) control which key prefixes an external caller can read or mutate.
+Key types re-exported: `ProactiveMemory`, `ProactiveMemoryHooks`, `MemoryStats`, `MemoryExportItem`.
 
-### Semantic Store (`semantic.rs` — `SqliteVectorStore`)
+### Semantic Memory (`semantic.rs` — `SqliteVectorStore`)
 
-Text-based memory search. Stores memory records in the `memories` table with optional embedding BLOBs (LE `f32` arrays). Supports:
+Implements `VectorStore` against SQLite. Stores embeddings as BLOBs (little-endian `f32` arrays) alongside the `memories` row. Search uses cosine similarity computed in Rust after loading candidates filtered by agent and scope. Suitable for moderate memory counts; larger deployments should switch to `HttpVectorStore`.
 
-- **Recall**: Retrieve memories by agent, ordered by confidence and recency
-- **Insert with embedding**: Store a content string alongside its vector embedding
-- **LIKE-based fallback search**: When no vector backend is available
+### `HttpVectorStore` (`http_vector_store.rs`)
 
-Implements the `VectorStore` trait from `librefang-types`.
+Delegates vector operations to a remote HTTP service. Implements the same `VectorStore` trait. The remote API must expose four endpoints:
 
-### HTTP Vector Store (`http_vector_store.rs`)
-
-A `VectorStore` implementation that delegates to a remote HTTP service (e.g., Qdrant, Weaviate). All operations are async via `reqwest`:
-
-| Endpoint | Method | Purpose |
-|---|---|---|
-| `/insert` | POST | Store an embedding with payload and metadata |
-| `/search` | POST | Nearest-neighbour search |
-| `/delete` | DELETE | Remove an embedding by ID |
-| `/get_embeddings` | POST | Batch-fetch embeddings by ID |
-
-Constructed with `HttpVectorStore::new("http://host:port/path")` — trailing slashes are stripped automatically.
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/insert` | Store a vector + payload |
+| POST | `/search` | Nearest-neighbour search |
+| DELETE | `/delete` | Remove a vector |
+| POST | `/get_embeddings` | Batch-fetch vectors by ID |
 
 ### Knowledge Graph (`knowledge.rs`)
 
-`KnowledgeStore` manages entities and relations in SQLite. Key methods:
+SQLite-backed entity-relation graph. Entities are typed (`EntityType::Person`, `Organization`, `Custom`, etc.) and carry a JSON `properties` map. Relations connect two entities with a `RelationType` and confidence score.
 
-- **`add_entity(entity, agent_id)`** — Upsert an entity (generates a UUID if `id` is empty)
-- **`add_relation(relation, agent_id)`** — Create a typed, weighted edge between two entities
-- **`query_graph(pattern)`** — Pattern-matching query over the `(source, relation, target)` triple
-- **`has_relation(source, relation_type, target)`** — Existence check (matches by ID or name)
-- **`delete_by_agent(agent_id)`** — Remove all entities and relations for an agent (transactional)
+Queries use `GraphPattern` — a triple pattern with optional source, relation, and target bindings. The JOIN matches entities by both `id` and `name`, so relations created by the MCP tool (which references by name) resolve correctly.
 
-Relations can reference entities by **ID or name**. The SQL JOIN in `query_graph` handles both cases, which is important because the MCP tool layer often references entities by name rather than ID.
+**Tenant isolation:** All queries are scoped by `agent_id`. `delete_by_agent` wraps the relations-then-entities delete in a single transaction to prevent orphan entities.
 
-### Session Store (`session.rs`, `session_store.rs`)
+### Text Chunker (`chunker.rs`)
 
-Persists conversation sessions as MessagePack blobs in the `sessions` table. Features:
-
-- **Message count denormalization**: The `message_count` column avoids deserializing the blob for listing (migration v32 backfills this).
-- **Full-text search**: An FTS5 virtual table (`sessions_fts`) indexes session content for text search.
-- **Canonical sessions**: Cross-channel persistent memory via `canonical_sessions` table.
-- **JSONL mirror**: Optional write-ahead log for session content.
-
-### Prompt Store (`prompt.rs`)
-
-Versioned prompt management with A/B experiment support. Tables: `prompt_versions`, `prompt_experiments`, `prompt_experiment_results`. Experiments track traffic splits and success criteria.
-
-### Usage Tracker (`usage.rs`)
-
-Cost and token metering in `usage_events`. Records per-agent, per-model input/output tokens and cost. Supports aggregation queries for dashboards and billing.
-
-### Idempotency Store (`idempotency.rs`)
-
-SQLite-backed cache for HTTP `Idempotency-Key` semantics. Records expire after 24 hours. The lookup path opportunistically prunes expired rows so the table self-trims without a background job.
-
-Key types:
-- `IdempotencyStore` trait — pluggable backend (testable with mocks)
-- `SqliteIdempotencyStore` — production implementation using the shared pool
-- `CachedResponse { status: u16, body: Vec<u8> }` — replayed verbatim on duplicate requests
-
-First-writer-wins via `INSERT OR IGNORE`.
-
-### Provider System (`provider.rs`)
-
-Plugin architecture for memory providers. `MemoryManager` holds a registry of `MemoryProvider` implementations (trait with methods like `prefetch`, `notify_turn_complete`). A `NullMemoryProvider` is registered as the built-in default; external providers are registered at startup. Errors in external providers are isolated and logged rather than propagated.
-
-## Memory Lifecycle
-
-### Chunking (`chunker.rs`)
-
-Long documents are split into overlapping chunks before embedding. `chunk_text(text, max_size, overlap)` applies a three-tier splitting strategy:
+Splits long text into overlapping chunks for embedding. Three-level splitting strategy:
 
 1. **Paragraph boundaries** (`\n\n`)
 2. **Sentence boundaries** (`. `, `.\n`, `。`, `？`, `！`)
-3. **Hard character limit** (only when a single sentence exceeds `max_size`)
+3. **Hard character limit** as a last resort
 
-Segments are then greedily packed into chunks with `overlap` characters of context carried forward from the previous chunk. All operations are Unicode-aware (char-based, not byte-based).
+All sizes are measured in Unicode characters, not bytes. Overlap is prepended from the tail of the previous chunk to preserve context continuity.
 
-### Decay (`decay.rs`)
-
-Time-based soft-deletion based on memory scope and TTL:
-
-| Scope | TTL Config Key | Behavior |
-|---|---|---|
-| `user_memory` | — | **Never decays** (permanent) |
-| `session_memory` | `session_ttl_days` | Soft-deletes after N days of no access |
-| `agent_memory` | `agent_ttl_days` | Soft-deletes after N days of no access |
-
-`run_decay(pool, config)` performs the sweep. Accessing a memory via search/recall resets `accessed_at`, extending the lifetime. Decay writes `deleted = 1` and stamps `deleted_at`; hard removal happens later.
-
-`prune_soft_deleted_memories(pool, older_than_days)` reclaims space by hard-deleting rows that have been soft-deleted for longer than the specified window.
+```rust
+pub fn chunk_text(text: &str, max_size: usize, overlap: usize) -> Vec<String>
+```
 
 ### Consolidation (`consolidation.rs`)
 
-`ConsolidationEngine` runs periodic consolidation cycles:
+`ConsolidationEngine` runs two phases per cycle:
 
-1. **Confidence decay**: Reduces confidence of memories not accessed in 7 days by `(1 - decay_rate)`, floored at 0.1.
-2. **Duplicate merging**: For each agent, loads active memories sorted by confidence (DESC), then pairwise compares using `text_similarity`. Pairs above 90% similarity are merged:
-   - **Keeper**: Higher-confidence row survives
-   - **Confidence**: `max(keeper, loser)`
-   - **Access count**: Summed (`keeper + loser`)
-   - **Metadata**: JSON union; keeper wins on key conflicts; non-object payloads preserved verbatim
-   - **Embedding**: Running confidence-weighted average (accumulates across multiple losers, not pairwise re-blended)
-   - **Loser**: Soft-deleted (`deleted = 1`)
+1. **Decay:** Reduces confidence of memories not accessed in 7 days by a configurable `decay_rate` (floored at 0.1).
+2. **Merge:** Compares memories per-agent (preventing cross-tenant merges) and soft-deletes duplicates with >90% text similarity, merging their state into the higher-confidence keeper.
 
-The merge runs in a single outer transaction (one fsync) capped at 100 merges per run to avoid O(n²) blowup. Agent isolation is enforced — memories from different agents are never compared or merged.
+Merge semantics:
+- **access_count:** summed (keeper + loser)
+- **metadata:** JSON object union; keeper wins on key conflict; non-object payloads are preserved verbatim
+- **embedding:** running confidence-weighted average — the keeper's accumulated weight grows with each absorbed loser, preventing pairwise-blend drift
+- **confidence:** `max(keeper, loser)`
 
-Embedding merge edge cases:
-- **Dimension mismatch**: Keeper's embedding preserved verbatim
-- **Keeper has no embedding, loser does**: Asymmetric — keeper adopts loser's vector (better than losing it on soft-delete)
-- **Both absent**: Stays `None`
+A single outer transaction wraps all merges (capped at `MAX_MERGES_PER_RUN = 100`) so only one fsync fires per consolidation cycle. If the run aborts mid-batch, the next cycle picks up where it left off — consolidation is idempotent.
 
-## Database Schema (`migration.rs`)
+### Time-Based Decay (`decay.rs`)
 
-The migration system manages 36 schema versions. Key tables:
+Scope-driven TTL soft-deletion:
 
-| Table | Purpose | Key Indexes |
-|---|---|---|
-| `agents` | Agent registry | PK `id` |
-| `sessions` | Conversation history | `agent_id`, FTS5 via `sessions_fts` |
-| `memories` | Semantic memories | `(deleted, agent_id, confidence DESC, accessed_at DESC)`, `scope` |
-| `entities` | Knowledge graph nodes | `agent_id`, `name` |
-| `relations` | Knowledge graph edges | `source_entity`, `target_entity`, `agent_id` |
-| `kv_store` | Per-agent key-value | PK `(agent_id, key)` |
-| `usage_events` | Cost metering | `(agent_id, timestamp)` |
-| `prompt_versions` | Prompt version history | `UNIQUE(agent_id, version)` |
-| `prompt_experiments` | A/B test definitions | — |
-| `idempotency_keys` | HTTP replay cache | PK `key`, `expires_at` |
-| `audit_entries` | Merkle audit trail | `agent_id`, `timestamp`, `action` |
-| `task_queue` | Async task queue | `(status, priority DESC)` |
+| Scope | TTL Config | Behaviour |
+|-------|-----------|-----------|
+| `user_memory` | Never | Permanent |
+| `session_memory` | `session_ttl_days` | Soft-delete after TTL |
+| `agent_memory` | `agent_ttl_days` | Soft-delete after TTL |
 
-Schema version is tracked via `PRAGMA user_version` and a `migrations` audit table. A self-healing pass on boot backfills any missing audit rows. Downgrade is refused — if the binary's `SCHEMA_VERSION` is lower than the database's, migrations fail with a clear error message.
+Accessing a memory (via search/recall) updates `accessed_at`, resetting the timer. Soft-deleted rows keep their `deleted_at` timestamp for later hard-deletion.
 
-## Connecting to the Rest of the Codebase
+**`prune_soft_deleted_memories`** — hard-deletes rows where `deleted_at` is older than a configurable threshold. Reclaims embedding BLOBs that would otherwise persist indefinitely in soft-deleted rows.
 
-- **`librefang-api`** calls `ProactiveMemoryStore` and `MemorySubstrate` from HTTP route handlers (`src/routes/memory.rs`, `src/routes/skills.rs`).
-- **Kernel cron jobs** (`src/kernel/cron_tick.rs`, `src/kernel/cron_compaction.rs`) trigger session saves, decay, and compaction.
-- **`librefang-types`** defines the shared traits (`VectorStore`, `ProactiveMemory`), config structs (`MemoryDecayConfig`, `ChunkConfig`), and error types (`LibreFangError`).
-- **`librefang-runtime`** uses `HttpVectorStore` when the vector backend is a remote service.
-- **Agent removal** (`remove_agent_inner` in `substrate.rs`) cascades deletes across sessions, memories, KV pairs, entities, and relations.
+### Session Store (`session.rs`, `session_store.rs`)
 
-## Key Re-exports from `lib.rs`
+Persists conversation history as MessagePack blobs in the `sessions` table. Features:
+
+- Full-text search via `sessions_fts` (unicode61 tokenizer, rebuilt in migration v33)
+- `message_count` denormalized column (migration v32) so `list_sessions` avoids deserializing blobs
+- Canonical sessions for cross-channel persistent memory
+- Expired session cleanup
+- 24-hour usage stats aggregation per agent
+
+### Namespace ACL (`namespace_acl.rs`)
+
+Gates memory operations on namespace-prefixed keys. `NamespaceGate` checks read and write permissions before any KV or memory access. Supports per-namespace allowlists so an agent's memory namespace can be selectively shared or restricted.
+
+### Idempotency Store (`idempotency.rs`)
+
+SQLite-backed cache for HTTP `Idempotency-Key` semantics. Persists full HTTP responses (status + body) with a 24-hour TTL (`TTL_SECONDS`). First-writer-wins via `INSERT OR IGNORE`. Expired rows are pruned opportunistically on lookup.
+
+Schema created by migration v34. Shares the substrate connection pool so no separate database file is needed.
+
+### Schema Migrations (`migration.rs`)
+
+40-version migration ladder. Each version is a transactional step that applies DDL and records itself in the `migrations` audit table. Key design properties:
+
+- **No downgrade:** If `user_version > SCHEMA_VERSION`, the binary refuses to start (prevents silent data loss from missing columns).
+- **Column-exists guards:** Every `ALTER TABLE ADD COLUMN` checks `column_exists` first so a retry after a partial failure doesn't error.
+- **Audit trail self-heal:** After running all steps, verifies `migrations` row count matches `user_version` and backfills missing rows.
+- **Performance indexes:** Migration v9 adds composite indexes for confidence-ordering, decay queries, and eviction scans.
+
+### Supporting Stores
+
+| Module | Purpose |
+|--------|---------|
+| `structured.rs` | Per-agent key-value store with version tracking and namespace ACL enforcement |
+| `prompt.rs` | Prompt template versioning with active-version selection |
+| `usage.rs` | LLM cost metering — records input/output tokens and cost per agent/model |
+| `workflow_store.rs` | Workflow run state persistence (replaces JSON file, survives restarts) |
+| `roster_store.rs` | Agent registry persistence |
+| `provider.rs` | `MemoryProvider` trait — pluggable memory backend with `NullMemoryProvider` default |
+
+## Data Flow
+
+### Memory Add (Proactive)
 
 ```
-MemorySubstrate, SessionStore, ProactiveMemoryStore
-SqliteVectorStore, HttpVectorStore
-MemoryManager, MemoryProvider, MemoryError, NullMemoryProvider
-MemoryNamespaceGuard, NamespaceGate
-PromptStore
+Agent calls add()
+  → chunker::chunk_text (if content > max_size)
+  → Embed each chunk via embedding provider
+  → NamespaceGate::check_write
+  → INSERT into memories (content, embedding, confidence, scope)
 ```
 
-Plus all types from `librefang_types::memory`: `MemoryFilter`, `MemoryItem`, `VectorSearchResult`, `ExtractionResult`, etc.
+### Memory Recall
+
+```
+Agent calls search(query)
+  → Embed query
+  → VectorStore::search (cosine similarity, filtered by agent_id)
+  → Update accessed_at + increment access_count on hits
+  → Return ranked results
+```
+
+### Consolidation Cycle
+
+```
+Kernel timer fires
+  → ConsolidationEngine::consolidate()
+    → Phase 1: decay confidence on 7+ day stale memories
+    → Phase 2: per-agent O(N²) similarity scan (capped at 100 merges)
+      → text_similarity > 0.9 → merge metadata, sum access_count,
+        weighted-average embeddings, soft-delete loser
+    → Single transaction commit (1 fsync)
+```
+
+### Decay Sweep
+
+```
+Kernel timer fires
+  → run_decay(pool, config)
+    → Soft-delete SESSION scope memories older than session_ttl_days
+    → Soft-delete AGENT scope memories older than agent_ttl_days
+    → USER scope untouched
+  → prune_soft_deleted_memories(pool, retention_days)
+    → Hard-delete rows soft-deleted > retention_days ago
+```
+
+## Design Decisions
+
+**Soft-delete everywhere.** Hard `DELETE` only happens in `prune_soft_deleted_memories`, giving operators a recovery window. Other modules (consolidation, history queries) rely on the `deleted` flag to filter.
+
+**Tenant isolation by `agent_id`.** Consolidation, knowledge graph queries, and vector search all scope by `agent_id`. Cross-tenant comparison never occurs, even when the database is shared.
+
+**Char-based sizing.** The chunker counts Unicode characters, not bytes. `char_boundaries` produces byte offsets that never split a multi-byte character, so UTF-8 text (Japanese, emoji) chunks correctly.
+
+**Single-transaction consolidation.** All merges in a consolidation cycle share one outer transaction. Per-pair atomicity (loser soft-delete + keeper update) is preserved because both writes land in the same transaction. A mid-batch crash rolls back the whole cycle; the next run is idempotent.
+
+**Running weighted average for embeddings.** When a keeper absorbs multiple losers, its accumulated weight grows by each loser's confidence. This prevents the pairwise-blend bias where the last-absorbed loser disproportionately shifts the embedding. The accumulated weight is tracked per keeper in `accum_weights`.
+
+**Embedding format.** Embeddings are stored as SQLite BLOBs containing little-endian `f32` values. `decode_embedding` / `encode_embedding` handle the conversion. Dimension mismatches between keeper and loser fall back to preserving the keeper's bytes verbatim.

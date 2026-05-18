@@ -2,53 +2,53 @@
 
 # librefang-kernel-handle
 
-A thin abstraction layer that defines the `KernelHandle` trait — the primary interface through which in-process callers interact with the LibreFang kernel.
+A trait abstraction that defines the interface for in-process callers into the LibreFang kernel.
 
 ## Purpose
 
-This crate exists to decouple **"what it means to talk to the kernel"** from **"how the kernel is actually implemented."** Any component that needs to invoke kernel operations — protocol handlers, session managers, integration tests — depends on this trait rather than on a concrete kernel implementation. This enables:
-
-- **Dependency injection** in production code (swap real kernel for a test double).
-- **Layer isolation** — higher-level crates never see kernel internals.
-- **Async-first design** — all kernel interactions are inherently asynchronous.
+This crate provides the `KernelHandle` trait — a boundary contract between the LibreFang kernel and any in-process component that needs to interact with it. By defining this as a trait rather than a concrete type, the kernel interface can be mocked, decorated, or replaced in tests and alternative configurations without touching caller logic.
 
 ## Role in the Architecture
 
-```mermaid
-graph TD
-    A[Protocol / Session Layer] -->|depends on| B[KernelHandle trait]
-    B -->|implemented by| C[Real Kernel]
-    B -->|implemented by| D[Test Mock / Stub]
-    C -->|uses| E[librefang-types]
-    B -->|uses| E
+```
+┌─────────────────────────┐
+│   In-process caller     │
+│  (plugin, service, etc) │
+└────────────┬────────────┘
+             │ depends on
+             ▼
+┌─────────────────────────┐
+│ librefang-kernel-handle │   ← this crate
+│   KernelHandle trait    │
+└────────────┬────────────┘
+             │ implemented by
+             ▼
+┌─────────────────────────┐
+│   LibreFang Kernel      │
+│   (concrete impl)       │
+└─────────────────────────┘
 ```
 
-Consumers depend on the *trait* defined here. The concrete kernel (likely in a separate crate) implements the trait. Tests can substitute their own implementation without touching production kernel code.
+The trait lives in its own crate to avoid circular dependencies. Callers depend only on this lightweight interface crate, while the kernel provides the concrete implementation. Neither side needs to depend on the other's full crate.
 
-## Dependencies and Why They Matter
+## Dependencies
 
-| Dependency | Reason |
+| Dependency | Role |
 |---|---|
-| `librefang-types` | Shared domain types (request/response structs, error codes, etc.) that flow across the trait boundary. |
-| `async-trait` | Makes the trait object-safe for async methods, allowing `dyn KernelHandle` to be used with `Box::pin`. |
-| `bytes` | Efficient byte-buffer handling for raw packet/message payloads. |
-| `serde_json` | JSON (de)serialization for message bodies that cross the trait boundary. |
-| `thiserror` | Derives the `Error` enum returned by trait methods. |
-| `tracing` | Structured logging spans for observability of kernel calls. |
-| `uuid` | Correlation/trace IDs attached to kernel requests. |
+| `librefang-types` | Shared domain types exchanged across kernel calls (messages, errors, identifiers) |
+| `async-trait` | Enables `async` methods in the trait definition |
+| `bytes` | Efficient byte buffer handling for payload data |
+| `serde_json` | JSON serialization for structured kernel messages |
+| `thiserror` | Derive macro for error types surfaced from kernel operations |
+| `uuid` | Unique identifiers for sessions, requests, or correlation tokens |
+| `tracing` | Structured logging and diagnostics within trait implementations |
 
-`tokio` appears only in `[dev-dependencies]` — it powers the async test runtime and is not a runtime requirement of the crate itself.
+## Testing
 
-## Implementing the Trait
+The dev-dependency on `tokio` (with `macros` and `rt` features) indicates that tests in this crate use the Tokio runtime, consistent with the async nature of the trait. Test authors should annotate test functions with `#[tokio::test]`.
 
-To provide your own `KernelHandle`:
+## Relationship to Other Crates
 
-1. Add `librefang-kernel-handle` and `librefang-types` as dependencies.
-2. Implement the `KernelHandle` trait for your type.
-3. Ensure every async method respects cancellation and returns the expected error type defined in this crate.
-
-For testing, implement the trait with stubbed responses. Because the trait is defined with `async-trait`, it is object-safe and can be used as `Box<dyn KernelHandle>` or `Arc<dyn KernelHandle>`.
-
-## Linting
-
-This crate inherits workspace-level lints, ensuring consistency with the broader LibreFang codebase.
+- **Consumers**: Any crate that needs to call into the kernel (plugins, adapters, middleware) depends on this crate and accepts a `dyn KernelHandle` or generic `H: KernelHandle`.
+- **Implementors**: The kernel crate itself implements this trait on its concrete handle type, satisfying the contract defined here.
+- **Shared types**: All types passed across the trait boundary are defined in `librefang-types`, keeping this crate free of domain logic.

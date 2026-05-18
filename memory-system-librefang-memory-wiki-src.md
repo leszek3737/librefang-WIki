@@ -1,94 +1,63 @@
 # Memory System — librefang-memory-wiki-src
 
-# Memory Wiki (`librefang-memory-wiki`)
+# librefang-memory-wiki
 
-A durable, file-backed markdown knowledge vault for LibreFang Agent OS. Where the memory substrate (`librefang-memory`) excels at vector similarity search over snippets, this crate provides a navigable knowledge base that agents and humans can read and edit — including inside Obsidian or any Markdown editor.
+Durable markdown knowledge vault for the LibreFang Agent OS. Complements `librefang-memory` (the SQLite + vector substrate) by providing a navigable, human-editable knowledge base that can be opened directly in Obsidian. Every page carries provenance frontmatter — which agent, session, channel, and turn produced the claim — so the origin of any fact is always auditable.
 
-Every page carries structured provenance frontmatter so any reader can audit which agent, session, and turn produced a claim.
-
-## Activation
-
-The vault is **off by default**. Operators opt in through `config.toml`:
-
-```toml
-[memory_wiki]
-enabled = true
-mode = "isolated"            # only mode wired in v1
-vault_path = "~/.librefang/wiki/main"
-render_mode = "native"       # native | obsidian
-ingest_filter = "tagged"     # tagged | all (all has no effect in v1)
-```
-
-If `vault_path` is unset, the vault roots itself under the kernel's `home_dir` (not the environment-derived `LIBREFANG_HOME`), so embedded profiles and tests don't mix data with a developer's personal vault.
-
-## Vault Layout
-
-```text
-<vault_path>/
-  <topic>.md              # one page per topic
-  index.md                # auto-generated alphabetical index
-  _meta/
-    compile-state.json    # mtime + sha256 per page from last compile
-    backlinks.json        # { target -> [source, ...] } from every [[link]]
-```
-
-Topic filenames map 1:1 to topic strings: `widgets.md` holds the `widgets` topic. The `index` topic and any name starting with `_` are reserved.
+The vault is **off by default**. Operators opt in via configuration.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[wiki_write caller] -->|topic, body with placeholders, provenance| B[WikiVault::write]
-    B --> C{validate_topic}
-    C -->|ok| D{body size check}
-    D -->|ok| E[acquire write_lock Mutex]
-    E --> F[read existing page]
-    F --> G{detect drift vs compile-state}
-    G -->|drifted, force=false| H[HandEditConflict error]
-    G -->|drifted, force=true| I[preserve external body, append provenance]
-    G -->|no drift| J[rewrite links, use caller body]
-    I --> K[render frontmatter + body to disk]
-    J --> K
-    K --> L[update compile-state.json]
-    L --> M[rebuild index.md + backlinks.json]
+    Caller["wiki_write / wiki_get / wiki_search caller"] --> Vault["WikiVault"]
+    Vault -->|atomic write| Disk["Disk (*.md, _meta/)"]
+    Vault -->|CRLF normalize + split| FM["frontmatter module"]
+    Vault -->|"rewrite [[links]]"| Render["RenderMode"]
+    Vault -->|sha256 + mtime check| CS["compile-state.json"]
+    CS -->|drift detected| Conflict["HandEditConflict error"]
+    Vault -->|rebuild after write| BL["backlinks.json + index.md"]
 ```
 
-## Module Structure
+## Configuration
 
-| File | Responsibility |
-|------|---------------|
-| `lib.rs` | Crate-level docs, re-exports of public types |
-| `error.rs` | `WikiError` enum and `WikiResult<T>` alias |
-| `frontmatter.rs` | YAML frontmatter parse/render/split; `Frontmatter` and `ProvenanceEntry` types |
-| `render.rs` | `RenderMode` enum — link rewriting and extraction |
-| `vault.rs` | `WikiVault` — the core read/write/search/backlinks engine |
+Enable the vault in `config.toml`:
 
-## Key Types
+```toml
+[memory_wiki]
+enabled = true
+mode = "isolated"                           # isolated | bridge | unsafe_local
+vault_path = "~/.librefang/wiki/main"
+render_mode = "native"                      # native | obsidian
+ingest_filter = "tagged"                    # tagged | all
+```
 
-### `WikiVault`
+| Field | Default | v1 Behavior |
+|---|---|---|
+| `enabled` | `false` | Must be `true` or `WikiVault::new` returns `WikiError::Disabled` |
+| `mode` | `isolated` | Only `isolated` is wired; `bridge` and `unsafe_local` return `ModeNotImplemented` |
+| `vault_path` | `<home_dir>/wiki/main` | When unset, falls back to the kernel-supplied `home_dir` — not the env-derived `LIBREFANG_HOME` — so embedded profiles don't mix data |
+| `render_mode` | `native` | Controls how `[[topic]]` placeholders are rendered on disk |
+| `ingest_filter` | `tagged` | `all` is accepted but has no behavioral effect in v1; a warning is logged |
 
-The primary entry point. Constructed via `WikiVault::new(config, home_dir)` (which checks `enabled` and rejects unsupported modes) or `WikiVault::with_root(...)` for tests.
+## File Layout
 
-All mutations go through a `Mutex<()`>` write lock, so concurrent `write` calls to the same vault are serialised.
+```
+<vault_path>/
+├── <topic>.md              # one page per topic
+├── index.md                # auto-generated alphabetical index
+└── _meta/
+    ├── compile-state.json  # mtime + sha256 per page from last compile
+    └── backlinks.json      # { target -> [source, ...] } from every [[link]]
+```
 
-**Public API:**
+Reserved names: `index` (the auto-generated index) and any topic starting with `_` (metadata). Both are rejected by topic validation.
 
-| Method | Description |
-|--------|-------------|
-| `new(config, home_dir)` | Construct from config; returns `WikiError::Disabled` if not opted in |
-| `with_root(root, render_mode, ingest_filter)` | Bypass enabled-check; used by tests and after kernel validation |
-| `root()` | Vault directory path |
-| `render_mode()` | Active `RenderMode` |
-| `write(topic, body, provenance, force)` | Create or update a page |
-| `get(topic)` | Read a single page |
-| `search(query, limit)` | Substring search across all pages |
-| `backlinks()` | List all `source → target` backlink entries |
+## Page Format
 
-### `Frontmatter`
+Each `.md` file is a YAML frontmatter block followed by a markdown body:
 
-Structured YAML header on every page:
-
-```yaml
+```markdown
 ---
 topic: project-conventions
 created: 2026-05-06T10:30:00Z
@@ -101,145 +70,190 @@ provenance:
     turn: 4
     at: 2026-05-06T10:30:00Z
 ---
+
+body markdown ...
 ```
 
-`content_sha256` is `Frontmatter::hash_body(body)` — a SHA-256 of the body with its trailing newline stripped. This hash is the drift-detection key: if the on-disk hash differs from what the compiler recorded, a human edited the file externally.
+**`content_sha256`** is `Frontmatter::hash_body(body)` — a SHA-256 of the body after stripping one trailing newline. This normalization ensures an editor adding or removing a final `\n` doesn't flip the hash.
 
-When a page has no frontmatter at all (hand-authored in an editor), `Frontmatter::default_for(topic)` synthesises one with `created = updated = now`, empty provenance, and a blank `content_sha256`.
+**Provenance is monotonic.** Every call to `WikiVault::write` appends a `ProvenanceEntry` to the existing list. The vault never drops provenance history.
 
-### `ProvenanceEntry`
+### Frontmatter tolerance
 
-Tracks the origin of each write: `agent`, optional `session`/`channel`/`turn`, and a timestamp `at`. Provenance is **monotonic** — the vault only ever appends, never removes entries.
+Pages hand-authored in Obsidian without frontmatter still load: `frontmatter::split` returns `(None, raw)`, and the vault synthesizes a default header with `created = updated = now` and an empty provenance list. A subsequent `wiki_write` re-renders the page with a clean header.
 
-### `RenderMode`
+Malformed YAML (e.g., an invalid hand-edit) triggers a warning log and falls back to `Frontmatter::default_for(topic)` — the read succeeds and the body remains accessible. The next successful `wiki_write` repairs the header.
 
-Controls how cross-page references are rendered on disk:
+### CRLF handling
 
-| Mode | Link syntax | Example |
-|------|------------|---------|
-| `Native` | `[topic](topic.md)` | `[widgets](widgets.md)` |
-| `Obsidian` | `[[topic]]` | `[[widgets]]` |
+Editors on Windows (or git checkouts with `core.autocrlf=true`) may save files with `\r\n`. The vault normalizes CRLF to LF on read in `read_page_if_present`, so the LF-only delimiter matcher in `frontmatter::split` works correctly regardless of how the file was saved. The vault's own `render()` always emits `\n`.
 
-The canonical authoring form is always `[[topic]]` (the Obsidian form). Callers pass `[[topic]]` placeholders in the body, and `RenderMode::rewrite_links` rewrites them to the active flavor at flush time. This means a body authored once is portable across render modes without re-authoring.
+## Core Operations
 
-`RenderMode::extract_links` recognises both forms, so backlink indexing works against pages on disk regardless of which mode wrote them.
+### Writing Pages — `WikiVault::write`
 
-### `WikiPage`
+```rust
+pub fn write(
+    &self,
+    topic: &str,
+    body_with_placeholders: &str,
+    provenance: ProvenanceEntry,
+    force: bool,
+) -> WikiResult<WikiWriteOutcome>
+```
 
-A read result: `topic`, `frontmatter`, and `body` (the markdown after the closing `---`).
+**Callers always pass body markdown using `[[topic]]` placeholders** for cross-references. The vault rewrites those into the active render flavor at flush time, so the same body is portable across modes.
 
-### `WikiWriteOutcome`
+Write flow:
 
-Returned by `write`: includes `topic`, `path`, `content_sha256`, and `merged_with_external_edit` (true when the caller forced an overwrite of a page that had drifted from the compiler state).
+1. **Validate** the topic name (see [Topic Validation](#topic-validation)).
+2. **Check body size** against the 1 MiB cap (`MAX_BODY_BYTES`). The size is measured after link rewriting.
+3. **Acquire the write lock** (a `Mutex` that serializes concurrent writes to the same vault).
+4. **Load compile state** from `_meta/compile-state.json`.
+5. **Detect external drift** — compare on-disk mtime and body sha256 against the last compiler run. If either diverges, the page was hand-edited externally.
+6. **Reject or merge** — if drifted and `force` is false, return `WikiError::HandEditConflict`. If `force` is true, preserve the external body verbatim (only provenance is appended).
+7. **Rewrite links** — unless the external body was preserved, substitute all `[[topic]]` placeholders via `RenderMode::rewrite_links`.
+8. **Update frontmatter** — set `updated`, append the new `ProvenanceEntry`, recompute `content_sha256`.
+9. **Atomic write** — write to a `.tmp.write` file, then `fs::rename` to the final path.
+10. **Update compile state** and rebuild `index.md` + `_meta/backlinks.json`.
 
-### `SearchHit`
+Returns a `WikiWriteOutcome` with the topic, file path, content hash, and a `merged_with_external_edit` flag indicating whether a human edit was preserved.
 
-A search result with `topic`, `snippet` (context window around the match), and `score`.
+### Reading Pages — `WikiVault::get`
 
-### `BacklinkEntry`
+```rust
+pub fn get(&self, topic: &str) -> WikiResult<WikiPage>
+```
 
-A directed edge: `source` page contains a link to `target` page.
+Reads the `.md` file, normalizes CRLF, splits frontmatter from body, and parses the YAML. Returns `WikiError::NotFound` if the file doesn't exist. Malformed frontmatter falls back to a synthetic default — the read never fails due to bad YAML alone.
 
-## Write Flow in Detail
+The returned `WikiPage` contains:
 
-1. **Topic validation** (`validate_topic`): rejects empty strings, lengths over 100, `index`, `_`-prefixed names, and characters outside `[a-zA-Z0-9_-]`.
-2. **Body size check**: rejects bodies over 1 MiB after link rewriting (prevents runaway LLM output from filling disk page-by-page).
-3. **Acquire write lock**: serialises concurrent writes.
-4. **Read existing page** (`read_page_if_present`): if the file exists, parse its frontmatter and body. CRLF line endings are normalised to LF on read so the `---` delimiter matcher works regardless of platform.
-5. **Detect drift**: compare on-disk mtime (nanoseconds) and body SHA-256 against `compile-state.json`. If either differs, the page was hand-edited.
-6. **Enforce hand-edit policy**: if drifted and `force = false`, return `WikiError::HandEditConflict`. If drifted and `force = true`, preserve the external body verbatim — only append the new provenance entry.
-7. **Rewrite links**: `RenderMode::rewrite_links` converts `[[topic]]` placeholders to the active flavor.
-8. **Render page**: `frontmatter::render` serialises the frontmatter to YAML and concatenates the body.
-9. **Atomic write** (`atomic_write`): write to a `.tmp.write` file, then `fs::rename` to the final path. Prevents partial writes on crash.
-10. **Update compile state**: record the new mtime and SHA-256.
-11. **Rebuild index and backlinks**: regenerate `index.md` (alphabetical topic list with links and timestamps) and `_meta/backlinks.json` (target → sorted source list).
+| Field | Type | Description |
+|---|---|---|
+| `topic` | `String` | Page topic identifier |
+| `frontmatter` | `Frontmatter` | Parsed YAML header (or synthetic default) |
+| `body` | `String` | Markdown body as it exists on disk (already link-rewritten) |
+
+### Search — `WikiVault::search`
+
+```rust
+pub fn search(&self, query: &str, limit: usize) -> WikiResult<Vec<SearchHit>>
+```
+
+Naive case-insensitive substring search across all page bodies and topics. Scoring:
+
+- Topic name contains the query: **+10.0**
+- Body matches: **ln(1 + count)** — sub-linear weighting so a single long page can't bury shorter topic-only matches
+
+Results are sorted by score descending, then topic name ascending. Each `SearchHit` includes a `snippet` — up to ~120 characters of context around the first body match, with `…` ellipsis at boundaries.
+
+This is intentionally simple for v1. Vector / FTS5 ranking is a follow-up.
+
+### Backlinks — `WikiVault::backlinks`
+
+```rust
+pub fn backlinks(&self) -> WikiResult<Vec<BacklinkEntry>>
+```
+
+Returns every `(source, target)` pair where `source` contains a link to `target`. Extracted from `_meta/backlinks.json`, which is rebuilt after every write. Deterministic order: target ascending, then source ascending.
 
 ## Hand-Edit Safety
 
-This is a core design contract. The vault tracks two signals per page in `compile-state.json`:
+This is a core v1 acceptance criterion. The vault detects when a page has been modified outside the compiler (e.g., a human editing in Obsidian) and refuses to silently overwrite.
 
-- **mtime** (nanoseconds since UNIX epoch): catches any file touch.
-- **sha256** of the body: catches content changes even on filesystems with coarse mtime precision (e.g. HFS+ with 1-second resolution).
+**Detection mechanism:** `compile-state.json` stores `{ mtime_ns, sha256 }` for every page after each compiler run. On the next write, the vault reads the on-disk file and compares:
 
-If both match the last compiler output, the write proceeds normally. If either drifts, the vault knows a human (or external tool) edited the page and refuses the write unless the caller explicitly passes `force = true`.
+- **mtime** — file modification timestamp (nanoseconds since epoch)
+- **sha256** — `Frontmatter::hash_body(body)` of the actual body on disk
 
-The forced path is **preservative**: the externally-edited body is kept intact, and only the provenance list is augmented. The next successful compile re-normalises the compile state.
+If either value has changed, the page was edited externally. The mtime alone isn't reliable on filesystems with 1-second precision (HFS+), so the sha256 provides a content-level guarantee.
 
-## Search
+**Conflict resolution:**
 
-v1 uses naive case-insensitive substring search. Scoring:
+| `force` | Drift detected | Behavior |
+|---|---|---|
+| `false` | No | Normal write — caller's body replaces on-disk content |
+| `false` | Yes | `WikiError::HandEditConflict` returned |
+| `true` | No | Normal write |
+| `true` | Yes | External body preserved verbatim; only provenance is appended; `merged_with_external_edit = true` |
 
-- **Topic match**: +10.0 (an exact substring in the topic name is a strong signal).
-- **Body matches**: `ln(1 + count)` — sub-linear weighting so a single long page can't bury short topic-only matches.
+## Render Modes
 
-Results are sorted by score descending, then topic ascending for deterministic ordering. A snippet (up to ~120 characters centred on the first match) is included with each hit.
+Controlled by `RenderMode` and the `render_mode` config field. Affects only how cross-references are emitted on disk — frontmatter and prose body are identical.
 
-Vector search and FTS5 integration are planned follow-ups.
+| Mode | Link format | Example |
+|---|---|---|
+| `Native` (default) | `[topic](topic.md)` | `[widgets](widgets.md)` |
+| `Obsidian` | `[[topic]]` | `[[widgets]]` |
+
+**Authoring contract:** Callers always pass `[[topic]]` placeholders. The vault rewrites at flush time via `RenderMode::rewrite_links`, which scans for `[[...]]` and replaces each with the active flavor. This makes body text portable across modes — switching from `native` to `obsidian` doesn't require re-authoring.
+
+**Backlink extraction** (`RenderMode::extract_links`) recognizes both forms so the backlinks index is invariant under render-mode flips. It also recognizes native-form links `[text](target.md)` — but only when `text == target`, which is what the vault always emits. This avoids false positives from generic markdown links like `[see this](docs/intro.md)`.
+
+## Topic Validation
+
+`validate_topic` enforces:
+
+- Non-empty
+- Max 100 characters
+- Not the reserved word `index`
+- Must not start with `_`
+- Only `[a-zA-Z0-9_-]` characters
+
+Validated on every `write` and `get` call. Violations return `WikiError::InvalidTopic` with the topic and reason.
 
 ## Error Handling
 
-`WikiError` covers every failure mode:
+All errors flow through `WikiError` with a `WikiResult<T>` type alias:
 
 | Variant | When |
-|---------|------|
-| `Disabled` | `enabled = true` not set in config |
-| `ModeNotImplemented` | `bridge` or `unsafe_local` mode requested (v1 stubs) |
+|---|---|
+| `Disabled` | `WikiVault::new` called with `enabled = false` |
+| `ModeNotImplemented` | `bridge` or `unsafe_local` mode requested |
 | `InvalidTopic` | Topic fails validation |
-| `BodyTooLarge` | Body exceeds 1 MiB |
-| `NotFound` | No `.md` file for the topic |
-| `HandEditConflict` | External edit detected, `force = false` |
-| `Frontmatter` | YAML parse error in a page header |
-| `Io` | Filesystem error at a given path |
+| `BodyTooLarge` | Body exceeds 1 MiB cap |
+| `NotFound` | No `.md` file for the requested topic |
+| `HandEditConflict` | External edit detected and `force = false` |
+| `Frontmatter` | YAML parse error (carries `serde_yaml::Error` source) |
+| `Io` | Filesystem error (carries `std::io::Error` source) |
 
-The `Io` variant wraps `std::io::Error` with the path that failed, making diagnostics actionable. `Frontmatter` wraps `serde_yaml::Error` with the topic name.
+`WikiError::io(path, source)` is a convenience constructor that wraps any `std::io::Error` with the file path for diagnostics.
 
-## Frontmatter Parsing Details
+## Thread Safety
 
-The `frontmatter::split` function extracts the optional YAML block and body from raw page content. It tolerates:
+`WikiVault` uses an internal `Mutex` (`write_lock`) to serialize all write operations. Concurrent writes to the same topic from multiple threads are safe — they'll either serialize cleanly or one will detect the mtime/sha256 drift from another thread's write and return `HandEditConflict` (unless `force = true`).
 
-- **Missing frontmatter**: pages hand-authored without any `---` block return `(None, raw)` — the full content becomes the body.
-- **Trailing newline variance**: `Frontmatter::hash_body` strips the trailing newline before hashing, so an editor adding or removing a final newline doesn't flip the hash.
-- **CRLF line endings**: `read_page_if_present` normalises `\r\n` to `\n` before calling `split`. Without this, a `\r\n` in the opening `---\r\n` would cause the LF-only delimiter matcher to treat the entire YAML header as body content.
-- **Malformed YAML**: if `serde_yaml` fails to parse the frontmatter block, the vault falls back to `Frontmatter::default_for(topic)` rather than failing the read — the body remains accessible, and a subsequent `wiki_write` repairs the header.
+Read operations (`get`, `search`, `backlinks`) do not acquire the lock — they read directly from disk.
 
-The `render` → `split` round-trip is guaranteed: `split(render(fm, body))` yields the same `body` (modulo trailing newline normalisation).
+## Re-exports
 
-## CRLF and Cross-Platform Compatibility
+The crate's public API (`lib.rs`):
 
-The vault's own `frontmatter::render` always emits `\n` line endings. However, external editors on Windows (or git checkouts with `core.autocrlf = true`) may re-save files with `\r\n`. The read path normalises these on the fly, so:
+```rust
+pub use error::{WikiError, WikiResult};
+pub use frontmatter::{Frontmatter, ProvenanceEntry};
+pub use render::RenderMode;
+pub use vault::{
+    BacklinkEntry, MemoryWikiConfig, MemoryWikiMode,
+    SearchHit, WikiPage, WikiVault, WikiWriteOutcome,
+};
+// From librefang-types:
+pub use librefang_types::config::{MemoryWikiIngestFilter, MemoryWikiRenderMode};
+```
 
-- Frontmatter parsing works regardless of line ending style.
-- Body content is returned with `\n` endings.
-- Subsequent writes re-emit `\n` endings.
-
-## Concurrency
-
-`WikiVault` uses an internal `Mutex<()>` to serialise writes. Concurrent `write` calls to the same topic from different threads will proceed one at a time. Each serialised write updates the compile state, so the later write sees the earlier one's state and can detect drift correctly.
-
-Reads (`get`, `search`, `backlinks`) are not locked — they read from the filesystem directly, which is safe because `atomic_write` uses `fs::rename` (atomic on POSIX) and the content is immutable once renamed.
-
-## Integration Points
-
-The crate re-exports configuration types from `librefang-types`:
-
-- `MemoryWikiConfig` — the `[memory_wiki]` section of the kernel config.
-- `MemoryWikiMode` — `Isolated`, `Bridge`, `UnsafeLocal`.
-- `MemoryWikiRenderMode` — `Native`, `Obsidian`.
-- `MemoryWikiIngestFilter` — `Tagged`, `All`.
-
-The vault is consumed by the runtime through three builtin tools (`wiki_get`, `wiki_search`, `wiki_write`) which map directly to `WikiVault::get`, `WikiVault::search`, and `WikiVault::write`.
-
-## v1 Scope Boundaries
+## v1 Scope and Limitations
 
 **In scope:**
-- `isolated` mode with its own vault directory.
-- Explicit write-through via `wiki_write` tool calls.
+- `isolated` mode only — the vault owns its directory, its writes, its index.
+- Three tools: `wiki_get`, `wiki_search`, `wiki_write` (defined in `librefang-runtime`, not this crate).
 - `native` and `obsidian` render modes.
-- Hand-edit detection and preservative merging.
+- Hand-edit safety with compile-state tracking.
+- Atomic writes, CRLF tolerance, malformed frontmatter fallback.
 
 **Out of scope (tracked as #3329 follow-ups):**
-- `bridge` mode — reading shared artifacts from the memory substrate.
-- `unsafe_local` mode — same-machine escape hatch for an existing Obsidian vault.
-- Memory-event subscription — v1 ingests only via explicit `wiki_write` calls, not via `memory_store` hooks.
-- LLM-assisted topic extraction — topics must be provided explicitly.
-- `memory_search` cross-corpus parameter — extending the runtime tool is a separate change.
+- `bridge` mode — reading shared artifacts from the memory substrate. The enum variant exists; the read path is stubbed.
+- `unsafe_local` mode — same-machine escape hatch for an existing Obsidian vault. Same stub.
+- Memory-event subscription (`memory_store` durable filter). v1 ingests only via explicit `wiki_write` calls.
+- LLM-assisted topic extraction. v1 requires explicit topic tags.
+- `memory_search` cross-corpus parameter (`corpus = all|kv|wiki`). Extending that touches the runtime tool surface.

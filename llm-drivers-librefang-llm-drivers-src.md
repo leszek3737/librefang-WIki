@@ -1,330 +1,322 @@
 # LLM Drivers — librefang-llm-drivers-src
 
-# LibreFang LLM Drivers (`librefang-llm-drivers`)
+# LLM Drivers — `librefang-llm-drivers`
 
-## Overview
+## Purpose
 
-This crate provides a unified abstraction layer for communicating with LLM providers. It implements the `LlmDriver` trait across multiple backends—cloud APIs, CLI tools, and local model servers—and wraps each with retry logic, credential pooling, rate-limit guards, and streaming support.
+This crate provides the unified LLM abstraction layer for the LibreFang platform. It defines a common `LlmDriver` trait and implements concrete drivers for a range of providers — cloud APIs (Anthropic, OpenAI/ChatGPT, Gemini, Vertex AI, Bedrock, Copilot, Qwen), local/self-hosted runtimes (Ollama), and CLI wrappers (Aider, Claude Code, Qwen Code, Gemini CLI). Infrastructure for retry logic, credential pooling, rate-limit tracking, and prompt caching is bundled alongside the drivers.
 
-The module is the sole point of contact between the rest of the LibreFang codebase and external LLM services. Every request flows through the same typed interface regardless of which provider ultimately handles it.
-
-## Architecture
+## Architecture Overview
 
 ```mermaid
 graph TD
     subgraph "Consumer Layer"
-        A[kernel / routes]
-        B[session runtime]
-        C[channel bridge]
+        Kernel["kernel / sessions"]
+        Fallback["FallbackChain"]
     end
 
-    subgraph "Driver Interface"
-        D[LlmDriver trait<br>complete() / stream()]
+    subgraph "Core Trait"
+        LlmDriver["LlmDriver trait<br/>complete() + stream()"]
     end
 
-    subgraph "Provider Drivers"
-        E[AnthropicDriver]
-        F[OpenAIDriver]
-        G[GeminiDriver]
-        H[VertexAIDriver]
-        I[OllamaDriver]
-        J[Claude Code CLI]
-        K[Qwen Code CLI]
-        L[AiderDriver]
-        M[FallbackDriver]
+    subgraph "Driver Implementations"
+        Anthropic["AnthropicDriver"]
+        OpenAI["OpenAI / ChatGPT"]
+        Gemini["Gemini"]
+        VertexAI["Vertex AI"]
+        Bedrock["Bedrock"]
+        Ollama["OllamaDriver"]
+        Copilot["CopilotDriver"]
+        Aider["AiderDriver"]
+        CLI["CLI wrappers<br/>(Claude Code, Qwen Code, Gemini CLI)"]
     end
 
-    subgraph "Cross-Cutting"
-        N[CredentialPool]
-        O[Backoff / Retry]
-        P[RateLimitTracker]
-        Q[SharedRateGuard]
-        R[Utf8StreamDecoder]
+    subgraph "Shared Infrastructure"
+        Backoff["backoff<br/>jittered exponential"]
+        CredPool["CredentialPool<br/>multi-key failover"]
+        RateLimit["rate_limit_tracker<br/>header parsing"]
+        RateGuard["shared_rate_guard<br/>cross-process 429"]
+        TokenRot["token_rotation"]
     end
 
-    A --> D
-    B --> D
-    C --> D
-    D --> E
-    D --> F
-    D --> G
-    D --> H
-    D --> I
-    D --> J
-    D --> K
-    D --> L
-    D --> M
-    E --- N
-    E --- O
-    E --- P
-    E --- Q
-    E --- R
+    Kernel --> Fallback
+    Fallback --> LlmDriver
+    LlmDriver --> Anthropic
+    LlmDriver --> OpenAI
+    LlmDriver --> Gemini
+    LlmDriver --> VertexAI
+    LlmDriver --> Bedrock
+    LlmDriver --> Ollama
+    LlmDriver --> Copilot
+    LlmDriver --> Aider
+    LlmDriver --> CLI
+
+    Anthropic --> Backoff
+    Anthropic --> RateLimit
+    Anthropic --> RateGuard
+    Fallback --> CredPool
+    Fallback --> Backoff
+    Copilot --> TokenRot
 ```
 
 ---
 
 ## Core Trait: `LlmDriver`
 
-Defined in `llm_driver.rs`, the trait is the contract every provider implements:
+Defined in `llm_driver.rs`, the `LlmDriver` trait is the central abstraction. Every provider implements two methods:
 
-```rust
-#[async_trait]
-pub trait LlmDriver: Send + Sync {
-    async fn complete(&self, request: CompletionRequest)
-        -> Result<CompletionResponse, LlmError>;
+| Method | Description |
+|--------|-------------|
+| `complete(request) → Result<CompletionResponse, LlmError>` | Non-streaming completion. Returns the full response at once. |
+| `stream(request, tx) → Result<CompletionResponse, LlmError>` | Streaming completion. Emits `StreamEvent` variants through an `mpsc::Sender`; returns the assembled response at the end. |
+| `family() → LlmFamily` | Identifies the provider family (Anthropic, OpenAI, etc.) for routing decisions. |
 
-    async fn stream(
-        &self,
-        request: CompletionRequest,
-        tx: mpsc::Sender<StreamEvent>,
-    ) -> Result<CompletionResponse, LlmError>;
+### Key Types
 
-    fn family(&self) -> LlmFamily;
-}
-```
+- **`CompletionRequest`** — Carries the model ID, message history (`Arc<Vec<Message>>`), tools (`Arc<Vec<ToolDefinition>>`), system prompt, temperature, max tokens, thinking configuration, prompt-caching flags, response-format hints, caller trace IDs (`agent_id`, `session_id`, `step_id`), and a per-request timeout override.
+- **`CompletionResponse`** — Contains content blocks (`Text`, `Thinking`, `ToolUse`), extracted `tool_calls`, `StopReason`, and `TokenUsage` (including cache read/creation buckets).
+- **`LlmError`** — Typed error enum: `Http`, `Api { status, message, code }`, `RateLimited { retry_after_ms }`, `Overloaded`, `Parse`, `Timeout`, `Auth`, etc.
+- **`StreamEvent`** — `TextDelta`, `ThinkingDelta`, `ToolUseStart`, `ToolInputDelta`, `ToolUseEnd`, `ContentComplete`.
 
-- **`complete`** — Sends a single-shot request and returns the full response.
-- **`stream`** — Opens an SSE connection, emits `StreamEvent` variants (text deltas, tool-use start/end, thinking deltas, content-complete) over the `mpsc::Sender`, and returns the assembled `CompletionResponse` once the stream finishes.
-- **`family`** — Returns the provider family (`Anthropic`, `OpenAi`, `Gemini`, etc.) for logging and routing.
+### `LlmFamily` Enum
 
-### `CompletionRequest`
-
-The universal request struct carried by every driver:
-
-| Field | Type | Purpose |
-|---|---|---|
-| `model` | `String` | Provider-specific model identifier |
-| `messages` | `Arc<Vec<Message>>` | Conversation history (user/assistant/system) |
-| `tools` | `Arc<Vec<ToolDefinition>>` | Available tools for this request |
-| `system` | `Option<String>` | Explicit system prompt |
-| `max_tokens` | `u32` | Response token limit |
-| `temperature` | `f32` | Sampling temperature |
-| `thinking` | `Option<ThinkingConfig>` | Extended thinking / chain-of-thought budget |
-| `prompt_caching` | `bool` | Enable Anthropic prompt-caching markers |
-| `cache_ttl` | `Option<&'static str>` | Cache duration hint (`"1h"` for extended) |
-| `response_format` | `Option<ResponseFormat>` | JSON / JSON-schema output constraints |
-| `timeout_secs` | `Option<u64>` | Per-request timeout override |
-| `extra_body` | `Option<serde_json::Value>` | Passthrough fields for provider-specific options |
-| `agent_id` / `session_id` / `step_id` | `Option<String>` | Trace-correlation headers |
-
-### `CompletionResponse`
-
-Uniform response across all providers:
-
-| Field | Type | Purpose |
-|---|---|---|
-| `content` | `Vec<ContentBlock>` | Text, Thinking, ToolUse, Image blocks |
-| `stop_reason` | `StopReason` | Why generation ended (EndTurn, ToolUse, MaxTokens, etc.) |
-| `tool_calls` | `Vec<ToolCall>` | Extracted tool invocations for the agent loop |
-| `usage` | `TokenUsage` | Input/output token counts including cache metrics |
-
-### `LlmError`
-
-Structured error type with provider-specific context:
-
-```rust
-pub enum LlmError {
-    Http(String),
-    Parse(String),
-    Api { status: u16, message: String, code: Option<ProviderErrorCode> },
-    RateLimited { retry_after_ms: u64, message: Option<String> },
-    Overloaded { retry_after_ms: u64 },
-    KeyExhausted,
-    AllKeysExhausted,
-    ContextLengthExceeded { ... },
-    ContentFiltered { ... },
-}
-```
-
-`ProviderErrorCode` provides a normalized classification (e.g., `RateLimit`, `AuthError`, `CreditExhausted`, `ModelNotFound`) derived from each provider's native error taxonomy. This allows the `FallbackDriver` and upper layers to make failover decisions without parsing human-readable error strings.
+Used by the fallback chain and metering to classify providers without string matching: `Anthropic`, `OpenAi`, `Gemini`, `Bedrock`, `Ollama`, etc.
 
 ---
 
-## Provider Drivers
+## Backoff and Retry — `backoff.rs`
 
-### Anthropic (`drivers/anthropic.rs`)
+Implements **jittered exponential backoff** for all retry loops. The formula:
 
-Full implementation of the Anthropic Messages API with:
+```
+delay = max(base × 2^(attempt-1), floor) + jitter
+```
 
-- **Tool use**: Serializes tool definitions and deserializes `tool_use` / `tool_result` content blocks. Malformed tool inputs (null, non-object strings, primitives) are wrapped in `{"raw_input": ...}` rather than silently dropped via `ensure_object()`.
-- **Extended thinking**: When `ThinkingConfig.budget_tokens >= 1024`, the driver enables Anthropic's thinking mode and adjusts `max_tokens` to exceed the budget by 1024.
-- **Prompt caching**: Implements Anthropic's `system_and_3` rolling-window strategy. Anthropic allows at most 4 `cache_control` breakpoints per request. The driver allocates them as:
-  1. System prompt block (always, when caching is on)
-  2. Last tool definition (when tools exist)
-  3. Remaining slots on the trailing message blocks (newest first)
+where `jitter ∈ [0, jitter_ratio × exp_delay]`. The exponential component is computed entirely in `f64` space to avoid `Duration` overflow panics at high attempt numbers.
 
-  Empty `Blocks` payloads (e.g., Thinking-only turns after filtering) do not consume a breakpoint slot—this ensures the rolling window doesn't silently shrink.
+### Seed Diversity
 
-- **Cache TTL**: Two modes controlled by `cache_ttl`:
-  - `None` (default): 5-minute ephemeral cache; markers carry `{"type": "ephemeral"}`.
-  - `Some("1h")`: 1-hour cache; markers carry `{"type": "ephemeral", "ttl": "1h"}` and the `extended-cache-ttl-2025-04-11` beta header is attached.
+The random seed combines `SystemTime::now().subsec_nanos()` XOR'd with a process-global Weyl-sequence counter (`JITTER_COUNTER`). This ensures unique seeds even when multiple concurrent retry loops fire within the same OS clock tick.
 
-- **Retry logic**: 429 and 529 responses trigger up to 3 retries with jittered exponential backoff. 429 lockouts are persisted to `shared_rate_guard` for cross-process coordination; 529 (overloaded) is not persisted since it reflects server capacity, not account limits.
-- **Rate-limit headers**: Extracted via `RateLimitSnapshot::from_headers()` and logged at warn/debug level.
-- **Streaming**: SSE parser accumulates content blocks incrementally. A `Utf8StreamDecoder` handles partial UTF-8 codepoints across chunk boundaries. If the consumer drops the receiver, the stream is cancelled on the next chunk (`receiver_dropped` flag via the `send_or_mark_dropped!` macro).
-- **Trace headers**: Optionally emits `x-librefang-{agent,session,step}-id` headers, gated by `emit_caller_trace_headers` (default `true`).
+### Public Functions
 
-### OpenAI-Compatible (`drivers/openai.rs`)
+| Function | Use Case |
+|----------|----------|
+| `jittered_backoff(attempt, base, max, jitter_ratio, floor)` | General-purpose; accepts a `floor` `Duration` (from `Retry-After` headers). |
+| `standard_retry_delay(attempt, floor)` | Standard LLM retries: 2 s base, 60 s cap, 50% jitter. |
+| `tool_use_retry_delay(attempt)` | Faster retry for tool-use failures: 1.5 s base. |
 
-Handles OpenAI, Azure OpenAI, Groq, DeepSeek, Cerebras, xAI, and any provider with an OpenAI-compatible chat completions endpoint. Key functions referenced from the call graph:
+### Test Support
 
-- `parse_tool_args` — Incremental JSON parser for streaming tool-call arguments, handling nested objects and trailing commas.
-- `extract_thinking_summary` / `extract_think_tags` — Extract chain-of-thought from DeepSeek and similar models that emit thinking in `<think/>` tags.
-- `is_deepseek_reasoner` — Model name detection for thinking-mode activation.
-- `parse_groq_failed_tool_call` — Handles Groq's non-standard tool-call failure format.
+`enable_test_zero_backoff()` returns a `ZeroBackoffGuard` that collapses all delays to zero (or the `floor`, whichever is smaller) for integration tests. The guard restores normal behavior on drop.
 
-### Google Gemini (`drivers/gemini.rs`, `drivers/gemini_cli.rs`)
+### Safety Guarantees
 
-Two backends:
-
-- **API driver** (`gemini.rs`): Direct Gemini API with tool use, thinking mode, and image support. Extracts system prompts and handles Gemini's `FunctionCall` / `FunctionResponse` mapping.
-- **CLI driver** (`gemini_cli.rs`): Wraps the `gemini` CLI tool, detects credentials via `credentials_in_dir()`.
-
-### Vertex AI (`drivers/vertex_ai.rs`)
-
-Google Cloud Vertex AI with JWT-based service account authentication. Uses:
-
-- ASN.1 DER parsing (`asn1_unwrap_sequence`, `asn1_read_content`) for service account key extraction.
-- PKCS#1 v1.5 signing (`pkcs1_v15_pad`) for JWT signatures.
-- Region and project resolution from `DriverConfig`.
-- Base64 URL encoding for JWT payloads.
-
-### Ollama (`drivers/ollama.rs`)
-
-Local model server driver. Notable behaviors:
-
-- `sanitize_base_url` — Strips trailing `/v1` or `/api` paths to avoid double-pathing.
-- Models user/assistant blocks with image attachments into Ollama's message format.
-- Handles thinking blocks and tool calls in streaming responses.
-
-### CLI Drivers
-
-Three CLI-based drivers share a common pattern: spawn a subprocess, pass a text prompt, capture stdout.
-
-| Driver | Binary | Key Feature |
-|---|---|---|
-| `ClaudeCodeDriver` | `claude` | Detects credentials in `~/.claude/`; supports image file references |
-| `QwenCodeDriver` | `qwen-coder` | Reads `oauth_creds.json` from configurable directory; applies caller-trace env vars |
-| `AiderDriver` | `aider` | Strips `aider/` prefix from model IDs; uses `--yes-always --no-auto-commits --no-git` flags |
-| `CodexCliDriver` | `codex` | Supports `--full-auto` mode flags |
-
-Each CLI driver:
-1. Detects availability (`detect()` / `available()`) by running `--version`.
-2. Builds args from the prompt and model.
-3. Spawns via `tokio::process::Command` with piped stdout/stderr.
-4. Parses authentication errors from stderr for actionable error messages.
-
-### Fallback Driver (`drivers/fallback.rs`)
-
-Wraps multiple drivers and selects among them based on health:
-
-- `health_order` — Sorts drivers by EWMA (exponentially weighted moving average) response health. Healthy drivers always precede unhealthy ones.
-- Transparently retries on the next driver when one fails with a retriable error.
-
-### Token Rotation (`drivers/token_rotation.rs`)
-
-Rotates API keys within a single provider, tracking request counts and exhaustion states per token.
+- **Non-finite `jitter_ratio`** (NaN, Infinity) is coerced to `0.0` — no panics in the retry hot path.
+- **Floor is capped at 300 s** to prevent pathological `Retry-After` values from stalling the daemon.
+- **Attempt overflow**: `u32::MAX` is handled via `f64`-space clamping; the result never exceeds `max_delay`.
 
 ---
 
-## Cross-Cutting Concerns
+## Credential Pool — `credential_pool.rs`
 
-### Backoff (`backoff.rs`)
+Manages multiple API keys for a single provider, providing automatic failover when keys are rate-limited (429) or quota-exhausted (402).
 
-Jittered exponential backoff for retry loops. Formula:
+### `CredentialPool`
 
-```
-delay = max(exp(base × 2^(attempt-1), max_delay), floor) + jitter
-```
+Thread-safe (`Send + Sync`) pool behind a single `Mutex`. Created with a list of `(api_key, priority)` pairs, sorted descending by priority.
 
-where `jitter ∈ [0, jitter_ratio × base_delay]`.
-
-**Seed diversity**: The random seed combines `SystemTime::now().subsec_nanos()` XOR'd with a process-global Weyl-sequence counter (`JITTER_COUNTER`). This ensures diverse seeds even when the OS clock has coarse granularity (e.g., 15 ms on Windows) and when multiple retry loops fire concurrently.
-
-**Overflow safety**: All exponential computation happens in `f64` space before constructing a `Duration`, preventing panics from `Duration::mul_f64` when `base × 2^attempt` exceeds `Duration`'s internal nanosecond range (which occurs around attempt 34 for a 2-second base).
-
-Two convenience functions:
-- `standard_retry_delay(attempt, floor)` — 2 s base, 60 s cap, 50% jitter.
-- `tool_use_retry_delay(attempt)` — 1.5 s base, 60 s cap, 50% jitter, no floor.
-
-**Test support**: `enable_test_zero_backoff()` returns a guard that forces all backoff delays to zero (respecting only the floor). The guard restores normal behavior on drop.
-
-### Credential Pool (`credential_pool.rs`)
-
-Thread-safe pool of API keys for a single provider, designed for failover when one key hits rate limits or quota exhaustion.
-
-**Selection strategies**:
+#### Selection Strategies
 
 | Strategy | Behavior |
-|---|---|
-| `FillFirst` | Always pick highest-priority available key; maximize premium key usage |
-| `RoundRobin` | Cycle through available keys in priority order; even load distribution |
-| `Random` | Pick a random available key using an LCG (no `rand` dependency) |
-| `LeastUsed` | Pick the key with the lowest `request_count` |
+|----------|----------|
+| `FillFirst` | Always picks the highest-priority available key. Maximizes premium key usage. |
+| `RoundRobin` (default) | Cycles through available keys in priority order. Distributes load evenly. |
+| `Random` | Picks a random available key using an LCG seeded from wall-clock nanoseconds. |
+| `LeastUsed` | Picks the key with the lowest `request_count`. |
 
-**Exhaustion handling**: Keys marked exhausted (via `mark_exhausted()`) are placed in cooldown for `exhausted_ttl` (default 1 hour). `mark_success()` immediately clears the exhaustion marker and increments the request counter.
+#### Lifecycle Methods
 
-**Thread safety**: All mutable state (credential list + round-robin index) is behind a single `Mutex`, eliminating TOCTOU between index reads and credential selection.
+| Method | Effect |
+|--------|--------|
+| `acquire() → Option<String>` | Returns a cloned API key, or `None` if all keys are in cooldown. |
+| `mark_success(api_key)` | Increments `request_count` and clears any exhaustion marker (early recovery). |
+| `mark_exhausted(api_key)` | Places the key in cooldown for `exhausted_ttl` (default 1 hour). |
+| `mark_permanent(api_key)` | Marks the key as permanently invalid (~100-year far-future timestamp). |
+| `available_count()` / `total_count()` | Diagnostic counts. |
+| `snapshot() → Vec<CredentialSnapshot>` | Redacted view for dashboards; API keys are shown as `****abcd`. |
 
-**Diagnostics**: `snapshot()` returns `Vec<CredentialSnapshot>` with redacted key hints (`****abcd`), priorities, request counts, and exhaustion status—safe for logs and dashboards.
+#### `ArcCredentialPool`
 
-**Convenience type**: `ArcCredentialPool = Arc<CredentialPool>` for sharing across async tasks.
-
-### Rate Limit Tracking (`rate_limit_tracker.rs`)
-
-`RateLimitSnapshot` parses provider-specific rate-limit headers (`x-ratelimit-*`, `anthropic-ratelimit-*`) into a structured snapshot with warning detection and human-readable display.
-
-### Shared Rate Guard (`shared_rate_guard.rs`)
-
-Cross-process rate-limit coordination. When a 429 is received:
-
-1. `record_429_from_headers()` persists the lockout state (keyed by hashed API key + provider).
-2. `pre_request_check()` short-circuits requests when the key is still in lockout, avoiding wasted API calls.
-
-This prevents thundering-herd scenarios when multiple LibreFang processes share the same API key.
-
-### UTF-8 Stream Decoder (`utf8_stream.rs`)
-
-Handles partial UTF-8 codepoints that split across SSE chunk boundaries (particularly relevant for CJK text). The decoder buffers incomplete sequences and emits replacement characters (`U+FFFD`) on `finish()` if a codepoint remains truncated at stream end.
-
-### Retry-After Parsing (`retry_after.rs`)
-
-Parses `Retry-After` headers in both delta-seconds and HTTP-date formats. Returns `Duration::ZERO` for invalid or past dates, with `duration_to_ms_or_fallback()` providing a safe default when the header is absent.
-
-### Trace Headers (`drivers/trace_headers.rs`)
-
-Builds `x-librefang-{agent,session,step}-id` HTTP headers from `CompletionRequest` fields. Controlled per-driver via `with_emit_caller_trace_headers()`—useful when upstream providers reject unknown headers.
+Type alias for `Arc<CredentialPool>`. Use `new_arc_pool()` for convenient construction when sharing across async tasks. The kernel's config-reload path calls `rebuild_credential_pools` → `new_arc_pool` to hot-swap pools without restarting.
 
 ---
 
-## Driver Construction
+## Driver: Anthropic — `drivers/anthropic.rs`
 
-Drivers are constructed through `create_driver()` in `drivers/mod.rs`, which reads `DriverConfig` and instantiates the appropriate backend. Provider-specific defaults (base URLs, model mappings, timeout values) are resolved via `provider_defaults()`.
+Full implementation of the Anthropic Messages API (`/v1/messages`) with tool use, extended thinking, prompt caching, and streaming SSE.
 
-Detection functions (`cli_provider_available`, `aider_available`, `claude_code_available`, etc.) check for CLI tool presence and credential files, enabling the wizard UI to show only configured providers.
+### Request Construction: `build_anthropic_request`
 
-## Error Classification Flow
+Shared by both `complete()` and `stream()`. The pipeline:
 
-```mermaid
-graph LR
-    A[HTTP Response] --> B{Status Code}
-    B -->|429| C[RateLimited<br>record to SharedRateGuard<br>retry with backoff]
-    B -->|529| D[Overloaded<br>retry with backoff<br>no cross-process lockout]
-    B -->|402/403| E[CreditExhausted<br>mark key exhausted in pool]
-    B -->|401| F[AuthError]
-    B -->|404| G[ModelNotFound]
-    B -->|413| H[ContextLengthExceeded]
-    B -->|Other 4xx/5xx| I[Api status + message<br>classify by ProviderErrorCode]
-    C --> J{Retries left?}
-    D --> J
-    J -->|Yes| K[Backoff + retry]
-    J -->|No| L[Return LlmError]
+1. **System prompt extraction** — From `request.system` or the first `Role::System` message.
+2. **Response format injection** — Anthropic has no native `response_format`; JSON/schema instructions are appended to the system prompt.
+3. **Prompt caching** — Controlled by `request.prompt_caching` (master switch) and `request.prompt_cache_strategy`. Breakpoints are allocated in most-stable-first order: system block → tools-last → trailing messages. Anthropic allows at most **4 breakpoints** per request.
+4. **Extended thinking** — When `request.thinking.budget_tokens >= 1024`, the `thinking` field is set and `max_tokens` is adjusted to exceed the budget. Temperature is forced to `None` (Anthropic requirement).
+5. **Tool serialization** — Tools get `cache_control` markers only on the last entry when caching is `SystemAndN`.
+6. **Message conversion** — `ContentBlock::Thinking` is filtered out (Anthropic doesn't accept it on input). `ImageFile` blocks are read from disk and base64-encoded.
+
+### Cache Strategy and Breakpoint Budget
+
+The `PromptCacheStrategy` enum controls marker placement:
+
+- **`Disabled`** — No markers anywhere.
+- **`SystemOnly`** — One marker on the system block; messages and tools stay outside the cached prefix.
+- **`SystemAndN(n)`** — System marker + tools-last marker + up to `n` trailing message markers, clipped to the remaining budget (4 − used_outside). `default_strategy()` returns `SystemAnd3`.
+
+Empty `Blocks` payloads (e.g., messages whose only content was a filtered `Thinking` block) are skipped without consuming a breakpoint slot.
+
+### Cache TTL
+
+Two modes via `CacheTtl`:
+
+| TTL | Marker | Beta Header |
+|-----|--------|-------------|
+| `Short` (default) | `{"type":"ephemeral"}` | None |
+| `Long` (`cache_ttl: Some("1h")`) | `{"type":"ephemeral","ttl":"1h"}` | `extended-cache-ttl-2025-04-11` |
+
+### Retry and Rate Limit Handling
+
+Both `complete()` and `stream()` share an identical retry loop (up to 3 retries):
+
+1. **Pre-request guard**: `shared_rate_guard::pre_request_check` — if a cross-process 429 lockout file exists for this API key, the request is short-circuited immediately.
+2. **429 handling**: Recorded via `shared_rate_guard::record_429_from_headers` (persists a lockout file for other processes). Retries with `standard_retry_delay` honoring the `Retry-After` header.
+3. **529 (overloaded)**: Retried but **not** persisted to the cross-process guard (server-capacity issue, not account-level).
+4. **Rate-limit headers**: Parsed into `RateLimitSnapshot` and logged at WARN if any bucket is in the warning zone.
+
+### Streaming Implementation
+
+The SSE parser in `stream()` handles these Anthropic event types:
+
+| Event | Action |
+|-------|--------|
+| `message_start` | Reads usage (input + cache buckets). Normalizes `input_tokens` to include cache read + creation. |
+| `content_block_start` | Creates a `ContentBlockAccum` (Text, Thinking, or ToolUse). Emits `ToolUseStart` for tool blocks. |
+| `content_block_delta` | Appends `text_delta`, `input_json_delta`, or `thinking_delta`. Emits corresponding `StreamEvent`. |
+| `content_block_stop` | For ToolUse blocks, parses accumulated JSON. Malformed input is caught and wrapped via `malformed_tool_input`. Emits `ToolUseEnd`. |
+| `message_delta` | Reads `stop_reason` and `output_tokens`. |
+
+A `Utf8StreamDecoder` handles partial UTF-8 codepoints across chunk boundaries. If the consumer drops the receiver, `receiver_dropped` is set and the upstream stream is cancelled on the next iteration (via the `send_or_mark_dropped!` macro).
+
+### Tool Input Normalization: `ensure_object`
+
+Anthropic requires tool `input` to be a JSON object. `ensure_object` handles malformed inputs from the model:
+
+- `null` → `{}`
+- String containing valid JSON object → parsed and returned
+- Any other type → wrapped in `{"raw_input": <value>}` for debugging
+
+### Error Classification: `anthropic_error_code`
+
+Maps Anthropic's `error.type` field to `ProviderErrorCode` for typed failover decisions:
+
+| Anthropic `type` | `ProviderErrorCode` |
+|-------------------|---------------------|
+| `rate_limit_error` | `RateLimit` |
+| `overloaded_error` | `ServerUnavailable` |
+| `authentication_error` / `permission_error` | `AuthError` |
+| `billing_error` | `CreditExhausted` |
+| `not_found_error` | `ModelNotFound` |
+| `invalid_request_error` (status 413) | `ContextLengthExceeded` |
+| `invalid_request_error` (other) | `BadRequest` |
+| `api_error` | `ServerError` |
+
+### Trace Headers
+
+When `emit_caller_trace_headers` is `true` (default), the driver attaches `x-librefang-agent-id`, `x-librefang-session-id`, and `x-librefang-step-id` headers from the `CompletionRequest` fields. This can be disabled via `with_emit_caller_trace_headers(false)` when upstream providers reject unknown headers.
+
+---
+
+## Driver: Aider — `drivers/aider.rs`
+
+Spawns the `aider` CLI as a subprocess in non-interactive mode. Aider manages its own LLM provider authentication via environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.).
+
+### Key Points
+
+- **Model mapping**: `aider/sonnet` → `--model sonnet` (prefix stripped).
+- **CLI flags**: `--message`, `--yes-always`, `--no-auto-commits`, `--no-git`.
+- **Prompt construction**: Flattens the multi-turn message history into `[System]\n...`, `[User]\n...`, `[Assistant]\n...` sections.
+- **Error handling**: Stderr/stdout are captured. Auth failures are detected by keyword matching ("not authenticated", "api key", "API key", "credentials").
+- **Token usage**: Returns zeros — Aider doesn't expose token counts.
+- **Detection**: `AiderDriver::detect()` runs `aider --version` to check availability.
+
+---
+
+## Supporting Modules (referenced across drivers)
+
+### `rate_limit_tracker`
+
+Parses HTTP rate-limit headers (`x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset`) into `RateLimitSnapshot`. Provides `has_warning()` for threshold detection and `display()` for structured logging.
+
+### `shared_rate_guard`
+
+Cross-process 429 lockout mechanism. When a driver receives HTTP 429, it writes a lockout file keyed by a hash of the API key. Other processes check this file before sending requests, avoiding wasted API calls during a known cooldown window. Uses `key_id_hash` to avoid storing raw keys on disk.
+
+### `retry_after`
+
+Parses `Retry-After` headers (both seconds and HTTP-date formats). Returns `Duration::ZERO` for absent/invalid headers.
+
+### `utf8_stream`
+
+`Utf8StreamDecoder` buffers partial UTF-8 sequences that arrive split across HTTP chunks. `finish()` drains any remaining bytes as replacement characters.
+
+### `think_filter`
+
+Stateful filter that strips `<think...</think >` blocks from streaming text deltas. Handles tags split across chunk boundaries.
+
+### `trace_headers` (in `drivers/`)
+
+Builds the `HeaderMap` for `x-librefang-{agent,session,step}-id` headers from `CompletionRequest` fields, gated by the `emit_caller_trace_headers` flag.
+
+### `token_rotation`
+
+Wraps a driver with automatic API key rotation for providers that use short-lived tokens (e.g., GitHub Copilot). Manages token refresh lifecycle.
+
+### `exhaustion`
+
+Persistent exhaustion store that records provider/key failures. Used by the fallback chain to skip known-bad providers without waiting for a timeout.
+
+---
+
+## Integration Points
+
+### From the Kernel
+
+- **Session execution** calls `FallbackChain::complete()` or `stream()`, which delegates to individual drivers.
+- **Config reload** (`rebuild_credential_pools`) reconstructs `ArcCredentialPool` instances from updated provider configs.
+- **Provider detection** (`cli_provider_available`) checks for CLI tool availability (Claude Code, Qwen Code, Gemini CLI) by calling each driver's `detect()` method.
+
+### Fallback Chain
+
+`FallbackChain` and `FallbackDriver` orchestrate multi-model failover:
+
+1. Try the primary driver.
+2. On `RateLimited` or `Overloaded`, mark the slot exhausted and retry with the next provider.
+3. On `AuthError` or `CreditExhausted`, mark with long backoff.
+4. Exhaustion state is persisted so subsequent requests skip known-bad providers immediately.
+
+### Driver Construction Pattern
+
+Most drivers follow a builder pattern:
+
+```rust
+let driver = AnthropicDriver::with_proxy_and_timeout(
+    api_key,
+    base_url,
+    proxy_url,           // Option<&str>
+    timeout_secs,        // Option<u64>
+).with_emit_caller_trace_headers(true);
 ```
 
-Each provider maps its native error taxonomy to `ProviderErrorCode` (e.g., Anthropic's `error.type` field is mapped in `anthropic_error_code()`). This normalization lets the `FallbackDriver` decide whether to fail over (server errors, rate limits) or surface the error immediately (auth, model-not-found).
-
-## Testing Conventions
-
-- **Zero backoff guard**: Integration tests call `enable_test_zero_backoff()` to eliminate sleep delays. The `ZeroBackoffGuard` restores real backoff on drop.
-- **Lockout files**: Tests create/remove lockout files via `key_id_hash()` to exercise `SharedRateGuard` without real API calls.
-- **Provider detection**: CLI availability tests use temporary directories with mock credential files rather than relying on the host system's installed tools.
+HTTP clients are constructed via `librefang_http::proxied_client()` or `proxied_client_with_override()`, ensuring consistent proxy and TLS configuration across all drivers.

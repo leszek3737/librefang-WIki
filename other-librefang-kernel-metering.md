@@ -4,59 +4,59 @@
 
 Cost metering and quota enforcement for the LibreFang kernel.
 
-## Overview
-
-This crate provides the accounting layer that tracks resource consumption and enforces quotas within the LibreFang kernel. It is responsible for ensuring that operations against the kernel stay within defined cost boundaries, preventing runaway resource usage or unbounded computation.
-
 ## Purpose
 
-Metering serves as the bridge between kernel operations and resource governance. Every meaningful action—query execution, memory allocation, API call—carries an associated cost. This module:
+This module tracks resource consumption and enforces spending limits across LLM operations. It acts as the kernel's financial control layer — every token processed through the system is accounted for, and quotas are checked before operations are dispatched.
 
-- **Tracks** cumulative resource consumption per context (tenant, session, request, etc.)
-- **Enforces** quotas by rejecting or throttling operations that would exceed limits
-- **Reports** usage data for observability and billing
+## Role in the Architecture
+
+Metering sits between the runtime and the LLM driver layer. When the runtime prepares to execute an LLM call, metering checks whether the operation is within budget. After the call completes, metering records the actual cost against the relevant account or session.
+
+```
+┌──────────────┐
+│   Runtime    │
+└──────┬───────┘
+       │ pre-check / post-record
+┌──────▼───────┐
+│   Metering   │
+└──────┬───────┘
+       │
+┌──────▼───────┐
+│  LLM Driver  │
+└──────────────┘
+```
 
 ## Dependencies
 
-| Dependency | Role |
+| Dependency | Reason |
 |---|---|
-| `librefang-types` | Shared type definitions for metering units, quota configurations, and cost descriptors |
-| `librefang-memory` | Memory accounting integration—tracking allocation-based costs |
-| `librefang-runtime` | Runtime context for binding metering state to execution scopes |
-| `serde` | Serialization support for persisting metering snapshots or transmitting usage data |
-
-## Architecture
-
-```
-┌─────────────────────────────────┐
-│       Caller (kernel ops)       │
-└──────────────┬──────────────────┘
-               │ check / record
-               ▼
-┌─────────────────────────────────┐
-│     librefang-kernel-metering   │
-│                                 │
-│  ┌───────────┐  ┌────────────┐  │
-│  │  Cost      │  │   Quota    │  │
-│  │  Tracking  │  │ Enforcement│  │
-│  └───────────┘  └────────────┘  │
-│                                 │
-└──────┬──────────┬───────────────┘
-       │          │
-       ▼          ▼
-  ┌─────────┐  ┌──────────┐
-  │ memory  │  │ runtime  │
-  └─────────┘  └──────────┘
-```
-
-## Relationship to the Kernel
-
-This module sits as a cross-cutting concern within the LibreFang kernel. Other kernel subsystems are expected to call into this crate before performing expensive operations, allowing metering to approve or deny the action. The module is consumed by higher-level kernel orchestration code rather than exposing a public API to end users.
+| `librefang-types` | Shared cost and quota types (price tables, usage counters, budget descriptors) |
+| `librefang-memory` | Persistent storage for usage records and quota state |
+| `librefang-runtime` | Hooks into the kernel execution loop for pre/post operation checks |
+| `librefang-llm-driver` | Model pricing metadata and token count reporting from LLM responses |
+| `serde` | Serialization of metering records for persistence and auditing |
+| `tracing` | Observability — logs quota breaches, spending milestones, and enforcement decisions |
 
 ## Key Concepts
 
-**Cost** — A numerical representation of resource consumption. Costs may be expressed in abstract units or tied to concrete resources (bytes allocated, rows scanned, CPU ticks).
+### Cost Metering
 
-**Quota** — A ceiling on cumulative cost within a given scope. Quotas are defined externally and fed into this module through configuration types from `librefang-types`.
+Each LLM response carries token usage data. Metering extracts the input and output token counts, applies the model's per-token price, and accumulates the cost. This produces a running total tied to whatever granularity the kernel requires — per-session, per-user, per-agent, or global.
 
-**Metering Context** — The scope against which costs accumulate. Tied to the runtime via `librefang-runtime`, a context typically maps to a tenant, session, or request lifecycle.
+### Quota Enforcement
+
+Quotas are checked before an LLM call is issued. If the remaining budget cannot cover the estimated cost of the operation, the call is rejected before any tokens are sent to the provider. This prevents overshoot and ensures hard spending caps are respected.
+
+Enforcement is optimistic for variable-cost operations — output tokens cannot be known in advance, so the check is made against a worst-case estimate or a configured max-output-tokens parameter.
+
+### State Persistence
+
+Metering state must survive kernel restarts. Usage counters and quota balances are persisted through `librefang-memory`, which provides the storage backend. Serialized metering snapshots are written on every update or at configured intervals.
+
+## Integration Points
+
+**Upstream consumers** — the runtime calls into metering before and after each LLM invocation.
+
+**Downstream data** — metering reads pricing information from `librefang-llm-driver` (model-specific cost per token) and reads/writes quota state through `librefang-memory`.
+
+**Observability** — all enforcement decisions and cost accumulations are emitted as `tracing` events, allowing external systems to monitor spending in real time.

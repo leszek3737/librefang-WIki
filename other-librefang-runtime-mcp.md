@@ -2,79 +2,91 @@
 
 # librefang-runtime-mcp
 
-MCP (Model Context Protocol) client for the LibreFang runtime. This module provides the client-side implementation for connecting to external MCP servers, enabling tool discovery and invocation through the standardized MCP protocol.
+MCP (Model Context Protocol) client for the LibreFang runtime. This module provides the integration layer that allows the LibreFang runtime to communicate with MCP-compatible servers, enabling tool discovery, invocation, and context management through the standardized MCP protocol.
 
-## Overview
+## Purpose
 
-The Model Context Protocol allows an application to interact with external tool servers that expose capabilities such as function calling, resource access, and prompt templates. This crate acts as the client half — it establishes connections to MCP servers, negotiates capabilities, discovers available tools, and dispatches tool calls on behalf of the LibreFang runtime.
+The Model Context Protocol (MCP) is an open protocol that standardizes how applications provide context and tools to AI models. This crate implements an MCP client that the LibreFang runtime uses to:
+
+- Connect to MCP servers over HTTP-based transports
+- Discover available tools and capabilities exposed by those servers
+- Invoke tools and retrieve results
+- Manage server connections and lifecycle
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[LibreFang Runtime] -->|tool requests| B[librefang-runtime-mcp]
-    B -->|SSE / HTTP transport| C[MCP Server 1]
-    B -->|SSE / HTTP transport| D[MCP Server 2]
+    A[librefang-runtime] --> B[librefang-runtime-mcp]
+    B --> C[rmcp]
+    B --> D[librefang-http]
     B --> E[librefang-types]
-    B --> F[librefang-http]
-    B --> G[rmcp crate]
+    C --> F[MCP Protocol Handling]
+    D --> G[HTTP Transport]
+    E --> H[Shared Type Definitions]
 ```
 
-The module wraps the `rmcp` crate (Rust MCP client) and layers LibreFang-specific concerns on top: type integration via `librefang-types`, HTTP transport via `librefang-http`, and security validations.
+The module sits between the LibreFang runtime and external MCP servers. It delegates MCP protocol-level handling to the `rmcp` crate and relies on `librefang-http` for the underlying HTTP transport, while translating between LibreFang's internal types and MCP wire formats.
 
 ## Key Dependencies
 
-| Dependency | Role |
+### Internal Crates
+
+| Crate | Role |
 |---|---|
-| `rmcp` | Core MCP protocol client implementation — handles protocol negotiation, message framing, and tool invocation semantics |
-| `librefang-types` | Shared type definitions used across LibreFang; ensures MCP tool inputs/outputs map to the same types the rest of the runtime uses |
-| `librefang-http` | HTTP client utilities, providing the transport layer for MCP's HTTP-based communication (including SSE streams) |
-| `reqwest` | Underlying HTTP client, used for outbound requests to MCP servers |
-| `http` | Low-level HTTP types (request/response) |
-| `sha2` / `base64` | Cryptographic hashing and encoding — used for verifying server identity and securing the handshake |
-| `psl` | Public Suffix List — validates domain names of MCP server endpoints to prevent connections to ambiguous or unsafe hosts |
-| `url` | URL parsing and validation for MCP server addresses |
-| `arc-swap` | Atomic swapping of shared state — enables live reconfiguration of MCP server connections without dropping active sessions |
-| `rand` | Random number generation — used for session nonces and challenge tokens |
-| `async-trait` | Async trait support for trait objects used in the transport abstraction |
-| `thiserror` | Ergonomic error type derivation |
+| `librefang-types` | Shared type definitions used across LibreFang — error types, configuration structs, and domain models |
+| `librefang-http` | HTTP client abstraction layer, providing consistent request/response handling |
 
-## Transport
+### External Crates
 
-MCP communication typically flows over HTTP with Server-Sent Events (SSE) for server-to-client messages. This module relies on `librefang-http` and `reqwest` to handle the HTTP transport, while `rmcp` handles protocol-level message serialization and deserialization.
+| Crate | Role |
+|---|---|
+| `rmcp` | Core MCP protocol implementation for Rust — handles JSON-RPC message formatting, capability negotiation, and protocol state |
+| `reqwest` | HTTP client used for transport-level requests to MCP servers |
+| `tokio` | Async runtime for non-blocking I/O operations |
+| `serde` / `serde_json` | Serialization of MCP messages to/from JSON |
+| `tracing` | Structured logging and diagnostics |
+| `http` | Low-level HTTP type definitions (status codes, headers, methods) |
 
-## Integration with LibreFang
+### Utility Dependencies
 
-This crate sits between the runtime core and external tool servers:
+- **`sha2`** / **`base64`** — Cryptographic hashing and encoding, likely used for session identifiers, authentication tokens, or message integrity verification
+- **`url`** / **`psl`** — URL parsing and Public Suffix List validation for safe server endpoint handling
+- **`rand`** — Random number generation for nonce generation or session tokens
+- **`arc-swap`** — Atomic swapping of shared state, used for thread-safe updates to server connection state or configuration without locks
+- **`async-trait`** — Async trait definitions for transport abstractions
+- **`thiserror`** — Derived error types
 
-1. The runtime core decides a tool call is needed and identifies that the tool is hosted on an MCP server.
-2. It delegates to this module, which looks up or establishes a connection to the appropriate MCP server.
-3. The module sends the tool invocation request, awaits the response, and converts the result back into `librefang-types` structures that the runtime can process.
+## Connection Lifecycle
+
+The typical flow for interacting with an MCP server follows this sequence:
+
+1. **Configuration** — Server endpoints, authentication credentials, and transport settings are assembled from the runtime configuration
+2. **Initialization** — An MCP session is established with the target server, including capability negotiation (protocol version, supported features)
+3. **Discovery** — Available tools and their schemas are queried from the server
+4. **Invocation** — Tools are called with structured input parameters, and results are received and decoded
+5. **Teardown** — Sessions are gracefully closed when the runtime shuts down or the connection is no longer needed
 
 ## Error Handling
 
-Errors are defined using `thiserror` and cover:
+Errors are defined using `thiserror` and integrate with `librefang-types`. Expected error categories include:
 
-- Connection failures (unreachable server, TLS errors)
-- Protocol errors (handshake failure, unsupported MCP version)
-- Transport errors (HTTP-level failures, SSE stream interruptions)
-- Validation errors (invalid server URL, disallowed domain)
-- Tool execution errors (server returned an error for the tool call)
-
-All errors are tracked via `tracing` spans for observability.
+- **Transport errors** — Connection failures, timeouts, HTTP-level errors from `reqwest`
+- **Protocol errors** — MCP-level error responses, capability mismatches, invalid messages
+- **Serialization errors** — Malformed JSON in server responses or schema violations
 
 ## Testing
 
-The test suite uses `wiremock` to mock HTTP endpoints, allowing verification of MCP protocol interactions without requiring a live MCP server. Tests are run with `tokio`'s multi-threaded runtime:
+The crate uses `wiremock` for mocking HTTP servers in tests, allowing verification of MCP message exchanges without requiring a live server:
 
 ```toml
 [dev-dependencies]
 wiremock = "0.6"
-tokio = { features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 ```
 
-## Security Considerations
+Tests construct mock MCP servers that respond with controlled payloads, validating that the client correctly handles both success and error scenarios.
 
-- **Domain validation**: The `psl` crate is used to check that MCP server URLs point to well-defined domains, rejecting ambiguous TLDs or IP-based addresses where appropriate.
-- **Handshake verification**: `sha2` and `base64` are used during the initial connection to verify server identity.
-- **URL parsing**: All server endpoints are validated through the `url` crate before any connection is attempted.
+## Integration with the Runtime
+
+This module is consumed by `librefang-runtime` as its interface to MCP tool servers. The runtime orchestrates when and how MCP connections are created — for example, initializing connections at startup based on configuration, routing tool calls through this client during execution, and managing reconnection or failover.
