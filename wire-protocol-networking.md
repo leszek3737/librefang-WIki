@@ -1,360 +1,276 @@
 # Wire Protocol & Networking
 
-# Wire Protocol & Networking (`librefang-wire`)
+# LibreFang Wire Protocol (OFP)
 
-## Purpose
-
-`librefang-wire` implements the **OFP (LibreFang Wire Protocol)** — the TCP-based, JSON-framed protocol for cross-machine agent discovery, authentication, and communication between LibreFang kernels. It handles everything from connection management and cryptographic handshake to per-message integrity and rate limiting.
-
-OFP is a **plaintext** protocol by design. Authentication, integrity, and replay protection are provided in-crate; confidentiality (protection against passive observers) is delegated to the deployment overlay — WireGuard, Tailscale, SSH tunnels, or service-mesh mTLS. Do not add TLS termination to this crate without re-evaluating [the documented decision](https://docs.librefang.ai/architecture/ofp-wire) (closed #3874, closed PR #4001).
+Agent-to-agent networking over TCP. Provides cross-machine discovery, authentication, and communication using length-prefixed JSON frames.
 
 ## Architecture Overview
 
 ```mermaid
 graph TD
-    subgraph "librefang-wire"
-        PN[PeerNode] -->|owns| PR[PeerRegistry]
-        PN -->|owns| KP[Ed25519KeyPair]
-        PN -->|owns| NT[NonceTracker]
-        PN -->|owns| RL[PeerRateLimiter]
-        PN -->|owns| PP[TOFU Pin Map]
-        PN -->|uses| TS[TrustedPeers Store]
-        PN -->|produces| EK[EphemeralKex]
+    subgraph "Local Kernel"
+        PH[PeerHandle trait]
+        PN[PeerNode]
+        PR[PeerRegistry]
     end
 
-    subgraph "Handshake Flow"
-        H1[Generate X25519 ephemeral] --> H2[Compute HMAC auth_data]
-        H2 --> H3[Sign identity scope with Ed25519]
-        H3 --> H4[Send Handshake request]
-        H4 --> H5[Receive HandshakeAck]
-        H5 --> H6[Verify remote HMAC + identity]
-        H6 --> H7[Derive session_key via ECDH]
+    subgraph "Identity Layer"
+        KP[Ed25519KeyPair]
+        PM[PeerKeyManager]
+        TP[TrustedPeers store]
     end
 
-    PN --> H1
-    H7 --> CL[Connection Loop]
-    CL -->|per-message HMAC| WM[read/write_message_authenticated]
+    subgraph "Session Layer"
+        KEX[EphemeralKex X25519]
+        NT[NonceTracker]
+        RL[PeerRateLimiter]
+    end
+
+    subgraph "Wire Format"
+        WM[WireMessage]
+        ENC[encode_message / decode_message]
+    end
+
+    PN -->|authenticates with| KP
+    PN -->|pins pubkeys in| TP
+    PN -->|derives session key via| KEX
+    PN -->|tracks nonces via| NT
+    PN -->|enforces limits via| RL
+    PN -->|manages peers via| PR
+    PN -->|dispatches to| PH
+    PN -->|frames with| ENC
+    WM -->|carried by| ENC
 ```
 
-## Security Model
+## Wire Format
 
-OFP enforces **four** independent security layers. All four are required for a successful connection:
+Every OFP frame on TCP is: **4-byte big-endian length + JSON body**.
 
-### Layer 1 — Network Admission (HMAC-SHA256)
-
-Coarse "cluster password" gate. The handshake carries:
+Post-handshake frames append a **64-character hex HMAC-SHA256** after the JSON body. The HMAC covers the JSON bytes using the session key derived during handshake.
 
 ```
-auth_hmac = HMAC-SHA256(shared_secret, nonce | sender_node_id | recipient_node_id)
+Unauthenticated:  [len: u32 BE][JSON]
+Authenticated:    [len: u32 BE][JSON][HMAC hex: 64 bytes]
 ```
 
-The `recipient_node_id` binding (#3875) prevents a captured handshake from being replayed against a *different* federation node that shares the same `shared_secret`.
+Maximum frame size is 16 MB (`MAX_MESSAGE_SIZE`). Agent message payloads are further capped at 64 KiB (`MAX_PEER_MESSAGE_BYTES`) to prevent LLM budget drain by federated peers.
 
-### Layer 2 — Per-Peer Identity (Ed25519, #3873)
+### Message Types
 
-Each node persists an Ed25519 keypair in `<data_dir>/peer_keypair.json`. The handshake carries the sender's public key plus an Ed25519 signature over the same auth-data string the HMAC covers. Recipients:
+`WireMessage` is the envelope, containing an `id` (UUID string) and a `WireMessageKind`:
 
-1. Verify the signature against the public key
-2. TOFU-pin the public key to the sender's `node_id`
-3. Reject subsequent handshakes claiming the same `node_id` with a different public key
+| Kind | Tag | Purpose |
+|------|-----|---------|
+| `Request` | `"request"` | RPC-style requests with responses |
+| `Response` | `"response"` | Replies to requests |
+| `Notification` | `"notification"` | One-way events, no response |
+| `Unknown` | (any other) | Forward-compat fallback, silently dropped |
 
-Pins persist across restarts in `<data_dir>/trusted_peers.json`.
+Requests use `#[serde(tag = "method")]` to discriminate: `handshake`, `discover`, `agent_message`, `ping`. Responses use the same scheme: `handshake_ack`, `discover_result`, `agent_response`, `pong`, `error`.
 
-**Net effect**: a leaked `shared_secret` no longer lets an attacker impersonate a previously-pinned peer — they'd also need that node's private key file.
+**Forward compatibility** — `#[serde(other)]` arms on all enums mean unknown `type`/`method`/`event` values decode successfully instead of rejecting the frame. This keeps TCP links alive across protocol version skew (#3544). The `classify_unknown` function peeks the raw JSON to extract the unknown tag and emits a `wire::compat` warn for operator visibility.
 
-### Layer 3 — Forward Secrecy (X25519 ECDH, #4269)
+Use `encode_message` / `decode_message` for serialization, `write_message` / `read_message` for async I/O, and `write_message_authenticated` / `read_message_authenticated` for HMAC-verified I/O.
 
-Each handshake generates a fresh X25519 ephemeral keypair. Both peers exchange public halves inside the handshake messages (covered by the Ed25519 signature so an active MITM cannot substitute their own key). The session key is then derived as:
+## Authentication Model
 
-```
-shared_point = X25519(local_ephemeral_secret, remote_ephemeral_public)
-session_key = HKDF-SHA256(salt=transcript, ikm=shared_point, info="librefang-ofp/v1/session-key")
-```
+Two independent layers, both required:
 
-The ephemeral private key is dropped after derivation (`StaticSecret` zeroizes on drop), so future compromise of `shared_secret` or static Ed25519 keys cannot decrypt recorded past traffic.
+### Layer 1: Network Admission (HMAC-SHA256)
 
-### Layer 4 — Per-Message HMAC
-
-Post-handshake, every message on the wire is framed as:
+Coarse "do you know the cluster password" gate. The `shared_secret` from `[network]` config is used to compute:
 
 ```
-[4-byte big-endian length][JSON body][64-char hex HMAC]
+auth_data = "{nonce}|{sender_node_id}|{recipient_node_id}"
+auth_hmac = HMAC-SHA256(shared_secret, auth_data)
 ```
 
-The HMAC is computed over the JSON body using the session key. Messages with invalid HMACs are rejected as tampered or forged.
+Including both node IDs prevents cross-node replay (#3875) — a captured handshake targeting node A cannot be replayed against node B even if both share the same `shared_secret`.
 
-### Additional Protections
+Verification is constant-time via `subtle::ConstantTimeEq`.
 
-| Mechanism | Where | Purpose |
-|---|---|---|
-| Nonce replay tracking | `NonceTracker` in `peer.rs` | 5-minute window, 100k cap, amortized GC |
-| Per-peer rate limiting | `PeerRateLimiter` in `peer.rs` | Configurable messages/minute + token budget/hour |
-| Message size cap | `MAX_PEER_MESSAGE_BYTES` (64 KiB) | Prevents LLM budget drain via oversized payloads |
-| Transport size cap | `MAX_MESSAGE_SIZE` (16 MiB) | General transport-level limit |
-| TOFU pin cap | `MAX_PIN_ENTRIES` (100k) | Prevents unbounded memory growth from identity flooding |
-| Downgrade rejection | `verify_and_pin_identity` | A peer previously seen with Ed25519 cannot drop back to HMAC-only |
-| Low-order key rejection | `EphemeralKex::derive_session_key` | All-zero X25519 output is explicitly rejected |
+### Layer 2: Per-Peer Identity (Ed25519, #3873)
 
-## Backward Compatibility
+Each node persists an Ed25519 keypair at `<data_dir>/peer_keypair.json`. During handshake, the sender includes `public_key` and `identity_signature` fields. The signature covers the same `auth_data` string as the HMAC (plus the ephemeral pubkey when present — see below).
 
-All new fields in the handshake are `Option<String>` with `skip_serializing_if`:
+Recipients verify the signature and **TOFU-pin** the public key to the sender's `node_id`. Subsequent handshakes from that `node_id` must present the same public key or are rejected. Pins are persisted in `<data_dir>/trusted_peers.json` and survive daemon restarts.
 
-- `public_key` / `identity_signature` — absent in pre-#3873 peers
-- `ephemeral_pubkey` — absent in pre-#4269 peers
+**Downgrade protection** — if a node previously authenticated with Ed25519 but now omits the identity fields, the connection is rejected. This prevents an attacker with `shared_secret` from stripping the identity layer.
 
-When both sides provide an ephemeral pubkey, ECDH-derived session key is used. When either side omits it, the legacy path is used:
+The pin map is bounded at 100,000 entries (`MAX_PIN_ENTRIES`) to prevent memory exhaustion from fresh `node_id` flooding.
+
+## Session Key Derivation
+
+### Legacy Path
 
 ```
-session_key = HMAC-SHA256(shared_secret, our_nonce || their_nonce)
+session_key = HMAC-SHA256(shared_secret, our_nonce + their_nonce)
 ```
 
-This allows rolling out the federation incrementally without breaking existing peers.
+Used when either peer omits the `ephemeral_pubkey` field (backward compatibility with pre-#4269 peers).
 
-## Key Types
+### Ephemeral X25519 Path (#4269)
 
-### `WireMessage` and Variants (`message.rs`)
+Both peers generate a per-handshake X25519 keypair via `EphemeralKex::generate()`. Public halves are exchanged in the handshake's `ephemeral_pubkey` field (covered by the Ed25519 signature, preventing MITM substitution). Session key derivation:
 
-The top-level envelope. Each message has a unique `id` and a `kind`:
-
-| Variant | Tag | Purpose |
-|---|---|---|
-| `WireRequest::Handshake` | `"type":"request","method":"handshake"` | Initial identity exchange |
-| `WireRequest::Discover` | `"type":"request","method":"discover"` | Agent search on remote peer |
-| `WireRequest::AgentMessage` | `"type":"request","method":"agent_message"` | Send message to remote agent |
-| `WireRequest::Ping` | `"type":"request","method":"ping"` | Liveness check |
-| `WireResponse::HandshakeAck` | `"type":"response","method":"handshake_ack"` | Handshake acceptance |
-| `WireResponse::AgentResponse` | `"type":"response","method":"agent_response"` | Agent reply |
-| `WireResponse::Error` | `"type":"response","method":"error"` | Error with code + message |
-| `WireNotification::AgentSpawned` | `"type":"notification","event":"agent_spawned"` | New agent on peer |
-| `WireNotification::AgentTerminated` | `"type":"notification","event":"agent_terminated"` | Agent gone |
-| `WireNotification::ShuttingDown` | `"type":"notification","event":"shutting_down"` | Peer shutting down |
-
-**Forward compatibility** (#3544): `WireMessageKind::Unknown`, `WireRequest::Unknown`, `WireResponse::Unknown`, and `WireNotification::Unknown` are catch-all variants using `#[serde(other)]`. Unknown message types from newer protocol versions decode successfully and are silently dropped, keeping the TCP link alive.
-
-### `PeerNode` (`peer.rs`)
-
-The central actor. Owns the TCP listener, manages connections, performs handshakes, and routes messages.
-
-```rust
-// Start with Ed25519 identity (production):
-let (node, task) = PeerNode::start_with_identity(
-    config, registry, handle, Some(keypair), Some(trust_dir)
-).await?;
-
-// Start without identity (legacy / testing):
-let (node, task) = PeerNode::start(config, registry, handle).await?;
+```
+shared_point = X25519(local_secret, remote_pubkey)
+transcript   = "{client_nonce}|{server_nonce}"  (fixed order)
+session_key  = HKDF-SHA256(salt=transcript, ikm=shared_point, info="librefang-ofp/v1/session-key")
 ```
 
-**Key methods:**
+Result is a 64-character hex string. The `EphemeralKex` struct is consumed and dropped after derivation; `StaticSecret` zeroizes on drop.
 
-| Method | Description |
-|---|---|
-| `start_with_identity` | Bind listener, hydrate TOFU pins from disk, start accept loop |
-| `connect_to_peer_with_id` | Outbound connection with recipient-bound HMAC (#3875) |
-| `connect_to_peer` | Outbound connection without recipient binding (bootstrap only) |
-| `send_to_peer` | One-shot: connect, handshake, send agent message, read response |
-| `identity_fingerprint` | SHA-256 fingerprint of local Ed25519 public key for OOB verification |
-| `list_pinned_peers` | Snapshot of all TOFU pins with fingerprints |
-| `pinned_peer_count` | Count of pinned identities (surfaced via `/api/network/status`) |
+**Properties gained:**
+- Forward secrecy — ephemeral private keys are discarded after handshake
+- `shared_secret` leak no longer breaks message integrity — session key is independent of it
+- Transcript binding — different nonces produce different keys even with the same ephemeral pair
 
-### `PeerHandle` Trait (`peer.rs`)
+All-zero shared point (low-order public key attack) is explicitly rejected.
 
-The kernel's integration point. Implement this trait to wire OFP into the rest of the system:
-
-```rust
-#[async_trait]
-impl PeerHandle for MyKernel {
-    fn local_agents(&self) -> Vec<RemoteAgentInfo> { /* ... */ }
-    async fn handle_agent_message(&self, agent: &str, message: &str, sender: Option<&str>) -> Result<String, String> { /* ... */ }
-    fn discover_agents(&self, query: &str) -> Vec<RemoteAgentInfo> { /* ... */ }
-    fn uptime_secs(&self) -> u64 { /* ... */ }
-}
-```
-
-### `PeerConfig` (`peer.rs`)
-
-| Field | Default | Description |
-|---|---|---|
-| `listen_addr` | `"127.0.0.1:0"` | TCP bind address |
-| `node_id` | Random UUID | Unique node identifier |
-| `node_name` | `"librefang-node"` | Human-readable name |
-| `shared_secret` | **required** | HMAC pre-shared key — OFP refuses to start if empty |
-| `max_messages_per_peer_per_minute` | `60` | Per-peer rate limit; `0` disables |
-| `max_llm_tokens_per_peer_per_hour` | `None` | Per-peer token budget; `None` disables |
-
-### `Ed25519KeyPair` and `PeerKeyManager` (`keys.rs`)
-
-`Ed25519KeyPair` wraps an Ed25519 signing key. Key operations:
-
-- `generate()` — create a fresh keypair from OS CSPRNG
-- `sign(data)` — returns base64(64-byte signature)
-- `verifying_key()` — reconstruct the `VerifyingKey` from stored public bytes
-- `fingerprint()` — SHA-256 of the base64 public key, hex-encoded
-
-`PeerKeyManager` handles persistence at `<data_dir>/peer_keypair.json`. On load it:
-
-1. Re-derives the public key from the stored seed and cross-checks against the stored public key (rejects tampered files)
-2. Migrates PR-1 files (no `node_id` field) by minting a UUID and rewriting
-3. Sets file permissions to `0600` on Unix (best-effort)
-
-### `EphemeralKex` (`kex.rs`)
-
-Represents one side of a per-handshake X25519 key exchange:
-
-```rust
-let our_kex = EphemeralKex::generate()?;          // fresh keypair
-let our_pub_b64 = our_kex.public_b64();           // put in handshake message
-// ... exchange pubkeys on the wire ...
-let session_key = our_kex.derive_session_key(their_pub_b64, &transcript)?;
-// our_kex is consumed (private key zeroized)
-```
-
-The `transcript` is built by `handshake_transcript(client_nonce, server_nonce)` — nonces concatenated in a fixed order (client first) so both sides produce the same salt regardless of who is calling.
-
-### `NonceTracker` (`peer.rs`)
-
-Thread-safe (`DashMap`-backed) replay detector. Uses a single `DashMap::entry()` call to avoid TOCTOU races. Key design decisions:
-
-- **5-minute window** — handshake nonces are single-use UUIDs
-- **100k entry cap** — prevents unbounded growth from flood attacks
-- **Amortized GC** — `retain()` sweep only runs when the map hits 80% capacity, so an unauthenticated attacker cannot force O(n) scans on every connection attempt
-- **Fails closed** — at capacity, new nonces are rejected rather than accepted without tracking
-
-### `PeerRateLimiter` (`peer.rs`)
-
-Two independent sliding-window limits per peer:
-
-1. **Message rate**: configurable `max_messages_per_peer_per_minute` (default 60). Checked *before* any agent work is done. Excess messages get a 429 response.
-2. **Token budget**: optional `max_llm_tokens_per_peer_per_hour`. Recorded *after* LLM completion (token cost is unknown upfront). Future TODO: wire actual token counts from `handle_agent_message`.
-
-### `PeerRegistry` (`registry.rs`)
-
-Tracks known peers and their agents. Thread-safe (`Arc<DashMap>`). Key operations: `add_peer`, `get_peer`, `connected_peers`, `mark_disconnected`, `add_agent`, `remove_agent`, `find_agents`.
-
-## Handshake Protocol (Wire-Level)
+## Handshake Flow
 
 ```mermaid
 sequenceDiagram
-    participant C as Client
-    participant S as Server
+    participant C as Client (initiator)
+    participant S as Server (listener)
 
-    C->>S: Handshake {nonce, node_id, auth_hmac, public_key, identity_signature, ephemeral_pubkey}
-    S->>S: Verify HMAC (shared_secret)
-    S->>S: Verify Ed25519 identity + TOFU check
-    S->>S: Record nonce (replay check)
-    S->>S: Generate own X25519 ephemeral
-    S->>C: HandshakeAck {nonce, node_id, auth_hmac, public_key, identity_signature, ephemeral_pubkey}
+    C->>S: Handshake {nonce, auth_hmac, public_key, identity_signature, ephemeral_pubkey}
+    S->>S: Verify HMAC
+    S->>S: Verify Ed25519 signature + TOFU pin
+    S->>S: Check nonce replay
+    S->>S: Generate own ephemeral X25519
+    S->>C: HandshakeAck {nonce, auth_hmac, public_key, identity_signature, ephemeral_pubkey}
     C->>C: Verify HMAC
-    C->>C: Verify Ed25519 identity + TOFU check
-    C->>C: Record nonce
-    C->>C: Derive session_key = HKDF(X25519(our_secret, their_pub), transcript)
-    Note over C,S: Post-handshake: all messages use per-message HMAC with session_key
+    C->>C: Verify Ed25519 signature + TOFU pin
+    C->>C: Check nonce replay
+    C->>C: Derive session key via ECDH + HKDF
+    Note over C,S: Post-handshake: per-message HMAC using session_key
 ```
 
-The Ed25519 signature scope (#4269) covers both `auth_data` and the ephemeral pubkey:
+Ordering matters:
+1. HMAC is verified **before** recording the nonce (#3880) — unauthenticated TCP clients cannot fill nonce capacity
+2. Ed25519 identity is verified after HMAC but before nonce recording
+3. Nonce recording happens last — only fully authenticated handshakes consume nonce slots
 
-```
-scope = auth_data                          (legacy, no ephemeral)
-scope = auth_data | "|" | ephemeral_pubkey (with ephemeral)
-```
+## Identity Persistence — `PeerKeyManager`
 
-This binds the ephemeral key to the static identity, preventing an active MITM from substituting their own X25519 public key during the handshake.
+Loads or generates an Ed25519 keypair from `<data_dir>/peer_keypair.json`. The file stores:
 
-## Framing
-
-**Unauthenticated** (handshake only):
-```
-[4 bytes: big-endian JSON length][JSON body]
-```
-
-**Authenticated** (post-handshake):
-```
-[4 bytes: big-endian (JSON length + 64)][JSON body][64 bytes: hex HMAC-SHA256(session_key, JSON body)]
-```
-
-Functions: `encode_message`, `decode_message`, `decode_length` in `message.rs`. Authenticated I/O: `write_message_authenticated`, `read_message_authenticated` in `peer.rs`.
-
-## Connection Lifecycle
-
-1. **Accept** — `accept_loop` spawns one Tokio task per inbound TCP connection
-2. **Handshake** — `handle_inbound` validates HMAC, identity, nonce, sends ack, derives session key
-3. **Message loop** — `connection_loop` reads authenticated messages, dispatches to `handle_request_in_loop` or `handle_notification`
-4. **Teardown** — on error or EOF, the peer is marked disconnected in the registry
-
-## Integration with the Rest of the Codebase
-
-- **Kernel** (`librefang-kernel`) implements `PeerHandle` to route remote agent messages to local agents
-- **API layer** (`librefang-api`) surfaces `identity_fingerprint`, `pinned_peer_count`, and `list_pinned_peers` via `GET /api/network/status` and `GET /api/network/trusted-peers`
-- **Configuration** — `shared_secret`, rate limits, and trust store directory come from `[network]` in `config.toml`
-- **Manifest signing** (`librefang-types`) reuses `verifying_key()` from `Ed25519KeyPair` for artifact verification
-
-## Common Patterns
-
-### Starting a production node with full security
-
-```rust
-let mut key_mgr = PeerKeyManager::new(data_dir.clone());
-let keypair = key_mgr.load_or_generate()?.clone();
-let node_id = key_mgr.node_id().unwrap().to_string();
-
-let config = PeerConfig {
-    listen_addr: "0.0.0.0:7070".parse()?,
-    node_id,
-    node_name: hostname,
-    shared_secret: config_file.shared_secret,
-    max_messages_per_peer_per_minute: 60,
-    max_llm_tokens_per_peer_per_hour: Some(100_000),
-};
-
-let (node, _task) = PeerNode::start_with_identity(
-    config,
-    registry,
-    kernel_handle,
-    Some(keypair),
-    Some(data_dir),
-).await?;
-```
-
-### Connecting to a known peer
-
-```rust
-// With recipient binding (prevents cross-node replay):
-node.connect_to_peer_with_id(peer_addr, handle.clone(), "recipient-node-id").await?;
-
-// Or send a one-shot agent message:
-node.send_to_peer("remote-node-id", "coder", "Write a test", None, handle.clone()).await?;
-```
-
-### Broadcasting a notification
-
-```rust
-let errors = broadcast_notification(
-    &registry,
-    WireNotification::AgentSpawned { agent: info },
-    &shared_secret,
-).await;
-for (node_id, err) in errors {
-    warn!("Failed to notify {}: {}", node_id, err);
+```json
+{
+  "public_key": "<base64 32 bytes>",
+  "private_key": "<base64 32 bytes>",
+  "node_id": "<UUID>"
 }
 ```
 
-## Error Types
+On load, the public key is re-derived from the private seed and cross-checked against the stored value. Mismatch is rejected (`KeyError::InvalidFormat`).
 
-`WireError` covers all wire-protocol failures:
+**Migration** — PR-1 files lack the `node_id` field. `load_or_generate` mints a fresh UUID and rewrites the file so subsequent restarts see a stable identity.
+
+File permissions are best-effort tightened to 0600 on Unix.
+
+## TOFU Pin Persistence — `TrustedPeers`
+
+`trusted_peers::TrustedPeers` backs the in-memory pin map to `<data_dir>/trusted_peers.json`. At startup, `start_with_identity` hydrates pins from this file (capped at `MAX_PIN_ENTRIES`). New pins are written to disk after in-memory insertion; disk write failure is logged but does not roll back the in-memory pin.
+
+## Replay Protection — `NonceTracker`
+
+`DashMap<String, Instant>` with a 5-minute window and 100,000 entry cap. `check_and_record` is atomic (single `DashMap::entry` call, no TOCTOU). Garbage collection runs only when the map reaches 80% capacity — amortized to avoid O(n) sweeps on every unauthenticated connection attempt.
+
+## Rate Limiting — `PeerRateLimiter`
+
+Two independent per-peer limits:
+
+| Limit | Default | Window |
+|-------|---------|--------|
+| Message rate | 60/min | 60 seconds |
+| Token budget | None (unlimited) | 3600 seconds |
+
+Configured via `PeerConfig::max_messages_per_peer_per_minute` and `PeerConfig::max_llm_tokens_per_peer_per_hour`. Excess messages receive a 429 error before reaching the LLM pipeline. Token budget is checked after each LLM turn (cost is unknown beforehand).
+
+## Peer Registry
+
+`PeerRegistry` tracks known peers in a `DashMap<String, PeerEntry>`. Each `PeerEntry` holds:
+
+- `node_id`, `node_name`, `address` (`SocketAddr`)
+- `agents: Vec<RemoteAgentInfo>` — agents advertised by this peer
+- `state: PeerState` — `Connected` or `Disconnected`
+- `connected_at`, `protocol_version`
+
+Registry methods: `add_peer`, `get_peer`, `connected_peers`, `mark_disconnected`, `find_agents` (query across all peers), `add_agent` / `remove_agent` (for notification-driven updates).
+
+## Connection Lifecycle
+
+### Outbound (`connect_to_peer_with_id`)
+
+1. TCP connect to remote address
+2. Build handshake with HMAC + Ed25519 signature + X25519 ephemeral
+3. Write `Handshake` request, read `HandshakeAck` response
+4. Verify HMAC, verify identity + TOFU pin, check nonce, derive session key
+5. Register peer in registry
+6. Spawn Tokio task running `connection_loop`
+
+### Inbound (`accept_loop` → `handle_inbound`)
+
+1. Accept TCP connection
+2. Read `Handshake` request
+3. Verify HMAC, verify identity + TOFU pin, check nonce
+4. Generate own X25519 ephemeral (only if client sent one)
+5. Write `HandshakeAck` response
+6. Derive session key
+7. Register peer, spawn `connection_loop`
+
+### Message Loop (`connection_loop`)
+
+Read-authenticate-dispatch cycle:
+- **Requests** — dispatched through `PeerHandle` trait; responses are HMAC-signed and written back
+- **Notifications** — handled directly (`AgentSpawned` → `registry.add_agent`, `AgentTerminated` → `registry.remove_agent`, `ShuttingDown` → `registry.mark_disconnected`)
+- **Unknown** — silently dropped (forward compat); raw tag already logged by `read_message_observed`
+
+## Integration Points
+
+### `PeerHandle` Trait
+
+The kernel implements this trait to wire OFP into the agent system:
+
+```rust
+#[async_trait]
+pub trait PeerHandle: Send + Sync + 'static {
+    fn local_agents(&self) -> Vec<RemoteAgentInfo>;
+    async fn handle_agent_message(&self, agent: &str, message: &str, sender: Option<&str>) -> Result<String, String>;
+    fn discover_agents(&self, query: &str) -> Vec<RemoteAgentInfo>;
+    fn uptime_secs(&self) -> u64;
+}
+```
+
+### Startup
+
+Production startup uses `PeerNode::start_with_identity`, passing the `Ed25519KeyPair` from `PeerKeyManager::load_or_generate` and the trust store directory. Legacy `PeerNode::start` (HMAC-only) exists for backward compatibility.
+
+### Operator Endpoints
+
+- `GET /api/network/status` — exposes `identity_fingerprint` for out-of-band verification, `pinned_peer_count`
+- `GET /api/network/trusted-peers` — full snapshot of pinned `(node_id, public_key, fingerprint)` triples via `list_pinned_peers()`
+
+### Broadcasting
+
+`broadcast_notification` sends a one-way notification to all connected peers with per-peer HMAC authentication.
+
+## Wire Confidentiality Note
+
+OFP frames are **plaintext**. Authentication, integrity, and replay protection are provided by the crate. Confidentiality must come from the deployment layer (WireGuard, Tailscale, SSH tunnel, service-mesh mTLS). Do not add TLS termination without re-evaluating the decision documented at the architecture docs (#3874, #4001).
+
+## Error Handling
+
+`WireError` variants:
 
 | Variant | When |
-|---|---|
+|---------|------|
 | `Io` | TCP read/write failures |
 | `Json` | Malformed JSON frames |
-| `HandshakeFailed` | HMAC mismatch, identity rejection, nonce replay, ECDH failure |
+| `HandshakeFailed` | HMAC failure, identity mismatch, nonce replay, version mismatch |
 | `ConnectionClosed` | Peer disconnected (clean EOF) |
-| `MessageTooLarge` | Frame exceeds 16 MiB |
-| `VersionMismatch` | Incompatible protocol versions |
-
-`KeyError` (in `keys.rs`) covers key operations: `Io`, `Serialization`, `InvalidFormat`, `Rng`, `BadSignature`.
-
-## Protocol Versioning
-
-The current protocol version is `PROTOCOL_VERSION = 1` (defined in `message.rs`).
-
-The HKDF info string `"librefang-ofp/v1/session-key"` in `kex.rs` serves as a secondary versioning hook for session key derivation — bumping it on a breaking change prevents old clients and new servers from accidentally agreeing on a key.
+| `MessageTooLarge` | Frame exceeds 16 MB |
+| `VersionMismatch` | `protocol_version` disagrees |

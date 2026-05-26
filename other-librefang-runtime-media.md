@@ -2,89 +2,114 @@
 
 # librefang-runtime-media
 
-Media generation drivers for [LibreFang](https://github.com/librefang/librefang). Provides provider-agnostic abstractions and concrete implementations for text-to-speech, image generation, video generation, and music generation.
-
-## Overview
-
-This crate was extracted from `librefang-runtime` during the #3710 god-crate split. It mirrors the architectural pattern established by `librefang-llm-drivers`, applying it to media generation rather than LLM inference. The parent crate `librefang-runtime` re-exports everything at its historical paths (`runtime::media`, `runtime::media_understanding`), so downstream code does not need to change imports. The re-export is gated behind the default-on `media` feature flag.
+Media generation drivers for LibreFang. Provides a provider-agnostic abstraction layer for text-to-speech, image generation, video generation, music generation, and media understanding (speech-to-text, image/audio analysis).
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[MediaDriver Trait] --> B[elevenlabs]
-    A --> C[gemini]
-    A --> D[google_tts]
-    A --> E[minimax]
-    A --> F[openai]
-    G[MediaDriverCache] --> A
-    H[media_understanding] --> A
-    style A fill:#2d6,stroke:#333
-    style G fill:#26d,stroke:#333
-    style H fill:#d62,stroke:#333
+    A[librefang-runtime] -->|re-exports| B[librefang-runtime-media]
+    B --> C[MediaDriver trait]
+    B --> D[MediaDriverCache]
+    B --> E[media_understanding]
+    C --> F[elevenlabs]
+    C --> G[gemini]
+    C --> H[google_tts]
+    C --> I[minimax]
+    C --> J[openai]
+    E --> K[speech-to-text]
+    E --> L[image/audio analysis]
 ```
 
-## Core Abstractions
+## Purpose
+
+This crate was extracted from `librefang-runtime` during the god-crate split (#3710 Phase 1). It encapsulates all media generation and analysis logic behind a provider-agnostic interface modeled after the patterns in `librefang-llm-drivers`.
+
+Downstream consumers should not import this crate directly. `librefang-runtime` re-exports it at the historical paths `runtime::media` and `runtime::media_understanding` behind its default-on `media` feature flag. Existing call sites require no import changes.
+
+## Core Components
 
 ### `MediaDriver` Trait
 
-The central trait. Each method corresponds to a media modality. Providers that do not support a given modality do not need to implement the method — the trait provides a default implementation that returns a typed `NotSupported` error.
+The central abstraction. Each media modality has its own method on the trait. Providers that do not support a given modality return a typed `NotSupported` error rather than panicking or returning a generic failure. This allows callers to attempt fallback providers or gracefully degrade.
 
 Supported modalities:
 
-- **TTS** — text-to-speech audio generation
-- **Image** — image generation from a prompt
-- **Video** — video generation from a prompt
-- **Music** — music generation from a prompt
+- **TTS** — text-to-speech synthesis
+- **Image** — image generation
+- **Video** — video generation
+- **Music** — music generation
 
-This design lets callers work against a single trait without worrying about which provider supports which modality. Call the method you need; if the provider doesn't support it, you get a clear error rather than a panic or a runtime mystery.
+The trait is async (`#[async_trait]`) and implementations rely on `reqwest` for HTTP communication with provider APIs.
 
 ### `MediaDriverCache`
 
-Lazy-initializing, thread-safe driver cache with per-provider URL overrides. Built on `dashmap` for concurrent access without global locking.
+A lazy-initialization, thread-safe cache for `MediaDriver` instances, backed by `DashMap`. Features:
 
-Key behaviors:
+- **Lazy init**: drivers are constructed on first access, not at startup.
+- **Thread safety**: concurrent tasks can request the same driver without races.
+- **Per-provider URL overrides**: allows pointing a provider at a custom endpoint (useful for proxies, self-hosted alternatives, or testing).
 
-- Drivers are constructed on first access, not at cache creation time.
-- Each provider entry can have its base URL overridden (useful for proxies, self-hosted endpoints, or testing).
-- Thread-safe: safe to share across async tasks and threads.
+### Provider Implementations
 
-## Provider Implementations
+| Provider | Module | Primary Modality | Notes |
+|---|---|---|---|
+| ElevenLabs | `elevenlabs` | TTS | Voice selection; API key via `ELEVENLABS_API_KEY` env var |
+| Gemini | `gemini` | Image, Video | Google's multimodal model |
+| Google TTS | `google_tts` | TTS | Google Cloud Text-to-Speech |
+| MiniMax | `minimax` | Image, Video, Music | Multi-modal generation |
+| OpenAI | `openai` | Image, TTS | DALL·E and TTS endpoints |
 
-| Provider    | TTS | Image | Video | Music | Notes |
-|-------------|-----|-------|-------|-------|-------|
-| `elevenlabs` | ✓ | — | — | — | Primary TTS provider. Requires `ELEVENLABS_API_KEY` env var. |
-| `gemini` | — | ✓ | — | — | Google Gemini image generation. |
-| `google_tts` | ✓ | — | — | — | Google Cloud TTS (distinct from Gemini). |
-| `minimax` | — | — | — | ✓ | Music generation. |
-| `openai` | — | ✓ | — | — | DALL·E / GPT-image generation. |
+### `media_understanding`
 
-Check mark (✓) means the provider implements that modality's method. Dash (—) means it falls back to the `NotSupported` default.
+A companion module handling the inverse direction — consuming media rather than generating it:
 
-## `media_understanding`
+- **Speech-to-text** (transcription)
+- **Image analysis** (description, classification)
+- **Audio analysis**
 
-A submodule handling the inverse direction: analyzing media rather than generating it. Routes speech-to-text (transcription) and image/audio analysis requests to the appropriate provider. This lives alongside the generation drivers because the same provider accounts and HTTP plumbing are shared.
+This module routes requests to the appropriate provider based on configuration, mirroring the same driver abstraction used for generation.
 
 ## Dependencies
 
-The crate depends on several sibling crates and workspace-shared libraries:
+Key external crates used:
 
-| Dependency | Purpose |
-|------------|---------|
-| `librefang-types` | Shared domain types used across the workspace |
-| `librefang-http` | HTTP client construction and shared request utilities |
-| `tokio` | Async runtime |
-| `reqwest` | HTTP client for provider API calls |
-| `serde` / `serde_json` | Request/response serialization |
-| `async-trait` | Async trait support for `MediaDriver` |
-| `dashmap` | Concurrent hashmap for `MediaDriverCache` |
-| `tracing` | Structured logging |
-| `base64` | Encoding media payloads in API requests |
-| `chrono` | Timestamp handling |
-| `uuid` | Request/correlation IDs |
-| `sha2` / `hex` | Content hashing (e.g., cache keys) |
-| `url` | URL parsing and construction for provider endpoints |
+- **`reqwest`** / **`tokio`** — async HTTP communication with provider APIs
+- **`dashmap`** — concurrent map for `MediaDriverCache`
+- **`async-trait`** — trait object support for async methods
+- **`serde_json`** — request/response serialization
+- **`base64`** / **`hex`** — encoding for media payloads and signatures
+- **`tracing`** — structured logging throughout driver operations
+
+Internal dependencies:
+
+- **`librefang-types`** — shared type definitions (request/response types, error types)
+- **`librefang-http`** — shared HTTP client configuration and middleware
 
 ## Testing
 
-Tests that validate the ElevenLabs `voice_id` lookup mutate the `ELEVENLABS_API_KEY` environment variable. These tests use `serial_test` (pinned to version 3, matching the workspace) to prevent concurrent test runners from racing over that env var. If you add new provider integration tests that read or write environment variables, apply the same serialization.
+The test suite uses `serial_test` (version 3, pinned to match the workspace) to serialize environment-mutating tests. Specifically, ElevenLabs voice ID validation tests modify `ELEVENLABS_API_KEY` and must not run concurrently to avoid race conditions.
+
+## Integration with LibreFang
+
+```mermaid
+graph LR
+    A[Application Code] --> B[librefang-runtime]
+    B -->|media feature| C[librefang-runtime-media]
+    C --> D[Provider APIs]
+    C --> E[librefang-http]
+    C --> F[librefang-types]
+```
+
+- **Import path**: Use `runtime::media` and `runtime::media_understanding` from `librefang-runtime`.
+- **Feature gate**: Enabled by the default `media` feature on `librefang-runtime`.
+- **No breaking changes**: The re-export preserves the historical module paths from before the extraction.
+
+## Adding a New Provider
+
+1. Create a new module under `src/` (e.g., `src/newprovider.rs`) and register it in `mod.rs`.
+2. Implement `MediaDriver` for a struct representing the provider's client.
+3. Return `NotSupported` for modalities the provider doesn't handle.
+4. Add the provider variant to whatever dispatch/enum is used for provider selection.
+5. Register the provider in `MediaDriverCache` so it can be lazily constructed and cached.
+6. Add configuration support (API key env var, endpoint URL override) following the patterns of existing providers.

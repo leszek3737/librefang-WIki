@@ -2,78 +2,84 @@
 
 # librefang-runtime-audit
 
-Tamper-evident audit log for the LibreFang runtime. Every auditable event is appended to a Merkle hash chain where each entry holds the SHA-256 of its own contents concatenated with the prior entry's hash, making any retroactive edit immediately detectable.
+Tamper-evident audit log for the LibreFang runtime. Every auditable runtime event is appended to a Merkle hash chain, making retroactive edits detectable.
+
+## Overview
+
+This crate provides an append-only audit log where each entry is cryptographically linked to its predecessor. Each entry stores the SHA-256 digest of its own contents concatenated with the previous entry's hash, forming a continuous chain. Any modification to a past entry invalidates every subsequent hash, providing strong tamper evidence.
+
+The crate was extracted from `librefang-runtime` as part of the #3710 god-crate split. Downstream consumers should not need to change imports — `librefang-runtime` re-exports this crate at its historical path (`runtime::audit`).
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    E[Runtime Event] --> A[AuditLog::append]
-    A --> H[SHA-256: payload ++ prev_hash]
-    H --> M[In-memory Merkle Chain]
-    H -->|with_db| S[SQLite audit_entries]
-    S --> R[Survives Restart]
+    E1[Entry N-1] -->|prev_hash| E2[Entry N]
+    E2 -->|SHA-256| E3[Entry N+1]
+
+    subgraph "Entry N"
+        direction TB
+        P[payload fields]
+        H[prev_hash]
+        C["hash = SHA-256(payload || prev_hash)"]
+    end
+
+    subgraph "Persistence"
+        DB[(SQLite audit_entries)]
+    end
+
+    E2 -.->|with_db| DB
 ```
 
-The chain is constructed entry-by-entry. Each new entry's hash is computed over its own serialized payload plus the hash of the preceding entry. This creates a linked structure where modifying any historical entry invalidates every subsequent hash.
+## How the Hash Chain Works
 
-## Key Design Decisions
+1. **Genesis entry** — The first entry uses a fixed sentinel value (typically all-zero bytes) as `prev_hash`.
+2. **Subsequent entries** — Each entry computes `hash = SHA-256(serialize(entry_fields) || prev_hash)`, where `prev_hash` is the hash of the immediately preceding entry.
+3. **Verification** — Walking the chain from genesis forward and recomputing each hash confirms integrity. A mismatch at any position indicates that the entry or an earlier one was altered.
 
-### Hash Chain Integrity
+This is a linear Merkle chain (a Merkle tree with a single branch), chosen for simplicity and deterministic verification.
 
-The core invariant is straightforward: `hash(n) = SHA-256(payload(n) || hash(n-1))`. The genesis entry uses a fixed sentinel value (typically an all-zero hash) as its predecessor. Verification walks the chain from head to tail, recomputing each hash and confirming it matches the stored value.
+## Persistence
 
-### Dual Persistence
+When the audit log is constructed **with_db**, entries are written to the `audit_entries` table in SQLite (schema V8). This ensures the chain survives daemon restarts and process crashes. The connection pool is managed via `r2d2` and `r2d2_sqlite`.
 
-When constructed via `with_db`, the audit log persists entries to the `audit_entries` table in SQLite (schema V8). This path uses `r2d2`/`r2d2_sqlite` for connection pooling. Without a database, the chain lives only in memory and is lost on restart — suitable for testing or ephemeral sessions.
+Key properties of the persistence layer:
 
-### Re-export Path
+- **Append-only** — Entries are never updated or deleted by normal operations.
+- **Atomic** — Each entry insertion is a single transaction, preventing partial writes.
+- **Restart-safe** — On startup, the log reads the last known hash from the database to continue the chain seamlessly.
 
-This crate was extracted from `librefang-runtime` as part of the #3710 god-crate split. The parent crate re-exports it at the historical path `runtime::audit`, so existing call sites require no import changes.
+Without `with_db`, the chain operates in-memory only and is lost when the process exits.
 
-## Dependencies and Their Roles
+## Dependencies
 
-| Dependency | Role |
+| Dependency | Purpose |
 |---|---|
-| `librefang-types` | Shared type definitions for auditable events |
+| `librefang-types` | Shared type definitions for audit events |
 | `sha2` | SHA-256 hashing for the Merkle chain |
-| `rusqlite` / `r2d2` / `r2d2_sqlite` | SQLite persistence with connection pooling |
-| `serde` / `serde_json` | Serialization of audit payloads |
+| `hex` | Hex encoding of digests for storage and display |
 | `chrono` | Timestamps on audit entries |
-| `uuid` | Unique identifiers for entries |
-| `hex` | Hex encoding of hashes for storage/display |
-| `tracing` / `metrics` | Observability |
+| `rusqlite` / `r2d2` / `r2d2_sqlite` | SQLite storage with connection pooling |
+| `serde` / `serde_json` | Serialization of entry payloads for hashing and storage |
+| `tracing` | Structured logging of audit operations |
+| `metrics` | Operational metrics (entry count, chain length, verification results) |
 
-## Database Schema
+## Integration with the Workspace
 
-When using `with_db`, entries are written to the `audit_entries` table (SQLite schema V8). Each row stores at minimum:
+```
+librefang-types
+       ↓
+librefang-runtime-audit
+       ↓
+librefang-runtime  (re-exports as runtime::audit)
+```
 
-- A unique entry identifier (`uuid`)
-- The entry timestamp (`chrono`)
-- The serialized payload (`serde_json`)
-- The computed SHA-256 hash for this entry
-- The hash of the previous entry (enabling chain verification)
+`librefang-runtime` re-exports this crate, so existing call sites using `runtime::audit` continue to work without modification. Direct dependency on `librefang-runtime-audit` is only necessary for crates that need audit functionality without pulling in the full runtime.
 
-## Usage Patterns
+## Testing
 
-### With Database Persistence
+Tests use the `tempfile` crate to create ephemeral SQLite databases, ensuring isolation between test cases. Verification routines are tested against known chains to confirm that both valid chains pass and tampered chains fail detection.
 
-Construct the audit log with a database connection pool. Entries are appended atomically — the hash is computed, the row is inserted, and the in-memory chain head is updated. On restart, the chain can be reconstructed from the persisted entries.
+## Schema Reference
 
-### In-Memory Only
-
-Construct without a database for testing or short-lived sessions. The chain operates identically but has no durability guarantees.
-
-### Chain Verification
-
-At any point, the chain can be walked from the genesis entry to the current head, recomputing hashes along the way. A mismatch at any position indicates tampering or corruption.
-
-## Integration with LibreFang
-
-This crate operates independently — it has no outgoing calls to other LibreFang crates beyond `librefang-types`. `librefang-runtime` consumes it by:
-
-1. Re-exporting the public API at `runtime::audit`
-2. Constructing the audit log during daemon initialization (optionally `with_db`)
-3. Calling `append` on auditable runtime events (state transitions, configuration changes, administrative actions)
-
-Downstream code should import from `librefang-runtime::audit` unless working with this crate directly.
+The `audit_entries` table (schema V8) stores the chain on disk. Each row corresponds to one audit entry and includes the serialized payload, the previous entry's hash, and the computed hash for that entry. The exact column layout is defined in the database migration files within the workspace schema directory.

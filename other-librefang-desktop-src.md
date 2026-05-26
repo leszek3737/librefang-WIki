@@ -1,78 +1,73 @@
 # Other — librefang-desktop-src
 
-# librefang-desktop (binary entry point)
+# librefang-desktop (Binary Entry Point)
 
-## Purpose
+## Overview
 
-This module is the **executable entry point** for the LibreFang Desktop application — the binary users launch to run LibreFang in desktop/agent mode. It is intentionally minimal: it handles CLI argument parsing and early environment initialization, then immediately delegates to the `librefang_desktop` library crate for all real work.
+`librefang-desktop` is the thin binary crate that serves as the executable entry point for the LibreFang Desktop application (referred to internally as "Agent OS"). Its responsibilities are minimal by design:
 
-## Architecture
+1. **Load environment secrets** from disk into the process environment.
+2. **Parse CLI arguments** (remote server URL or local mode flag).
+3. **Delegate** to `librefang_desktop::run`, which owns the actual application lifecycle.
 
-```mermaid
-flowchart LR
-    A[User invokes binary] --> B[load_dotenv]
-    B --> C[Cli::parse]
-    C --> D[librefang_desktop::run]
-```
+The crate contains no business logic. It exists because environment variables must be loaded synchronously at the process boundary before any async runtime or additional threads are spawned.
 
 ## Startup Sequence
 
-### 1. Environment Loading
-
-```rust
-librefang_extensions::dotenv::load_dotenv();
+```mermaid
+flowchart TD
+    A[main] --> B["librefang_extensions::dotenv::load_dotenv()"]
+    B --> C[clap::Parser::parse]
+    C --> D["librefang_desktop::run(server_url, local)"]
 ```
 
-This runs **before anything else** — before argument parsing, before any async runtime or threads are spawned. It reads configuration files (`~/.librefang/.env`, `secrets.env`, `vault`) and injects their values into the process environment via `std::env::set_var`.
+## CLI Interface
 
-This ordering is critical. `std::env::set_var` is undefined behavior once additional threads exist, so environment mutation must happen at the synchronous `main()` boundary. Any code that reads environment variables (including code inside `librefang_desktop::run`) can safely assume the values are available.
-
-### 2. CLI Argument Parsing
-
-Arguments are parsed via `clap` using the `Parser` derive macro:
+The binary exposes two optional flags via `clap`:
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--server-url <URL>` | `Option<String>` | Connect to a remote LibreFang server (e.g. `http://192.168.1.100:4545`). When omitted, the application decides its own connection behavior. |
-| `--local` | `bool` | Start a local server immediately, skipping the connection screen. |
+| `--server-url <URL>` | `Option<String>` | Connect to a remote LibreFang server (e.g. `http://192.168.1.100:4545`) |
+| `--local` | `bool` | Start a local server directly, skipping the connection screen |
 
-Example invocations:
+Both flags are optional. When neither is provided, the behavior is determined by `librefang_desktop::run` (typically presenting a UI for the user to choose).
+
+### Examples
 
 ```bash
-# Start with connection screen (default behavior)
+# Launch with connection screen (default)
 librefang-desktop
 
-# Connect directly to a known server
+# Connect to a specific remote server
 librefang-desktop --server-url http://192.168.1.100:4545
 
-# Start a local server immediately
+# Start in local/offline mode
 librefang-desktop --local
 ```
 
-### 3. Delegation
+## Environment Loading
 
-```rust
-librefang_desktop::run(cli.server_url, cli.local);
-```
+`librefang_extensions::dotenv::load_dotenv()` is called as the very first operation in `main`. It reads dotfiles (`.env`, `secrets.env`, `vault`) from `~/.librefang/` and injects them into the process environment via `std::env::set_var`.
 
-All application logic — window creation, UI rendering, networking, state management — lives in the `librefang_desktop` library crate. This binary passes the parsed arguments straight through.
+> **Why here and not inside the library?** `std::env::set_var` is undefined behavior once multiple threads exist. The synchronous `main()` function is the only safe place to call it — before the Tokio runtime (or any other thread pool) is spawned by `librefang_desktop::run`.
 
-## Platform Note
+The search path and file precedence are handled entirely by `librefang_extensions::dotenv`.
+
+## Windows Console Behavior
+
+The attribute:
 
 ```rust
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 ```
 
-On Windows release builds, this attribute prevents a console window from appearing alongside the GUI. In debug builds, the console remains visible for `stdout`/`stderr` output.
+Suppresses the allocation of a console window on Windows when building in release mode. In debug builds, the console remains visible for `println!` / `eprintln!` output. This has no effect on non-Windows platforms.
 
-## Dependencies on Other Crates
+## Relationship to Other Crates
 
-| Crate | Usage |
-|-------|-------|
-| `librefang_desktop` | Library crate containing the full application; calls `run(server_url, local)` |
-| `librefang_extensions` | Provides `dotenv::load_dotenv()` for early environment setup |
-| `clap` | CLI argument parsing with derive macros |
+| Crate | Direction | Role |
+|-------|-----------|------|
+| `librefang_desktop` (library) | Called | Contains `run(server_url, local)` — the actual application bootstrapping, UI, and runtime |
+| `librefang_extensions::dotenv` | Called | Handles `.env` / secrets file discovery and loading |
 
-## Contributing
-
-This binary should stay thin. If you find yourself adding logic here, it almost certainly belongs in `librefang_desktop` or `librefang_extensions` instead. The only invariant to preserve is that `load_dotenv()` must remain the very first call in `main()`.
+This binary crate has **no incoming calls** — it is the leaf node at the top of the call graph.

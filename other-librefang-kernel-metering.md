@@ -2,61 +2,61 @@
 
 # librefang-kernel-metering
 
-Cost metering and quota enforcement for the LibreFang kernel.
-
 ## Purpose
 
-This module tracks resource consumption and enforces spending limits across LLM operations. It acts as the kernel's financial control layer — every token processed through the system is accounted for, and quotas are checked before operations are dispatched.
+Cost metering and quota enforcement for the LibreFang kernel. This module tracks resource consumption—primarily LLM token usage and associated costs—and enforces quotas to prevent runaway spending or resource exhaustion.
 
-## Role in the Architecture
+## Dependencies & What They Imply
 
-Metering sits between the runtime and the LLM driver layer. When the runtime prepares to execute an LLM call, metering checks whether the operation is within budget. After the call completes, metering records the actual cost against the relevant account or session.
-
-```
-┌──────────────┐
-│   Runtime    │
-└──────┬───────┘
-       │ pre-check / post-record
-┌──────▼───────┐
-│   Metering   │
-└──────┬───────┘
-       │
-┌──────▼───────┐
-│  LLM Driver  │
-└──────────────┘
+```toml
+librefang-types    # Shared type definitions used across the kernel
+librefang-memory   # Memory management — likely for storing metering state
+librefang-runtime  # Runtime infrastructure — lifecycle, async runtime
+librefang-llm-driver  # LLM driver — the primary source of billable operations
+serde              # Serialization — metering data is persisted or transmitted
+tracing            # Structured logging — audit trails for cost events
 ```
 
-## Dependencies
-
-| Dependency | Reason |
-|---|---|
-| `librefang-types` | Shared cost and quota types (price tables, usage counters, budget descriptors) |
-| `librefang-memory` | Persistent storage for usage records and quota state |
-| `librefang-runtime` | Hooks into the kernel execution loop for pre/post operation checks |
-| `librefang-llm-driver` | Model pricing metadata and token count reporting from LLM responses |
-| `serde` | Serialization of metering records for persistence and auditing |
-| `tracing` | Observability — logs quota breaches, spending milestones, and enforcement decisions |
-
-## Key Concepts
-
-### Cost Metering
-
-Each LLM response carries token usage data. Metering extracts the input and output token counts, applies the model's per-token price, and accumulates the cost. This produces a running total tied to whatever granularity the kernel requires — per-session, per-user, per-agent, or global.
-
-### Quota Enforcement
-
-Quotas are checked before an LLM call is issued. If the remaining budget cannot cover the estimated cost of the operation, the call is rejected before any tokens are sent to the provider. This prevents overshoot and ensures hard spending caps are respected.
-
-Enforcement is optimistic for variable-cost operations — output tokens cannot be known in advance, so the check is made against a worst-case estimate or a configured max-output-tokens parameter.
-
-### State Persistence
-
-Metering state must survive kernel restarts. Usage counters and quota balances are persisted through `librefang-memory`, which provides the storage backend. Serialized metering snapshots are written on every update or at configured intervals.
+The dependency on `librefang-llm-driver` is the key signal: this module wraps or intercepts LLM operations to measure them. The `serde` dependency suggests metering state is serialized, likely for persistence across sessions or for reporting. The `tracing` dependency indicates that cost events are logged for observability.
 
 ## Integration Points
 
-**Upstream consumers** — the runtime calls into metering before and after each LLM invocation.
+Based on the dependency graph, this module sits between the LLM driver and the rest of the kernel:
 
-**Downstream data** — metering reads pricing information from `librefang-llm-driver` (model-specific cost per token) and reads/writes quota state through `librefang-memory`.
+```
+┌─────────────────┐
+│ librefang-llm-  │
+│     driver      │
+└────────┬────────┘
+         │ LLM calls produce
+         │ billable events
+         ▼
+┌─────────────────┐
+│ librefang-      │
+│ kernel-metering │◄── quota configuration
+└────────┬────────┘
+         │ enforce / block
+         ▼
+┌─────────────────┐
+│ librefang-      │
+│    runtime      │
+└─────────────────┘
+```
 
-**Observability** — all enforcement decisions and cost accumulations are emitted as `tracing` events, allowing external systems to monitor spending in real time.
+The module consumes telemetry or hook points from the LLM driver, accumulates usage, checks against configured limits, and signals back when quotas are exceeded.
+
+## Expected Responsibilities
+
+Given its stated purpose and dependencies, this module is responsible for:
+
+- **Token counting**: Tracking prompt and completion tokens per request.
+- **Cost accumulation**: Converting token counts to monetary cost using model-specific pricing.
+- **Quota enforcement**: Rejecting or throttling requests when a budget or token limit is reached.
+- **State persistence**: Serializing metering data so it survives restarts (via `serde` and `librefang-memory`).
+- **Audit logging**: Emitting structured trace events for every metered operation.
+
+## Status
+
+No execution flows or call edges were detected in the static analysis. This indicates the module is either newly scaffolded, contains only type definitions and configuration structs without active call paths, or its interactions are dispatched indirectly (e.g., through trait objects or dynamic dispatch) that the analysis did not resolve.
+
+When adding to or consuming this module, inspect the actual source files under `librefang-kernel-metering/src/` for the concrete API surface.

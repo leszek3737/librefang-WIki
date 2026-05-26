@@ -2,53 +2,59 @@
 
 # librefang-http
 
-Shared HTTP client builder providing consistent TLS configuration and proxy support across the LibreFang project.
+Shared HTTP client builder providing consistent TLS configuration and proxy support across the LibreFang workspace.
 
 ## Purpose
 
-Rather than each LibreFang component independently constructing its own `reqwest::Client` with ad-hoc TLS and proxy settings, this crate centralizes that logic. Every HTTP call made by the application—whether fetching remote configs, communicating with game services, or downloading resources—goes through a client built by this module.
-
-## Architecture
-
-```mermaid
-graph TD
-    A[Consumer module] -->|calls build function| B[librefang-http]
-    B -->|configures TLS| C[rustls]
-    B -->|loads CA roots| D[webpki-roots]
-    B -->|fallback CA roots| E[rustls-native-certs]
-    B -->|returns| F[reqwest::Client]
-    F -->|used by| A
-```
-
-The module exposes a builder/factory function that returns a fully configured `reqwest::Client`. Consumers never deal with TLS internals directly.
-
-## TLS Strategy
-
-TLS configuration follows a two-tier certificate root loading strategy:
-
-1. **Primary — `webpki-roots`**: Bundles Mozilla's curated set of root certificates. This works everywhere regardless of the host OS but only trusts certificates from well-known CAs.
-
-2. **Fallback — `rustls-native-certs`**: Loads the host operating system's native certificate store. This is necessary for environments with custom/private CAs (corporate proxies, self-signed infrastructure) whose roots aren't in Mozilla's set.
-
-The fallback ensures that LibreFang works out of the box on standard setups while remaining flexible in restricted network environments. All TLS is handled by `rustls`—there is no dependency on OpenSSL.
-
-## Proxy Support
-
-Relies on `reqwest`'s built-in proxy detection, which respects standard environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`). This keeps proxy configuration consistent with the rest of the system without requiring custom logic.
+This crate centralizes `reqwest` client construction so that every component in LibreFang——makes HTTP requests with identical TLS behavior and proxy handling. Any crate that needs to speak HTTP depends on this library rather than building its own client, preventing certificate trust mismatches and duplicated boilerplate.
 
 ## Dependencies
 
-| Crate | Role |
+| Dependency | Role |
 |---|---|
-| `reqwest` | HTTP client; the constructed output type |
-| `rustls` | TLS backend (no OpenSSL linkage) |
-| `webpki-roots` | Bundled Mozilla CA certificates |
-| `rustls-native-certs` | OS-native CA certificate loading |
-| `librefang-types` | Shared types used across LibreFang |
-| `tracing` | Structured logging for certificate loading and errors |
+| `reqwest` | HTTP client runtime (workspace-managed version) |
+| `rustls` | TLS backend — avoids OpenSSL linkage |
+| `webpki-roots` | Mozilla's bundled CA certificates |
+| `rustls-native-certs` | Loads system certificate store as a fallback |
+| `tracing` | Structured logging for TLS and proxy diagnostics |
+| `librefang-types` | Shared domain types used across the workspace |
 
-## Integration
+## TLS Certificate Strategy
 
-Other LibreFang crates depend on `librefang-http` and call its build function to obtain a `reqwest::Client`. The types exchanged over HTTP (request/response shapes) come from `librefang-types`, keeping serialization concerns separate from transport concerns.
+The crate implements a two-tier certificate trust chain:
 
-Because no incoming or outgoing calls were detected in static analysis, the module is purely a utility: it builds a client and returns it, with no callbacks, trait objects, or runtime hooks into the rest of the application.
+1. **Primary** — `webpki-roots` provides a pinned set of well-known Mozilla CA certificates. This guarantees consistent behavior regardless of the host OS.
+2. **Fallback** — `rustls-native-certs` loads whatever CA bundle the operating system provides. This covers corporate environments with private CAs, self-signed infrastructure, or non-standard root certificates.
+
+Both pools are merged into a single `rustls::RootCertStore` so that the resulting `reqwest::Client` trusts the union of Mozilla's roots and the system's roots. If native cert loading fails entirely, the client still functions with the webpki roots alone.
+
+## Proxy Support
+
+Proxies are left to `reqwest`'s default behavior, which respects the standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables. This crate does not hardcode proxy configuration, keeping it flexible for different deployment scenarios.
+
+## Relationship to the Workspace
+
+```mermaid
+graph TD
+    A[librefang-types] --> B[librefang-http]
+    B --> C[librefang-resolver]
+    B --> D[Other LibreFang crates]
+    B --> E[reqwest + rustls]
+```
+
+`librefang-http` sits between the shared types layer and any crate that makes outbound HTTP calls. It consumes types from `librefang-types` and exposes a pre-configured `reqwest::Client` (or builder) that downstream crates use directly.
+
+## Usage Pattern
+
+Downstream crates add `librefang-http` as a dependency and call its builder to obtain a ready-to-use client. The returned client already has:
+
+- A `rustls`-backed TLS connector (no OpenSSL required)
+- The merged certificate store described above
+- Sensient default timeouts and redirect policies from the workspace's `reqwest` version
+- `tracing` instrumentation for connection and TLS events
+
+Consumers should not need to touch TLS configuration themselves.
+
+## Build Notes
+
+Because this crate uses `rustls` exclusively, the workspace avoids an OpenSSL build dependency. This simplifies cross-compilation and reduces the binary's attack surface. Ensure the workspace `reqwest` dependency is configured with `default-features = false` and `features = ["rustls-tls"]` (or equivalent) so that no OpenSSL backend is accidentally pulled in through feature unification.

@@ -2,138 +2,107 @@
 
 # librefang-cli-locales
 
-Localization resources for the LibreFang CLI, using [Project Fluent](https://projectfluent.org/) (`.ftl`) message files. This module is a **pure data layer** — it contains no executable code, only translation strings consumed at runtime by the CLI's i18n formatter.
+Fluent (FTL) message catalogs for the LibreFang CLI. Provides all user-facing strings—status messages, error reports, hints, and interactive prompts—in a structured, localizable format. Currently ships English (`en`) as the primary locale and Simplified Chinese (`zh-CN`) as a complete translation.
 
-## Directory Layout
+## Architecture
+
+```mermaid
+graph LR
+    CLI["librefang-cli<br/>(Rust binary)"] -->|"fluent::FluentBundle<br/>load(\"en/main.ftl\")"| EN["locales/<b>en</b>/main.ftl"]
+    CLI -->|"load(\"zh-CN/main.ftl\")"| ZH["locales/<b>zh-CN</b>/main.ftl"]
+    EN -->|fallback| CLI
+    ZH -->|override| CLI
+```
+
+The CLI uses the [Fluent](https://projectfluent.org/) system (Rust crate `fluent`) to resolve message IDs to localized strings at runtime. The English catalog is the canonical source; all other locales translate against it one-to-one.
+
+## File Layout
 
 ```
 librefang-cli/locales/
-├── en/           # English (primary / fallback locale)
-│   └── main.ftl
-└── zh-CN/        # Simplified Chinese
-    └── main.ftl
+├── en/main.ftl       # Primary (canonical) catalog
+└── zh-CN/main.ftl    # Simplified Chinese translation
 ```
 
-Each locale directory holds a single `main.ftl` file containing every user-facing string the CLI can emit.
+Each file is a single self-contained Fluent resource with no imports.
 
-## How It Works
+## Message ID Conventions
 
-The CLI loads Fluent bundles at startup based on the user's system locale (with `en` as the unconditional fallback). Every `print!` or `eprintln!` that faces the user is replaced by a Fluent message lookup. Messages are keyed by a dot-free identifier (e.g. `daemon-starting`, `config-parse-error`) and may include **variables** interpolated at runtime.
+### Prefixes group messages by subsystem
 
-Example Fluent definition:
+| Prefix | Domain | Example |
+|--------|--------|---------|
+| `daemon-*` | Daemon lifecycle (start, stop, restart, background) | `daemon-started-bg`, `daemon-stopped-forced` |
+| `label-*` | Short field labels for status/info tables | `label-uptime`, `label-pid` |
+| `hint-*` | Non-critical guidance shown after output | `hint-stop-daemon`, `hint-check-status` |
+| `error-*` | Error titles and diagnostics | `error-boot-auth`, `error-connect-refused` |
+| `agent-*` | Agent spawning, killing, model management | `agent-spawned`, `agent-kill-failed` |
+| `vault-*` | Credential vault operations | `vault-stored`, `vault-rotate-success` |
+| `cron-*` | Scheduled job CRUD | `cron-created`, `cron-deleted` |
+| `config-*` | Config file reads/writes/edits | `config-set-kv`, `config-parse-error` |
+| `channel-*` | Messaging channel setup (Discord, Slack, etc.) | `channel-test-ok`, `channel-unknown` |
+| `section-*` | Table/section headers for status output | `section-daemon-status`, `section-active-agents` |
+| `webhook-*` | Webhook management | `webhook-created`, `webhook-test-ok` |
+| `memory-*` | Agent memory key-value operations | `memory-set`, `memory-deleted` |
+| `uninstall-*` | Teardown and cleanup | `uninstall-goodbye`, `uninstall-removed` |
+| `doctor-*` | Diagnostic checks | `doctor-all-passed`, `doctor-some-failed` |
+| `model-*` | Model catalog selection | `model-set-success`, `model-no-catalog` |
+| `approval-*` | Human-in-the-loop approvals | `approval-responded`, `approval-failed` |
+| `device-*` | Mobile device pairing | `device-scan-qr`, `device-removed` |
+| `guide-*` | Interactive setup wizard | `guide-title`, `guide-testing-key` |
+| `shutdown-*` | Shutdown-specific edge cases | `shutdown-401-detected`, `shutdown-401-fallback-attempt` |
+| `reset-*` / `log-*` | Reset and log tailing | `reset-success`, `log-following` |
+
+### Error + fix pattern
+
+Many error messages have a companion `*-fix` variant that provides remediation guidance. Consumers typically print the error message followed by the fix hint:
 
 ```ftl
-daemon-already-running = Daemon already running at { $url }
+error-boot-auth = LLM provider authentication failed
+error-boot-auth-fix = Run `librefang doctor` to check your API key configuration
 ```
 
-Rendered in code as something like:
+In code, these are resolved as a pair:
 
 ```rust
-bundle.get_message("daemon-already-running")
-    .and_then(|msg| msg.value())
-    .map(|pattern| bundle.format_pattern(pattern, &args, &mut errors))
+println!("{}: {}", ftl("error-boot-auth"), ftl("error-boot-auth-fix"));
 ```
 
-## Message Organization
+### Value labels
 
-Messages are grouped into logical sections within each `.ftl` file, separated by comments. Both locales follow the **exact same section order and message identifiers**.
-
-| Section | Covers | Typical Variables |
-|---|---|---|
-| **Daemon lifecycle** | `start`, `stop`, `restart`, background launch, health-wait | `$url`, `$status`, `$error`, `$path`, `$pid` |
-| **Labels** | Table/field names in status output | — |
-| **Hints** | One-line user guidance after commands | `$url`, `$name`, `$provider` |
-| **Init** | First-run setup success/cancel | — |
-| **Error messages** | General, daemon-comm, boot failures | `$error`, `$status`, `$path` |
-| **Provider detection** | Auto-detected LLM backends | `$display`, `$env_var` |
-| **Desktop app** | `librefang desktop` launch messages | `$error` |
-| **Dashboard** | Browser-open feedback | `$url` |
-| **Agent commands** | Spawn, kill, model-set, templates | `$name`, `$id`, `$error`, `$field`, `$value` |
-| **Manifest errors** | Missing/corrupt agent manifests | `$path`, `$error`, `$name` |
-| **Status** | `librefang status` section headers and labels | `$count` |
-| **Doctor** | Diagnostic pass/fail output | — |
-| **Security** | Audit trail, sandbox, wire-protocol status | `$count` |
-| **Health** | Simple up/down check | — |
-| **Channel setup** | Telegram, Discord, Slack, WhatsApp, Email, Signal, Matrix | `$name`, `$key` |
-| **Vault** | Init, unlock, store, remove, rotate master key | `$key`, `$error`, `$count`, `$path` |
-| **Cron** | Create, delete, toggle scheduled jobs | `$id`, `$action`, `$error` |
-| **Approvals** | Approve/reject pending approvals | `$id`, `$action`, `$error` |
-| **Memory** | Per-agent key-value memory | `$agent`, `$key`, `$error` |
-| **Devices** | Mobile app pairing via QR | `$id`, `$error` |
-| **Webhooks** | Create, delete, test webhook endpoints | `$id`, `$error` |
-| **Models** | Default model selection | `$model`, `$error`, `$max` |
-| **Config** | Get/set/unset config values, `set-key` | `$key`, `$value`, `$error`, `$env_var`, `$provider` |
-| **Hand commands** | Install deps, pause, resume hand instances | `$id` |
-| **Uninstall** | Teardown across Windows, macOS, Linux | `$path`, `$error` |
-| **Reset** | Remove data directories | `$path`, `$error` |
-| **Logs** | `librefang logs --follow` output | `$path` |
-
-## Adding a New Locale
-
-1. Create a new directory under `locales/` using the appropriate BCP 47 tag (e.g. `ja` for Japanese).
-2. Copy `en/main.ftl` into the new directory.
-3. Translate every message value while preserving:
-   - The message identifier (left of `=`) exactly.
-   - Variable syntax: `{ $variable }`.
-   - Multiline formatting (indented continuation lines), especially in messages like `shutdown-401-fallback-fix`.
-   - Section comments (lines starting with `#`) are optional but recommended for maintainability.
-4. Register the locale in the CLI's Fluent bundle loader (the code that calls `fluent::FluentBundle::add_resource`).
-
-## Adding a New Message
-
-1. Add the identifier and English text to `en/main.ftl` in the appropriate section.
-2. Add the same identifier to every other locale's `main.ftl` with a translated value.
-3. If the new message is never translated in a locale, the Fluent bundle will fall back to English automatically — but missing identifiers produce no output, so always add the key everywhere.
-
-## Variable Convention
-
-Messages use positional `$variables` that map to `FluentArgs` entries passed from Rust code. The convention is:
-
-| Variable | Meaning |
-|---|---|
-| `$error` | Error message string from an `anyhow::Error` or similar |
-| `$path` | Filesystem path |
-| `$url` | HTTP URL |
-| `$id` | Entity identifier (agent, cron job, webhook, etc.) |
-| `$name` | Human-readable name |
-| `$count` | Numeric count |
-| `$status` | HTTP status code or exit code |
-| `$pid` | OS process ID |
-| `$action` | Verb like "pause"/"resume" or "approve"/"reject" |
-| `$provider` | LLM provider slug |
-| `$model` | Model identifier |
-| `$key` | Config key or vault key name |
-| `$value` | Config value |
-| `$env_var` | Environment variable name |
-| `$command` | CLI subcommand name |
-| `$display` | Human-readable provider name |
-
-## Notable Patterns
-
-### Error + Fix Pairs
-
-Many error messages come in pairs — the error itself and a companion `*-fix` message that suggests remediation:
+Static display values for the security status table use a `value-*` prefix to pair with their `label-*` counterpart:
 
 ```ftl
-error-connect-refused = Cannot connect to daemon
-error-connect-refused-fix = Is the daemon running? Start it with: librefang start
+label-audit-trail = Audit trail
+value-audit-trail = Merkle hash chain (SHA-256)
 ```
 
-This lets the CLI print the error and its suggestion as separate lines, with different formatting if desired.
+## Variable Interpolation
 
-### Issue-Linked Comments
+Messages use Fluent's `$variable` syntax. All variables are positional and untyped (rendered as strings by the CLI before passing to Fluent). Common variables:
 
-Messages tied to specific bug reports or design decisions carry a comment referencing the issue number, so future translators understand the context:
+| Variable | Used in | Meaning |
+|----------|---------|---------|
+| `$error` | `daemon-error`, `vault-unlock-failed`, etc. | Underlying error string |
+| `$status` | `error-daemon-returned`, `daemon-bg-exited` | HTTP or exit status code |
+| `$path` | `log-path-hint`, `vault-rotate-no-vault` | Filesystem path |
+| `$url` | `daemon-already-running`, `dashboard-opening` | Daemon/dashboard URL |
+| `$count` | `models-available`, `agents-loaded`, `vault-rotate-success` | Numeric count |
+| `$pid` | `shutdown-401-fallback-attempt`, `shutdown-401-fallback-success` | OS process ID |
+| `$id` | `agent-killed`, `cron-deleted`, `webhook-created` | Entity identifier |
+| `$name` | `agent-spawned`, `channel-configured` | Human-readable name |
+| `$key` | `vault-stored`, `config-key-not-found` | Config or vault key |
+| `$value` | `agent-model-set`, `config-set-kv` | Assigned value |
+| `$command` | `error-require-daemon` | CLI subcommand name |
+| `$provider` / `$model` | `kernel-booted`, `model-set-success` | LLM provider or model ID |
+| `$display` / `$env_var` | `detected-provider`, `config-saved-key` | Provider display name, env var name |
+| `$action` | `cron-toggled`, `approval-responded` | Past-tense action (paused/resumed, approved/rejected) |
+| `$field` | `agent-unknown-field` | Field name in set operations |
+| `$max` | `model-out-of-range` | Upper bound of selection range |
 
-```ftl
-# Issue #4693 — after `curl install.sh | sh` upgrades the binary without
-# restarting the running daemon ...
-shutdown-401-detected = Shutdown request was rejected ...
-```
+## Multiline Messages
 
-### Multiline Messages
-
-Some messages span multiple lines using Fluent's block syntax. The indentation is part of the output:
+Some remediation hints use Fluent's block syntax (indented continuation lines). For example, `shutdown-401-fallback-fix`:
 
 ```ftl
 shutdown-401-fallback-fix = Stop the daemon manually, then start it again:
@@ -141,21 +110,35 @@ shutdown-401-fallback-fix = Stop the daemon manually, then start it again:
     librefang start
 ```
 
-## Relationship to the Codebase
+The indented lines are part of the same message value. Consumers should preserve line breaks when rendering.
 
-```
-┌──────────────────────┐
-│  librefang-cli       │
-│  (Rust binary)       │
-│                      │    loads at startup
-│  Fluent bundle  ◄────┼──────────────────────────┐
-│  formatter            │                          │
-└──────────────────────┘                          │
-                                                  │
-┌─────────────────────────────────────────────────┘
-│  librefang-cli/locales/
-│    ├── en/main.ftl     ← source of truth
-│    └── zh-CN/main.ftl  ← mirrors en/ structure
-```
+## Adding a New Locale
 
-No other modules call into this directory. The CLI's i18n layer reads the `.ftl` files at compile time (via `include_str!`) or runtime, builds `FluentBundle` instances, and the rest of the CLI references messages by their string identifiers. Changes to message IDs require a corresponding update in the Rust code that looks them up.
+1. Create `librefang-cli/locales/<locale>/main.ftl` (e.g., `ja/main.ftl`).
+2. Copy `en/main.ftl` as the starting template.
+3. Translate every message value. **Do not change message IDs or variable names.**
+4. Keep the same section comment structure for diff-ability.
+5. Register the locale in the CLI's Fluent bundle loader (see the i18n initialization code in `librefang-cli`).
+
+### Completeness check
+
+Every message ID present in `en/main.ftl` must exist in the new locale file. Missing IDs will silently fall back to English if the bundle is configured with an `en` fallback chain, but this should be treated as a bug.
+
+## Adding New Messages
+
+1. Add the message to `en/main.ftl` under the appropriate section comment.
+2. Follow the naming convention (`subsystem-variant` or `subsystem-variant-fix`).
+3. Use `$variable` placeholders for any dynamic content—never hardcode formatted strings.
+4. Immediately add the same message ID to all other locale files with a translation. Leaving other locales out of date is acceptable short-term only if fallback is configured.
+5. If the message is an error, add a companion `*-fix` variant.
+
+## Notable Design Decisions
+
+**Issue #4693 shutdown flow.** The `shutdown-401-*` family of messages handles a specific upgrade scenario: `curl install.sh | sh` replaces the CLI binary while the old daemon keeps running with a different `api_key`. The messages explain the cause, attempt a PID-based fallback, and guide manual recovery if that also fails. The entire flow is driven through these seven message IDs rather than hardcoded English strings.
+
+**Quick mode vs. interactive mode.** The `hint-non-interactive` and `hint-non-interactive-wizard` messages distinguish between piped/CI terminals and interactive ones. The `init-quick-success` / `init-interactive-success` pair reflects the same split in the init command.
+
+**In-process vs. daemon agents.** Several message pairs distinguish ephemeral in-process agents from daemon-managed persistent ones:
+- `agent-spawned` vs. `agent-spawned-inprocess`
+- `section-daemon-status` vs. `section-status-inprocess`
+- `hint-agent-lost-on-exit` and `hint-persistent-agents`

@@ -2,296 +2,212 @@
 
 # librefang-kernel-tests
 
-Integration test suite for the LibreFang kernel. Covers the full lifecycle — boot, agent spawning, messaging, task tracking, memory isolation, RBAC policy evaluation, hand (multi-agent) management, audit retention, session compaction, and CLI tooling.
+Integration test suite for `librefang-kernel`. Exercises the kernel's public APIs — boot, agent lifecycle, messaging, async tasks, memory, RBAC, cron compaction, hand management, and workflow integration — without requiring a full production runtime.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    subgraph "Test Infrastructure"
-        COMMON[common/mod.rs<br/>boot_kernel helpers]
-        MOCK[MockKernelBuilder<br/>librefang-testing]
+    subgraph "Test Suite (librefang-kernel/tests)"
+        COMMON["common/mod.rs<br/>boot helpers"]
+        ASYNC["async_task_tracker_test.rs"]
+        AUDIT_CH["audit_cron_channel_name_test.rs"]
+        AUDIT_RET["audit_retention_test.rs"]
+        COMPACT["cron_compaction_test.rs"]
+        MEM_ISO["cross_chat_memory_isolation_5227_test.rs"]
+        INTEGRATION["integration_test.rs"]
+        KH_BROADER["kernel_handle_contract_broader.rs"]
+        KH_CRON["kernel_handle_contract_cron_spawn.rs"]
+        KH_MEM["kernel_handle_contract_memory.rs"]
+        KH_RBAC["kernel_handle_contract_rbac.rs"]
+        KH_SPAWN["kernel_handle_contract_spawn_checked.rs"]
+        KH_TASK["kernel_handle_contract_task.rs"]
+        MULTI["multi_agent_test.rs"]
     end
 
-    subgraph "Kernel Contract Tests"
-        BROADER[kernel_handle_contract_broader<br/>roster · goals · A2A · events]
-        CRON[kernel_handle_contract_cron_spawn<br/>cron CRUD · agent spawn]
-        MEM[kernel_handle_contract_memory<br/>store/recall/list · security]
-        RBAC[kernel_handle_contract_rbac<br/>user policy resolution]
-        SPAWN[kernel_handle_contract_spawn_checked<br/>capability escalation guard]
-        TASK[kernel_handle_contract_task<br/>post · claim · complete]
+    subgraph "Kernel Surfaces Under Test"
+        KERNEL["LibreFangKernel"]
+        HANDLE["KernelHandle trait"]
+        TASK_REG["task registry"]
+        MEMORY["memory substrate"]
+        HANDS["hand registry"]
     end
 
-    subgraph "Subsystem Integration"
-        ASYNC[async_task_tracker_test<br/>register · complete · dedupe · recovery]
-        AUDIT[audit_retention_test<br/>periodic trim · self-audit]
-        COMPACT[cron_compaction_test<br/>LLM summarization · fallback · tool pairs]
-        MULTI[multi_agent_test<br/>hand lifecycle · settings · triggers]
-    end
-
-    subgraph "End-to-End"
-        INTEG[integration_test<br/>Groq pipeline · multi-model fleet]
-        RBAC_M3[rbac_m3_evaluate_tool_call<br/>deny/allow/approval matrix]
-        PURGE[purge_sentinels_test<br/>CLI binary · dry-run · idempotency]
-    end
-
-    COMMON --> BROADER
-    COMMON --> CRON
-    COMMON --> MEM
-    COMMON --> RBAC
-    COMMON --> SPAWN
-    COMMON --> TASK
-    MOCK --> AUDIT
+    COMMON --> KERNEL
+    ASYNC --> TASK_REG
+    KH_MEM --> HANDLE
+    KH_RBAC --> HANDLE
+    KH_SPAWN --> HANDLE
+    MULTI --> HANDS
 ```
 
-## Shared Infrastructure
+## Common Utilities
 
-### `common/mod.rs`
+**`common/mod.rs`** provides shared boot helpers:
 
-Two boot helpers used across contract tests:
+- `boot_kernel()` — Boots a `LibreFangKernel` with a temp directory, network disabled, and an in-memory SQLite store. Returns `(LibreFangKernel, TempDir)`.
+- `boot_kernel_with_users(users)` — Same as above but seeds `UserConfig` entries (used by RBAC contract tests).
 
-- **`boot_kernel()`** — Boots a `LibreFangKernel` with a temp directory, SQLite memory store, networking disabled, no users. Returns `(LibreFangKernel, TempDir)`.
-- **`boot_kernel_with_users(users)`** — Same but seeds `KernelConfig.users` for RBAC tests.
+Most test files in this crate define their own `test_config(name)` helper that creates an isolated temp directory per test. The `common/mod.rs` helpers are consumed by the `kernel_handle_contract_*` files via `mod common;`.
 
-Both create the required directory skeleton (`data/`, `skills/`, `workspaces/agents/`, `workspaces/hands/`) and call `LibreFangKernel::boot_with_config`.
+## Test Domains
 
-### `MockKernelBuilder` (from `librefang-testing`)
+### Async Task Tracker (`async_task_tracker_test.rs`)
 
-Used by `audit_retention_test.rs` to build a kernel with custom config closures (e.g., `trim_interval_secs`, `max_in_memory_entries`). Returns `(LibreFangKernel, TempDir)`.
+Tests the `register_async_task` / `complete_async_task` lifecycle. Covers:
 
-## Kernel Handle Contract Tests
-
-All contract tests operate through the `KernelHandle` trait object (`&dyn KernelHandle`), validating the public API surface that `librefang-runtime` and external consumers rely on.
-
-### Broader (`kernel_handle_contract_broader.rs`)
-
-Covers miscellaneous `KernelHandle` methods:
-
-| Test | Method | Validates |
-|------|--------|-----------|
-| `test_roster_roundtrip` | `roster_upsert`, `roster_members`, `roster_remove_member` | Insert, enumerate, remove |
-| `test_goal_list_active_default_empty` | `goal_list_active` | Empty kernel returns no goals |
-| `test_list_a2a_agents_default_empty` | `list_a2a_agents` | No agents → empty list |
-| `test_get_a2a_agent_url_default_none` | `get_a2a_agent_url` | Unknown agent → `None` |
-| `test_kill_agent_unknown_returns_error` | `kill_agent` | Nonexistent agent → `Err` |
-| `test_publish_event_succeeds` | `publish_event` | Publishing an arbitrary event succeeds |
-
-### Cron and Spawn (`kernel_handle_contract_cron_spawn.rs`)
-
-Tests cron job creation and agent spawning metadata:
-
-- **`test_cron_create_preserves_peer_id`** — `cron_create` round-trips the `peer_id` field.
-- **`test_cron_create_without_peer_id`** — Omitting `peer_id` results in `null`, not an error.
-- **`test_spawn_agent_returns_valid_identity`** — `spawn_agent` returns `(id, name)` and the agent appears in `list_agents`.
-- **`test_list_agents_returns_manifest_metadata`** — `list_agents` and `find_agents` return manifest fields (name, description).
-
-### Memory (`kernel_handle_contract_memory.rs`)
-
-Validates the memory subsystem's isolation model and security boundary.
-
-**Namespace isolation:**
-
-- `memory_store` / `memory_recall` / `memory_list` isolate global (`None` peer_id) from peer-scoped namespaces. Storing `"key1"` globally and as `"peer-a"` / `"peer-b"` returns the correct value per scope.
-- `memory_list` returns only keys in the requested scope.
-
-**Security boundary (#5119, #5120):**
-
-The following inputs are rejected at the `KernelHandle` boundary with `KernelOpError::InvalidInput`, and tests assert the **side effect** (no data leakage), not just the error variant:
-
-| Attack vector | Rejection | Side-effect assertion |
-|---------------|-----------|----------------------|
-| Key prefixed `peer:` | Rejected on store and recall | Victim namespace stays empty |
-| `peer_id` containing `:` | Rejected on store, recall, list | No cross-namespace leakage |
-| Empty `peer_id` | Rejected on store, recall, list | Global namespace unmodified |
-| Pre-fix planted rows (`peer:victim:peer:other:secret`) | Not enumerable via `memory_list(Some("victim"))` | Round-trip guard drops structurally-impossible keys |
-
-**Substrate validation (#5138):**
-
-- Empty key rejected — no nameless row lands in the substrate.
-- Oversized value (>256 KiB) rejected — the key is never created.
-- `test_concurrent_goal_update_loses_no_writes_5138` — Two threads concurrently update different goals. Uses `std::thread::scope` with 20 iterations each. Asserts both goals reach their final status (no lost updates from the pre-fix get→mutate→set pattern).
-
-### RBAC (`kernel_handle_contract_rbac.rs`)
-
-Tests user-policy resolution through `resolve_user_tool_decision` and `memory_acl_for_sender`:
-
-- **Unconfigured kernel** — No registered users: `resolve_user_tool_decision` returns `Allow` (guest mode).
-- **Configured user, matching channel** — Bound Telegram sender receives the configured deny.
-- **Unknown sender** — Falls back to guest gate (`NeedsApproval`), not a registered user's policy.
-- **Wrong channel** — Same sender ID on a different channel does not match.
-- **Memory ACL** — `memory_acl_for_sender` returns `None` for unconfigured or mis-routed users.
-- **Delegation** — `requires_approval_with_context` and `is_tool_denied_with_context` delegate to their context-free counterparts in default config.
-
-### Spawn Checked (`kernel_handle_contract_spawn_checked.rs`)
-
-Tests `spawn_agent_checked`, which enforces capability non-escalation:
-
-- Succeeds with empty parent caps, with a parent ID, and with specific capabilities.
-- **Rejects capability escalation** — A child manifest requesting `shell_exec` when the parent only has `FileRead("/data/*")` returns an error mentioning "escalation" or "capability".
-
-### Task (`kernel_handle_contract_task.rs`)
-
-Full task lifecycle through `KernelHandle`:
-
-1. `task_post` — Creates a task with optional `assigned_to` and `created_by`. Both fields are preserved in `task_list` output.
-2. `task_claim` — Returns the assigned task for an agent.
-3. `task_complete` — Updates status to `"completed"` with a result string.
-4. Unassigned task — `task_post` with `None` assignment results in null/empty `assigned_to`.
-
-## Async Task Tracker (`async_task_tracker_test.rs`)
-
-Tests the `register_async_task` / `complete_async_task` pair — the kernel-side registry for tracking async work (workflows, delegations) across agent loop turns.
-
-### Core lifecycle
-
-| Test | Validates |
-|------|-----------|
-| `register_inserts_into_registry_and_returns_handle` | Registration increments `pending_async_task_count`, handle is lookable up by ID |
-| `complete_workflow_task_injects_signal_into_originating_session` | Completion injects `AgentLoopSignal::TaskCompleted` on the injection channel, removes registry entry |
-| `complete_delegation_task_injects_signal_with_delegation_kind` | Delegation completions preserve `(agent_id, prompt_hash)` in the signal |
-| `complete_unknown_task_id_returns_ok_false` | Unknown ID returns `Ok(false)`, no panic |
-
-### Delivery paths
-
-- **Mid-turn delivery** — When an injection receiver is attached, `complete_async_task` returns `Ok(true)` and the signal arrives on the channel.
-- **Idle delivery** — When no receiver is attached and `self_handle` is unset, returns `Ok(false)`. The entry is still removed (delete-on-delivery contract).
-- **Wake-idle path** — When `self_handle` is set (via `set_self_handle`), the kernel spawns a `tokio::task` to drive a turn, returning `Ok(true)`.
-- **Backpressure fallthrough** — When the injection channel is full (`TrySendError::Full`), the kernel falls through to the wake-idle path instead of propagating the error. Test uses a capacity-1 channel pre-saturated with a stray signal.
-
-### Deduplication (#5033)
-
-| Test | Behavior |
+| Test | Contract |
 |------|----------|
-| `register_dedupes_workflow_kind_against_existing_run_id` | Same `TaskKind::Workflow { run_id }` returns the existing handle, count stays 1 |
-| `register_dedupes_delegation_kind_against_existing_target_and_hash` | Same `(agent_id, prompt_hash)` returns the existing handle |
-| `register_does_not_dedupe_distinct_delegations_to_same_target` | Different `prompt_hash` → distinct handles |
-| `register_dedupe_is_cross_session_for_delegation_kind` | **Intentional**: same `(target, prompt_hash)` from different `(agent, session)` callers returns the same handle. Completion routes to the first caller's session only. Callers needing per-session isolation must salt their `prompt_hash`. |
+| `register_inserts_into_registry_and_returns_handle` | Registration inserts into the registry and the handle is lookable-up via `lookup_async_task` |
+| `complete_workflow_task_injects_signal_into_originating_session` | Workflow completion injects `AgentLoopSignal::TaskCompleted` into the originating session's injection channel and removes the registry entry |
+| `complete_delegation_task_injects_signal_with_delegation_kind` | Delegation completion carries the correct `TaskKind::Delegation` and status through the signal |
+| `complete_with_no_attached_receiver_still_removes_entry` | Delete-on-delivery contract: entry is removed even when no receiver is attached (`self_handle` unset → `Ok(false)`) |
+| `wake_idle_path_returns_true_when_self_handle_is_set` | With `set_self_handle`, the wake-idle path spawns a turn and returns `Ok(true)` |
+| `double_completion_is_a_noop_on_second_call` | Idempotency: second `complete_async_task` returns `Ok(false)`, no duplicate signal |
+| `complete_unknown_task_id_returns_ok_false` | Unknown IDs return `Ok(false)` without panicking |
+| `register_dedupes_workflow_kind_against_existing_run_id` | Same `TaskKind::Workflow { run_id }` returns the existing handle |
+| `register_dedupes_delegation_kind_against_existing_target_and_hash` | Same `(target, prompt_hash)` returns the existing handle |
+| `register_does_not_dedupe_distinct_delegations_to_same_target` | Different `prompt_hash` values produce distinct task IDs |
+| `register_dedupe_is_cross_session_for_delegation_kind` | Dedupe is structural on `kind` — cross-session callers sharing `(target, prompt_hash)` get the same handle; completion routes to the first caller's session only |
+| `complete_falls_through_to_wake_idle_when_injection_channel_is_full` | `Backpressure(Full)` on the injection channel falls through to the wake-idle spawn path rather than returning an error |
+| `recovery_synthesizes_failed_event_for_matching_pending_workflow` | `synthesize_task_failures_for_recovered_runs` drains matching entries and injects a `Failed("workflow run interrupted by daemon restart")` signal |
 
-### Idempotency and recovery
+Key helper: `attach_injection_receiver` manually wires an `mpsc::channel` into the kernel's `injection_senders_ref()` map so tests can receive `AgentLoopSignal` values without going through the agent loop.
 
-- **`double_completion_is_a_noop_on_second_call`** — Second call returns `Ok(false)`, only one signal lands.
-- **`recovery_synthesizes_failed_event_for_matching_pending_workflow`** — `synthesize_task_failures_for_recovered_runs` drains matching entries and injects a `Failed("workflow run interrupted by daemon restart")` signal.
-- **`recovery_noop_when_no_pending_task_matches_recovered_run`** — Non-matching run ID is a no-op.
+### Audit: Channel Name Reservation (`audit_cron_channel_name_test.rs`)
 
-### Type contract
+Regression test for a security audit issue where external callers could pass `channel = "cron"` and collide with the kernel's internal cron session. The fix applies `sanitize_channel_name` at every external ingress point, renaming reserved names to `ext-<name>`.
 
-- **`workflow_run_id_canonical_definition_lives_in_types_crate`** — `librefang_kernel::workflow::WorkflowRunId` is a re-export of `librefang_types::task::WorkflowRunId`, not a parallel newtype.
+Tests assert:
+- External variants of `"cron"`, `"autonomous"`, `"webui"` (case-insensitive, with whitespace) never derive the same `SessionId` as the internal path
+- The sanitizer only renames reserved names; benign channels pass through unchanged
+- Sanitized external channels are stable across invocations (two external adapters sharing the same reserved name land on the same `ext-` session)
 
-## Audit Retention (`audit_retention_test.rs`)
+### Audit: Retention Trimming (`audit_retention_test.rs`)
 
-Tests the periodic audit log trim task:
+Tests that `start_background_agents()` spawns the periodic trim task and the self-audit `RetentionTrim` row is recorded when a trim cycle drops entries. Uses a `trim_interval_secs = 1` and `max_in_memory_entries = 10` with 50 seeded entries, then waits ~2.5s for the periodic task to fire.
 
-1. Seeds 50 audit entries (well over the configured `max_in_memory_entries = 10`).
-2. Calls `start_background_agents()` to spawn the periodic trim task.
-3. Waits ~2.5 seconds for the 1-second trim interval to fire.
-4. Asserts the log length drops to near the cap (≤20, accounting for boot-time writes).
-5. Asserts a `RetentionTrim` self-audit row appears.
-6. Asserts chain integrity (`verify_integrity`) is maintained.
+Requires `#![recursion_limit = "256"]` because `start_background_agents()` spawns many closures whose combined async-block layouts exceed the default limit.
 
-Requires `#![recursion_limit = "256"]` due to deeply nested async closures from `start_background_agents()`.
+### Cron Session Compaction (`cron_compaction_test.rs`)
 
-## Cron Compaction (`cron_compaction_test.rs`)
+Tests the `try_summarize_trim` logic through the `librefang_runtime::compactor` surface:
 
-Tests session compaction via `librefang_runtime::compactor`:
+- **Successful LLM summarization**: `compact_session` with a `FakeDriver` produces a non-empty summary with `used_fallback = false`. The output is `[summary_msg] + kept_tail`.
+- **LLM failure fallback**: A `FailingDriver` causes `compact_session` to return `Ok(result)` with `used_fallback = true` (not an `Err`). The kernel checks `!result.used_fallback` to reject these.
+- **Tool pair integrity**: `adjust_split_for_tool_pair` shifts the split point so an `Assistant{ToolUse}` / `User{ToolResult}` pair is never separated across the summary/tail boundary.
 
-### H2 gap 1 — Successful summarization
+### Cross-Chat Memory Isolation (`cross_chat_memory_isolation_5227_test.rs`)
 
-`compact_session` with a `FakeDriver` returns a non-empty summary with `used_fallback = false`. The output is `[summary_msg] + kept_tail` (1 summary + `keep_recent` messages).
+Regression test for #5227 where memories extracted in a WhatsApp group chat bled into a 1:1 DM. Tests verify:
 
-### H2 gap 2 / M4 — LLM failure fallback
+- `SessionId::for_sender_scope` produces distinct session IDs for DM vs group of the same peer
+- `ProactiveMemoryHooks::auto_memorize` stamps every stored memory with `CHAT_SCOPE_METADATA_KEY` matching the originating channel
+- Unscoped callers (`chat_scope = None`) retain legacy recall behavior — no filtering
+- `compose_sender_scope` formula matches `for_sender_scope` for WhatsApp (pre-qualified), Telegram/Slack/Discord (bare channel + chat_id), and empty chat_id shapes
 
-`compact_session` with a `FailingDriver` returns `Ok(result)` with `used_fallback = true`. The M4 guard (`!result.summary.is_empty() && !result.used_fallback`) correctly rejects the fallback placeholder.
+### Live LLM Integration (`integration_test.rs`)
 
-### H1 — Tool pair integrity
+Full pipeline tests that require `GROQ_API_KEY`. Marked `#[ignore]`. Tests:
+- Boot → spawn agent → send message → receive response → kill agent
+- Multiple agents with different models running concurrently
 
-`adjust_split_for_tool_pair` shifts the split point so an `Assistant{ToolUse}` / `User{ToolResult}` pair is never separated across the summary/tail boundary. Test constructs a 10-message sequence with a pair at indices 6-7 and verifies the raw split (7) is adjusted past the ToolResult.
+### KernelHandle Contract Tests
 
-## Multi-Agent / Hand Lifecycle (`multi_agent_test.rs`)
+A family of test files exercising the `KernelHandle` trait (from `librefang-kernel-handle`), which is the stable API surface consumed by adapters and the HTTP layer.
 
-Comprehensive hand lifecycle tests covering activation, deactivation, settings, triggers, and persistence.
+#### `kernel_handle_contract_broader.rs`
 
-### Hand definitions used
+General `KernelHandle` methods:
+- Roster upsert/remove/members round-trip
+- `goal_list_active` returns empty by default
+- `list_a2a_agents` / `get_a2a_agent_url` defaults
+- `kill_agent` on unknown ID returns error
+- `publish_event` succeeds
 
-| Constant | ID | Agents | Notes |
-|----------|----|--------|-------|
-| `HAND_A` | `test-clip` | Single (`main`) | Tools: file_read, file_write, shell_exec |
-| `HAND_B` | `test-devops` | Single (`main`) | Tools: shell_exec |
-| `HAND_C` | `test-research` | `analyst` + `planner` (coordinator) | Explicit non-main coordinator |
-| `HAND_WITH_SETTINGS` | `test-settings` | Single | Has `[[settings]]` with defaults |
+#### `kernel_handle_contract_cron_spawn.rs`
 
-### Key behaviors tested
+Cron job creation and agent spawning:
+- `cron_create` preserves `peer_id` and omits it when not provided
+- `spawn_agent` returns valid identity and the agent appears in `list_agents`
+- `find_agents` matches by name
 
-- **Deterministic agent IDs** — `AgentId::from_hand_agent(hand_id, role, None)` produces stable IDs. Single-instance reactivation preserves the same agent ID.
-- **Explicit coordinator** — `HAND_C` uses `coordinator = true` on the planner role; routes resolve to the planner, not the first-defined agent.
-- **Deactivation kills agents** — `deactivate_hand` removes agents from the registry.
-- **Pause/resume** — Agents remain alive while paused; status transitions correctly.
-- **Tags** — Agents are tagged with `hand:{hand_id}` and `hand_instance:{instance_id}`.
-- **Tool inheritance** — Hand-level `tools` are applied to the agent manifest capabilities.
-- **Provider resolution** — `"default"` provider sentinel is resolved to the kernel's actual provider at activation time.
+#### `kernel_handle_contract_memory.rs`
 
-### Settings schema
+Memory subsystem isolation, security, and validation:
 
-- **`test_activation_seeds_schema_defaults_into_config`** — Activating with no user overrides fills all settings from their `[[settings]]` defaults.
-- **`test_activation_preserves_user_overrides_over_defaults`** — User-provided values take precedence.
-- **`test_reactivation_backfills_missing_schema_keys`** — When persisted config is missing a key added by schema evolution, reactivation fills it from the default while preserving existing values.
+**Isolation**: Per-agent writes are invisible to other agents. Peer-scoped keys are isolated per peer. Global (agent_id=None) namespace is independent.
 
-### State persistence
+**Security (#5119 / #5120)**:
+- `peer:`-prefixed keys are rejected at the boundary (prevents LLM-planted rows surfacing in victim's namespace)
+- Colon-bearing `peer_id` values (e.g. Slack-style `"T1:U2"`) are rejected
+- Empty `peer_id` is rejected (prevents ambiguous `peer::{key}` collision)
+- Pre-fix planted rows are not enumerable via `memory_list` (round-trip guard)
+- Empty keys are rejected (#5138)
+- Oversized values (>256 KiB) are rejected (#5138)
 
-- State file at `data/hand_state.json`, version 5.
-- Persists `instance_id`, `status`, `activated_at`, `updated_at`, `agent_ids` map, `coordinator_role`, and `config`.
-- Multi-agent hands persist the `coordinator_role` field.
+**Concurrency (#5138)**: `test_concurrent_goal_update_loses_no_writes_5138` verifies that concurrent `goal_update` calls using `structured_modify` don't lose writes (fixes a prior get→mutate→set race).
 
-### Trigger reactivation
+#### `kernel_handle_contract_rbac.rs`
 
-- **`test_reactivation_restores_triggers_to_original_roles`** — Triggers registered on an agent role survive deactivation and reactivation. A reactivated analyst retains its triggers; the planner does not inherit them.
+RBAC policy resolution:
+- Unconfigured users default-allow (guest mode)
+- Tool deny and memory ACL policies match on `(sender_id, channel_binding)` — wrong channel doesn't match
+- `requires_approval_with_context` delegates to `requires_approval`
 
-### Live LLM test
+#### `kernel_handle_contract_spawn_checked.rs`
 
-`test_six_agent_fleet` — Spawns 6 agents (coder, researcher, writer, ops, analyst, hello-world) with different models and sends a message to each. Skips if `GROQ_API_KEY` is unset.
+Capability-checked spawning:
+- `spawn_agent_checked` succeeds with empty parent caps
+- Parent ID is tracked
+- Capability escalation (child requesting `shell_exec` when parent only has `FileRead`) is rejected
 
-## Integration Test (`integration_test.rs`)
+#### `kernel_handle_contract_task.rs`
 
-Live Groq API tests, both marked `#[ignore]`:
+Task lifecycle:
+- `task_post` preserves `assigned_to` and `created_by`
+- `task_claim` returns the assigned task
+- `task_complete` updates status to `"completed"`
+- Unassigned tasks have null/empty fields
 
-- **`test_full_pipeline_with_groq`** — Boot → spawn agent from TOML manifest → `send_message` → assert non-empty response and positive token usage → kill agent.
-- **`test_multiple_agents_different_models`** — Spawns a llama-70b agent and a llama-8b agent concurrently, sends messages to both.
+### Multi-Agent / Hand Lifecycle (`multi_agent_test.rs`)
 
-Requires `#![recursion_limit = "256"]`.
+Comprehensive tests for the hand system (preconfigured agent templates):
 
-## RBAC M3 (`rbac_m3_evaluate_tool_call.rs`)
+**Lifecycle**: `activate_hand` → spawns agent → `deactivate_hand` → kills agent. `pause_hand` / `resume_hand` change status without killing.
 
-End-to-end RBAC policy evaluation with real `LibreFangKernel` (no stubs):
+**Deterministic IDs**: `AgentId::from_hand_agent(hand_id, role, instance_id)` produces stable IDs. Single-instance activations use legacy format (same ID on reactivation).
 
-- Boots with `[[users]]` having per-user `tool_policy` and `[tool_policy.groups]`.
-- Tests the deny/allow/approval matrix:
-  - (a) User denies but agent allows → `Deny` (user deny short-circuits).
-  - (c) Both allow → `Allow`.
-  - (d) User policy says `NeedsApproval` → `NeedsApproval`.
-- Tests hot-reload: `reload()` picks up new policy without reboot.
+**Coordinator roles**: Multi-agent hands with an explicit `[agents.planner] coordinator = true` route through the coordinator role, not the default "main".
 
-## Purge Sentinels (`purge_sentinels_test.rs`)
+**Agent metadata**: Spawned agents are tagged with `hand:<hand_id>` and `hand_instance:<uuid>`.
 
-Tests the `purge_sentinels` CLI binary via `std::process::Command`:
+**Tool inheritance**: Hand-defined tools are applied to the spawned agent's capabilities.
 
-| Test | Behavior |
-|------|----------|
-| `dry_run_reports_counts_and_touches_nothing` | Reports removed line count, files unmodified, no `.bak` created |
-| `apply_creates_backup_and_rewrites` | Creates `.bak` with original content; removes whole-line sentinels (`NO_REPLY`, `[no reply needed]`, `  no_reply  `); preserves sentence-embedded sentinels |
-| `apply_is_idempotent` | Second run reports 0 removals; files and backups unchanged |
-| `apply_aborts_when_existing_bak_differs` | Pre-seeded stale `.bak` causes non-zero exit with "backup mismatch" error |
-| `nonexistent_path_exits_non_zero` | Invalid path → error containing "does not exist" |
+**Settings**: `[[settings]]` blocks with `default` values are seeded into the instance config on activation. User overrides take precedence over schema defaults.
+
+**State persistence**: Hand state is written to `hand_state.json` (version 5 format) with typed fields (`instance_id`, `status`, `activated_at`, `agent_ids` map, `coordinator_role`).
+
+**Triggers**: Hand trigger patterns survive reactivation and are restored to original roles.
+
+**Coexistence**: Multiple hands can be active simultaneously.
 
 ## Running the Tests
 
-Most tests run offline. Some require environment variables:
-
 ```bash
-# Full suite (offline tests only)
+# All unit-style tests (no API keys needed)
 cargo test -p librefang-kernel
 
-# Live LLM tests
+# Live LLM integration tests (requires API key)
 GROQ_API_KEY=gsk_... cargo test -p librefang-kernel --test integration_test -- --nocapture --ignored
-GROQ_API_KEY=gsk_... cargo test -p librefang-kernel --test multi_agent_test test_six_agent_fleet -- --nocapture --ignored
+
+# Specific test domain
+cargo test -p librefang-kernel --test async_task_tracker_test
+cargo test -p librefang-kernel --test kernel_handle_contract_memory
 ```
 
-Several test files require `#![recursion_limit = "256"]` due to deeply monomorphized futures from `send_message_full` / `start_background_agents` (specifically `audit_retention_test.rs`, `integration_test.rs`, `multi_agent_test.rs`).
+Most tests require `#[tokio::test(flavor = "multi_thread")]` because the kernel spawns blocking tasks internally via `tokio::task::block_in_place`.
+
+## Recursion Limit
+
+Several test files set `#![recursion_limit = "256"]`. This is required because `send_message_full` and `start_background_agents` nest deeply monomorphized async closures that exceed the compiler's default limit of 128. The crate root (`librefang-kernel/src/lib.rs`) sets the same limit.

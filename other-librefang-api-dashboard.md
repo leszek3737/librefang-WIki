@@ -1,14 +1,15 @@
 # Other — librefang-api-dashboard
 
-# LibreFang API Dashboard
+# LibreFang Dashboard
 
 ## Overview
 
-The dashboard is a single-page application for managing and monitoring LibreFang agents. Built on **React 19**, **TanStack Router v1**, and **TanStack Query v5**, it provides a real-time interface to the LibreFang kernel's REST API for agent lifecycle management, session control, channel configuration, memory inspection, analytics, and more.
+The dashboard is a single-page application for managing the LibreFang autonomous agent operating system. Built on **React 19**, **TanStack Router v1**, and **TanStack Query v5**, it provides real-time visibility and control over agents, sessions, workflows, channels, skills, schedules, and more.
 
 **Entry point:** `src/main.tsx`  
-**Page components:** `src/pages/`  
-**HTML shell:** `index.html` (mounts `<div id="root">`, registers service worker)
+**Pages:** `src/pages/`  
+**PWA manifest:** `public/manifest.json`  
+**Service worker:** `public/sw.js` (stale-while-revalidate for static assets; network-only for `/api/`)
 
 ---
 
@@ -16,58 +17,44 @@ The dashboard is a single-page application for managing and monitoring LibreFang
 
 ```mermaid
 graph TD
-    A["Pages<br/>src/pages/"] --> B["Hooks Layer"]
-    B --> C["Queries<br/>src/lib/queries/"]
-    B --> D["Mutations<br/>src/lib/mutations/"]
-    C --> E["Query Keys<br/>src/lib/queries/keys.ts"]
-    D --> E
-    C --> F["HTTP Client<br/>src/lib/http/client.ts"]
-    D --> F
-    F --> G["Raw API Calls<br/>src/api.ts"]
-    G --> H["LibreFang Kernel<br/>REST API"]
-    I["Components<br/>src/components/"] --> B
+    A[Pages & Components] -->|useQuery / useMutation| B[Queries & Mutations Layer]
+    B -->|queryOptions + hooks| C[Query Key Factories]
+    B -->|mutationFn| D[HTTP Client]
+    D -->|typed fetch| E[src/api.ts]
+    E -->|REST / WebSocket| F[LibreFang API Server]
+    A -->|direct fetch only| G[Streaming / SSE exceptions]
+    C -->|invalidation targets| H[TanStack Query Cache]
+    B -->|onSuccess invalidation| H
 ```
 
-All data flows one direction: pages and components consume hooks from the shared queries/mutations layer, which calls through the HTTP client to `src/api.ts`, which communicates with the backend.
+Pages and components never call `fetch()` or `api.*` directly. All data access flows through the shared hooks layer in `src/lib/queries/` and `src/lib/mutations/`. The only exceptions are streaming/SSE connections and imperative fire-and-forget control channels (e.g., `TerminalTabs.tsx`), which may call `fetch` directly with an explanatory comment.
 
 ---
 
 ## Data Layer
 
-### Core Rule
-
-**Pages and components never call `fetch()` or `api.*` directly.** All data access goes through the hooks layer. The only exceptions are streaming/SSE endpoints, imperative fire-and-forget control channels (e.g., `src/components/TerminalTabs.tsx` terminal lifecycle), and one-shot probes that must not be cached. These exceptions must be narrow and commented.
+The data layer is the most structurally important part of this codebase. It is organized under `src/lib/` with a strict separation of concerns.
 
 ### Directory Layout
 
 ```
 src/lib/
   http/
-    client.ts      # Thin wrapper over src/api.ts + typed re-exports
-    errors.ts      # ApiError class used by the wrapper
+    client.ts        # Thin wrapper over src/api.ts + typed re-exports
+    errors.ts        # ApiError class used by the wrapper
   queries/
-    keys.ts        # All query-key factories — edit when adding a domain
-    keys.test.ts   # Smoke tests — add cases when adding a factory
-    <domain>.ts    # queryOptions + useXxx hooks per domain
+    keys.ts          # All query-key factories — edit when adding a domain
+    keys.test.ts     # Smoke tests — add cases when adding a factory
+    <domain>.ts      # queryOptions + useXxx hooks per domain
   mutations/
-    <domain>.ts    # useXxx mutation hooks with cache invalidation
+    <domain>.ts      # useXxx mutation hooks with invalidation
 ```
 
-### Active Domains
+**Current domains:** `agents`, `analytics`, `approvals`, `channels`, `config`, `goals`, `hands`, `mcp`, `media`, `memory`, `models`, `network`, `overview`, `plugins`, `providers`, `runtime`, `schedules`, `sessions`, `skills`, `workflows`.
 
-`agents` · `analytics` · `approvals` · `channels` · `config` · `goals` · `hands` · `mcp` · `media` · `memory` · `models` · `network` · `overview` · `plugins` · `providers` · `runtime` · `schedules` · `sessions` · `skills` · `workflows`
+### Query Key Factories
 
----
-
-## Adding a New Endpoint
-
-### Step 1: Raw API Call
-
-Add the raw call in `src/api.ts`. If needed, re-export via `src/lib/http/client.ts`.
-
-### Step 2: Query Key Factory
-
-If this is a new domain, add a factory in `src/lib/queries/keys.ts`. Every sub-key **must** be anchored with `...fooKeys.all` so broad invalidation works correctly:
+Every domain has a hierarchical key factory in `src/lib/queries/keys.ts`. All sub-keys are anchored with `...fooKeys.all` so broad invalidation works correctly:
 
 ```ts
 export const fooKeys = {
@@ -79,9 +66,11 @@ export const fooKeys = {
 };
 ```
 
-### Step 3: Query Hook
+Never construct a `queryKey` inline — always call the factory. Never subscribe to the same endpoint with a different key just to get a subset; use `select` on the shared `queryOptions`.
 
-Add the query in `src/lib/queries/<domain>.ts`:
+### Query Hooks
+
+Each domain file (`src/lib/queries/<domain>.ts`) exports a `queryOptions` factory and a `useFoo` hook:
 
 ```ts
 export const fooQueryOptions = (filters?: FooFilters) =>
@@ -90,20 +79,6 @@ export const fooQueryOptions = (filters?: FooFilters) =>
     queryFn: () => listFoo(filters),
     staleTime: 30_000,
   });
-
-export function useFoo(filters?: FooFilters) {
-  return useQuery(fooQueryOptions(filters));
-}
-```
-
-Accept an optional `options` argument for per-call overrides (see [Query Options Override Pattern](#query-options-override-pattern)):
-
-```ts
-type UseFooOptions = {
-  enabled?: boolean;
-  staleTime?: number;
-  refetchInterval?: number | false;
-};
 
 export function useFoo(filters?: FooFilters, options: UseFooOptions = {}) {
   const { enabled, staleTime, refetchInterval } = options;
@@ -116,174 +91,178 @@ export function useFoo(filters?: FooFilters, options: UseFooOptions = {}) {
 }
 ```
 
-### Step 4: Mutation Hook
+The `UseFooOptions` parameter (`{ enabled?, staleTime?, refetchInterval? }`) allows call sites to override polling/gating behavior per-page. Examples:
 
-Add mutations in `src/lib/mutations/<domain>.ts`. **Every write must invalidate**, and invalidation must live inside the hook. Call sites may attach per-call `onSuccess`/`onError` for UI feedback — that is orthogonal to invalidation.
-
-**Prefer the narrowest matching keys.** Use `fooKeys.all` only when the mutation truly dirties every sub-key in the domain.
-
-**Invalidation strategy guide:**
-
-| Scenario | Keys to Invalidate | Example |
-|---|---|---|
-| Per-id update where list projection changes (default) | `fooKeys.lists()` + `fooKeys.detail(id)` | `usePatchAgentConfig`, experiment mutations |
-| List-shape change, no existing detail stale | `fooKeys.lists()` | Create, delete, reorder |
-| Change scoped to one detail or nested collection | `fooKeys.detail(id)` or nested sub-key | Detail-only update |
-| Bulk import / cache reset / cross-cutting migration | `fooKeys.all` | Bulk import |
-
-**Fan-out warning:** Invalidating `fooKeys.all` when N items are cached causes N+1 refetches (the list plus every cached sub-key for each item). Reserve this for genuinely cross-cutting changes.
-
-```ts
-// Default template: per-id patch where list projection also changes
-export function useUpdateFoo() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: updateFoo,
-    onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: fooKeys.lists() });
-      qc.invalidateQueries({ queryKey: fooKeys.detail(variables.id) });
-    },
-  });
-}
-
-// Lists-only: membership changed
-export function useCreateFoo() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: createFoo,
-    onSuccess: () => qc.invalidateQueries({ queryKey: fooKeys.lists() }),
-  });
-}
-
-// Bulk — NOT the default
-export function useImportFoos() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: importFoos,
-    onSuccess: () => qc.invalidateQueries({ queryKey: fooKeys.all }),
-  });
-}
-```
-
-### Step 5: Key Factory Tests
-
-Update `src/lib/queries/keys.test.ts`. At minimum, add the new factory to the "all factories exist" list. Add anchoring/hierarchy tests for non-trivial factories.
-
----
-
-## Consuming Hooks in Pages
-
-```tsx
-import { useFoo } from "../lib/queries/foo";
-import { useCreateFoo } from "../lib/mutations/foo";
-
-function FooPage() {
-  const { data, isLoading } = useFoo({ active: true });
-  const createFoo = useCreateFoo();
-  // ...
-}
-```
-
-**Rules:**
-- Never build a `queryKey` inline — always call the factory.
-- Never subscribe to the same endpoint with a different key for a subset; use `select` on the shared `queryOptions`.
-
----
-
-## Query Options Override Pattern
-
-Hooks set sensible defaults via `queryOptions` (shared `staleTime` / `refetchInterval`). Call sites can override per-page needs through the `options` argument. Common patterns:
-
-| Override | Use Case | Example |
-|---|---|---|
-| `enabled` | Gate query by tab visibility or modal state | `useApprovals({ enabled: open })` |
-| `refetchInterval` | Fast polling for live data | `useCommsEvents(50, { refetchInterval: 5_000 })` |
-| `enabled` (conditional) | Skip query until prerequisite resolved | `useModels({}, { enabled: isModelArg })` |
-| `enabled` (gate) | Pause background fetch when inactive | `useAgentTemplates({ enabled })` |
+| Hook | Override | Reason |
+|------|----------|--------|
+| `useApprovals({ enabled: open })` | `enabled` | Only poll when the approvals panel is open |
+| `useCommsEvents(50, { refetchInterval: 5_000 })` | `refetchInterval` | Fast polling for live comms |
+| `useModels({}, { enabled: isModelArg })` | `enabled` | Gate on context |
+| `useApprovalCount({ refetchInterval: 5_000 })` | `refetchInterval` | Bell-icon badge polling |
 
 Every call-site override must carry a short inline comment explaining why.
 
----
+### Mutation Hooks and Cache Invalidation
 
-## Mutation Invalidation vs. UI Feedback
+Mutations live in `src/lib/mutations/<domain>.ts`. **Every write must invalidate**, and invalidation must live inside the hook, not at the call site. Call sites may additionally attach `onSuccess`/`onError` for UI feedback (toasts, modal dismissal), which is orthogonal to cache invalidation.
 
-Mutation invalidation is encapsulated in the hook — callers never need to know which keys a mutation touches. Call sites may attach per-call `onSuccess`/`onError` handlers for UI feedback (toasts, modal dismissal, local state updates). See `MemoryPage` delete/cleanup and `ChannelsPage` configure/test for reference patterns.
+**Prefer the narrowest matching keys.** Use `fooKeys.all` only when the mutation truly dirties every sub-key in the domain:
+
+| Invalidation scope | When to use |
+|---|---|
+| `fooKeys.detail(id)` + `fooKeys.lists()` | **Default template** — per-id update where the list projection also changes (patch, rename, status flag) |
+| `fooKeys.lists()` | List-shape change with no existing detail to refresh (create, delete, reorder) |
+| `fooKeys.detail(id)` or nested sub-key | Change is genuinely scoped to one detail and list projection is unaffected |
+| `fooKeys.all` | Bulk import, cache reset, cross-cutting schema migration — **not the default** |
+
+Fan-out trade-off: invalidating `fooKeys.all` while N items are cached will refetch the list plus every cached sub-key for each of the N items. Use it only when that is the desired effect.
+
+### Adding a New Endpoint
+
+1. Add the raw call in `src/api.ts` (or re-export via `src/lib/http/client.ts`).
+2. If it's a new domain, add a factory in `src/lib/queries/keys.ts` following the hierarchical pattern above.
+3. Add the query in `src/lib/queries/<domain>.ts`.
+4. Add mutations in `src/lib/mutations/<domain>.ts` with invalidation.
+5. Update `src/lib/queries/keys.test.ts` — add the new factory to the "all factories exist" list and add anchoring/hierarchy tests for non-trivial factories.
+
+### Type Source
+
+`src/api.ts` is the canonical, hand-maintained type source for the SPA. Do not import from `openapi/generated.ts` — it is a regenerable cross-reference only (refresh via `pnpm openapi:types`).
 
 ---
 
 ## Navigation & Pages
 
-The dashboard shell provides navigation links to these top-level pages:
+The dashboard uses TanStack Router for client-side routing. The sidebar exposes these top-level sections (verified by E2E in `e2e/dashboard.spec.ts`):
 
-| Link | Page Component | Purpose |
-|---|---|---|
-| Overview | OverviewPage | System health and KPI summary |
-| Agents | AgentsPage | Agent lifecycle management |
-| Sessions | SessionsPage | Session listing and control |
-| Approvals | ApprovalsPage | Pending approval queue |
-| Comms | CommsPage | Inter-agent communication |
-| Providers | ProvidersPage | LLM provider configuration |
-| Channels | ChannelsPage | Channel adapter setup |
-| Skills | SkillsPage | Skill management |
-| Hands | HandsPage | Hand (browser automation) instances |
-| Workflows | WorkflowsPage | Workflow orchestration |
-| Scheduler | SchedulesPage | Cron job management |
-| Goals | GoalsPage | Goal tracking |
-| Analytics | AnalyticsPage | Usage analytics and cost |
-| Memory | MemoryPage | Proactive memory inspection |
-| Runtime | RuntimePage | Runtime diagnostics |
-| Logs | LogsPage | Audit log viewer |
+Overview, Agents, Sessions, Approvals, Comms, Providers, Channels, Skills, Hands, Workflows, Scheduler, Goals, Analytics, Memory, Runtime, Logs
+
+Authentication is handled via a sign-in dialog that appears when the backend requires credentials (mode `credentials` from `/api/auth/dashboard-check`). Tokens are stored in `sessionStorage` (not `localStorage`) under the key `librefang-api-key`.
 
 ---
 
-## Authentication
+## UI Component Library
 
-The dashboard checks authentication mode via `/api/auth/dashboard-check`. When the response returns `{ mode: "credentials" }`, the app presents a sign-in dialog with username/password fields. Other modes (e.g., OAuth providers) are handled via provider-specific flows.
+### Shared Components
+
+The `src/components/ui/` directory contains reusable primitives:
+
+- **`Button`** — Variants: `primary`, `secondary`, `ghost`, `danger`, `success`. Sizes: `sm`, `md`, `lg`. Supports `isLoading` spinner and `leftIcon`/`rightIcon` slots.
+- **`Modal`** — Supports `centered`, `panel-right`, and `drawer-right` variants. Auto-focus defaults to the close button for side panels and first focusable descendant for centered modals. Overridable via `autoFocus` prop.
+- **`PushDrawer`** — Global drawer slot powered by Zustand (`src/lib/drawerStore`). Renders desktop `<aside>` on `≥1000px` and mobile overlay on `<1000px`. The breakpoint literal (`999px`) is locked to the CSS `--breakpoint-lg: 1000px` override.
+- **`DrawerPanel`** — Declarative wrapper around `PushDrawer`'s global slot. Handles parent-driven open/close, external close (Esc/X/backdrop), and ownership arbitration when sibling drawers transition in the same React commit (see issue #4714).
+- **`MultiSelectCmdk`** — Combobox-based multi-select with chip removal, search filtering, optional `optionMeta` descriptions, and `allowFreeText` mode for free-form entries.
+
+### Domain Components
+
+- **`NotificationCenter`** — Bell-icon dropdown with WAI-ARIA menu button pattern, roving tabindex, Home/End jumps, and wrap-around Arrow key navigation.
+- **`AgentManifestForm`** — Form for agent manifests with catalog-driven comboboxes for tools, skills, and MCP servers. Falls back to `TagInput` when no catalog is supplied.
+- **`AgentSchedulePanel`** — Displays and edits agent schedule modes (manual, continuous, periodic, proactive). Supports cron job and trigger CRUD. Non-cron schedule kinds (`every`, `at`) disable the edit pencil with a tooltip directing users to `agent.toml`.
+- **`PromptsExperimentsModal`** — Tabbed modal for prompt version management and A/B experiments with traffic splitting.
+- **`WorkflowStepImageGallery`** — Renders image galleries from workflow step output when `image_urls` are present.
 
 ---
 
-## Type System
+## Authentication & WebSocket
 
-- **TypeScript strict mode** — no `any` in new hooks.
-- **Canonical types** live in `src/api.ts` — the hand-maintained type source consumed by the SPA.
-- `openapi/generated.ts` is a **regenerable cross-reference only**. It is not imported anywhere in `src/`. Refresh it with `pnpm openapi:types` (requires a running daemon on port 4545) to get a typed diff against the live OpenAPI schema.
+The `src/api.ts` module handles auth token management:
+
+- **`setApiKey(token)`** — Stores the token in `sessionStorage`.
+- **`verifyStoredAuth()`** — Probes a protected endpoint; clears stale tokens on 401.
+- **`buildAuthenticatedWebSocket(path)`** — Returns `{ url, protocols }` with the token as a `Sec-WebSocket-Protocol` bearer sub-protocol (`bearer.<token>`).
+
+All HTTP helper functions attach `Authorization: Bearer <token>` automatically.
 
 ---
 
-## Testing
+## Testing Strategy
 
-The test infrastructure uses `vitest` with MSW for API mocking. A shared test utility at `src/lib/test/query-client.tsx` exports `createQueryClientWrapper` for hook tests.
+### Unit & Integration Tests (Vitest)
 
-### Test Categories
+```bash
+pnpm test --run    # Run all vitest tests
+pnpm test:watch    # Watch mode
+```
 
-- **Key factory tests** (`src/lib/queries/keys.test.ts`) — validate anchoring and hierarchy for all query-key factories.
-- **Hook tests** (`src/lib/queries/*.test.tsx`, `src/lib/mutations/*.test.tsx`) — verify query options, enabled guards, and mutation invalidation.
-- **Page tests** (`src/pages/*.test.tsx`) — component rendering and user interaction.
-- **E2E tests** (`e2e/dashboard.spec.ts`) — Playwright tests for shell loading, navigation, and auth dialog.
+Test infrastructure:
+- **`src/lib/test/query-client.tsx`** — Exports `createQueryClientWrapper` for React Query hook tests. Disables retry, sets `gcTime: 0`, and disables structural sharing.
+- **`src/lib/__tests__/locale-parity.test.ts`** — Gates CI; ensures all locale files have key parity with `en.json`.
+- Query key factory tests in `src/lib/queries/keys.test.ts` verify anchoring (all sub-keys contain `...fooKeys.all`).
 
-### Test Helpers
+Common test patterns:
+- `vi.mock("react-i18next", ...)` — Returns `defaultValue` when supplied, otherwise the key.
+- `vi.mock("../lib/store", ...)` — Replaces `useUIStore` with a no-op `addToast` to avoid zustand persist errors in jsdom.
+- `vi.mock("motion/react", ...)` — Shims `AnimatePresence` and `motion.*` as pass-through elements for jsdom.
 
-Pages commonly define `renderPage`, `makeQuery`, and `setMutationDefaults` helper functions within their test files to configure MSW handlers and mount components with the correct router/query context.
+### E2E Tests (Playwright)
+
+```bash
+pnpm e2e
+```
+
+Configured in `playwright.config.ts` — starts the dev server on `127.0.0.1:4173`, runs tests from `e2e/`. The smoke test (`e2e/dashboard.spec.ts`) verifies the shell loads with all sidebar navigation links and that the sign-in dialog appears when credentials are required.
+
+### i18n Parity
+
+```bash
+pnpm test:i18n-parity    # Standalone CLI check (no vitest needed)
+```
+
+The script (`scripts/i18n-parity.mjs`) flattens each locale JSON, compares key sets against `en.json`, and reports missing/extra keys with a non-zero exit code on drift.
 
 ---
 
 ## Build & Verification
 
-Run all three commands after any change to `src/lib/queries/`, `src/lib/mutations/`, or `src/api.ts`:
+Run all four commands after any change to `src/lib/queries/`, `src/lib/mutations/`, or `src/api.ts`:
 
 ```bash
-pnpm typecheck    # tsc --noEmit — must pass
-pnpm test --run   # vitest — all tests must pass
-pnpm build        # vite build — must succeed
+pnpm lint        # ESLint 9 — errors must be green; warnings allowed
+pnpm typecheck   # tsc --noEmit — must be green
+pnpm test --run  # vitest — all tests pass
+pnpm build       # vite build — must succeed
 ```
 
-A passing typecheck alone is insufficient — the key-factory tests catch anchoring regressions that the compiler does not detect.
+A passing typecheck alone is not sufficient — the key-factory tests catch anchoring regressions that the compiler does not.
+
+### ESLint Policy
+
+`eslint.config.js` uses ESLint 9 flat config. The two security-critical rules are **`error`**:
+
+- `react/jsx-no-target-blank` — Prevents `target="_blank"` without `rel="noopener noreferrer"` (regression guard for issue #5390).
+- `react/no-danger-with-children` — Rejects `dangerouslySetInnerHTML` combined with `children`.
+
+Baseline violations (`react-hooks/rules-of-hooks`, `no-unused-expressions`, `no-irregular-whitespace`, `no-control-regex`) are demoted to `warn` for the initial bootstrap. Clean them up incrementally rather than adding `eslint-disable` comments.
+
+---
+
+## Service Worker
+
+`public/sw.js` implements a basic cache-first strategy:
+
+- **API requests (`/api/*`)**: Network only (no caching).
+- **Static GET requests**: Stale-while-revalidate — serves from cache, updates in background.
+- **Non-GET requests**: Not cached.
+- Precaches `/dashboard/` on install.
+
+---
+
+## Dependency Audit Management
+
+Audit ignores are documented in `AUDIT_IGNORES.md`. Each ignored GHSA entry includes:
+
+- **Why ignored** — rationale for the false positive or accepted risk.
+- **Risk if wrong** — impact assessment.
+- **Unlock condition** — specific criteria for removing the ignore.
+- **Owner / last review** — PR reference and re-evaluation trigger.
+
+Currently ignored: `GHSA-rmmr-r34h-pfm5` (`@tanstack/history`) — the advisory's `>= 0` range flags the clean `1.161.6` version we pin to via `@tanstack/react-router`.
 
 ---
 
 ## Commit Convention
 
-Follows the root repo format scoped to dashboard areas:
+Follows the root repo format with dashboard-scoped paths:
 
 ```
 feat(dashboard/<area>): ...

@@ -1,79 +1,136 @@
 # Other — librefang-cli-tests
 
-# librefang-cli-tests
+# librefang-cli/tests — Integration & Regression Tests
 
-Integration and regression tests for the `librefang-cli` crate. This module contains two test suites that guard against specific failure modes: one prevents `build.rs` from mutating user git configuration, and the other validates the vault key-rotation workflow end-to-end.
+## Overview
 
-## Test Files
+This directory contains two standalone test programs that guard against specific regressions in `librefang-cli` and its dependency `librefang-extensions`. They are compiled and run by `cargo test` but live outside the main library crate so they can inspect build-time artifacts and drive library APIs without coupling to the CLI's `std::process::exit` error paths.
 
-### `build_rs_no_git_mutation.rs`
+| File | What it protects | Issue reference |
+|---|---|---|
+| `build_rs_no_git_mutation.rs` | Ensures `build.rs` never mutates the user's git config or invokes side-effecting git subcommands | #3641 |
+| `vault_rotate_key.rs` | Validates the full vault key-rotation lifecycle (decrypt → rewrap → sentinel preservation → old-key rejection) | #3651 |
 
-**Purpose:** Regression guard for [issue #3641](#). Ensures `build.rs` never invokes side-effecting git operations — particularly `git config`, which was previously found to mutate the user's global git configuration during the build phase.
+---
 
-**Why it exists:** A `build.rs` script that calls `git config` can silently alter a developer's git environment. Since `build.rs` runs implicitly on `cargo build`, such mutations are easy to introduce and hard to trace. This test acts as a static analysis gate: it reads `build.rs` as plain text and scans for forbidden tokens.
+## build_rs_no_git_mutation.rs
 
-**How it works:**
+### Purpose
 
-1. `read_build_rs()` reads `build.rs` from `CARGO_MANIFEST_DIR`.
-2. `strip_comments()` removes all `//`-style line comments so that doc strings or explanatory notes about the old bug don't produce false positives.
-3. Two test functions then assert the cleaned source doesn't contain forbidden strings:
+Issue #3641 was caused by `build.rs` writing to the user's global git config (specifically `core.hooksPath`) during compilation — an unacceptable side effect for a build script. This test is a **static analysis guard**: it reads `build.rs` at test time and asserts that forbidden tokens never appear in the source, preventing regressions silently introduced by future edits.
 
-| Test | Forbidden patterns | Rationale |
-|------|-------------------|-----------|
-| `build_rs_does_not_mutate_git_config` | `"config"`, `hooksPath` | The bare `git config` subcommand can mutate state. Even read-only usage (`git config --get`) is banned by default — an explicit allowance must be added to the test if that becomes necessary. |
-| `build_rs_uses_only_read_only_git_subcommands` | `"init"`, `"clone"`, `"commit"`, `"push"`, `"pull"`, `"fetch"`, `"checkout"`, `"reset"`, `"add"`, `"rm"` | Side-effecting git subcommands have no legitimate purpose in a build script. |
+### How it works
 
-**Caveat:** This is string-based scanning, not a full AST parse. It works because the git CLI arguments are passed as string literals (e.g., `arg("config")`). The check is conservative: it searches for quoted token forms like `"config"` to avoid flagging variable names or comments that merely mention git.
+1. **`read_build_rs()`** — Resolves `<CARGO_MANIFEST_DIR>/build.rs` and reads the entire file into a `String`. Panics if the file is missing (the test is meaningless without it).
 
-### `vault_rotate_key.rs`
+2. **`strip_comments(src)`** — Strips `//` line comments from the source so that doc comments or explanatory notes referencing the old bug (e.g. `// We used to run git config …`) don't trigger false positives. This is intentionally naive — it doesn't handle block comments or string-escaped slashes — which is fine because `build.rs` doesn't use `/* */` comments.
 
-**Purpose:** Integration tests for the `librefang vault rotate-key` CLI subcommand ([issue #3651](#)). Rather than spawning the CLI binary, these tests drive the `CredentialVault` API from `librefang-extensions` directly.
+3. Two test functions scan the cleaned source for banned patterns:
 
-**Why not spawn the CLI binary:** The `cmd_vault_rotate_key` CLI handler calls `std::process::exit` on every error path and reads `LIBREFANG_VAULT_KEY_OLD` / `LIBREFANG_VAULT_KEY_NEW` from the process environment. This makes parallel `cargo test` runs non-deterministic. Driving the library API directly covers the same invariants — vault re-encryption under a new key, old key rejection, and sentinel preservation — without the flakiness.
+   - **`build_rs_does_not_mutate_git_config`** — Bans the literal string token `"config"` (the argument subcommand passed to git) and the string `hooksPath`. If a future change needs read-only `git config --get`, the test must be updated with an explicit allowance rather than silently passing.
 
-**Test helper:**
+   - **`build_rs_uses_only_read_only_git_subcommands`** — Bans a list of side-effecting git subcommands: `init`, `clone`, `commit`, `push`, `pull`, `fetch`, `checkout`, `reset`, `add`, `rm`.
 
+### Design note
+
+The test checks for string literals like `"config"` (with quotes) rather than the bare word `config`. This avoids matching variable names, comments, or other incidental occurrences while catching cases where git is invoked with `arg("config")`.
+
+---
+
+## vault_rotate_key.rs
+
+### Purpose
+
+The CLI subcommand `librefang vault rotate-key` wraps several `CredentialVault` methods from `librefang-extensions`. This test exercises the **exact library-level code path** the CLI drives, verifying that:
+
+- After rotation, the vault decrypts under the **new** key and **rejects** the old key.
+- All user entries survive rotation with their original plaintext intact.
+- The internal sentinel (`SENTINEL_KEY` / `SENTINEL_VALUE`) survives rotation, is invisible to `list_keys()`, and is inspectable via `iter_all_entries()`.
+- Re-wrapping with the **same** key is idempotent (the CLI blocks this as a user-facing guard, but the library tolerates it).
+
+### Why library-level and not CLI-spawned
+
+The real `cmd_vault_rotate_key` has two properties that make it hostile to parallel `cargo test`:
+
+- It calls `std::process::exit` on every error path, which would kill the test runner.
+- It reads `LIBREFANG_VAULT_KEY_OLD` / `LIBREFANG_VAULT_KEY_NEW` from the **global** process environment, causing data races under `cargo test --threads > 1`.
+
+Driving `CredentialVault` directly is deterministic, parallel-safe, and covers the actual invariants the CLI depends on.
+
+### Helper
+
+```rust
+fn key_filled(b: u8) -> Zeroizing<[u8; 32]>
 ```
-key_filled(b: u8) -> Zeroizing<[u8; 32]>
-```
 
-Produces a deterministic 32-byte key where every byte is `b`. Deterministic keys ensure reproducible failures without `OsRng` noise. Keys are wrapped in `Zeroizing` to match the production API's memory-zeroing contract.
+Returns a deterministic 32-byte key with every byte set to `b`. Uses `Zeroizing` to match production key handling. Deterministic keys make failures reproducible without `OsRng` noise.
 
-**Test cases:**
+### Test functions
 
 #### `rotate_key_end_to_end_replaces_master_key_and_preserves_entries`
 
-The main integration test. Exercises the full rotation lifecycle in four phases:
+Four-phase lifecycle test:
 
-1. **Create** — Initialize a vault under key A, store two entries (`API_KEY`, `REFRESH_TOKEN`), verify the sentinel is present.
-2. **Rotate** — Unlock with key A, verify sentinel, call `rewrap_with_new_key(key_b)`.
-3. **Verify new key** — Unlock with key B, confirm both entries decrypt to their original plaintext, confirm sentinel verifies, confirm sentinel is invisible to `list_keys()`.
-4. **Reject old key** — Unlock with key A must fail.
+```
+Phase 1: Create vault under key A → store API_KEY, REFRESH_TOKEN → verify sentinel
+Phase 2: Unlock with key A → verify sentinel → rewrap_with_new_key(key B)
+Phase 3: Unlock with key B → assert entries match originals → verify sentinel
+Phase 4: Unlock with key A → assert failure (old key must be rejected)
+```
 
-This mirrors the exact sequence `cmd_vault_rotate_key` performs: `unlock_with_key(old)` → `verify_or_install_sentinel()` → `rewrap_with_new_key(new)`.
+This mirrors the sequence in `cmd_vault_rotate_key`: `unlock_with_key` → `verify_or_install_sentinel` → `rewrap_with_new_key`.
 
 #### `rewrap_with_identical_key_still_decrypts`
 
-Guards against data loss if `rewrap_with_new_key` is called with the same key. At the library layer this is allowed (it's an idempotent re-encrypt under a fresh AES-GCM nonce/salt). The CLI prevents the footgun at a higher level — see `vault-rotate-same-key` in `main.ftl` — but this test confirms the library operation itself is safe.
+Tests idempotent re-encryption: create a vault, call `rewrap_with_new_key` with the **same** key, then reopen and verify the entry is still readable and the sentinel still validates. The library allows this (it re-encrypts with a fresh AES-GCM nonce/salt); the CLI layer blocks it as a user-facing footgun via the `vault-rotate-same-key` fluent message.
 
 #### `sentinel_round_trips_through_rotation`
 
-Verifies that the internal sentinel entry (key/value constants from `librefang-extensions::vault`) survives key rotation exactly. Uses `iter_all_entries()` (which includes reserved keys) to inspect the sentinel directly, then calls `verify_or_install_sentinel()` for a second validation. This catches regressions where `rewrap_with_new_key` might only re-encrypt user-facing entries while dropping internal ones.
+Focused test for internal entry preservation. Creates a vault, rotates the key, then uses `iter_all_entries()` (which includes reserved keys hidden from `list_keys()`) to directly inspect the sentinel:
 
-## Relationship to the Codebase
-
-```mermaid
-graph TD
-    subgraph "librefang-cli/tests"
-        A["build_rs_no_git_mutation.rs"]
-        B["vault_rotate_key.rs"]
-    end
-
-    A -- "reads as text" --> C["build.rs"]
-    B -- "drives API" --> D["librefang-extensions::vault<br/>CredentialVault"]
-    E["cmd_vault_rotate_key<br/>(CLI handler)"] -- "same API sequence" --> D
+```rust
+let (_, sv) = vault2.iter_all_entries().find(|(k, _)| *k == SENTINEL_KEY).expect("...");
+assert_eq!(sv, SENTINEL_VALUE);
 ```
 
-- **`build_rs_no_git_mutation.rs`** has no runtime dependency on any other crate. It performs static text analysis on `build.rs` at test time.
-- **`vault_rotate_key.rs`** depends on `librefang-extensions` (for `CredentialVault`, `SENTINEL_KEY`, `SENTINEL_VALUE`) and `tempfile` / `zeroize` as test utilities. It exercises the same code path as the CLI handler `cmd_vault_rotate_key`, but without process spawning or environment variable mutation.
-- There are no incoming calls to this module — it is purely a test consumer.
+This catches regressions where `rewrap_with_new_key` might only re-encrypt user-visible entries and drop internal slots.
+
+### Relationship to librefang-extensions
+
+```mermaid
+graph LR
+    subgraph "vault_rotate_key.rs (tests)"
+        T1[rotate_key_end_to_end]
+        T2[rewrap_identical_key]
+        T3[sentinel_round_trips]
+    end
+    subgraph "CredentialVault (librefang-extensions)"
+        init[init_with_key]
+        unlock[unlock_with_key]
+        set[set / get]
+        list[list_keys]
+        rewrap[rewrap_with_new_key]
+        sentinel[verify_or_install_sentinel]
+        iter[iter_all_entries]
+    end
+    T1 --> init & unlock & set & list & rewrap & sentinel
+    T2 --> init & unlock & set & rewrap & sentinel
+    T3 --> init & unlock & rewrap & sentinel & iter
+```
+
+---
+
+## Running
+
+```sh
+# Both test programs
+cargo test
+
+# Only build.rs guard
+cargo test --test build_rs_no_git_mutation
+
+# Only vault rotation
+cargo test --test vault_rotate_key
+```
+
+No environment variables, network access, or external state are required. All vault tests use `tempfile::tempdir()` for automatic cleanup.

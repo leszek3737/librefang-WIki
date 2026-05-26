@@ -2,53 +2,74 @@
 
 # librefang-kernel-handle
 
-A trait abstraction that defines the interface for in-process callers into the LibreFang kernel.
+Defines the `KernelHandle` trait — the primary in-process interface for callers interacting with the LibreFang kernel.
 
 ## Purpose
 
-This crate provides the `KernelHandle` trait — a boundary contract between the LibreFang kernel and any in-process component that needs to interact with it. By defining this as a trait rather than a concrete type, the kernel interface can be mocked, decorated, or replaced in tests and alternative configurations without touching caller logic.
+This crate provides a stable, async-aware abstraction that allows components within the same process to call into the LibreFang kernel. Rather than coupling callers directly to a concrete kernel implementation, dependents code against the `KernelHandle` trait. This separation enables:
 
-## Role in the Architecture
+- **Testability** — substitute a mock or stub implementation during unit tests without spawning a real kernel.
+- **Decoupling** — callers remain agnostic to whether the kernel is a single-threaded service, a threaded actor, or any other execution strategy.
+- **Boundary clarity** — the trait acts as a well-defined API contract at the kernel edge.
 
-```
-┌─────────────────────────┐
-│   In-process caller     │
-│  (plugin, service, etc) │
-└────────────┬────────────┘
-             │ depends on
-             ▼
-┌─────────────────────────┐
-│ librefang-kernel-handle │   ← this crate
-│   KernelHandle trait    │
-└────────────┬────────────┘
-             │ implemented by
-             ▼
-┌─────────────────────────┐
-│   LibreFang Kernel      │
-│   (concrete impl)       │
-└─────────────────────────┘
+## Architecture
+
+```mermaid
+graph TD
+    A[In-Process Caller] -->|depends on trait| B[KernelHandle trait]
+    B -->|implemented by| C[Concrete Kernel]
+    B -->|uses types from| D[librefang-types]
 ```
 
-The trait lives in its own crate to avoid circular dependencies. Callers depend only on this lightweight interface crate, while the kernel provides the concrete implementation. Neither side needs to depend on the other's full crate.
+Any in-process component that needs to interact with the kernel receives a `dyn KernelHandle` (or a generic constrained by the trait) and calls methods defined here. The concrete kernel lives in a separate crate and provides the actual implementation.
 
-## Dependencies
+## Dependencies and Their Roles
 
 | Dependency | Role |
 |---|---|
-| `librefang-types` | Shared domain types exchanged across kernel calls (messages, errors, identifiers) |
-| `async-trait` | Enables `async` methods in the trait definition |
-| `bytes` | Efficient byte buffer handling for payload data |
-| `serde_json` | JSON serialization for structured kernel messages |
-| `thiserror` | Derive macro for error types surfaced from kernel operations |
-| `uuid` | Unique identifiers for sessions, requests, or correlation tokens |
-| `tracing` | Structured logging and diagnostics within trait implementations |
-
-## Testing
-
-The dev-dependency on `tokio` (with `macros` and `rt` features) indicates that tests in this crate use the Tokio runtime, consistent with the async nature of the trait. Test authors should annotate test functions with `#[tokio::test]`.
+| `librefang-types` | Shared domain types passed across the trait boundary — request/response structs, error types, identifiers. |
+| `async-trait` | Enables `async` methods in the trait definition. All kernel interactions are inherently asynchronous (I/O, timers, message passing), so callers `await` trait methods. |
+| `bytes` | Efficient byte-buffer handling, likely used for raw frame or payload data flowing through the kernel. |
+| `serde_json` | JSON serialization for message payloads or configuration data exchanged via the handle. |
+| `tracing` | Structured logging and span instrumentation on trait method boundaries. |
+| `uuid` | Unique identifiers for sessions, requests, or kernel-managed entities. |
 
 ## Relationship to Other Crates
 
-- **Consumers**: Any crate that needs to call into the kernel (plugins, adapters, middleware) depends on this crate and accepts a `dyn KernelHandle` or generic `H: KernelHandle`.
-- **Implementors**: The kernel crate itself implements this trait on its concrete handle type, satisfying the contract defined here.
-- **Shared types**: All types passed across the trait boundary are defined in `librefang-types`, keeping this crate free of domain logic.
+- **librefang-types** — supplies the data types that appear in `KernelHandle` method signatures. This is the only LibreFang crate this module depends on, keeping the interface layer thin.
+- **Consumer crates** — any crate that needs to call into the kernel adds a dependency on `librefang-kernel-handle` and accepts a `KernelHandle` implementor through dependency injection.
+- **Concrete kernel crate** — implements `KernelHandle`, wiring trait methods to internal kernel state, actors, or message queues.
+
+## Usage Pattern
+
+A typical caller receives a handle at construction time:
+
+```rust
+use librefang_kernel_handle::KernelHandle;
+
+struct SomeService {
+    kernel: Box<dyn KernelHandle>,
+}
+
+impl SomeService {
+    pub async fn do_work(&self) -> Result<(), MyError> {
+        // Call into the kernel through the trait
+        let response = self.kernel.some_operation(/* ... */).await?;
+        Ok(())
+    }
+}
+```
+
+During testing, inject a lightweight stub; in production, inject the full kernel implementation.
+
+## Testing
+
+The `tokio` dev-dependency (with `macros` and `rt` features) supports async test functions in this crate's own tests. When writing tests against `KernelHandle`, you typically:
+
+1. Implement the trait on a test helper struct with controlled responses.
+2. Use `#[tokio::test]` to drive async trait method calls.
+3. Assert that the caller under test behaves correctly given specific kernel responses.
+
+## Build Configuration
+
+This crate inherits workspace-level settings for `version`, `edition`, `license`, and lint rules via the `[workspace]` inheritance mechanism (`workspace = true`). It follows the same edition and linting standards as the rest of the LibreFang project.

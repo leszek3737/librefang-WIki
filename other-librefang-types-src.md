@@ -1,122 +1,132 @@
 # Other — librefang-types-src
 
-# `model_catalog` — Shared Types for the Model Registry
+# librefang-types: Model Catalog
 
-## Purpose
+Shared data structures for the model registry — the canonical source of truth for provider metadata, model definitions, pricing, capabilities, and per-user overrides. Every crate that needs to reason about "what models exist, what can they do, and what do they cost" depends on these types.
 
-This module defines the data structures that flow between the TOML-based model catalog files on disk, the runtime catalog loader, the metering kernel, the API layer, and the OpenAI-compatible driver. Everything is serializable (`serde` + `Deserialize`) and lives in `librefang-types` so it can be imported without pulling in heavy runtime dependencies.
-
-## Architecture Overview
+## Architecture
 
 ```mermaid
 graph TD
-    TOML["TOML Catalog Files<br/>(providers/*.toml)"]
-    MCF["ModelCatalogFile"]
-    PCT["ProviderCatalogToml"]
-    MCE["ModelCatalogEntry"]
-    PI["ProviderInfo"]
-    MO["ModelOverrides"]
-    EC["EffectiveCapabilities"]
+    TOML["providers/*.toml<br/>(Registry files)"] -->|parse| MCF[ModelCatalogFile]
+    MCF -->|provider field| PCT[ProviderCatalogToml]
+    MCF -->|models array| MCE[ModelCatalogEntry]
+    PCT -->|From&lt;T&gt; into| PI[ProviderInfo]
+    PI -->|runtime enrichment| API["API routes /<br/>dashboard"]
 
-    TOML --> MCF
-    MCF -->|"provider field"| PCT
-    MCF -->|"models array"| MCE
-    PCT -->|"From impl"| PI
-    MO -->|"applied on top of"| MCE
-    MCE -->|"resolved to"| EC
+    JSON["model_overrides.json<br/>(~/.librefang)"] -->|parse| MO[ModelOverrides]
+    MCE -->|catalog defaults| EC[EffectiveCapabilities]
+    MO -->|user overrides| EC
 ```
 
-Consumers include `librefang-runtime` (catalog loading, model metadata synthesis), `librefang-api` (provider routes, custom model endpoints), `librefang-kernel-metering` (cost estimation from catalog pricing), and the OpenAI-compatible driver (reasoning echo policy dispatch).
+## Enums
 
----
+### `ModelTier`
 
-## Key Types
+Capability classification for models. Serialized as lowercase strings (`"frontier"`, `"smart"`, etc.). Default is `Balanced`.
 
-### Enums
+| Variant | Typical examples |
+|---|---|
+| `Frontier` | Claude Opus, GPT-4.1 |
+| `Smart` | Claude Sonnet, Gemini 2.5 Flash |
+| `Balanced` | GPT-4o-mini, Groq Llama |
+| `Fast` | Lightest/cheapest models |
+| `Local` | Ollama, vLLM, LM Studio |
+| `Custom` | User-added at runtime |
 
-| Type | Purpose | Serde format |
-|---|---|---|
-| `ModelTier` | Capability classification (frontier → fast, local, custom) | `lowercase` |
-| `AuthStatus` | Provider authentication state | `snake_case` |
-| `Modality` | Output kind (text, image, audio, video, music) | `lowercase` |
-| `ModelType` | Inference type (chat, speech, embedding) | `lowercase` |
-| `ReasoningEchoPolicy` | How the OpenAI-compat driver handles `reasoning_content` on history turns | `snake_case` |
+### `AuthStatus`
 
-All enums are `#[non_exhaustive]` — new variants may be added without a semver break. Consumers must handle unknown variants gracefully (or wildcard-match with `_`).
+Provider authentication state. Default is `Missing`. Call `is_available()` to check usability — returns `true` for `ValidatedKey`, `Configured`, `AutoDetected`, `ConfiguredCli`, and `NotRequired`. Returns `false` for `InvalidKey` (key present but rejected) and all other states.
 
-#### `AuthStatus` availability check
+Notable variants:
+- **`AutoDetected`** — key found via a fallback env var; usable but may not match the actual provider.
+- **`LocalOffline`** — local provider probed and found offline. Unlike `Missing`, `detect_auth()` will not reset this; the probe owns the transition back to `NotRequired`.
 
-`AuthStatus::is_available()` returns `true` for states where the provider is functionally usable:
+### `Modality`
 
-- `ValidatedKey`, `Configured`, `AutoDetected`, `ConfiguredCli`, `NotRequired`
+What kind of output a model produces. Critical for validation: `Text` models **must** have non-zero `context_window` and `max_output_tokens`, while all other modalities may legitimately omit those fields.
 
-It returns `false` for `InvalidKey`, `Missing`, `CliNotInstalled`, and `LocalOffline`. Note that `InvalidKey` is explicitly excluded — a key exists but the provider rejected it.
+| Variant | Token fields required? |
+|---|---|
+| `Text` (default) | Yes — both must be > 0 |
+| `Image` | No |
+| `Audio` | No |
+| `Video` | No |
+| `Music` | No |
 
-#### `ReasoningEchoPolicy` and provider quirks
+### `ReasoningEchoPolicy`
 
-The OpenAI-compatible ecosystem has incompatible conventions for `reasoning_content` on multi-turn history. The catalog encodes the correct behavior per model so the driver doesn't need to substring-match model names:
+Controls how the OpenAI-compatible driver handles `reasoning_content` on historical assistant turns. The ecosystem has multiple incompatible conventions, so this is encoded as per-model metadata to avoid substring-matching model names.
 
-| Variant | Behavior | Canonical provider |
-|---|---|---|
-| `None` | Omit field on history turns (default) | Most providers |
-| `Strip` | Strip `reasoning_content` from history; force non-null `content` on empty assistant turns | DeepSeek R1 / reasoner |
-| `Echo` | Echo original thinking text on `tool_calls` turns | DeepSeek V4 Flash (thinking mode on) |
-| `EmptyString` | Send empty-string `reasoning_content` on `tool_calls` turns, disable thinking wire-side | Moonshot / Kimi K2 |
+| Variant | Behavior |
+|---|---|
+| `None` (default) | Omit `reasoning_content` on history |
+| `Strip` | Strip historical `reasoning_content`; also force non-null `content` on empty-text assistant turns (DeepSeek R1) |
+| `Echo` | Echo original thinking text on `tool_calls` turns (DeepSeek V4 Flash thinking-mode) |
+| `EmptyString` | Send empty-string `reasoning_content` on `tool_calls` turns, disable thinking wire-side (Moonshot / Kimi K2) |
 
-Drivers for non-OpenAI-compat providers (Anthropic, Gemini) ignore this field entirely.
+Drivers that use native SDKs (Anthropic, Gemini) ignore this field entirely.
 
----
+## Core Structs
 
-### Core Structs
+### `ModelCatalogEntry`
 
-#### `ModelCatalogEntry`
+A single model in the catalog. Key fields:
 
-A single model in the catalog. Key design decisions:
+- **`id`** — canonical identifier (e.g. `"claude-sonnet-4-20250514"`)
+- **`provider`** — provider identifier (e.g. `"anthropic"`)
+- **`tier`** / **`modality`** — classification enums
+- **`context_window`** / **`max_output_tokens`** — token limits; `0` means unknown or not applicable
+- **`input_cost_per_m`** / **`output_cost_per_m`** — cost per million tokens in USD
+- **`image_input_cost_per_m`** / **`image_output_cost_per_m`** — optional separate image pricing
+- **Capability flags**: `supports_tools`, `supports_vision`, `supports_streaming`, `supports_thinking`
+- **`reasoning_echo_policy`** — provider-specific reasoning wire-format handling
+- **`aliases`** — short names for lookup (e.g. `["sonnet", "claude-sonnet"]`)
 
-- **`context_window` and `max_output_tokens`** use `#[serde(default)]` so image/audio/video/music models (which have no token context) can omit these fields in TOML. The value `0` means "unknown or not applicable."
-- **`validate()` must be called after deserialization** for `Modality::Text` entries — it rejects text models missing either field, preventing `0` from leaking into compaction thresholds or budget math. Catalog loaders call this at load time and reject malformed entries.
-- **`image_input_cost_per_m` / `image_output_cost_per_m`** are `Option<f64>` and only present for multimodal/image-generation models where pixel tokens are priced separately from text.
+#### Validation
 
-#### `ProviderCatalogToml` vs `ProviderInfo`
+Call `validate()` after deserialization. It enforces that `Text` models have non-zero `context_window` and `max_output_tokens`. Non-text modalities skip this check. Catalog loaders **must** call this and reject entries that fail — a `0` value propagated downstream into compaction thresholds or budget math will produce incorrect behavior.
 
-Two structs represent providers at different stages:
+```rust
+let entry: ModelCatalogEntry = toml::from_str(raw)?;
+entry.validate()?; // reject malformed text entries
+```
 
-- **`ProviderCatalogToml`** — maps 1:1 to the `[provider]` TOML section. No runtime fields.
+### `ProviderInfo` vs `ProviderCatalogToml`
+
+Two parallel structs for provider metadata:
+
+- **`ProviderCatalogToml`** — maps 1:1 to the `[provider]` TOML section. Omits runtime-only fields. Used during parsing.
 - **`ProviderInfo`** — the runtime representation, adding `auth_status`, `model_count`, `available_models`, `is_custom`, and `proxy_url`.
 
-`ProviderCatalogToml` converts to `ProviderInfo` via `From` impl, which initializes runtime fields to their defaults (`AuthStatus::Missing`, zero models, empty available list).
+`ProviderCatalogToml` implements `From<ProviderCatalogToml> for ProviderInfo`, initializing runtime fields to their defaults (`Missing` auth, 0 models, etc.).
 
-#### `ModelCatalogFile`
+### `RegionConfig`
 
-The top-level TOML structure containing an optional `[provider]` section and a `[[models]]` array. This is the unified format used by both the main registry and community catalog repositories.
+Per-region endpoint override with a `base_url` and optional `api_key_env`. Stored in `ProviderInfo::regions` as a `HashMap<String, RegionConfig>`. When a region is selected at runtime, the driver resolves the base URL from the region config, falling back to the provider-level default.
 
-#### `AliasesCatalogFile`
+### `ModelOverrides`
 
-A separate alias file mapping short names to canonical model IDs. Loaded alongside the main catalog to support shorthand references like `sonnet` → `claude-sonnet-4-20250514`.
+Per-model inference parameter overrides persisted to `~/.librefang/model_overrides.json`, keyed by `provider:model_id`. Every field is `Option` — `None` means "use the agent's or system default."
 
-#### `RegionConfig`
+Override precedence: **agent-level config > model overrides > system defaults**.
 
-Per-region endpoint overrides within a provider. When a region is selected at runtime, its `base_url` replaces the provider-level default. Optionally overrides `api_key_env` per region (e.g., a different key for an international endpoint).
+The capability fields (`supports_tools`, `supports_vision`, `supports_streaming`, `supports_thinking`) allow forcing a capability on or off regardless of what the catalog declares — useful when a provider's metadata is wrong or incomplete (ref #4745).
 
-#### `ModelOverrides`
+### `EffectiveCapabilities`
 
-Per-model inference parameter overrides persisted to `~/.librefang/model_overrides.json`. Every field is `Option` — `None` means "use the agent or system default." The override layering order is:
+Resolved capability flags after applying `ModelOverrides` on top of the catalog entry's declared capabilities. Produced by `ModelCatalog::effective_capabilities` and consumed anywhere that gates runtime behavior on capability truth (tool use, vision input validation, etc.).
 
-1. Agent-level `ModelConfig` (highest precedence)
-2. `ModelOverrides` (this struct)
-3. System defaults
+### `ModelCatalogFile` and `AliasesCatalogFile`
 
-The capability overrides (`supports_tools`, `supports_vision`, `supports_streaming`, `supports_thinking`) exist so users can force a capability on/off when the provider's catalog declaration is wrong or missing. Use `is_empty()` to check whether any overrides are set.
+Top-level TOML file structures:
 
-#### `EffectiveCapabilities`
+- **`ModelCatalogFile`** — optional `[provider]` section + `[[models]]` array. Used by both the main repository and community catalog repos.
+- **`AliasesCatalogFile`** — maps short names to canonical model IDs via `[aliases]`.
 
-The resolved capability set after applying user overrides on top of the catalog entry's declared capabilities. Produced by `ModelCatalog::effective_capabilities` and consumed by callers that gate runtime behavior (tool gating, vision input validation).
+## TOML Format Reference
 
----
-
-## TOML Catalog Format
-
-A typical catalog file at `providers/<name>.toml`:
+A complete provider catalog file:
 
 ```toml
 [provider]
@@ -125,6 +135,10 @@ display_name = "Anthropic"
 api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://api.anthropic.com"
 key_required = true
+
+[provider.regions.us]
+base_url = "https://us.anthropic.com"
+api_key_env = "ANTHROPIC_US_API_KEY"   # optional per-region key override
 
 [[models]]
 id = "claude-sonnet-4-20250514"
@@ -139,51 +153,41 @@ supports_tools = true
 supports_vision = true
 supports_streaming = true
 aliases = ["sonnet", "claude-sonnet"]
-```
 
-The `[provider]` section is optional — models-only files are valid and the provider is inferred during merge.
-
-Regional endpoints are expressed as:
-
-```toml
-[provider.regions.us]
-base_url = "https://dashscope-us.aliyuncs.com/compatible-mode/v1"
-
-[provider.regions.intl]
-base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-api_key_env = "DASHSCOPE_INTL_API_KEY"
-```
-
-Image-generation models omit `context_window` and `max_output_tokens`:
-
-```toml
 [[models]]
 id = "gpt-image-2"
 display_name = "GPT Image 2"
 tier = "frontier"
 modality = "image"
-input_cost_per_m = 5.00
-output_cost_per_m = 10.00
-image_input_cost_per_m = 8.00
-image_output_cost_per_m = 30.00
-supports_tools = false
+input_cost_per_m = 5.0
+output_cost_per_m = 10.0
+image_input_cost_per_m = 8.0
+image_output_cost_per_m = 30.0
 supports_vision = true
+# context_window / max_output_tokens omitted — not applicable to image models
 ```
 
----
+## Serde Conventions
+
+- All enums use `#[serde(rename_all = "lowercase")]` or `snake_case` for wire compatibility.
+- Optional fields use `#[serde(default)]` so catalog TOML files can omit them.
+- `Option<f64>` cost fields use `#[serde(skip_serializing_if = "Option::is_none")]` to keep output clean.
+- All enums are `#[non_exhaustive]` — new variants can be added without a semver break.
 
 ## Integration Points
 
-### Where the types are consumed
+| Consumer | What it uses |
+|---|---|
+| **`librefang-runtime`** (`model_metadata`) | `ModelCatalogEntry` for constructing runtime model metadata |
+| **`librefang-kernel-metering`** | `ModelCatalogFile` for pricing/cost estimation |
+| **`librefang-api`** (`routes/providers`) | `ModelCatalogEntry::validate()` when adding custom models via the dashboard |
+| **Model catalog subsystem** | `ModelOverrides` and `EffectiveCapabilities` for resolving user preferences |
+| **Kernel tests** | `ModelCatalogEntry` fields (especially `context_window`) for budget/compaction behavior |
 
-- **`librefang-runtime`** (`model_metadata.rs`) — constructs `ModelCatalogEntry` instances from catalog data and synthesizes entries for unknown models.
-- **`librefang-api`** (`routes/providers.rs`) — calls `ModelCatalogEntry::validate()` when adding custom models via the dashboard.
-- **`librefang-api`** (`model_catalog/tests.rs`) — exercises `ModelOverrides` for capability override resolution and alias-based lookups.
-- **`librefang-kernel-metering`** (`lib.rs`) — uses `ModelCatalogFile` for cost estimation, falling back to legacy budget rates when catalog pricing is zero.
+## Adding a New Model
 
-### Adding a new provider
-
-1. Create a `providers/<name>.toml` with a `[provider]` section and `[[models]]` entries.
-2. Ensure all `Modality::Text` models have non-zero `context_window` and `max_output_tokens`.
-3. If the provider uses the OpenAI-compat wire format with non-standard `reasoning_content` handling, set `reasoning_echo_policy` on affected models.
-4. If the provider has regional endpoints, add `[provider.regions.<name>]` subsections.
+1. Add a `[[models]]` entry to the appropriate `providers/*.toml` file.
+2. For text models, `context_window` and `max_output_tokens` are **required** — `validate()` will reject the entry if either is zero.
+3. For non-text models, set `modality` explicitly and omit the token fields.
+4. If the model has provider-specific reasoning wire-format quirks, set `reasoning_echo_policy`.
+5. Add aliases for convenient lookup.

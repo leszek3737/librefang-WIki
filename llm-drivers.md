@@ -2,43 +2,44 @@
 
 # LLM Drivers
 
-The LLM Drivers module group provides LibreFang's unified LLM provider abstraction — a trait-based interface that decouples the rest of the platform from any single model vendor.
+The LLM Drivers module group provides LibreFang's complete transport layer to upstream LLM providers. It splits cleanly into a thin abstraction crate and a heavy implementations crate.
 
-## Sub-modules
+## Structure
 
 | Crate | Role |
 |---|---|
-| [**librefang-llm-driver**](librefang-llm-driver-src.md) | Core `LlmDriver` trait, shared types (`CompletionRequest`, `CompletionResponse`, `LlmError`), exhaustion tracking, and error sanitisation infrastructure |
-| [**librefang-llm-drivers**](librefang-llm-drivers-src.md) | Concrete driver implementations, retry/backoff logic, rate-limit guards, credential pooling, prompt caching, and stream decoding |
+| [librefang-llm-driver](librefang-llm-driver-src.md) | Defines the `LlmDriver` trait, shared request/response types (`CompletionRequest`, `CompletionResponse`), error taxonomy (`LlmError`, `classify_error`), and exhaustion tracking (`ProviderExhaustionStore`). |
+| [librefang-llm-drivers](librefang-llm-drivers-src.md) | Implements `LlmDriver` for every supported provider (Anthropic, OpenAI, Gemini, Bedrock, Claude Code, Codex CLI, Qwen Code, Gemini CLI) and supplies cross-cutting infrastructure: credential pools, jittered backoff, rate-limit guards, token rotation, and fallback chains. |
 
-## How they fit together
+## How They Fit Together
 
+```mermaid
+graph LR
+    subgraph "librefang-llm-driver (abstraction)"
+        T["LlmDriver trait"]
+        REQ["CompletionRequest / Response"]
+        ERR["LlmError · classify_error"]
+        EXH["ProviderExhaustionStore"]
+    end
+
+    subgraph "librefang-llm-drivers (implementations)"
+        PROV["Anthropic · OpenAI · Gemini<br/>Bedrock · Claude Code · Codex CLI<br/>Qwen Code · Gemini CLI"]
+        INFRA["CredentialPool · Backoff<br/>RateLimitTracker · FallbackChain"]
+    end
+
+    T -.->|implemented by| PROV
+    PROV -->|produces| REQ
+    PROV -->|raises| ERR
+    INFRA -->|marks / checks| EXH
+    ERR -->|feeds| EXH
 ```
-┌─────────────────────────────────────────────────┐
-│  Consumers: kernel, FallbackChain, agent_loop   │
-│              metering, ws / API layer            │
-└──────────────┬──────────────────────────────────┘
-               │ depends on trait + types
-┌──────────────▼──────────────────────────────────┐
-│         librefang-llm-driver (core)              │
-│  LlmDriver trait · ProviderExhaustionStore       │
-│  LlmError · FailoverReason · CompletionRequest   │
-└──────────────┬──────────────────────────────────┘
-               │ implements trait
-┌──────────────▼──────────────────────────────────┐
-│        librefang-llm-drivers (implementations)   │
-│  Anthropic · OpenAI · Gemini · Bedrock · Ollama  │
-│  Claude Code · Codex CLI · Aider · Qwen · …     │
-│  + backoff · rate_limit_tracker · utf8_stream    │
-└─────────────────────────────────────────────────┘
-```
 
-`librefang-llm-driver` owns the interface contract. Every concrete driver in `librefang-llm-drivers` implements the `LlmDriver` trait's `complete` and `stream` methods against a specific provider API. This split keeps downstream crates (kernel, FallbackChain, agent_loop) depending only on the thin trait crate, while the heavier HTTP/gRPC/CLI integrations live behind an optional dependency boundary.
+The kernel depends only on the `LlmDriver` trait and its types from the abstraction crate. Concrete providers and their supporting infrastructure live in the implementations crate and are wired together at runtime.
 
-## Key cross-cutting workflows
+## Key Cross-Crate Workflows
 
-- **Failover / exhaustion tracking** — `FallbackChain` queries `ProviderExhaustionStore` (core) to decide which driver to call next; individual drivers record failures back into the same shared `Arc<DashMap>`.
-- **Rate limiting** — `RateLimitBucket` and `RateLimitSnapshot` (drivers) are consumed by `shared_rate_guard`'s cooldown-picker logic, enabling per-provider RPM/RPH throttling before requests hit the wire.
-- **Retry with jittered backoff** — failed calls flow through `jittered_backoff` (drivers), which wraps exponential delay with configurable jitter before the caller retries against the same or a fallback driver.
-- **Error sanitisation** — raw provider error bodies pass through `sanitize_raw_excerpt` → `cap_message` (core) so logs and API responses never leak full prompt text or credentials.
-- **Credential bootstrapping** — CLI-based drivers (Claude Code, Codex CLI, etc.) probe the filesystem at startup (`home_dir`, `claude_credentials_exist`, `codex_cli_credentials_exist`) and cache tokens; this chain is invoked from the API route layer during provider availability checks.
+**Request lifecycle.** The kernel acquires a credential from a `CredentialPool`, builds a `CompletionRequest`, and calls `LlmDriver::complete`. The chosen provider serialises the request, handles SSE streaming, and parses the response back into a `CompletionResponse`.
+
+**Error classification → exhaustion marking.** When a provider call fails, the error flows through `classify_error` to determine its `FailoverReason`. Retriable errors trigger jittered exponential backoff (respecting `Retry-After` headers). Non-recoverable errors call `mark_exhausted` on the `ProviderExhaustionStore`, which causes credential pools and fallback chains to skip that provider on subsequent attempts.
+
+**Fallback chains.** A `FallbackChain` iterates over an ordered list of `ChainEntry` providers. Each entry consults the shared exhaustion store before attempting a call, ensuring that a provider that has permanently failed (authentication error, billing issue, model not found) is not retried.

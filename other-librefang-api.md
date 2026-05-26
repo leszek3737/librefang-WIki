@@ -2,110 +2,103 @@
 
 # librefang-api
 
-HTTP and WebSocket API server for the LibreFang Agent OS daemon. This crate is the primary network entry point for all external clients — CLI tools, desktop applications, mobile apps, and the bundled React dashboard — communicating with the in-process agent kernel.
+HTTP/WebSocket API server for the LibreFang Agent OS daemon. Exposes agent management, sessions, channels, approvals, MCP, peer/A2A networking, and the React dashboard SPA over JSON REST and WebSocket endpoints. The kernel runs in-process; CLI, desktop, and mobile clients connect over this surface.
 
-## Architecture
-
-The API server hosts the `librefang-kernel` inside the same process. All client interactions flow through this surface:
+## Architecture Overview
 
 ```mermaid
-graph LR
-    CLI[CLI Client]
-    DESK[Desktop App]
-    MOB[Mobile App]
-    DASH[React Dashboard]
+graph TD
+    Clients["CLI / Desktop / Mobile Clients"]
+    API["librefang-api<br/>(axum HTTP + WebSocket)"]
+    Kernel["librefang-kernel<br/>(in-process)"]
+    Sidecars["Channel Sidecars<br/>(out-of-process)"]
+    SPA["Dashboard SPA<br/>(embedded static)"]
 
-    API[librefang-api<br/>axum HTTP/WS]
-
-    CLI --> API
-    DESK --> API
-    MOB --> API
-    DASH --> API
-
-    API --> K[librefang-kernel]
-    API --> CH[librefang-channels]
-    API --> MEM[librefang-memory]
-    API --> LLM[librefang-llm-drivers]
+    Clients -->|REST / WS| API
+    API --> Kernel
+    API -->|SIDECAR_CATALOG| Sidecars
+    API --> SPA
 ```
 
-The kernel is not a remote service — it is instantiated directly and accessed through in-process calls. The API layer translates between HTTP/WS protocols and kernel operations.
+The server is an axum application assembled by `server::build_router`. It embeds the kernel directly and communicates with channel adapters through out-of-process sidecars rather than in-process adapters.
 
-## Entry Point
+## Entry Points
 
-`server::build_router(kernel, addr)` assembles the complete axum `Router` along with the shared `AppState`. This is the single public function that consumers (such as `librefang-cli`) call to obtain a runnable server.
+- **`server::build_router(kernel, addr)`** — Assembles the full axum router with all routes, shared `AppState`, middleware stack, and starts listening on the given address.
+- **`routes::*`** — Endpoint handlers organized by domain (agents, sessions, channels, approvals, MCP, peers, etc.).
+- **`middleware`** — Authentication, rate limiting, and telemetry. Auth is governed by three route-classification lists:
+  - `PUBLIC_ROUTES_ALWAYS` — accessible without any auth
+  - `PUBLIC_ROUTES_GET_ONLY` — accessible unauthenticated for GET requests only
+  - `PUBLIC_ROUTES_DASHBOARD_READS` — read-only dashboard access without auth
+- **`ws`** — WebSocket authentication and streaming handlers for real-time session and event communication.
 
-## Key Components
+## Dashboard SPA
 
-### Routes (`routes::*`)
+The React/TypeScript dashboard lives in `dashboard/` and uses TanStack Query. It is built externally via `cargo xtask build-web` and embedded into the binary using `include_dir!` from the `static/react` directory.
 
-Endpoint handlers organized by domain — agent management, sessions, channels, approvals, MCP (Model Context Protocol), peer/A2A networking, and administrative operations. All routes return JSON and follow REST conventions.
+The build script (`build.rs`) ensures `static/react` exists at compile time (creating it if absent on fresh clones). When the embedded directory is empty, the runtime falls back to serving assets from `~/.librefang/dashboard/`.
 
-### Middleware (`middleware`)
+## Channel Adapter Architecture
 
-- **Authentication** — JWT-based with three route visibility tiers:
-  - `PUBLIC_ROUTES_ALWAYS` — accessible without credentials (e.g., login)
-  - `PUBLIC_ROUTES_GET_ONLY` — read-only public access
-  - `PUBLIC_ROUTES_DASHBOARD_READS` — unauthenticated dashboard read paths
-- **Rate limiting** — powered by the `governor` crate
-- **Telemetry** — request tracing and metrics (gated behind the `telemetry` feature)
+Channel adapters run exclusively as out-of-process sidecars. The historical in-process features (`core-channels`, `all-channels`, `channel-*`, `mini`, `all-channels-no-email`) have been removed. Sidecar definitions live in `SIDECAR_CATALOG` within `src/routes/channels.rs`, and the corresponding SDK is at `sdk/python/` with the `librefang.sidecar.adapters.*` namespace.
 
-### WebSocket (`ws`)
+## Features
 
-WebSocket authentication handshake and streaming handlers. Used for real-time session streaming, agent event subscriptions, and terminal/pty interactions.
+### Default: `telemetry`
 
-### Dashboard SPA
+Enabled by default. Pulls in OpenTelemetry tracing export and Prometheus metrics:
 
-The TypeScript/React/TanStack Query dashboard lives under `dashboard/`. It is built externally via `cargo xtask build-web` and embedded into the binary at compile time using `include_dir!`. The embedded assets are served as static files. At runtime, the directory `~/.librefang/dashboard/` can override the embedded assets, allowing updates without recompilation.
+- `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp` — OTLP trace export
+- `tracing-opentelemetry` — bridges `tracing` spans to OpenTelemetry
+- `metrics` + `metrics-exporter-prometheus` — Prometheus metrics endpoint
 
-The build script (`build.rs`) ensures the `static/react` placeholder directory exists so `include_dir!` compiles cleanly on fresh clones where no dashboard build has occurred yet.
+### Removed features
 
-### OpenAPI
+`channel-*`, `core-channels`, `all-channels`, `all-channels-no-email`, and `mini` no longer exist. All channel adapters are sidecars.
 
-An `openapi.json` is committed at the workspace root, generated by `cargo xtask codegen --openapi` using `utoipa` with `schemars` schema derivation. CI verifies this file for drift against hash baselines in `xtask/baselines/`.
+## Build Script (`build.rs`)
 
-## Feature Flags
+The build script performs four tasks before compilation:
 
-Features control which channel adapters and telemetry capabilities are compiled in. Channel features are forwarded directly to `librefang-channels`.
+1. **Creates the dashboard embed directory** — Ensures `static/react` exists so `include_dir!` compiles on fresh clones where the gitignored build artifacts haven't been produced yet.
 
-| Feature | Description |
-|---|---|
-| `default` | `core-channels` + `telemetry` |
-| `telemetry` | OpenTelemetry tracing export + Prometheus metrics endpoint |
-| `core-channels` | Telegram, Discord, Slack, Webhook, ntfy — lightweight, `reqwest`-only adapters |
-| `all-channels` | Every channel adapter |
-| `all-channels-no-email` | All channels except email (for Android targets where `rustls-platform-verifier` lacks `new_with_extra_roots` support) |
-| `mini` | 12 commonly-used channels (core 5 + Matrix, Email, WhatsApp, Signal, Teams, Mattermost, IRC, Google Chat) |
-| `channel-*` | Individual channel toggle (e.g., `channel-telegram`) |
+2. **Captures the git commit hash** into `GIT_SHA` — Resolution order:
+   - `GITHUB_SHA` environment variable (GitHub Actions, full 40-char SHA truncated to 7)
+   - `CI_COMMIT_SHA` environment variable (GitLab CI, same truncation)
+   - `git rev-parse --short HEAD` with `git` located via `which::which`
+   - `"unknown"` if none of the above succeed
 
-**Why the granularity:** A plain `cargo build` compiles only the five core channels to keep build times fast for library consumers and development. Release and packaging pipelines opt into `all-channels` explicitly. Adding a new channel to `core-channels` requires verifying its dependency tree stays lightweight.
+3. **Captures the build date** into `BUILD_DATE` — Uses `chrono::Utc::now()` formatted as `%Y-%m-%d` instead of shelling out to the platform-specific `date` command.
 
-## Build-Time Metadata
+4. **Captures the rustc version** into `RUSTC_VERSION` — Via `rustc --version`, falling back to `"unknown"`.
 
-The build script captures three environment variables available at runtime:
-
-| Variable | Source | Example |
-|---|---|---|
-| `GIT_SHA` | `git rev-parse --short HEAD` | `a1b2c3d` |
-| `BUILD_DATE` | `date -u +%Y-%m-%d` | `2025-01-15` |
-| `RUSTC_VERSION` | `rustc --version` | `rustc 1.82.0` |
-
-These are embedded in the binary and exposed through the version/health endpoint.
+The `resolve_git_sha()` function feeds into `short_sha()` for consistent 7-character truncation. Rebuilds are triggered by changes to `GITHUB_SHA`, `CI_COMMIT_SHA`, or `SOURCE_DATE_EPOCH`.
 
 ## Platform-Specific Dependencies
 
-**Unix:** `rustix` (with `process` feature) and `libc` for POSIX process operations.
+**Unix** — `rustix` (with `process` feature) and `libc` for Unix process operations.
 
-**Windows:** `windows-sys` with `Win32_Security` and `Win32_Security_Authorization` features. Used exclusively for the ACP named-pipe listener — `ConvertStringSecurityDescriptorToSecurityDescriptorW` restricts the pipe DACL to the daemon's owner SID so other local users cannot connect. Since `windows-sys` is already in the transitive dependency tree via tokio, this adds no additional compile-time cost.
+**Windows** — `windows-sys` with `Win32_Foundation`, `Win32_Security`, and `Win32_Security_Authorization` features. Used for SDDL → `SECURITY_DESCRIPTOR` conversion on the ACP named-pipe listener, restricting the pipe DACL to the daemon's owner SID.
 
-## Authentication Stack
+## Key Internal Dependencies
 
-The cryptographic dependencies indicate the auth layer uses:
+| Crate | Role |
+|---|---|
+| `librefang-kernel` | Core agent OS logic, runs in-process |
+| `librefang-kernel-handle` | Handle abstraction for kernel interaction |
+| `librefang-types` | Shared type definitions |
+| `librefang-acp` | Agent Client Protocol (with `kernel-adapter` feature) |
+| `librefang-wire` | Wire protocol types |
+| `librefang-llm-driver` / `librefang-llm-drivers` | LLM provider abstraction and driver implementations |
+| `librefang-memory` | Agent memory subsystem |
+| `librefang-channels` | Channel types (no default features — adapters are sidecars) |
+| `librefang-skills` | Skill system |
+| `librefang-hands` | Tool/action execution |
+| `librefang-extensions` | Extension loading |
+| `librefang-import` | Import functionality |
+| `librefang-http` | Shared HTTP utilities |
+| `librefang-telemetry` | Telemetry infrastructure |
 
-- **JWT** (`jsonwebtoken`, `hmac`, `sha2`) — token issuance and validation, with JWKS support for OIDC integration
-- **Password hashing** (`argon2`) — credential storage
-- **Constant-time comparison** (`subtle`) — timing-safe token/secret checks
-- **TOTP** (`totp-rs` in dev-dependencies) — two-factor authentication, tested via `librefang-testing`
+## OpenAPI
 
-## Relationship to Other Crates
-
-This crate is the integration hub — it depends on nearly every other LibreFang crate but nothing depends on it (except the CLI binary which calls `build_router`). It does not publish types or utilities for reuse; its role is to bind the kernel, channels, memory, LLM drivers, skills, hands, and extensions together behind a unified HTTP/WS interface.
+The committed `openapi.json` at the workspace root is generated by `cargo xtask codegen --openapi` using `utoipa`. Drift is verified in CI against hash baselines in `xtask/baselines/`.

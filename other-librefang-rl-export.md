@@ -2,68 +2,50 @@
 
 # librefang-rl-export
 
-Long-horizon RL rollout trajectory exporter providing integration surfaces for W&B (Weights & Biases), Tinker, and Atropos.
+Long-horizon reinforcement learning rollout trajectory exporter, providing an integration surface for W&B (Weights & Biases), Tinker, and Atropos.
 
 ## Purpose
 
-This module is responsible for serializing and transmitting reinforcement learning rollout trajectories to external observability and training platforms. It serves as the bridge between the game's RL agents and downstream systems that consume trajectory data for analysis, visualization, or further training.
-
-"Long-horizon" here refers to extended episode rollouts — complete trajectories spanning many steps — as opposed to single-step transitions. The export format and transport are designed around batched trajectory payloads.
+This module handles the export of RL rollout trajectories generated during long-horizon training. It serves as the bridge between the training loop and external tracking/logging systems, serializing trajectory data and shipping it to configured backends.
 
 ## Architecture
 
 ```mermaid
 graph LR
-    A[librefang-rl-export] -->|HTTP transport| B[librefang-http]
-    A -->|Trajectory payloads| C[W&B API]
-    A -->|Trajectory payloads| D[Tinker]
-    A -->|Trajectory payloads| E[Atropos]
+    A[Training Loop] -->|trajectory data| B[librefang-rl-export]
+    B -->|HTTP| C[W&B]
+    B -->|HTTP| D[Tinker]
+    B -->|HTTP| E[Atropos]
+    B --> F[librefang-http]
 ```
 
-The module depends on `librefang-http` for outbound HTTP communication, keeping transport concerns (connection pooling, retries, auth) in a shared layer rather than reimplementing them here.
+The module depends on `librefang-http` as its HTTP transport layer, keeping network concerns abstracted behind a shared client. All outbound communication to external services flows through this dependency.
 
 ## Key Dependencies
 
 | Dependency | Role |
 |---|---|
-| `librefang-http` | Shared HTTP client with retry/auth semantics |
+| `librefang-http` | Shared HTTP client infrastructure |
 | `reqwest` | Underlying HTTP request execution |
 | `serde` / `serde_json` | Trajectory serialization to JSON |
-| `base64` | Encoding binary observation data in JSON payloads |
-| `urlencoding` | Encoding path/query parameters |
-| `url` | Constructing and validating endpoint URLs |
-| `regex` | Pattern matching on trajectory metadata |
-| `chrono` | Timestamping trajectory records |
-| `tracing` | Structured logging of export operations |
+| `tokio` | Async runtime for non-blocking I/O |
+| `chrono` | Timestamp handling for trajectory events |
+| `base64` / `urlencoding` | Encoding for binary payloads and URL-safe data |
+| `url` | URL construction for backend endpoints |
+| `regex` | Pattern matching for data validation/transformation |
 | `thiserror` | Typed error definitions |
+| `tracing` | Structured logging of export operations |
 
-## Integration Surfaces
+## Integration Surface
 
-### W&B (Weights & Biases)
+The module targets three external systems:
 
-Trajectories are logged as structured runs with step-level metrics. This enables visualizing reward curves, action distributions, and episode returns over training.
+- **W&B (Weights & Biases)** — Experiment tracking. Trajectories are logged as structured data for visualization and comparison across training runs.
+- **Tinker** — Local or remote debugging/inspection tooling for rollout data.
+- **Atropos** — RL infrastructure backend, receiving trajectory data for centralized storage and analysis.
 
-### Tinker
-
-Internal tooling integration for trajectory replay and analysis.
-
-### Atropos
-
-RL training framework integration, supporting trajectory replay for off-policy methods or curriculum learning.
-
-## Error Handling
-
-Errors are defined via `thiserror` and should cover:
-
-- Serialization failures when encoding trajectory data
-- HTTP transport errors propagated from `librefang-http`
-- URL construction errors
-- Response validation errors (unexpected status codes, malformed responses)
+Each backend is expected to accept JSON-formatted trajectory payloads over HTTP. The module handles serialization, encoding, and transmission.
 
 ## Testing
 
-Tests use `wiremock` to mock external HTTP endpoints, allowing validation of request shape, headers, authentication, and retry behavior without hitting real services. The test runtime is `tokio` with `macros` and `rt-multi-thread` features enabled.
-
-## Relationship to Other Modules
-
-This module is a leaf dependency — it consumes `librefang-http` but nothing in the workspace depends on it. It is invoked by the RL training loop or game runner when trajectories need to be flushed to an external system. There are no incoming calls from other workspace crates, meaning integration is typically driven by application-level orchestration code that calls into this library directly.
+Tests use `wiremock` to mock HTTP endpoints, allowing verification of request structure, headers, and payload format without requiring live backend connections. Test configuration lives in `[dev-dependencies]` with `tokio`'s `macros` and `rt-multi-thread` features enabled for async test execution.

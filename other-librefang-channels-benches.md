@@ -1,91 +1,104 @@
 # Other — librefang-channels-benches
 
-# librefang-channels-benches
+# librefang-channels-benches: Dispatch Hot-Path Benchmarks
 
-Criterion benchmarks for channel message dispatch hot paths in `librefang-channels`.
+Criterion microbenchmark suite covering the performance-critical paths in `librefang-channels`: JSON (de)serialization of channel messages, agent routing resolution, and cross-platform message formatting.
+
+**File:** `librefang-channels/benches/dispatch.rs`
 
 ## Purpose
 
-This module provides continuous performance tracking for the three most latency-sensitive operations in the channel subsystem: turning raw platform messages into domain types (`ChannelMessage`), routing them to the correct agent (`AgentRouter`), and formatting agent responses back into platform-native markup. These are the operations that sit on the critical path for every inbound and outbound message, so regressions here directly impact end-user perceived latency.
+These benchmarks guard against regressions in the three operations that execute on every inbound or outbound message:
+
+| Operation | Why it matters |
+|---|---|
+| `ChannelMessage` serde | Every persisted or transmitted message is serialized at least once |
+| `AgentRouter::resolve` / `resolve_with_context` | Runs per-incoming-message to determine which agent handles it |
+| `format_for_channel` / `split_message` / `default_phase_emoji` | Runs per-outgoing-message to adapt content for the target platform |
 
 ## Running
 
 ```bash
-# All benchmark groups
+# All groups
 cargo bench -p librefang-channels
 
 # Single group
-cargo bench -p librefang-channels -- serialization
+cargo bench -p librefang-challenges -- serialization
 cargo bench -p librefang-channels -- routing
 cargo bench -p librefang-channels -- formatting
+
+# Individual benchmark
+cargo bench -p librefang-channels -- router_resolve_direct
 ```
 
-Output is standard Criterion HTML reports under `target/criterion/`.
+Results are saved under `target/criterion/` with HTML reports.
 
 ## Benchmark Groups
 
-### Serialization
+### Serialization (`serialization`)
 
-| Bench function | What it measures |
+Measures `serde_json` throughput on `ChannelMessage`.
+
+| Benchmark | What it does |
 |---|---|
-| `bench_message_serialize` | `serde_json::to_string` on a `ChannelMessage` |
-| `bench_message_deserialize` | `serde_json::from_str::<ChannelMessage>` on the same JSON |
-| `bench_message_roundtrip` | Serialize then deserialize in one iteration |
+| `message_serialize` | `serde_json::to_string` on a sample `ChannelMessage` |
+| `message_deserialize` | `serde_json::from_str::<ChannelMessage>` from pre-serialized JSON |
+| `message_roundtrip` | Serialize then immediately deserialize — catches combined overhead |
 
-All three use a representative sample message built by `make_sample_message` — a Telegram text message with a sender, timestamp, and empty metadata map. The sample deliberately avoids edge-case structures (no `thread_id`, no `metadata` entries, no `target_agent`) to establish a baseline for the common case.
+**Fixture:** `make_sample_message()` constructs a Telegram `ChannelMessage` with a text payload, a sender (`ChannelUser` with `platform_id` and `display_name`), a timestamp, and empty metadata. The `black_box` wrapper prevents the compiler from eliding the work.
 
-### Routing
+### Routing (`routing`)
 
-| Bench function | `AgentRouter` path exercised |
-|---|---|
-| `bench_router_resolve_direct` | Direct user-to-agent mapping via `resolve` hitting a `set_direct_route` entry |
-| `bench_router_resolve_default` | `resolve` falling through to the `set_default` agent (no direct route match) |
-| `bench_router_resolve_with_bindings` | `resolve` matching an `AgentBinding` with `channel` + `peer_id` rules |
-| `bench_router_resolve_with_context` | `resolve_with_context` matching a binding that checks `guild_id` and `roles` |
+Measures `AgentRouter` resolution under increasingly complex configurations.
 
-The routing benches form a progression from cheapest to most expensive resolution strategy:
+| Benchmark | Router setup | Resolution path |
+|---|---|---|
+| `router_resolve_direct` | One default agent + one direct route (`Telegram`/`user-42` → agent) | Direct-route hit — fastest path |
+| `router_resolve_default_fallback` | One default agent, no channel/user routes | Falls through to default |
+| `router_resolve_binding_match` | Agent registered as `"support"`, binding matches `telegram` + `vip-user` | Binding rule match via `load_bindings` |
+| `router_resolve_with_context` | Agent registered as `"admin-bot"`, binding matches `discord` + `guild_id` + `roles` | Context-aware resolution with `BindingContext` including guild and role data |
+
+The progression is intentional: each successive benchmark exercises additional matching logic in the router, so comparing them reveals the marginal cost of binding evaluation and context matching.
+
+### Formatting (`formatting`)
+
+Measures the `format_for_channel` conversion pipeline and related utilities.
+
+| Benchmark | Input | Output format |
+|---|---|---|
+| `format_markdown_passthrough` | Multi-paragraph markdown (`SAMPLE_MARKDOWN`) | `OutputFormat::Markdown` |
+| `format_telegram_html` | Same markdown | `OutputFormat::TelegramHtml` |
+| `format_slack_mrkdwn` | Same markdown | `OutputFormat::SlackMrkdwn` |
+| `format_plain_text` | Same markdown | `OutputFormat::PlainText` |
+| `format_telegram_html_short` | `"Hello world!"` | `OutputFormat::TelegramHtml` |
+| `split_message_short` | `"Hello!"` with limit 4096 | No split needed |
+| `split_message_long` | 500 repeated lines with limit 4096 | Multiple chunks |
+| `default_phase_emoji_all` | All six `AgentPhase` variants | Emoji lookup per phase |
+
+The `SAMPLE_MARKDOWN` constant exercises bold, italic, code spans, links, and bullet lists — the full set of markup constructs the formatter must handle.
+
+## Dependencies on Library Code
 
 ```mermaid
-flowchart LR
-    A[resolve] --> B{Direct route?}
-    B -->|yes| C[return mapped agent]
-    B -->|no| D{Binding match?}
-    D -->|yes| E[return bound agent]
-    D -->|no| F[return default agent]
+graph LR
+    dispatch_rs["dispatch.rs<br/>(benchmarks)"]
+    dispatch_rs --> types["types module<br/>ChannelMessage, split_message,<br/>default_phase_emoji, AgentPhase"]
+    dispatch_rs --> router["router module<br/>AgentRouter, BindingContext"]
+    dispatch_rs --> formatter["formatter module<br/>format_for_channel"]
+    dispatch_rs --> librefang_types["librefang-types<br/>AgentId, AgentBinding,<br/>BindingMatchRule, OutputFormat"]
 ```
 
-`bench_router_resolve_with_context` is the heaviest because it constructs a `BindingContext` with borrowed `guild_id` and a `smallvec` of roles, then calls `resolve_with_context` which must evaluate the multi-field `BindingMatchRule`.
+Key API surfaces exercised:
 
-### Formatting
+- **`librefang_channels::types`** — `ChannelMessage`, `ChannelUser`, `ChannelContent`, `ChannelType`, `split_message`, `default_phase_emoji`, `AgentPhase`
+- **`librefang_channels::router`** — `AgentRouter::new`, `set_default`, `set_direct_route`, `register_agent`, `load_bindings`, `resolve`, `resolve_with_context`; `BindingContext`
+- **`librefang_channels::formatter`** — `format_for_channel`
+- **`librefang_types::agent`** — `AgentId`
+- **`librefang_types::config`** — `OutputFormat`, `AgentBinding`, `BindingMatchRule`
 
-| Bench function | What it measures |
-|---|---|
-| `bench_format_markdown_passthrough` | `format_for_channel(..., OutputFormat::Markdown)` — identity-ish path |
-| `bench_format_telegram_html` | Markdown → Telegram HTML (bold, italic, code, links) |
-| `bench_format_slack_mrkdwn` | Markdown → Slack mrkdwn |
-| `bench_format_plain_text` | Markdown → plain text (strip all markup) |
-| `bench_format_short_text` | Telegram HTML conversion on a trivially short string |
-| `bench_split_message_short` | `split_message` on a string well under the 4096-char limit |
-| `bench_split_message_long` | `split_message` on ~8 000 characters of repeated lines (forces at least one split) |
-| `bench_default_phase_emoji` | Iterates all `AgentPhase` variants (Queued, Thinking, tool_use, Streaming, Done, Error) calling `default_phase_emoji` on each |
+## Adding New Benchmarks
 
-The long-format input (`SAMPLE_MARKDOWN`) exercises every markup construct the formatter handles: bold, italic, inline code, links, and bullet lists. The short-format input (`SHORT_TEXT`) measures per-call overhead when the formatter has nothing to transform.
-
-## Dependencies on Library Crates
-
-The benches import from four locations:
-
-| Import path | Crate | Used for |
-|---|---|---|
-| `librefang_channels::types` | `librefang-channels` | `ChannelMessage`, `ChannelUser`, `ChannelContent`, `ChannelType`, `AgentPhase`, `default_phase_emoji`, `split_message` |
-| `librefang_channels::router` | `librefang-channels` | `AgentRouter`, `BindingContext` |
-| `librefang_channels::formatter` | `librefang-channels` | `format_for_channel` |
-| `librefang_types::agent` | `librefang-types` | `AgentId` |
-| `librefang_types::config` | `librefang-types` | `OutputFormat`, `AgentBinding`, `BindingMatchRule` |
-
-## Adding a New Benchmark
-
-1. Place the function in the appropriate section of `dispatch.rs` (or create a new section with a comment header).
-2. Use `black_box` on every input to prevent the compiler from constant-folding the work away.
-3. Register the function in the matching `criterion_group!` macro call (or create a new group and add it to `criterion_main!`).
-4. Prefer benchmarking the public API directly (`resolve`, `format_for_channel`, `split_message`) rather than internal helpers, so the bench remains valid across refactorings.
+1. Place the benchmark function in the appropriate section of `dispatch.rs` (or create a new section with a comment header).
+2. Add the function to the relevant `criterion_group!` macro invocation, or define a new group and include it in `criterion_main!`.
+3. Use `black_box` on all inputs and outputs to prevent dead-code elimination.
+4. For router benchmarks, construct the `AgentRouter` setup inside the benchmark function (before the `bench_function` closure) so setup cost is excluded from the measurement. The closure should contain only the `resolve`/`resolve_with_context` call.

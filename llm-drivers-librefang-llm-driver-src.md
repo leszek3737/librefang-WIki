@@ -2,267 +2,320 @@
 
 # librefang-llm-driver
 
-Core trait, types, and error infrastructure for LibreFang's LLM provider abstraction layer. Every concrete driver (Anthropic, OpenAI, Gemini, Ollama, CLI-based providers) implements the types defined here.
+Core trait, types, and error classification for LibreFang's LLM provider abstraction layer. This crate defines the `LlmDriver` trait that all concrete provider implementations (Anthropic, OpenAI, Gemini, Ollama, etc.) implement, along with the error taxonomy, fallback-chain exhaustion tracking, and request/response types that flow through the entire system.
 
 ## Architecture
 
 ```mermaid
 graph TD
     subgraph "librefang-llm-driver"
-        LT["LlmDriver trait<br/>complete / stream"]
-        CR["CompletionRequest"]
-        CS["CompletionResponse"]
-        LE["LlmError"]
-        PES["ProviderExhaustionStore<br/>(Arc&lt;DashMap&gt;)"]
-        FR["FailoverReason"]
+        LT[LlmDriver trait]
+        CR[CompletionRequest]
+        CPR[CompletionResponse]
+        LE[LlmError]
+        FE[FailoverReason]
+        PES[ProviderExhaustionStore]
+        CE[classify_error]
     end
 
-    subgraph "Consumer crates"
-        FC["FallbackChain"]
-        AL["agent_loop"]
-        MT["metering"]
-        API["ws / API layer"]
+    subgraph Consumers
+        DRIVERS[librefang-llm-drivers<br/>Concrete providers]
+        METERING[librefang-kernel-metering<br/>Budget gates]
+        RUNTIME[librefang-runtime<br/>Routing, compaction, agent loop]
+        API[librefang-api<br/>WebSocket streaming]
+        TESTING[librefang-testing<br/>Mock drivers]
     end
 
-    FC -->|implements| LT
-    FC -->|queries / records| PES
-    FC -->|classifies via| LE
-    LE -->|failover_reason| FR
-    MT -->|budget cap| PES
-    AL -->|constructs| CR
-    AL -->|reads| CS
-    API -->|classifies errors| llm_errors
+    DRIVERS -->|implements| LT
+    DRIVERS -->|populates| LE
+    METERING -->|writes| PES
+    RUNTIME -->|constructs| CR
+    API -->|calls| CE
+    TESTING -->|implements| LT
+    LE -->|classifies via| FE
 ```
 
----
+## Core Trait: `LlmDriver`
 
-## LlmDriver Trait
-
-The central abstraction. Every provider implements `LlmDriver`:
+The central abstraction. Every LLM provider implements this trait:
 
 ```rust
 #[async_trait]
 pub trait LlmDriver: Send + Sync {
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError>;
-    async fn stream(&self, request: CompletionRequest, tx: Sender<StreamEvent>) -> Result<CompletionResponse, LlmError>;
+    async fn complete(&self, request: CompletionRequest)
+        -> Result<CompletionResponse, LlmError>;
+
+    async fn stream(&self, request: CompletionRequest, tx: Sender<StreamEvent>)
+        -> Result<CompletionResponse, LlmError>;
+
     fn is_configured(&self) -> bool { true }
     fn family(&self) -> LlmFamily { LlmFamily::Other }
 }
 ```
 
-- **`complete`** — single-shot request/response. Required.
-- **`stream`** — default implementation wraps `complete` and emits `TextDelta` + `ContentComplete` events. Concrete drivers override for true streaming. Returns an error if the receiver is dropped (cancellation propagation, #3543).
-- **`is_configured`** — returns `false` only for `StubDriver`. All real drivers use the default `true`.
-- **`family`** — returns the driver's `LlmFamily` for cross-cutting policy. Defaults to `LlmFamily::Other`; in-tree drivers override.
+- **`complete`** — synchronous (non-streaming) request. Returns the full response at once.
+- **`stream`** — has a default implementation that wraps `complete` and emits `TextDelta` + `ContentComplete` events. Concrete drivers override this for true token-by-token streaming. If the receiver is dropped mid-stream (client disconnect, abort), the default implementation returns `LlmError::Http("stream receiver dropped")` rather than silently swallowing the cancellation.
+- **`is_configured`** — returns `false` only for `StubDriver`. Real drivers always return `true`.
+- **`family`** — returns the provider family for cross-cutting policy decisions. Defaults to `LlmFamily::Other` so out-of-tree drivers compile without changes.
 
-### LlmFamily
+### `LlmFamily`
 
-High-level provider grouping for policy-level decisions:
+Coarse grouping of providers that share wire format and policy-relevant behavior:
 
 | Variant | Providers |
-|---------|-----------|
-| `Anthropic` | Claude direct API, Anthropic-compatible, Claude Code CLI |
+|---|---|
+| `Anthropic` | Claude direct API, Anthropic-compatible providers, Claude Code CLI |
 | `OpenAi` | OpenAI, Azure OpenAI, Groq, OpenRouter, DeepInfra, Together, Cerebras |
-| `Google` | Gemini API, Vertex AI, Gemini CLI |
+| `Google` | Gemini API, Vertex AI Gemini, Gemini CLI |
 | `Local` | Ollama, LM Studio, vLLM, sglang, llama.cpp (native protocol) |
-| `Other` | Anything else (default for out-of-tree drivers) |
+| `Other` | Cohere, custom CLIs, anything not yet categorized |
 
-Serialized as `snake_case` (`"open_ai"`, `"anthropic"`, etc.).
+## Request and Response Types
 
----
+### `CompletionRequest`
 
-## CompletionRequest
+All fields default to zero/empty values. Real callers must set at minimum `model` and `messages`.
 
-All fields a driver needs to fulfill an LLM call. Key design decisions:
+Key fields worth noting:
 
-- **`messages`** and **`tools`** are `Arc<Vec<...>>` — cloning the request (for retry, fallback) only bumps a refcount instead of deep-copying potentially hundreds of KB of history (#3766, #3586).
-- **`prompt_caching`** / **`cache_ttl`** / **`prompt_cache_strategy`** — Anthropic-specific cache breakpoint control. Other drivers ignore these fields. The `SystemAndN(n)` strategy stamps system + last-tool + N trailing-message markers, capped at 4 breakpoints.
-- **`extra_body`** — provider-specific JSON parameters merged last-wins into the request body.
-- **`agent_id`** / **`session_id`** / **`step_id`** — correlation keys emitted as `x-librefang-{agent,session,step}-id` HTTP headers by OpenAI-compatible drivers. Controlled by `DriverConfig::emit_caller_trace_headers`.
-- **`reasoning_echo_policy`** — controls how the OpenAI-compat driver handles `reasoning_content` on historical assistant turns. Sourced from the model catalog.
-- **`timeout_secs`** — per-request override for long-running calls (e.g. browser tool use).
-
-`Default` gives an unusable zero-value request (empty model, empty messages) — callers must set fields explicitly.
-
----
-
-## CompletionResponse
-
-Carries content blocks, stop reason, tool calls, and token usage. The `actual_provider` field is populated by fallback-chain wrappers (not leaf drivers) so the billing layer attributes spend to the slot that actually served the request (#4807).
-
-`text()` concatenates all `ContentBlock::Text` blocks, skipping thinking blocks.
-
----
-
-## StreamEvent
-
-Incremental events emitted during streaming:
-
-| Event | Source |
-|-------|--------|
-| `TextDelta` | LLM driver |
-| `ThinkingDelta` | LLM driver (extended thinking) |
-| `ToolUseStart` / `ToolInputDelta` / `ToolUseEnd` | LLM driver |
-| `ContentComplete` | LLM driver |
-| `PhaseChange` | Agent loop (lifecycle phases) |
-| `ToolExecutionResult` | Agent loop (tool output preview) |
-| `OwnerNotice` | Agent loop (owner-side private DM) |
-
-`PHASE_RESPONSE_COMPLETE` is the constant for the phase that signals "final text streamed, post-processing begins."
-
----
-
-## LlmError
-
-Non-exhaustive error enum covering every failure mode. Critical variants:
-
-### RateLimited
-```rust
-RateLimited { retry_after_ms: u64, message: Option<String> }
-```
-Server-reported rate limit with a delay hint. The fallback chain backs off then retries the same provider.
-
-### Api
-```rust
-Api { status: u16, message: String, code: Option<ProviderErrorCode> }
-```
-Structured API errors. The `code` field is a typed classification (`ProviderErrorCode`) parsed from the provider's JSON response body — immune to provider rewording/localization (#3745). When `code` is `None`, classification falls back to status-code-only heuristics.
-
-### TimedOut
-```rust
-TimedOut { inactivity_secs: u64, partial_text: Option<Arc<str>>, partial_text_len: usize, last_activity: String }
-```
-CLI subprocess timeout. `partial_text` is `Option<Arc<str>>` so cloning the error is O(1) — most consumers only read `partial_text_len` (#3552).
-
-### AllProvidersExhausted
-```rust
-AllProvidersExhausted { details: Vec<ProviderExhaustionDetail>, cause: Option<Box<LlmError>> }
-```
-Terminal: every slot in the fallback chain was either pre-skipped (exhaustion store) or attempted-and-failed. `details` is sorted by `provider_id` for deterministic string output (#3298). `cause` preserves the last underlying error via `Error::source` (#3745).
-
-### Error Classification: `failover_reason()`
-
-Every `LlmError` variant maps to a `FailoverReason` that drives fallback-chain routing:
-
-| FailoverReason | Trigger | Recovery |
+| Field | Type | Purpose |
 |---|---|---|
-| `RateLimit(ms)` | 429, `Overloaded` | back off, retry same provider |
-| `CreditExhausted` | 402 | skip to next provider |
-| `AuthError` | 401, missing key | skip to next provider |
-| `ModelUnavailable` | 404, 503 | skip to next provider |
-| `ContextTooLong` | 413 | propagate (caller must compress) |
-| `Timeout` | inactivity timeout | skip to next provider |
-| `HttpError` | other 4xx/5xx | skip to next provider |
-| `ChainExhausted` | all slots dry | propagate (terminal) |
-| `Unknown` | parse errors | propagate immediately |
+| `messages` | `Arc<Vec<Message>>` | Refcounted — cloning for retries/fallback is O(1) |
+| `tools` | `Arc<Vec<ToolDefinition>>` | Same `Arc` strategy as messages |
+| `prompt_caching` | `bool` | Enables cache markers (Anthropic) or relies on automatic prefix caching (OpenAI) |
+| `prompt_cache_strategy` | `Option<PromptCacheStrategy>` | Controls breakpoint placement: `SystemOnly`, `SystemAndN(n)`, `Disabled` |
+| `cache_ttl` | `Option<&'static str>` | `"1h"` for extended Anthropic cache; default is 5 minutes |
+| `response_format` | `Option<ResponseFormat>` | Structured output constraints |
+| `extra_body` | `Option<HashMap<String, serde_json::Value>>` | Provider-specific overrides; last-wins over standard fields |
+| `agent_id` / `session_id` / `step_id` | `Option<String>` | Correlation keys surfaced as `x-librefang-*-id` HTTP headers |
+| `timeout_secs` | `Option<u64>` | Per-request timeout override (CLI drivers use `message_timeout_secs` instead) |
+| `reasoning_echo_policy` | `ReasoningEchoPolicy` | How to handle `reasoning_content` on historical turns (OpenAI-compat only) |
 
-Classification is purely structural (variant + status + typed code) — no allocation, no substring matching.
+### `CompletionResponse`
 
----
+| Field | Type | Purpose |
+|---|---|---|
+| `content` | `Vec<ContentBlock>` | Text, thinking, and other content blocks |
+| `stop_reason` | `StopReason` | Why generation stopped |
+| `tool_calls` | `Vec<ToolCall>` | Extracted tool invocations |
+| `usage` | `TokenUsage` | Input/output token counts |
+| `actual_provider` | `Option<String>` | Set by fallback wrappers to attribute spend to the slot that served the request, not the nominated slot. Always `None` on leaf drivers. |
 
-## ProviderExhaustionStore
+`response.text()` concatenates all `ContentBlock::Text` blocks into a single string, skipping thinking blocks.
 
-In-memory exhaustion ledger shared between the fallback chain and the metering layer. Backed by `Arc<DashMap>`, cheap to clone, safe across tasks.
+### `StreamEvent`
 
-### Design Principles
+Events emitted during streaming. Key variants:
 
-1. **Process-local**: daemon restart clears all state. Persisting exhaustion would risk locking out a slot whose issue was fixed out-of-band (key rotation, billing top-up).
-2. **Auto-expiring**: `is_exhausted()` atomically removes entries whose `until` has passed, returning `None` so the chain naturally retries.
-3. **Last-wins**: marking the same provider twice replaces the entry — the most recent reason is the actionable one.
+- **`TextDelta`** — incremental text
+- **`ToolUseStart` / `ToolInputDelta` / `ToolUseEnd`** — tool use lifecycle
+- **`ThinkingDelta`** — extended thinking output
+- **`ContentComplete`** — final event with `stop_reason` and `usage`
+- **`PhaseChange`** — agent lifecycle phase for UX indicators (e.g., `"response_complete"`)
+- **`ToolExecutionResult`** / **`OwnerNotice`** — emitted by the agent loop, not LLM drivers
 
-### ExhaustionReason
+## Error Handling: `LlmError`
 
-| Reason | Typical trigger | Auto-retry |
-|--------|----------------|------------|
-| `RateLimited` | 429 with `Retry-After` | when server-reported reset passes |
-| `QuotaExceeded` | 402 / out of funds | after `DEFAULT_LONG_BACKOFF` (1h) |
-| `BudgetExceeded` | operator-set spending cap | after `DEFAULT_LONG_BACKOFF` (1h) |
-| `AuthFailed` | 401 / invalid key | after `DEFAULT_LONG_BACKOFF` (1h) |
+Non-exhaustive error enum covering all failure modes. Each variant carries enough context for both failover decisions and user-facing diagnostics.
 
-`DEFAULT_LONG_BACKOFF` (1 hour) balances "don't waste an attempt every minute" against "auto-heal once the operator fixes the underlying issue."
+### Variants and Their Failover Behavior
 
-### API Summary
+`LlmError::failover_reason()` classifies every variant into a `FailoverReason` that drives the fallback chain:
 
-| Method | Description |
-|--------|-------------|
-| `mark_exhausted(id, reason, until)` | Record exhaustion. Replaces any previous entry. Emits `INFO` to the `metering` tracing target. |
-| `is_exhausted(id) -> Option<ProviderExhaustion>` | Query. Side-effect: atomically removes expired entries. Returns `None` for unknown or expired providers. |
-| `record_skip(id) -> Option<ProviderExhaustion>` | Convenience: calls `is_exhausted`, logs a skip event, returns the record. |
-| `clear_exhausted(id)` | Explicit removal (admin endpoint, test fixtures). |
-| `snapshot() -> Vec<ExhaustionSnapshotRow>` | Diagnostic snapshot, sorted by `provider_id` ascending for deterministic output (#3298). Excludes already-expired entries. |
-| `live_count() -> usize` | Count of non-expired entries. |
+| Error Variant | FailoverReason | Recovery Action |
+|---|---|---|
+| `RateLimited { retry_after_ms }` | `RateLimit(Some(ms))` | Back off, retry same provider |
+| `Overloaded { retry_after_ms }` | `RateLimit(Some(ms))` | Same as rate limit — transient capacity |
+| `Api { status, code, .. }` | Varies (see below) | Depends on classification |
+| `AuthenticationFailed` / `MissingApiKey` | `AuthError` | Skip to next slot |
+| `ModelNotFound` | `ModelUnavailable` | Skip to next slot |
+| `TimedOut` | `Timeout` | Skip to next provider |
+| `Http(_)` | `HttpError` | Skip to next provider |
+| `Parse(_)` | `Unknown` | Propagate (not recoverable by switching) |
+| `AllProvidersExhausted` | `ChainExhausted` | Terminal — propagate to user |
 
-### Concurrency
+### `Api` Error Classification
 
-- `is_exhausted` takes a read lock first; only acquires a write lock to remove an expired entry.
-- Removal uses `remove_if` so a concurrent `mark_exhausted` that replaced the entry with a fresh `until` is not clobbered.
-- Clones share the same `DashMap` — state is visible across all clone handles.
+The `Api` variant has a `code: Option<ProviderErrorCode>` field. When populated (by drivers that parse structured error responses), classification uses the typed enum — locale-independent and immune to provider rewording. When `None`, classification falls back to status-code matching only:
 
----
+| Status | FailoverReason |
+|---|---|
+| 429 | `RateLimit(None)` |
+| 401 | `AuthError` |
+| 402 | `CreditExhausted` |
+| 413 | `ContextTooLong` |
+| 503 | `ModelUnavailable` |
+| other | `HttpError` |
 
-## llm_errors — Error Classification & Sanitization
+When `code` is present, the typed enum takes priority over status-code heuristics.
 
-Two independent classification systems coexist:
+### `TimedOut` Variant
 
-### 1. `classify_error` / `classify_error_with_context` → `LlmErrorCategory`
+Designed for cheap cloning — `partial_text` is `Option<Arc<str>>` so cloning is an O(1) refcount bump rather than copying potentially-megabyte payloads. `Display` references only `partial_text_len`; CLI callers that need the actual body pattern-match the variant.
 
-For user-facing diagnostics and logging. Classifies raw error messages + HTTP status into 8 categories using case-insensitive substring matching against pattern tables covering 19+ providers.
+### `AllProvidersExhausted` Variant
 
-Priority order: ContextOverflow → Billing → Auth → RateLimit → ModelNotFound → Format → Overloaded → Timeout.
+Terminal error produced when every slot in a fallback chain is exhausted. Carries:
+- `details: Vec<ProviderExhaustionDetail>` — one row per slot, sorted by `provider_id` for deterministic string output (#3298 prompt-cache determinism)
+- `cause: Option<Box<LlmError>>` — the last underlying provider error, exposed via `std::error::Error::source` so callers walking the error chain still see the upstream failure. `None` when every slot was pre-skipped from the exhaustion store.
 
-Special handling:
-- **403**: checked against `FORBIDDEN_NON_AUTH_PATTERNS` first because many providers (especially Chinese ones) return 403 for quota/region/model issues, not auth failures.
-- **HTML error pages**: Cloudflare and other CDN error pages are detected and classified as `Overloaded`.
-- **Retry delay extraction**: parses `Retry-After N`, `try again in N`, and `Nms` patterns.
+## Provider Exhaustion Tracking (`exhaustion`)
 
-`classify_error_with_context` enriches with `provider`, `model`, and an actionable `suggestion`.
+In-memory ledger that prevents a fallback chain from re-attempting a provider slot that is known to be unavailable. Shared between the fallback chain (which queries and records) and the metering layer (which records when operator-set spending caps trigger).
 
-### 2. `FailoverReason` (via `LlmError::failover_reason()`)
+### Core Type: `ProviderExhaustionStore`
 
-For provider-switching decisions in `FallbackChain`. Uses the typed `ProviderErrorCode` enum on `LlmError::Api` when available, falling back to status-code-only matching. No substring matching of human-readable messages.
+Wraps an `Arc<DashMap<String, ProviderExhaustion>>` — cheap to clone, safe to share across tasks, optimized for hot reads and medium writes.
+
+**Lifecycle of an entry:**
+
+1. **Recorded** via `mark_exhausted(provider_id, reason, until)` — typically called when a provider returns an exhaustion-class error (429, 402, 401) or when the metering layer detects a budget cap breach.
+2. **Queried** via `is_exhausted(provider_id)` — returns `Some(record)` when the slot should be skipped. **Side effect**: expired entries are atomically removed on read, so the chain naturally re-attempts the slot once the cooldown passes.
+3. **Cleared** via `clear_exhausted(provider_id)` — explicit removal for admin/CLI force-retry ahead of scheduled reset.
+
+### `ExhaustionReason`
+
+| Variant | Typical Trigger | Auto-Recovery |
+|---|---|---|
+| `RateLimited` | 429, server-reported reset time | Yes — clears when server reset hint passes |
+| `QuotaExceeded` | 402, out of funds | Yes — after `DEFAULT_LONG_BACKOFF` (1 hour) |
+| `BudgetExceeded` | Operator-set budget cap pre-dispatch | Yes — after `DEFAULT_LONG_BACKOFF` (1 hour) |
+| `AuthFailed` | 401/403, invalid key | Yes — after `DEFAULT_LONG_BACKOFF` (1 hour) |
+
+For reasons requiring operator action (quota, budget, auth), callers pass `DEFAULT_LONG_BACKOFF` (1 hour) — short enough that a fixed operator action heals the chain automatically, long enough that the chain doesn't waste attempts every minute.
+
+### `ExhaustionReason::as_metric_label()`
+
+Returns a stable, lowercase, no-spaces label (`"rate_limited"`, `"quota_exceeded"`, `"budget_exceeded"`, `"auth_failed"`) suitable for Prometheus labels and structured log fields without quoting.
+
+### Determinism Guarantees
+
+- Storage is process-local. A daemon restart clears all state by design — persisting exhaustion across restarts could lock out a slot whose underlying issue was resolved out-of-band.
+- `snapshot()` returns entries sorted by `provider_id` ascending (via `BTreeMap`), ensuring any stringified output is byte-identical across processes. This preserves prompt-cache determinism when exhaustion data leaks into a prompt.
+- `DashMap` iteration order is non-deterministic (sharded by hash), but `snapshot()` normalizes this.
+
+### Observability
+
+Both `mark_exhausted` and `record_skip` emit `tracing::info!` events with `target: "metering"` so existing tracing-subscriber filters that route metering events to dashboards pick them up without additional wiring.
+
+## Error Classification (`llm_errors`)
+
+Two-layer classification system: a general-purpose classifier for user-facing diagnostics, and a failover taxonomy for provider-switching decisions.
+
+### `classify_error(message, status) -> ClassifiedError`
+
+Classifies raw LLM API errors into 8 categories using priority-ordered pattern matching:
+
+1. **ContextOverflow** — checked first (most specific patterns)
+2. **Billing** (402)
+3. **Auth** (401/403 — with careful handling of non-auth 403s)
+4. **RateLimit** (429)
+5. **ModelNotFound**
+6. **Format** (400-class)
+7. **Overloaded** (500/503)
+8. **Timeout** (network)
+
+Falls back to `Format` for structured errors or `Timeout` for network-sounding messages.
+
+Status-code fast paths take priority over pattern matching for unambiguous codes (429 → RateLimit, 402 → Billing, 401 → Auth, 404 → ModelNotFound). Status 403 requires special handling because providers use it for rate limiting, quota issues, region restrictions, and model permissions — not just auth.
+
+#### `classify_error_with_context(message, status, provider, model)`
+
+Enriches the classified error with:
+- `provider` and `model` metadata
+- `suggestion` — actionable resolution text based on category and context
+- Enriched `sanitized_message` with `[provider=X, model=Y]` suffix
+
+### `FailoverReason`
+
+Provider-switching taxonomy that drives `FallbackChain` decisions:
+
+| Variant | Recovery |
+|---|---|
+| `RateLimit(Option<u64>)` | Sleep (optional hint), retry same provider |
+| `CreditExhausted` | Skip to next provider immediately |
+| `ContextTooLong` | Propagate — caller must compress |
+| `ModelUnavailable` | Skip to next provider |
+| `Timeout` | Skip to next provider |
+| `HttpError` | Skip to next provider |
+| `AuthError` | Skip to next provider |
+| `ChainExhausted` | Terminal — propagate to user/operator |
+| `Unknown` | Propagate immediately |
+
+`ChainExhausted` is distinct from `Unknown` — the classification is known, the chain is simply dry.
+
+### `ProviderErrorCode`
+
+Typed enum populated by drivers that parse structured provider error responses (JSON `error.code`, `error.type`). When present on `LlmError::Api { code, .. }`, `failover_reason()` classifies via this enum instead of status-code heuristics, making classification immune to provider rewording and localization (#3745).
+
+Variants: `RateLimit`, `CreditExhausted`, `ContextLengthExceeded`, `ModelNotFound`, `AuthError`, `ServerUnavailable`, `ServerError`, `BadRequest`.
 
 ### Sanitization
 
-`sanitize_for_user` produces user-safe messages by:
-1. Extracting the `message` field from JSON error bodies (`/error/message`, `/message`, `/detail`)
-2. Redacting secret fragments (`sk-...`, `Bearer ...`, `key-...`)
-3. Stripping the `LLM driver error: API error (NNN):` wrapper
-4. Detecting HTML error pages and replacing with a generic message
-5. Capping at 300 chars (UTF-8-safe truncation)
+`sanitize_for_user(category, raw)` produces user-facing messages that include a sanitized excerpt of the raw provider error (capped at 300 characters). The pipeline:
+
+1. **Detect HTML error pages** — Cloudflare etc. → generic "provider returned an error page"
+2. **Extract JSON message** — tries `/error/message`, `/message`, `/detail` pointers
+3. **Redact secrets** — strips `sk-*`, `key-*`, `Bearer *` patterns
+4. **Strip LLM wrapper** — removes `"LLM driver error: API error (NNN): "` prefix
+5. **Cap length** — truncates to 200 chars at UTF-8 character boundaries (safe for CJK/emoji)
+
+### Retry Delay Extraction
+
+`extract_retry_delay(message)` recognizes patterns like `"retry after 30"`, `"retry-after: 5"`, `"try again in 10"` (seconds) and `"retry after 500ms"` (milliseconds). Returns milliseconds.
 
 ### Transient Detection
 
-`is_transient(message)` returns `true` for timeout, overloaded, rate-limit, and SSL transient patterns. Quick heuristic without full classification.
+`is_transient(message)` is a quick heuristic (no full classification) that returns `true` for timeout, overloaded, rate-limit, and SSL transient patterns (`bad record mac`, `ssl alert`, etc.). Excludes SSL handshake failures (those are configuration errors, not transient).
 
----
+## Configuration: `DriverConfig`
 
-## DriverConfig
+### Security
 
-Provider configuration carried from the kernel to driver construction. Notable fields:
+- `api_key` and `proxy_url` have `#[serde(skip_serializing)]` — any `serde_json::to_*` or `toml::to_*` of a `DriverConfig` (cache dump, diagnostic snapshot, `mcp_config.json`) never emits these in cleartext. `Deserialize` is unaffected so config files still populate them on load.
+- Custom `Debug` impl redacts both fields to `"<redacted>"`.
+- `mcp_bridge` is `#[serde(skip)]` (not serialized at all) — set only by the kernel at construction time.
 
-- **`api_key`**: redacted in `Debug` output (`"<redacted>"`)
-- **`skip_permissions`**: defaults to `true` — LibreFang runs as a daemon with no interactive terminal; its own RBAC layer handles permissions
-- **`message_timeout_secs`**: inactivity-based timeout for CLI drivers (default 300s)
-- **`mcp_bridge`**: `McpBridgeConfig` for bridging LibreFang tools into Claude Code via MCP. `#[serde(skip)]` — set only by the kernel at construction time
-- **`emit_caller_trace_headers`**: controls `x-librefang-{agent,session,step}-id` header emission. Defaults to `true`; operators with zero-egress policies can disable via config
+### Key Fields
 
----
+| Field | Default | Purpose |
+|---|---|---|
+| `provider` | `""` | Provider identifier |
+| `api_key` | `None` | Provider API key |
+| `base_url` | `None` | Override API endpoint |
+| `skip_permissions` | `true` | `--dangerously-skip-permissions` for CLI drivers |
+| `message_timeout_secs` | `300` | Inactivity timeout for CLI-based providers |
+| `request_timeout_secs` | `None` | Per-provider HTTP read timeout |
+| `emit_caller_trace_headers` | `true` | Emit `x-librefang-{agent,session,step}-id` headers |
+| `vertex_ai` | default | Vertex AI project/region/credentials |
+| `azure_openai` | default | Azure endpoint/deployment/apiversion |
 
 ## Integration Points
 
-**FallbackChain** (`librefang-llm-drivers::fallback_chain`):
-- Implements `LlmDriver` by trying multiple provider slots in sequence
-- Queries `ProviderExhaustionStore` before each attempt; skips exhausted slots
-- Records exhaustion on failure via `mark_exhausted`
-- Emits `LlmError::AllProvidersExhausted` when all slots are exhausted
+### Fallback Chain (`librefang-llm-drivers`)
 
-**Metering layer** (`librefang-kernel-metering`):
-- Records `BudgetExceeded` in the exhaustion store when an operator-set spending cap is crossed pre-dispatch
+The `FallbackChain` driver wraps multiple providers and uses:
+- `ProviderExhaustionStore` to pre-skip exhausted slots before attempting
+- `LlmError::failover_reason()` to classify failures and decide whether to retry or advance
+- `ProviderExhaustionDetail` (sorted by `provider_id`) when constructing `AllProvidersExhausted`
 
-**Agent loop** (`agent_loop`):
-- Constructs `CompletionRequest` with model, messages, tools, and caller identity
-- Reads `CompletionResponse.text()` and `stop_reason` to drive tool-use loops
-- Emits `StreamEvent::PhaseChange` and `ToolExecutionResult` events
+### Metering Layer (`librefang-kernel-metering`)
 
-**API layer** (`librefang-api::ws`):
-- Calls `classify_error` / `classify_error_with_context` to produce user-facing error messages from raw driver errors
+- Calls `ProviderExhaustionStore::mark_exhausted` with `ExhaustionReason::BudgetExceeded` when an operator-set budget cap triggers pre-dispatch
+- Reads `ExhaustionReason::as_metric_label()` for metric tags in budget route handlers
+
+### Runtime (`librefang-runtime`)
+
+- Constructs `CompletionRequest` for routing, compaction, web augmentation, and agent loop turns
+- Reads `CompletionResponse::text()` for agent loop tool-call staging and max-tokens detection
+- Uses `classify_error` in the agent loop retry handler for building user-facing error messages
+
+### API Layer (`librefang-api`)
+
+- Calls `classify_error` for WebSocket streaming error classification
+- Emits stream events via the `Sender<StreamEvent>` channel
+
+### Testing (`librefang-testing`)
+
+- Provides mock `LlmDriver` implementations
+- Constructs `CompletionRequest` for test fixtures
