@@ -2,184 +2,196 @@
 
 # librefang-desktop
 
-Native desktop and mobile application for LibreFang, built on **Tauri 2.0**. This single crate produces binaries for four platforms (macOS, Windows, Linux, iOS, Android) with platform-specific feature sets gated by `cfg` attributes and Cargo features.
+Native client application for the LibreFang Agent OS, built on Tauri 2.0. Ships as a desktop app (macOS, Windows, Linux) and as a thin mobile client (iOS, Android) that connects to a remote LibreFang daemon.
 
-## Purpose
-
-LibreFang is an Agent Operating System — it runs, orchestrates, and extends AI agents across channels 24×7. The desktop crate provides the native shell: a system tray, auto-update, autostart, and a windowed UI rendered from the shared React frontend bundled in `librefang-api`.
-
-On mobile, the same crate compiles as a **thin client** that connects to a remote librefang daemon over HTTP/WebSocket. The daemon is never embedded in the mobile binary — iOS and Android cannot guarantee the uptime that cron, autodream, and channel adapters require.
-
-## Architecture
+## Architecture Overview
 
 ```mermaid
 graph LR
-    subgraph Desktop
-        DT[Desktop Binary] -->|embeds| Kernel[librefang-kernel]
-        DT -->|serves| API[librefang-api / React]
-        DT -->|tray / autoupdate| OS[Native OS APIs]
+    subgraph Desktop["Desktop (macOS / Windows / Linux)"]
+        UI["Tauri WebView UI"]
+        TK["librefang-kernel"]
+        TA["librefang-api (Axum)"]
+        EXT["librefang-extensions"]
     end
 
-    subgraph Mobile
-        MT[Mobile Binary] -->|HTTP/WS| Daemon[Remote librefang Daemon]
-        MT -->|renders| React[Shared React Frontend]
+    subgraph Mobile["Mobile (iOS / Android)"]
+        MUI["Tauri WebView UI"]
     end
+
+    subgraph Remote["Remote Daemon"]
+        DAEMON["librefang daemon"]
+    end
+
+    UI -- embedded --> TK
+    UI -- embedded --> TA
+    MUI -- HTTP / WebSocket --> DAEMON
+    TA -- serves static react --> UI
 ```
 
-### Dependency graph
+On **desktop**, the kernel, API server, and extension runtime run in-process. On **mobile**, the app is a dashboard that connects to a separately-hosted daemon — iOS and Android cannot guarantee the background uptime required for cron jobs, autodream, channel adapters, and triggers.
 
-The desktop crate sits at the top of the workspace dependency tree:
+## Directory Layout
+
+```
+librefang-desktop/
+├── Cargo.toml                  # Workspace member manifest
+├── build.rs                    # Tauri build script
+├── MOBILE.md                   # Mobile build & distribution guide
+├── tauri.conf.json             # Base Tauri 2 config (desktop)
+├── tauri.desktop.conf.json     # Desktop-specific plugin config (updater)
+├── tauri.android.conf.json     # Android overlay config
+├── tauri.ios.conf.json         # iOS overlay config
+├── src/
+│   ├── main.rs                 # Desktop binary entry point
+│   └── lib.rs                  # Shared library (desktop + mobile)
+└── icons/                      # Bundle icons
+```
+
+## Key Dependencies
 
 | Crate | Role |
 |---|---|
-| `librefang-kernel` | Core agent runtime — embedded in desktop builds |
-| `librefang-api` | HTTP/WebSocket API server + static React frontend |
-| `librefang-types` | Shared type definitions |
-| `librefang-extensions` | Extension/plugin system |
+| `librefang-kernel` | Core agent runtime (cron, triggers, channel adapters) |
+| `librefang-api` | Axum HTTP/WS API server; also serves the React frontend |
+| `librefang-types` | Shared data structures |
+| `librefang-extensions` | Extension loading and sidecar management |
+| `tauri` | Native shell + WebView (v2) |
+| `tauri-plugin-*` | Autostart, single-instance, updater, shell, global shortcut, dialog, notification |
 
-## Platform targets
+## Platform-Conditional Dependencies
 
-### macOS and Windows
+Cargo target-specific dependency blocks control which plugins are available:
 
-Full feature set with no opt-in required:
+### macOS and Windows (`cfg(not(ios, android, linux))`)
 
-- **System tray icon** — native `NSStatusItem` / `Shell_NotifyIconW`, no GTK dependency.
-- **Single-instance enforcement** — `tauri-plugin-single-instance`.
-- **Autostart on login** — `tauri-plugin-autostart`.
-- **Global keyboard shortcuts** — `tauri-plugin-global-shortcut`.
-- **Auto-updater** — `tauri-plugin-updater` with passive install mode on Windows. Public key and GitHub release endpoint configured in `tauri.desktop.conf.json`.
-- **Shell plugin** — `tauri-plugin-shell` for CLI process spawning.
+All desktop plugins are always enabled — system tray uses native APIs (`NSStatusItem` on macOS, `Shell_NotifyIconW` on Windows) with no GTK dependency:
 
-### Linux
+- `tauri` with features `tray-icon`, `image-png`
+- `tauri-plugin-single-instance`
+- `tauri-plugin-autostart`
+- `tauri-plugin-global-shortcut`
+- `tauri-plugin-updater`
+- `tauri-plugin-shell`
 
-Identical plugin set to macOS/Windows, except the **system tray is opt-in** (see [Linux tray and GTK3](#linux-tray-and-gtk3) below).
+### Linux (`cfg(target_os = "linux")`)
 
-### iOS and Android
+Identical plugin set except `tray-icon` is **opt-in** via the `linux-tray` Cargo feature. Tauri 2.10's `tray-icon` on Linux pulls `libappindicator-rs 0.9`, which transitively depends on 8 unmaintained GTK3 crates (RUSTSEC-2024-0411..0420) plus a `glib` unsoundness (RUSTSEC-2024-0429). Headless server and CI builds should not need a system tray.
 
-Compiled-out features: system tray, single-instance, autostart, global shortcuts, auto-updater, and shell plugin. Additional mobile-only dependencies are pulled in:
+See issue #3667 for context and the pending migration to `tray-icon 0.22+`/ksni.
 
-- `tauri-plugin-barcode-scanner` — QR-based connection wizard.
-- `keyring` — native credential storage.
+### iOS and Android (`cfg(ios, android)`)
 
-Mobile-specific Tauri configs (`tauri.android.conf.json`, `tauri.ios.conf.json`) set the window URL to `lfconnect://localhost/` and point `frontendDist` at the shared React build in `librefang-api/static/react`.
+Desktop-only plugins are compiled out. Mobile gets:
 
-Minimum OS versions:
+- `tauri-plugin-barcode-scanner` — QR-based connection wizard
+- `keyring` — secure credential storage
 
-| Platform | Minimum |
-|----------|---------|
-| iOS | 16.0 |
-| Android | API 26 (Android 8.0) |
-| macOS | 12.0 |
+Features not available on mobile: system tray, single-instance, autostart, global shortcuts, auto-updater, CLI process spawning.
 
-## Cargo features
+## Cargo Features
 
-| Feature | Default | Description |
-|---------|---------|-------------|
-| `default` | ✅ | Inherits `librefang-api/default` |
-| `custom-protocol` | ❌ | Production Tauri builds — activates `tauri/custom-protocol` |
-| `mobile` | ❌ | Documentation-only flag; mobile targets are cfg-gated, not feature-gated |
-| `linux-tray` | ❌ | Opts into `tauri/tray-icon` on Linux (see below) |
+| Feature | Effect |
+|---|---|
+| `default` | Inherits `librefang-api/default` |
+| `custom-protocol` | Enables `tauri/custom-protocol` for production builds (uses `tauri://` protocol instead of dev server) |
+| `mobile` | No-op documentation flag; mobile targets are cfg-gated |
+| `linux-tray` | Re-enables system tray on Linux (`tauri/tray-icon`). No-op on macOS/Windows where tray is always on |
 
-Removed features: `all-channels`, `mini`, `mobile-no-email` — channel adapters are now sidecars with no Rust feature gate. CI configs referencing these flags should drop the `-f` argument.
-
-## Tauri configuration files
-
-The crate uses Tauri 2.0's layered configuration system:
-
-```
-tauri.conf.json              — base: product name, identifier, CSP, bundle settings
-tauri.desktop.conf.json      — desktop overlay: auto-updater pubkey + endpoints
-tauri.android.conf.json      — Android overlay: bundle ID, min SDK, mobile window
-tauri.ios.conf.json          — iOS overlay: bundle ID, minimum system version
-```
-
-### Content Security Policy
-
-The desktop CSP (`tauri.conf.json`) allows:
-- `self`, `tauri:`, `ipc:` for scripts and connections
-- `http://127.0.0.1:*` and `ws://127.0.0.1:*` for local API communication
-- Google Fonts for `style-src` / `font-src`
-- `blob:` and `data:` for images and media
-- `object-src 'none'` and `base-uri 'self'` as hardening
-
-## Crate types
+## Crate Types
 
 ```toml
 [lib]
 crate-type = ["staticlib", "cdylib", "lib"]
 ```
 
-iOS requires `staticlib` (linked by Xcode) and Android requires `cdylib` (loaded by the Tauri mobile runtime). `lib` (rlib) is kept so the desktop binary in `src/main.rs` can depend on the library normally.
+- `staticlib` / `cdylib` — Required for iOS (Xcode links the static lib) and Android (Gradle loads the cdylib). Without these, `cargo tauri ios build` fails with "Library not found".
+- `lib` (rlib) — Used by the desktop binary in `src/main.rs`.
 
-**Trade-off**: Cargo cannot conditionalize `crate-type` on `cfg(mobile)`, so desktop builds also produce `staticlib` and `cdylib` outputs. This adds a link step costing ~10–20% extra build time on clean builds. If desktop build times become a bottleneck, this is the first place to investigate.
+Cargo cannot conditionalize crate-type on `cfg(mobile)`, so desktop builds also produce the `staticlib` and `cdylib` artifacts. This adds ~10–20% to clean build times.
 
-## Linux tray and GTK3
+## Tauri Configuration
 
-Tauri 2.10's `tray-icon` feature on Linux depends on `libappindicator-rs 0.9`, which transitively pulls in eight unmaintained GTK3 crates (RUSTSEC-2024-0411 through RUSTSEC-2024-0420) plus a `glib` unsoundness issue (RUSTSEC-2024-0429).
+Tauri 2 uses layered configuration. The base file is `tauri.conf.json`, with platform overlays merging on top.
 
-To avoid these advisories on headless Linux servers and CI:
+### Base Config (`tauri.conf.json`)
 
-- **Default**: `tray-icon` is **not** enabled on Linux. The app runs without a system tray.
-- **Opt-in**: Pass `--features linux-tray` to enable the tray at the cost of the GTK3 dependency chain.
-- **Future**: This will be resolved when Tauri migrates to `tray-icon 0.22+` / `ksni`, eliminating the GTK dependency. Tracked in issue #3667.
+- **Identifier**: `ai.librefang.desktop`
+- **withGlobalTauri**: `true` — exposes Tauri APIs on `window.__TAURI__` for the React frontend
+- **windows**: Empty array — windows are created programmatically at runtime
+- **CSP**: Restrictive policy allowing `self`, `tauri:`, `ipc:`, and `127.0.0.1:*` for the embedded API server. Google Fonts are whitelisted. `object-src` is `none`.
+- **Bundle targets**: `all` (platform-appropriate: dmg/app on macOS, msi/nsis on Windows, deb/appimage on Linux)
+- **Minimum system versions**: macOS 12.0, Windows WebView2 via download bootstrapper
 
-## Building and running
+### Desktop Overlay (`tauri.desktop.conf.json`)
 
-### Desktop (development)
+Configures the auto-updater:
+
+- **Public key**: Ed25519 minisign key for update signature verification
+- **Endpoint**: `https://github.com/librefang/librefang/releases/latest/download/latest.json`
+- **Windows install mode**: `passive` (shows progress, no interaction required)
+
+### Mobile Overlays
+
+Both `tauri.android.conf.json` and `tauri.ios.conf.json` override:
+
+- **Identifier**: `ai.librefang.app` (separate from desktop for store listings)
+- **frontendDist**: `../librefang-api/static/react` — pre-built React bundle
+- **Main window URL**: `lfconnect://localhost/` — custom protocol scheme for the mobile connection wizard
+- **Minimum OS**: Android API 26 (8.0), iOS 16.0
+
+## Building
+
+### Desktop
 
 ```bash
-# From the workspace root
+# Development (from workspace root)
 cargo run -p librefang-desktop
 
-# From crates/librefang-desktop/
-cargo tauri dev
-```
-
-### Desktop (production bundle)
-
-```bash
+# Production bundle
 cargo tauri build
-# Produces platform-specific bundles (dmg, msi, AppImage, deb)
 ```
 
-### Android
-
-```bash
-cd crates/librefang-desktop
-cargo tauri android init   # first time only
-cargo tauri android dev    # emulator
-```
-
-### iOS (macOS only)
-
-```bash
-cd crates/librefang-desktop
-cargo tauri ios init       # first time only
-cargo tauri ios dev        # simulator
-```
-
-### Linux with system tray
+### Linux with System Tray
 
 ```bash
 cargo run -p librefang-desktop --features linux-tray
 ```
 
-## Mobile release and distribution
+### Mobile
 
-- CI builds produce signed `.aab`, `.apk`, and `.ipa` artifacts in `.github/workflows/release.yml` (jobs `mobile_android` and `mobile_ios`).
-- TestFlight and Play Internal Testing uploads are unattended in CI.
-- Upload secrets are tracked in `.github/SECRETS.md`.
-- The mobile privacy policy template is at `.github/templates/PRIVACY_MOBILE_TEMPLATE.md` — publish under `docs/src/app/privacy-mobile/` after legal review.
-- Full release procedures, version-mapping rules, and the recovery runbook for failed uploads are in `docs/src/app/operations/mobile-release/page.mdx`.
+See `MOBILE.md` for full prerequisites (Android NDK 26+, Xcode 15+, etc.).
 
-## Related issues
+```bash
+cd crates/librefang-desktop
 
-| Issue | Topic |
-|-------|-------|
-| #3351 | Mobile epic |
-| #3342 | Initial scaffold (this crate) |
-| #3343 | Mobile UX |
-| #3344 | Connection wizard + QR |
-| #3345 | CI build jobs |
-| #3348 | Distribution |
-| #3667 | Linux tray / GTK3 migration |
+# Android emulator
+cargo tauri android dev
+
+# iOS Simulator (macOS only)
+cargo tauri ios dev
+```
+
+The `gen/android/` and `gen/apple/` directories are generated by `cargo tauri {android,ios} init` and must be committed after generation.
+
+## Relationship to Other Crates
+
+```
+librefang-desktop
+├── librefang-kernel      # Agent runtime (embedded on desktop)
+├── librefang-api         # HTTP/WS server + React static files
+│   └── librefang-types
+└── librefang-extensions  # Sidecar channel adapters
+```
+
+The desktop binary is the primary integration point — it wires together the kernel, API server, extension system, and native shell. The mobile build links the same `lib.rs` but most desktop functionality is compiled out via `cfg` gates.
+
+## Removed Features
+
+The following Cargo features were removed and should not be referenced in CI or packaging:
+
+- `all-channels` — channel adapters are now sidecars, not feature-gated
+- `mini` — removed
+- `mobile-no-email` — removed
+
+CI workflows that previously used `-f mobile-no-email` or similar flags need to drop those flags.

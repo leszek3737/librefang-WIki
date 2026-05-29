@@ -2,107 +2,77 @@
 
 # librefang-acp
 
-Agent Client Protocol (ACP) adapter for LibreFang — provides the bridge layer that lets LibreFang agents run inside editors (Zed, VS Code, JetBrains) over a stdio JSON-RPC transport.
+Agent Client Protocol (ACP) adapter for LibreFang — exposes LibreFang agents to editor integrations (Zed, VS Code, JetBrains) over stdio JSON-RPC.
 
 ## Overview
 
-This crate implements the editor-facing side of the [Agent Client Protocol](https://github.com/Aider-AI/agent-client-protocol) for LibreFang. Editors that support ACP communicate with agents over JSON-RPC, typically piped through stdin/stdout. `librefang-acp` translates those protocol messages into LibreFang kernel operations and back.
-
-The crate is intentionally split into a **protocol core** (always compiled) and an optional **kernel binding** (behind the `kernel-adapter` feature). This separation lets integration tests and alternative kernel implementations use the protocol layer without pulling in the full `librefang-kernel` dependency tree.
+`librefang-acp` translates between the **Agent Client Protocol** wire format and LibreFang's internal kernel APIs. Editors that implement ACP launch the LibreFang process as a language-server-style child, communicating over stdin/stdout using JSON-RPC. This crate owns that translation boundary.
 
 ## Architecture
 
 ```mermaid
-graph TD
+graph LR
     Editor["Editor (Zed / VS Code / JetBrains)"]
-    ACP["agent-client-protocol<br/>(workspace crate)"]
-    ACPTokio["agent-client-protocol-tokio"]
-    LFA["librefang-acp<br/>(this crate)"]
-    AK["AcpKernel trait"]
-    KA["KernelAdapter<br/>(feature: kernel-adapter)"]
-    LFK["librefang-kernel"]
-    LFT["librefang-types"]
-    LLD["librefang-llm-driver"]
-    LKH["librefang-kernel-handle"]
+    Transport["Stdio JSON-RPC Transport"]
+    ACP["librefang-acp"]
+    Kernel["LibreFang Kernel"]
 
-    Editor -->|"stdio JSON-RPC"| ACPTokio
-    ACPTokio --> ACP
-    LFA --> ACP
-    LFA --> ACPTokio
-    LFA --> AK
-    KA -.->|"implements"| AK
-    KA --> LFK
-    LFA --> LFT
-    LFA --> LLD
-    LFA --> LKH
+    Editor -->|stdio| Transport
+    Transport --> ACP
+    ACP -->|AcpKernel trait| Kernel
 ```
 
-## Key Abstractions
-
-### `AcpKernel` trait
-
-The central trait that decouples ACP protocol handling from any specific kernel backend. Anything implementing `AcpKernel` can serve as the agent engine behind the ACP server. The trait captures the operations an editor client needs: initiating sessions, sending prompts, handling approval requests, and streaming responses.
-
-Pure-protocol consumers (integration tests, alternative backends) implement this trait directly against their own infrastructure, avoiding the `librefang-kernel` dependency entirely.
-
-### `KernelAdapter` (feature-gated)
-
-Behind the `kernel-adapter` feature, this struct wraps `Arc<LibreFangKernel>` and implements `AcpKernel`. This is the production path: `librefang-cli` and `librefang-api` both enable this feature so they can host an in-process ACP server without duplicating the kernel binding logic.
+The crate is deliberately split into a **protocol layer** (always compiled) and an optional **kernel binding layer** (behind `kernel-adapter`). This separation lets integration tests and alternative kernel implementations provide their own `AcpKernel` without pulling in the full kernel dependency tree.
 
 ## Feature Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `kernel-adapter` | off | Pulls in `librefang-kernel`. Provides `KernelAdapter` that implements `AcpKernel` over a real kernel instance. |
+| `kernel-adapter` | off | Pulls in `librefang-kernel` and provides a `KernelAdapter` wrapping `Arc<LibreFangKernel>` that implements `AcpKernel`. Enabled by `librefang-cli` (in-process hosting) and `librefang-api` (daemon-attached hosting). Leave this off if you only need the protocol types and transport. |
 
-## Dependencies — why each one
+## Key Dependencies
 
-| Dependency | Role in this crate |
-|---|---|
-| `agent-client-protocol` | Core ACP types, JSON-RPC method definitions, request/response schemas |
-| `agent-client-protocol-tokio` | Tokio-based transport layer for the stdio JSON-RPC duplex |
-| `librefang-types` | Shared domain types used across all LibreFang crates |
-| `librefang-llm-driver` | LLM abstraction — the kernel delegates model calls through this |
-| `librefang-kernel-handle` | Lightweight handle type for referencing a kernel without owning it |
-| `dashmap` | Concurrent `HashMap` for tracking in-flight sessions and approval callbacks |
-| `uuid` | Session and request identifiers |
-| `tokio` / `tokio-util` | Async runtime, I/O adapters for the stdio transport |
-| `tracing` | Structured logging throughout the protocol layer |
-| `thiserror` | Error types for protocol and kernel adapter failures |
-| `serde_json` | JSON serialization for protocol messages and dynamic payload handling |
+| Crate | Role |
+|-------|------|
+| `agent-client-protocol` | Workspace crate providing ACP type definitions (requests, responses, notifications). |
+| `agent-client-protocol-tokio` | Tokio-based ACP transport — handles JSON-RPC framing over async I/O. |
+| `librefang-types` | Shared domain types used across all LibreFang crates. |
+| `librefang-llm-driver` | LLM abstraction layer; used when the ACP adapter needs to forward prompt/completion calls. |
+| `librefang-kernel-handle` | Lightweight handle to a kernel instance, decoupled from the heavy kernel crate. |
+| `librefang-kernel` | Full kernel implementation. Optional — only pulled in when `kernel-adapter` is enabled. |
+
+## Trait-Based Kernel Abstraction
+
+The core of this crate is the `AcpKernel` trait (async, via `async-trait`). It defines the operations that the ACP protocol needs from the underlying agent kernel — things like initiating sessions, submitting prompts, handling approval requests, and streaming responses.
+
+Consumers implement this trait to bridge ACP into whatever backend they have:
+
+- **With `kernel-adapter`**: Use the provided `KernelAdapter` which wraps `Arc<LibreFangKernel>` and implements `AcpKernel` by delegating to the real kernel. This is what `librefang-cli` and `librefang-api` use.
+- **Without `kernel-adapter`**: Implement `AcpKernel` yourself. Useful for integration tests or experimental backends.
 
 ## Integration Points
 
 ### From `librefang-cli`
 
-The CLI enables `kernel-adapter` and runs the ACP server in-process. When launched with the appropriate subcommand, it wires stdin/stdout to an `agent-client-protocol-tokio` transport, constructs a `KernelAdapter` around a freshly initialized `LibreFangKernel`, and serves requests until the pipe closes.
+When running as a CLI tool in ACP mode, the process hosts the ACP server in-process with `kernel-adapter` enabled. The kernel is instantiated directly, wrapped in `KernelAdapter`, and the stdio transport is attached.
 
 ### From `librefang-api`
 
-The API server (daemon mode) enables `kernel-adapter` to attach to a long-running kernel instance and expose ACP over a managed transport — useful for scenarios where the editor connects to a persistent agent process rather than spawning a new one.
+In daemon mode, `librefang-api` attaches to an already-running kernel instance and hosts the ACP server as a frontend. It also uses `kernel-adapter` but may connect through a different kernel acquisition path.
 
-### From integration tests
+### Integration Tests
 
-The `tests/acp_integration.rs` test file leaves `kernel-adapter` off and implements `AcpKernel` with a stub or mock backend. It uses `futures` (for `AsyncRead`/`AsyncWrite` duplex construction) and `chrono` (for timestamping `ApprovalRequest` fixtures) — both kept as dev-dependencies to minimize the release dependency tree.
+The `tests/acp_integration.rs` test file exercises the full ACP transport layer using duplex async I/O (`AsyncRead`/`AsyncWrite` from `futures`) and stamps `ApprovalRequest` fixtures (using `chrono` for timestamps). These tests implement `AcpKernel` directly with mock/stub logic, so they don't need the kernel feature.
 
-## Error Handling
+## Concurrency
 
-Errors are modeled with `thiserror` enums covering:
+The crate uses `dashmap` for concurrent session state management — ACP allows multiple concurrent agent sessions, and the server needs lock-free concurrent access to session metadata keyed by session ID (`uuid`).
 
-- **Protocol errors** — malformed JSON-RPC messages, unexpected method names, serialization failures.
-- **Kernel adapter errors** — forwarded from `librefang-kernel` when the `kernel-adapter` feature is active (session creation failures, model errors, tool execution failures).
-- **Transport errors** — I/O failures on the stdio pipe, unexpected disconnects.
+Error handling follows the workspace pattern: domain errors are enumerated through `thiserror` derive, and `tracing` spans are attached to JSON-RPC request boundaries for observability.
 
-All errors are traced through the `tracing` subscriber before being serialized back to the client as JSON-RPC error responses.
+## Adding a New ACP Method
 
-## Adding a New Kernel Backend
-
-1. Implement `AcpKernel` for your backend type.
-2. Construct your backend and pass it to the ACP server entry point in this crate.
-3. No need to enable `kernel-adapter` — that feature exists solely for the `LibreFangKernel` binding.
-
-## Conventions
-
-- **No direct kernel dependency by default.** The base crate compiles without `librefang-kernel`. Only enable `kernel-adapter` if you need the real kernel.
-- **All state is thread-safe.** Session tracking uses `DashMap` so the server handles concurrent editor requests without a global mutex.
-- **Stdio is the expected transport.** The crate is designed around the duplex byte-stream model that ACP editors provide. Other transports are theoretically possible but not a primary target.
+1. Define or reuse the request/response types in `agent-client-protocol`.
+2. Add the method handler in this crate's server dispatch.
+3. Extend `AcpKernel` with the corresponding async method if the kernel needs to support it.
+4. Update `KernelAdapter` (behind `kernel-adapter`) to delegate the new method to `LibreFangKernel`.

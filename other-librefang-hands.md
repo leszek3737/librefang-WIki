@@ -2,102 +2,71 @@
 
 # librefang-hands
 
-Curated autonomous capability packages for LibreFang.
+Hands system for LibreFang — curated autonomous capability packages.
 
 ## Overview
 
-A **Hand** is a self-contained, curated capability package that encapsulates a discrete unit of autonomous functionality. Hands serve as the primary mechanism by which LibreFang defines, distributes, and manages the skills available to the system. Each hand is independently versioned, identifiable, and loadable.
+A **hand** in LibreFang is a self-contained, declaratively defined capability package. Each hand describes a distinct autonomous behavior that can be loaded, validated, and dispatched by the runtime. This crate provides the data structures, loading logic, validation, and registry for managing hands throughout their lifecycle.
 
-This crate provides the data structures, loading logic, registry, and validation for working with hands.
+The crate is intentionally decoupled from execution — it owns hand *definition* and *discovery*, not hand *execution*. That responsibility falls to `librefang-runtime`.
 
-## Conceptual Model
+## Architecture
 
 ```mermaid
 graph TD
-    A[Hand Package] --> B[Manifest / Metadata]
-    A --> C[Capability Definition]
-    B --> D[UUID]
-    B --> E[Version]
-    B --> F[Timestamps]
-    G[Hand Registry] --> H[dashmap concurrent store]
-    G --> I[lookup by UUID / name]
-    J[Deserializer] --> K[TOML source]
-    J --> L[JSON source]
-    J --> A
+    A[TOML Hand Definition] --> B[HandLoader]
+    B --> C[Hand struct]
+    C --> D[HandRegistry]
+    D --> E[librefang-runtime]
+    F[librefang-types] --> B
+    F --> C
 ```
 
-## Key Responsibilities
+Hands are authored as TOML files on disk. The loader reads and deserializes them into typed structs, validates their contents, and registers them in a concurrent registry (`DashMap`-backed) keyed by unique hand IDs.
 
-| Concern | Implementation Detail |
-|---|---|
-| **Hand identity** | Each hand carries a `uuid::Uuid` for unique identification. |
-| **Serialization formats** | Hands can be loaded from both TOML and JSON via `serde`, `toml`, and `serde_json`. |
-| **Concurrency-safe registry** | A `dashmap`-backed store allows concurrent registration and lookup of hands. |
-| **Timestamping** | `chrono` is used for creation and modification timestamps on hand metadata. |
-| **Diagnostics** | `tracing` spans and events are emitted during loading, validation, and registration. |
-| **Error handling** | `thiserror` derives structured error types for parse failures, validation errors, and registry conflicts. |
+## Key Concepts
 
-## Core Components
+### Hand
 
-### Hand Definition
+A hand represents a single autonomous capability. It carries:
 
-The central data structure representing a capability package. It is `Serialize`/`Deserialize`-owned and contains:
-
-- A unique identifier (`Uuid`)
-- A human-readable name
-- A version string
-- Creation and last-modified timestamps
-- Capability-specific configuration or payload
+- **Identity** — A unique identifier (UUID-based) and a human-readable name.
+- **Metadata** — Description, author, version, and creation timestamp.
+- **Capability specification** — The parameters, triggers, and constraints that define what the hand can do.
 
 ### Hand Registry
 
-A concurrency-safe collection (`DashMap`-backed) that stores loaded hands. Supports:
+The registry is a thread-safe collection (`DashMap`) that holds all loaded hands. It supports:
 
-- Insertion of new hands with conflict detection
-- Lookup by UUID or by name
-- Removal of hands
+- Insertion and lookup by ID.
+- Concurrent access from multiple tasks or threads without external locking.
+- Iteration over registered hands for dispatch or introspection.
 
-### Loader / Deserializer
+### Hand Loader
 
-Reads hand definitions from TOML or JSON sources, validates them, and produces ready-to-register `Hand` instances. Invalid or malformed input results in structured errors rather than panics.
+Responsible for:
 
-### Error Types
+1. Reading TOML hand definitions from the filesystem.
+2. Deserializing into the `Hand` type using `serde`.
+3. Running validation checks (required fields, schema correctness, constraint sanity).
+4. Returning structured errors via `thiserror` when a definition is malformed.
 
-Custom error enum covering:
+### Validation
 
-- TOML parse errors
-- JSON parse errors
-- Schema validation failures (missing required fields, invalid values)
-- Registry conflicts (duplicate UUID or name)
+Before a hand enters the registry, it passes through validation that checks for structural correctness and semantic issues. Errors are typed and include context about what failed and where.
 
-## Integration with LibreFang
+## Dependencies
 
-```text
-librefang-types       ← shared type definitions used across crates
-        ↑
-librefang-hands       ← this crate
-        ↓ (dev-dependency only)
-librefang-runtime     ← used in tests to verify hands integrate with the runtime
-```
-
-- **`librefang-types`**: Provides shared types that hands reference (e.g., common enums, result aliases).
-- **`librefang-runtime`**: Not a production dependency—used exclusively in tests to confirm that loaded hands can be handed off to the runtime correctly.
-
-## Loading a Hand
-
-Hands are typically loaded from a TOML manifest file or a JSON blob. The general flow is:
-
-1. **Read** the source content (file, string, etc.).
-2. **Deserialize** into the hand data structure using the appropriate format.
-3. **Validate** required fields and constraints.
-4. **Register** in the hand registry for later lookup.
-
-Errors at any stage produce a typed error carrying context about what failed and why.
+| Crate | Role |
+|---|---|
+| `librefang-types` | Shared types used across LibreFang crates |
+| `serde` / `serde_json` / `toml` | Deserialization of hand definitions |
+| `thiserror` | Derived error types for loading and validation failures |
+| `tracing` | Structured logging during load, validate, and register operations |
+| `uuid` | Unique hand identification |
+| `chrono` | Timestamp handling for metadata |
+| `dashmap` | Lock-free concurrent map backing the registry |
 
 ## Testing
 
-Tests use:
-
-- **`tempfile`** — to create temporary directories and files for filesystem-based loading tests.
-- **`serial_test`** — to serialize tests that share global registry state, preventing race conditions.
-- **`librefang-runtime`** — to verify end-to-end integration of loaded hands with the runtime environment.
+Tests use `tempfile` to create isolated directory structures with sample TOML definitions, ensuring the loader and validation logic work against real filesystem reads without polluting the working tree. The `serial_test` crate prevents race conditions in tests that share temporary directories. `librefang-runtime` is available as a dev-dependency for integration tests that exercise the full load → register → dispatch path.

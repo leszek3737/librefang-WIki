@@ -1,104 +1,89 @@
 # Other — librefang-hands-tests
 
-# librefang-hands-tests — Registry Smoke Tests
+# librefang-hands Tests — Registry Smoke Tests
 
 ## Purpose
 
-This module contains integration smoke tests that validate the `HandRegistry` public API behaves correctly when its methods are composed together. These tests are not unit tests for individual methods — they verify **cross-method invariants** and **disk persistence contracts** that previous production bugs violated (e.g., definitions present but no workspace directory, instances lingering after uninstall).
+This module (`registry_smoke.rs`) contains integration smoke tests that exercise the `HandRegistry` public API end-to-end. Unlike unit tests that validate individual methods in isolation, these tests verify that the registry methods **compose correctly** across a full lifecycle. The historical motivation is explicit: every previous bug in this area was a cross-method invariant violation (e.g., definitions present without a workspace, instances surviving uninstall).
 
-The tests require no LLM, no kernel, and no running services. They exercise pure tool-dispatch and persistence behaviour against a temporary filesystem.
+There is no LLM involvement and no kernel — these tests validate tool-dispatch and persistence behavior only.
 
-## Fixtures
+## Test Fixtures
 
-Two constant strings provide the minimal valid inputs needed to install a hand:
+Two inline constants provide the fixture data, avoiding any dependency on external files or network resources:
 
-- **`SMOKE_HAND_TOML`** — A complete `HAND.toml` with `id = "smoke-hand"`, a `routing` section with an alias, and an `[agent]` block. The `category = "data"` value satisfies schema validation without pulling in additional dependencies.
-- **`SMOKE_SKILL_MD`** — A trivial Markdown file that serves as the skill body written to `SKILL.md`.
+- **`SMOKE_HAND_TOML`** — A minimal valid `HAND.toml` defining a hand with id `smoke-hand`, category `data`, routing alias `smoke`, and a stub agent with an echo-style system prompt.
+- **`SMOKE_SKILL_MD`** — A trivial `SKILL.md` body ("Integration-test skill body.").
+
+Both are passed to `install_from_content_persisted` which writes them to disk under `home/workspaces/<id>/`.
 
 ## Test Cases
 
 ### `install_activate_deactivate_uninstall_lifecycle`
 
-End-to-end exercise of the full hand lifecycle. The call sequence and the invariants checked at each stage are:
+This is the primary regression test. It drives the complete state machine of a hand through every public transition:
 
-```
-HandRegistry::new()
-  ├── list_definitions / list_instances  →  both empty
-  │
-  ├── install_from_content_persisted(home, toml, md)
-  │     ├── returns def with id "smoke-hand"
-  │     ├── creates home/workspaces/smoke-hand/HAND.toml on disk
-  │     ├── creates home/workspaces/smoke-hand/SKILL.md on disk
-  │     └── get_definition("smoke-hand") → Some
-  │
-  ├── activate("smoke-hand", HashMap::new())
-  │     ├── returns instance with status HandStatus::Active
-  │     └── list_instances → exactly one entry matching the instance
-  │
-  ├── uninstall_hand(home, "smoke-hand")
-  │     ├── must ERR (refused — live instance exists)
-  │     ├── get_definition still Some (state unperturbed)
-  │     └── list_instances still length 1 (state unperturbed)
-  │
-  ├── deactivate(instance_id)
-  │     ├── returns deactivated instance
-  │     └── list_instances → empty
-  │
-  └── uninstall_hand(home, "smoke-hand")
-        ├── succeeds (no live instances)
-        ├── get_definition → None
-        └── workspace directory physically removed from disk
+```mermaid
+stateDiagram-v2
+    [*] --> Empty : HandRegistry::new()
+    Empty --> Defined : install_from_content_persisted()
+    Defined --> Active : activate()
+    Active --> Defined : deactivate()
+    Active --> Active : uninstall_hand() → ERR
+    Defined --> Empty : uninstall_hand()
 ```
 
-The key cross-method invariants this test locks in:
+**What it verifies at each step:**
 
-| Invariant | Why it matters |
-|---|---|
-| Files persist to `workspaces/<id>/` after install | Daemon restarts must be able to reload state from disk |
-| `uninstall_hand` refuses while instances exist | The `DELETE /api/hands/{id}` route depends on this guard |
-| A refused uninstall leaves in-memory state untouched | Prevents partial corruption on error paths |
-| Deactivation removes the instance from `list_instances` | Ensures cleanup is complete, not just a status change |
-| Successful uninstall removes the workspace directory | Prevents orphaned disk usage |
+| Step | Assertions |
+|------|-----------|
+| Fresh registry | `list_definitions()` and `list_instances()` return empty |
+| Install | Returns definition with correct id/name; `HAND.toml` and `SKILL.md` exist on disk at `workspaces/<id>/`; definition visible via `list_definitions()` and `get_definition()` |
+| Activate | Returns instance with `HandStatus::Active`; instance appears in `list_instances()` and is retrievable via `get_instance()` |
+| Uninstall while active | Must fail (returns `Err`); definition and instance must remain unchanged — no partial state corruption |
+| Deactivate | Returns the same instance; `list_instances()` must be empty afterward |
+| Uninstall after deactivate | Must succeed; definition gone from memory (`get_definition()` returns `None`); workspace directory physically removed from disk |
 
-The empty `HashMap::new()` passed to `activate` exercises the explicit-default path — equivalent to a dashboard "activate with defaults" action for a hand that declares no required settings.
+The test uses an empty `HashMap::new()` for config on activation — this is the explicit-default path for a hand with no required settings, equivalent to a dashboard "activate with defaults" action.
 
 ### `definitions_round_trip_through_a_disk_reload`
 
-Validates the disk-as-source-of-truth contract:
+Validates the disk-as-source-of-truth contract. After one registry writes a hand via `install_from_content_persisted`, a **completely separate** `HandRegistry` instance starts empty and calls `reload_from_disk(home)` on the same directory. It must recover the hand definition.
 
-1. One `HandRegistry` installs a hand via `install_from_content_persisted`.
-2. A second, independent `HandRegistry` is created (starts empty).
-3. `reload_from_disk(home)` discovers and loads the previously installed hand.
-4. `get_definition("smoke-hand")` returns the correct definition on the fresh registry.
+This locks in the guarantee that a daemon restart can re-discover all installed hands from `home/workspaces/<id>/HAND.toml` without replaying any in-memory log.
 
-This test ensures that a daemon process restart — where a new `HandRegistry` is constructed and `reload_from_disk` is called — re-discovers all previously installed hands without needing to replay an in-memory log. The `reload_from_disk` return value `(loaded, _failed)` is asserted to report at least one successful load.
+Key assertions:
 
-## Disk Layout Contract
+- The second registry starts empty (`list_definitions()` is empty before reload)
+- `reload_from_disk` returns a `loaded` count ≥ 1 and no unexpected failures
+- `get_definition("smoke-hand")` returns a definition with `name == "Smoke Hand"`
 
-Both tests depend on the following filesystem layout established by `install_from_content_persisted`:
+## Relationship to the Rest of the Codebase
 
-```
-<home>/
-└── workspaces/
-    └── <hand-id>/
-        ├── HAND.toml
-        └── SKILL.md
-```
+These tests sit above `librefang_hands::registry` and consume its public API exclusively:
 
-This layout is the contract between `install_from_content_persisted` (write side) and `reload_from_disk` (read side). Changing it requires updating both the registry implementation and these tests.
+- `HandRegistry::new()` — constructor
+- `install_from_content_persisted()` — writes to disk + registers in memory
+- `activate()` / `deactivate()` — instance lifecycle
+- `list_definitions()` / `list_instances()` — read-side queries
+- `get_definition()` / `get_instance()` — point lookups
+- `uninstall_hand()` — guarded removal (refuses while instances exist)
+- `reload_from_disk()` — restores state from persisted files
 
-## Dependencies
+The `HandStatus` enum is imported from the crate root.
 
-| Crate / Module | Usage |
-|---|---|
-| `librefang_hands::registry::HandRegistry` | System under test |
-| `librefang_hands::HandStatus` | Asserting instance status after activation |
-| `tempfile` | Isolated temporary directories per test |
+The tests use `tempfile::tempdir()` to guarantee isolation — each test gets a fresh, empty home directory that is cleaned up on drop. No shared state exists between tests.
 
-## Running
+## When to Extend These Tests
 
-```sh
-cargo test -p librefang-hands-tests --test registry_smoke
-```
+Add a new smoke test here when:
 
-These tests are safe to run in parallel — each creates its own `tempfile::tempdir` with no shared state.
+- A new public method is added to `HandRegistry` that participates in the lifecycle state machine
+- A cross-method invariant is discovered (or fixed) — e.g., "install after uninstall should work," "activate with invalid config must not leave a zombie instance"
+- The disk layout changes — e.g., a new file alongside `HAND.toml` and `SKILL.md`
+
+Do **not** add tests here for:
+
+- Error variant specifics — those belong in unit tests within `registry.rs`
+- Parsing validation — covered by TOML/schema tests elsewhere
+- Agent execution or LLM behavior — out of scope for registry smoke tests

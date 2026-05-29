@@ -2,89 +2,86 @@
 
 # librefang-wire
 
-LibreFang Protocol (OFP) — agent-to-agent networking and cryptographic handshake layer.
+OFP (LibreFang Protocol) agent-to-agent networking — the secure transport layer that handles authenticated, encrypted communication between LibreFang agents over the network.
 
-## Purpose
+## Overview
 
-`librefang-wire` implements the secure communication protocol that LibreFang agents use to talk to each other. It handles the full lifecycle of an agent-to-agent session: cryptographic key exchange, message framing, authentication, and encrypted transport. This crate is purely a protocol library — it defines *how* bytes move between agents, not *what* those agents do with the information.
+This crate implements the wire protocol that LibreFang agents use to talk to each other. It is responsible for everything between "bytes on a socket" and "a typed, authenticated message delivered to application logic." The protocol is built on well-vetted cryptographic primitives and is designed so that agents can communicate securely even over untrusted networks.
 
-## Cryptographic Architecture
+The crate depends on `librefang-types` for shared type definitions (message envelopes, agent identities, etc.) but is otherwise self-contained. Downstream consumers — typically the agent runtime — use this crate to establish sessions and exchange OFP messages.
 
-The dependency set reveals a clear multi-layered cryptographic design:
+## Cryptographic Foundation
 
-```mermaid
-flowchart TD
-    A[X25519 ECDH] --> B[Shared Secret]
-    B --> C[HKDF Key Derivation]
-    C --> D[Tx/Rx Session Keys]
-    C --> E[HMAC-SHA256 Keys]
-    F[Ed25519 Signatures] --> G[Identity Verification]
-    D --> H[Encrypted Message Channel]
-    E --> H
-    G --> H
-```
+The dependency list reveals the protocol's security architecture:
 
-### Key Exchange — X25519
-
-Agents perform an ephemeral Diffie-Hellman exchange using `x25519-dalek`. Each side generates an ephemeral keypair, exchanges public keys, and derives a shared secret. This provides forward secrecy — compromising a long-term key does not expose past session traffic.
-
-### Key Derivation — HKDF
-
-The raw X25519 shared secret is fed through HKDF (`hkdf` crate with `sha2` for the underlying hash) to produce:
-
-- **Session encryption keys** (separate Tx and Rx keys for each direction)
-- **HMAC authentication keys** for message integrity
-
-HKDF ensures the derived keys are cryptographically independent even though they originate from the same shared secret.
-
-### Identity — Ed25519
-
-Long-term agent identities are backed by Ed25519 keypairs (`ed25519-dalek`). During handshake, agents sign their ephemeral public keys with their long-term identity key, allowing the peer to verify who they are talking to. This separates identity from session encryption.
-
-### Message Authentication — HMAC-SHA256
-
-`hmac` and `sha2` provide keyed-hash message authentication. Every message on the wire carries an HMAC, and verification uses `subtle` for constant-time comparison to prevent timing side-channel attacks.
-
-## Role in the System
-
-```mermaid
-flowchart LR
-    subgraph Agent Process
-        T[librefang-types] --> W[librefang-wire]
-        W --> App[Application Logic]
-    end
-    W <--TCP_TLS["TCP/TLS"]--> W2[Peer Agent]
-```
-
-| Dependency | Role in this crate |
+| Dependency | Role |
 |---|---|
-| `librefang-types` | Shared message types, protocol enums, wire format definitions |
-| `tokio` | Async I/O for reading/writing frames on TCP streams |
-| `serde` / `serde_json` | Serialization of handshake payloads and message envelopes |
-| `dashmap` | Concurrent map for tracking active sessions or peer state |
-| `uuid` | Correlation IDs for request/response matching |
-| `chrono` | Timestamps in handshake and message metadata |
-| `tracing` | Structured logging of protocol events (handshake steps, errors) |
-| `async-trait` | Trait definitions for transport abstraction, allowing mock or alternate transports in tests |
-| `thiserror` | Typed error enums for protocol failures |
+| `x25519-dalek` | Diffie-Hellman key exchange during handshake — two agents derive a shared secret without ever transmitting it |
+| `hkdf` | Derives symmetric session keys from the shared secret, producing separate keys for encryption and MAC |
+| `ed25519-dalek` | Agent identity signatures — each agent proves ownership of its long-term identity key |
+| `hmac` + `sha2` | Message authentication codes on every transmitted frame, ensuring integrity and authenticity |
+| `subtle` | Constant-time comparison for MAC verification, preventing timing side-channel attacks |
+| `rand_core` | Cryptographically secure random number generation for ephemeral keys and nonces |
+
+## Architecture
+
+```mermaid
+graph TD
+    A[Agent Runtime] -->|send/receive messages| B[librefang-wire]
+    B -->|message types, identities| C[librefang-types]
+    B -->|encrypted frames| D[TCP Socket / Tokio]
+    
+    subgraph "Wire Protocol Layers"
+        E[Serialization<br/>serde_json] --> F[Framing]
+        F --> G[HMAC Authentication<br/>hmac + sha2]
+        G --> H[Encrypted Payload]
+    end
+    
+    B --- E
+```
+
+### Session Lifecycle
+
+A typical session between two agents follows these phases:
+
+1. **Handshake** — Each agent generates an ephemeral X25519 keypair. The ephemeral public keys are exchanged, along with each agent's long-term Ed25519 identity and a signature binding the ephemeral key to that identity. X25519 Diffie-Hellman produces a shared secret.
+
+2. **Key Derivation** — The shared secret is fed through HKDF to produce symmetric session keys. Separate keys are derived for each direction and purpose (encryption vs. authentication), preventing key reuse.
+
+3. **Steady-State Transport** — Messages are serialized (via `serde_json`), authenticated with HMAC, and transmitted as length-prefixed frames over the Tokio-managed TCP connection. Each inbound frame is MAC-verified in constant time before any further processing.
+
+4. **Session Teardown** — Either side may cleanly terminate. The session keys and ephemeral key material are dropped.
+
+## Key Design Decisions
+
+**Async-first transport.** The crate is built on `tokio` and uses `async-trait` to define transport abstractions. All I/O is non-blocking, fitting naturally into the agent runtime's async event loop.
+
+**Concurrent session management.** `dashmap` provides a lock-free concurrent hashmap, used internally to track multiple active sessions across agents without becoming a bottleneck under concurrent load.
+
+**No encryption scheme re-invention.** The crate composes standard primitives (X25519 for key agreement, HKDF for derivation, HMAC-SHA256 for authentication, Ed25519 for identity) rather than implementing custom cryptography. This is deliberate — the security of the protocol rests on the correctness of widely-audited crates.
+
+**Structured errors.** `thiserror` is used to define a typed error surface, making it straightforward for callers to distinguish between handshake failures, MAC verification errors, I/O errors, and deserialization problems.
+
+**Observable operation.** `tracing` spans and events are emitted throughout the protocol lifecycle, allowing operators to debug connectivity issues without resorting to packet captures.
+
+## Relationship to the Rest of the Codebase
+
+```
+librefang-types  ←  librefang-wire  ←  agent runtime / server
+```
+
+- **`librefang-types`** provides the shared vocabulary — message structs, agent ID types, protocol constants. `librefang-wire` consumes these types but does not define them.
+- **Agent runtime** consumes `librefang-wire` to open listener sockets, initiate outbound connections, and route decoded messages to handlers. It is the only crate that directly depends on `librefang-wire`.
+
+The crate intentionally has no incoming or outgoing calls in its call graph — it is a leaf dependency that communicates with the outside world exclusively through its public API and async I/O.
 
 ## Error Handling
 
-Errors are defined using `thiserror` and should cover the distinct failure modes of the protocol:
+Errors are concentrated into a typed error enum (via `thiserror`) covering:
 
-- Handshake failures (invalid signature, unsupported version)
-- Decryption failures (bad key, corrupted ciphertext)
-- Authentication failures (HMAC mismatch, unknown peer identity)
-- Framing errors (malformed messages, oversized payloads)
-- I/O errors wrapping `tokio`/underlying transport failures
+- **Handshake failures** — key exchange errors, invalid signatures, protocol version mismatches
+- **MAC verification failures** — tampered or corrupted frames
+- **Serialization errors** — malformed message payloads
+- **I/O errors** — unexpected disconnections, socket timeouts
 
-## Testing
-
-The `tempfile` dev-dependency suggests tests that involve writing session state, keys, or cached peer information to temporary files, then verifying the protocol works end-to-end across clean and resuming sessions.
-
-## Development Notes
-
-- **No panics in crypto code.** All key operations return `Result` types. The `subtle` dependency exists specifically to avoid branching on secret data.
-- **Sessions are directional.** Because HKDF produces separate Tx/Rx keys, each agent in a pair uses a different key for sending vs. receiving. Code that handles both directions must key them correctly.
-- **Wire compatibility.** Changes to the handshake protocol or message framing are breaking changes. Version negotiation happens at the handshake layer using types from `librefang-types`.
-- **Transport abstraction.** The use of `async-trait` means the protocol logic should not be coupled to a specific I/O type. Implementations accept a generic async read/write stream, making the protocol testable with in-memory channels.
+Callers should match on the error variants to decide whether to retry, abort the session, or log for investigation. MAC verification failures in particular should be treated as potential attacks and logged at warning level or above.

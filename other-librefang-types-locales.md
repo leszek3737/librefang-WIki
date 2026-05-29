@@ -2,11 +2,13 @@
 
 # librefang-types-locales
 
-Fluent (FTL) translation files for API error messages, providing localized user-facing error strings across six languages.
-
 ## Overview
 
-This module holds the **authoritative error message catalog** for the LibreFang API layer. Every error returned by API route handlers resolves to a Fluent message key defined here. The files are consumed at runtime by the Fluent localization system (typically via `fluent-templates` or similar Rust/crate bindings) and interpolated with context variables before being sent as HTTP response bodies.
+This module provides the localized API error message catalog for LibreFang. It contains [Fluent](https://projectfluent.org/) (`.ftl`) resource files — one per supported language — that map semantic error identifiers to human-readable strings. The API layer looks up keys at runtime via `t_args("key", …)` and returns the translated message to the caller.
+
+There is no executable Rust code in this module. It is a pure **resource crate** consumed by whatever localization crate the server uses (likely `fluent` / `fluent-bundle`).
+
+## File layout
 
 ```
 librefang-types/locales/
@@ -18,165 +20,159 @@ librefang-types/locales/
 └── zh-CN/errors.ftl   # Simplified Chinese
 ```
 
-## Key Conventions
+Every file follows the same naming convention: `<language-tag>/errors.ftl`. The Fluent locale resolver selects the correct directory based on the negotiated language at request time.
 
-### Message ID Format
+## Message format
 
-All keys follow the pattern:
-
-```
-api-error-<domain>-<detail>
-```
-
-For example, `api-error-agent-not-found` is the agent domain, "not found" detail. This naming makes it straightforward to locate the source of any error in route handler code via grep.
-
-### Interpolation Variables
-
-Messages may include Fluent variables wrapped in `{ $var }`:
-
-| Variable | Used by | Purpose |
-|----------|---------|---------|
-| `$error` | `*-failed`, `api-error-generic` | Underlying error string from the system |
-| `$reason` | `api-error-bad-request`, `api-error-message-delivery-failed` | Human-readable reason for rejection |
-| `$name` | Template, provider, webhook keys | Name of the referenced resource |
-| `$id` | Agent, goal, hand, provider keys | Identifier of the referenced resource |
-| `$step` | `api-error-workflow-step-needs-agent` | Specific workflow step causing the error |
-| `$field` | `api-error-agent-invalid-sort` | Invalid field name |
-| `$valid` | `api-error-agent-invalid-sort`, `api-error-webhook-unknown-event` | List of valid values |
-| `$max` | `api-error-file-too-large`, `api-error-skill-description-too-long` | Maximum allowed value |
-| `$status` | `api-error-network-auth-failed` | HTTP status code |
-| `$url` | `api-error-network-a2a-not-found` | URL of a remote resource |
-| `$provider` | `api-error-provider-model-exists` | Provider name |
-| `$alias` | Provider alias keys | Alias string |
-| `$event` | `api-error-webhook-unknown-event` | Event type string |
-
-### The `api-error-generic` Catch-All
-
-The `api-error-generic` key is a critical stopgap used by 41+ HTTP 500 handlers. It interpolates the raw `$error` string verbatim:
+Each line is a Fluent message definition:
 
 ```fluent
-api-error-generic = { $error }          # en
-api-error-generic = Fehler: { $error }   # de
-api-error-generic = エラー: { $error }    # ja
+<message-id> = <translated text>
 ```
 
-If this key is missing from a locale file, any `t_args("api-error-generic", …)` call will return the literal key name as the response body, and the `$error` interpolation will never run. **Do not remove this key from any locale.**
-
-## Error Domains
-
-The English (`en`) file is canonical and contains the most keys. Below is a summary of all domains and their coverage:
-
-| Domain | Example Key | en Keys | Description |
-|--------|-------------|---------|-------------|
-| **agent** | `api-error-agent-not-found` | ~16 | Agent lifecycle: spawn, clone, execution, workspace |
-| **message** | `api-error-message-too-large` | 5 | Inter-agent messaging, streaming |
-| **template** | `api-error-template-not-found` | 6 | Template parsing, manifest validation |
-| **manifest** | `api-error-manifest-signature-mismatch` | 5 | Manifest format and signature checks |
-| **auth** | `api-error-auth-invalid-key` | 3 | API key validation, header checks |
-| **session** | `api-error-session-not-found` | 6 | Session CRUD, cleanup |
-| **workflow** | `api-error-workflow-missing-steps` | 5 | Multi-step workflow orchestration |
-| **trigger** | `api-error-trigger-missing-pattern` | 7 | Event trigger registration and lookup |
-| **budget** | `api-error-budget-invalid-amount` | 3 | Cost limits and budget updates |
-| **config** | `api-error-config-parse-failed` | 5 | TOML configuration read/write |
-| **profile** | `api-error-profile-not-found` | 1 | Named profile lookup |
-| **cron** | `api-error-cron-invalid-expression` | 6 | Scheduled job creation and validation |
-| **goal** | `api-error-goal-circular-parent` | 16 | Goal hierarchy, validation, CRUD |
-| **memory** | `api-error-memory-not-enabled` | 9 | Proactive memory, KV store, import/export |
-| **network** | `api-error-network-a2a-not-found` | 7 | Peer networking, A2A protocol |
-| **plugin** | `api-error-plugin-invalid-source` | 5 | Plugin installation sources |
-| **channel** | `api-error-channel-unknown` | 4 | Inter-agent channel routing |
-| **provider** | `api-error-provider-alias-exists` | 21 | LLM provider config, secrets, models |
-| **skill** | `api-error-skill-name-too-long` | 9 | Skill definition and installation |
-| **hand** | `api-error-hand-not-found` | 3 | Hand definition and instance lookup |
-| **mcp** | `api-error-mcp-missing-transport` | 5 | MCP server configuration |
-| **integration / extension** | `api-error-integration-not-found` | 3 | Extension system |
-| **system** | `api-error-system-cli-not-found` | 1 | CLI availability |
-| **kv** | `api-error-kv-missing-fields` | 4 | Structured key-value memory |
-| **approval** | `api-error-approval-not-found` | 2 | Human-in-the-loop approvals |
-| **webhook** | `api-error-webhook-url-unreachable` | 10 | Outgoing webhook delivery |
-| **backup** | `api-error-backup-missing-manifest` | 10 | Backup creation and restoration |
-| **schedule** | `api-error-schedule-invalid-cron` | 9 | Named schedule management |
-| **job** | `api-error-job-not-retryable` | 5 | Background job lifecycle |
-| **task** | `api-error-task-not-found` | 2 | Task resolution |
-| **pairing** | `api-error-pairing-invalid-token` | 2 | Device/client pairing |
-| **binding** | `api-error-binding-out-of-range` | 1 | Binding index validation |
-| **command** | `api-error-command-not-found` | 1 | CLI command lookup |
-| **file** | `api-error-file-path-traversal` | 14 | Upload/download, path security |
-| **tool** | `api-error-tool-invoke-denied` | 5 | Direct tool invocation, allowlist |
-| **validation** | `api-error-validation-color-invalid` | 5 | Field-level input validation |
-| **general** | `api-error-internal` | 4 | HTTP-level catch-alls (404, 500, 429) |
-
-## Locale Coverage Matrix
-
-Not all locales have full parity with English. The matrix below shows which domains are translated:
-
-| Domain | en | ja | de | es | fr | zh-CN |
-|--------|:--:|:--:|:--:|:--:|:--:|:-----:|
-| agent | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| message | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| template | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| manifest | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| auth | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| session | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| workflow | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| trigger | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| budget | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| config | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| profile | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| cron | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| goal | ✅ | ✅ | — | — | — | — |
-| memory | ✅ | ✅ | — | — | — | — |
-| network | ✅ | ✅ | — | — | — | — |
-| plugin | ✅ | ✅ | — | — | — | — |
-| channel | ✅ | ✅ | — | — | — | — |
-| provider | ✅ | ✅ | — | — | — | — |
-| skill | ✅ | ✅ | — | — | — | — |
-| hand | ✅ | ✅ | — | — | — | — |
-| mcp | ✅ | ✅ | — | — | — | — |
-| integration/extension | ✅ | ✅ | — | — | — | — |
-| system | ✅ | ✅ | — | — | — | — |
-| kv | ✅ | ✅ | — | — | — | — |
-| approval | ✅ | ✅ | — | — | — | — |
-| webhook | ✅ | ✅ | — | — | — | ✅* |
-| backup | ✅ | ✅ | — | — | — | — |
-| schedule | ✅ | ✅ | — | — | — | — |
-| job | ✅ | ✅ | — | — | — | — |
-| task | ✅ | ✅ | — | — | — | — |
-| pairing | ✅ | ✅ | — | — | — | — |
-| binding | ✅ | ✅ | — | — | — | — |
-| command | ✅ | ✅ | — | — | — | — |
-| file | ✅ | ✅ | — | — | — | — |
-| tool | ✅ | ✅ | — | — | — | ✅* |
-| validation | ✅ | ✅ | — | — | — | — |
-
-✅\* = Partial coverage (subset of keys).
-
-When a key is missing from a non-English locale, the Fluent fallback chain resolves to the English version. This means **all routes function correctly regardless of locale completeness**, but users see English for untranslated domains.
-
-## Adding a New Error Message
-
-1. **Add the key to `en/errors.ftl` first** — this is the canonical source.
-2. **Copy the key to all other locale files** with translated text, or leave it absent (English fallback applies).
-3. **Follow the naming convention**: `api-error-<domain>-<detail>`.
-4. **Use interpolation variables** for dynamic content rather than string concatenation in code:
+Messages can interpolate variables using `{ $var }`:
 
 ```fluent
-# Good — uses interpolation
 api-error-template-not-found = Template '{ $name }' not found
-
-# Avoid — no context for translators
-api-error-template-not-found = Template not found
+api-error-message-delivery-failed = Message delivery failed: { $reason }
+api-error-generic = { $error }
 ```
 
-5. **If the error is used by an HTTP 500 handler**, consider whether `api-error-generic` suffices temporarily, but plan to create a typed key.
+The caller provides these variables through `t_args`. For example, `t_args("api-error-template-not-found", name = "analyst")` resolves to `"Template 'analyst' not found"`.
 
-## Adding a New Locale
+## Error domain categories
 
-1. Create `librefang-types/locales/<locale-code>/errors.ftl`.
-2. At minimum, translate the **general** domain keys (`api-error-not-found`, `api-error-internal`, `api-error-bad-request`, `api-error-rate-limited`, `api-error-generic`). These are the most user-visible.
-3. Register the locale in whatever Fluent loader configuration the application uses.
-4. Translate remaining domains incrementally — the fallback mechanism ensures nothing breaks.
+Messages are grouped by the subsystem that produces them. The prefix of the key encodes the domain.
 
-## Relationship to Route Handlers
+### Core resource domains
 
-Route handlers reference these keys by name using the Fluent binding's lookup function (e.g., `t_args("api-error-agent-not-found")` or `t_args("api-error-generic", error = ...)`)`). The module itself has no executable code — it is pure data consumed by the i18n layer at runtime. The long-term migration path, noted in the source comments, is to replace bare `api-error-generic` calls with typed, domain-specific error keys backed by a `MemoryRouteError`-style enum so that every error is self-documenting and locale-independent in the type system.
+| Prefix | Domain | Typical HTTP codes |
+|---|---|---|
+| `api-error-agent-*` | Agent lifecycle (spawn, lookup, execution, clone) | 404, 409, 500 |
+| `api-error-session-*` | Session management (load, lookup, cleanup) | 400, 404, 500 |
+| `api-error-message-*` | Inter-agent message delivery and streaming | 400, 500 |
+| `api-error-workflow-*` | Multi-step workflow definition and execution | 400, 404, 500 |
+| `api-error-trigger-*` | Event trigger registration and matching | 400, 404, 500 |
+| `api-error-cron-*` | Scheduled (cron) job management | 400, 404, 500 |
+| `api-error-schedule-*` | Schedule CRUD operations | 400, 404, 500 |
+| `api-error-job-*` / `api-error-task-*` | Background job/task tracking | 400, 404 |
+
+### Data and configuration domains
+
+| Prefix | Domain |
+|---|---|
+| `api-error-template-*` | Agent template parsing and lookup |
+| `api-error-manifest-*` | Template manifest validation and signature |
+| `api-error-config-*` | TOML configuration read/write |
+| `api-error-profile-*` | Named profile lookup |
+| `api-error-budget-*` | Cost budget limits |
+| `api-error-goal-*` | Hierarchical goal tracking |
+| `api-error-memory-*` | Proactive memory KV store |
+| `api-error-kv-*` | Structured key-value fields |
+| `api-error-file-*` | File upload/download and workspace paths |
+| `api-error-backup-*` | System backup creation and restoration |
+
+### Integration domains
+
+| Prefix | Domain |
+|---|---|
+| `api-error-auth-*` | API key authentication |
+| `api-error-provider-*` | LLM provider/model configuration |
+| `api-error-network-*` | Peer-to-peer / A2A networking |
+| `api-error-plugin-*` | Plugin installation (registry/local/git) |
+| `api-error-skill-*` | Custom skill creation and installation |
+| `api-error-mcp-*` | Model Context Protocol server config |
+| `api-error-channel-*` | Inter-agent channel routing |
+| `api-error-hand-*` | Hand definitions and instances |
+| `api-error-webhook-*` | Outbound webhook triggers |
+| `api-error-integration-*` / `api-error-extension-*` | Third-party integrations |
+| `api-error-approval-*` | Human-in-the-loop approval flow |
+| `api-error-tool-*` | Direct tool invocation |
+| `api-error-command-*` | CLI command dispatch |
+| `api-error-pairing-*` | Device/entity pairing |
+| `api-error-binding-*` | Binding index validation |
+
+### Catch-all and general keys
+
+| Key | Purpose |
+|---|---|
+| `api-error-generic` | Interpolates the raw error string verbatim. Used as a stopgap by 41+ HTTP 500 handlers that have not yet been migrated to typed error helpers. |
+| `api-error-not-found` | Generic 404 |
+| `api-error-internal` | Generic 500 |
+| `api-error-bad-request` | Generic 400 with `{ $reason }` |
+| `api-error-rate-limited` | Generic 429 |
+
+## Language parity
+
+English (`en`) is the **canonical** locale and contains every defined key. Other languages cover a subset:
+
+- **Full parity with English**: `ja` (Japanese) — all domains including goal, memory, network, provider, skill, webhook, backup, schedule, job, file, tool, validation, and general keys.
+- **Partial parity**: `de`, `es`, `fr`, `zh-CN` — cover agent, message, template, manifest, auth, session, workflow, trigger, budget, config, profile, cron, and general keys. Missing domains include goal, memory, network, plugin, channel, provider, skill, hand, MCP, webhook, backup, schedule, job, file, tool, validation, and approval.
+
+When a key is missing from a non-English locale, the Fluent resolver falls back to English. The application never returns a raw key to the client unless the key is also absent from English.
+
+## Naming conventions
+
+All keys share the `api-error-` prefix followed by a domain segment and a descriptive suffix, joined by hyphens:
+
+```
+api-error-<domain>-<descriptor>
+api-error-<domain>-<descriptor>-<qualifier>
+```
+
+Examples:
+
+```fluent
+api-error-agent-not-found                        # simple lookup failure
+api-error-agent-not-found-with-id                # same failure, includes ID context
+api-error-agent-not-found-or-terminated          # ambiguous case
+api-error-schedule-invalid-cron-detail            # detailed variant of a shorter key
+```
+
+Suffixes follow consistent semantic patterns:
+
+- `*-not-found` — resource does not exist (404)
+- `*-invalid-*` — malformed input (400)
+- `*-missing-*` — required field absent (400)
+- `*-failed` / `*-create-failed` / `*-save-failed` — operation failure (500)
+- `*-too-large` / `*-too-long` — size limit exceeded (400)
+- `*-already-exists` / `*-exists` — uniqueness conflict (409)
+
+## How to add a new error message
+
+1. **Add the key to `en/errors.ftl` first.** Choose the correct domain prefix and a descriptive suffix. If the message needs runtime data, add Fluent variables: `{ $variable }`.
+
+   ```fluent
+   api-error-inference-timeout = Model inference timed out after { $seconds }s
+   ```
+
+2. **Add translations to every other locale file.** If you cannot provide a professional translation, leave the key out — the English fallback will be used. Do **not** copy the English text into other locale files as a placeholder.
+
+3. **Use the key in the server** via the localization helper:
+
+   ```rust
+   t_args("api-error-inference-timeout", seconds = 30)
+   ```
+
+4. **If the key is a generic catch-all**, verify that the existing `api-error-generic` key does not already serve the purpose before adding a new one. The comment on `api-error-generic` explains that it exists specifically as a stopgap for untyped error paths.
+
+## How to add a new language
+
+1. Create a new directory under `locales/` with the appropriate BCP 47 tag (e.g., `pt-BR/`).
+2. Create `errors.ftl` inside it.
+3. Translate keys from `en/errors.ftl`. At minimum, translate the general errors (`api-error-not-found`, `api-error-internal`, `api-error-bad-request`, `api-error-rate-limited`, `api-error-generic`) and the most common domain keys (agent, session, auth, message).
+4. Register the new Fluent resource with the locale bundle in the server's localization setup code.
+
+## Dependency relationships
+
+This module has **no Rust code** and **no build-time dependencies**. It is a pure data crate that other workspace members depend on at compile time so the Fluent resource files are included in the binary (typically via `include_str!` or a build script that copies `locales/` into the asset directory).
+
+```mermaid
+graph LR
+    A[librefang-types-locales<br/>.ftl files only] --> B[librefang-types<br/>shared type definitions]
+    B --> C[librefang-server<br/>API route handlers]
+    B --> D[other workspace crates]
+    C -->|t_args / t| A
+```
+
+At runtime the server's Fluent bundle loads the `.ftl` files from this crate, selects the locale matching the request's `Accept-Language` header, and resolves message keys to translated strings with interpolated variables.

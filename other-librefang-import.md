@@ -2,71 +2,82 @@
 
 # librefang-import
 
-Migration engine for importing agent configurations, prompts, and data from other agent frameworks into LibreFang's internal representation.
+Import engine for migrating configurations and data from other agent frameworks into LibreFang.
 
 ## Purpose
 
-Switching agent frameworks typically requires manually rewriting prompt definitions, tool configurations, and agent metadata. `librefang-import` automates this by parsing foreign configuration files in a variety of formats and converting them into LibreFang-compatible types defined in `librefang-types`.
+This module provides the tooling needed to bring existing agent framework configurations—policies, agent definitions, tool configurations, and related metadata—into the LibreFang ecosystem. It handles format detection, parsing, validation, and transformation so that teams adopting LibreFang don't need to manually rewrite their existing setups.
 
 ## Supported Input Formats
 
-The crate pulls in parsers for five common configuration formats:
+The dependency list reflects support for the most common configuration formats encountered in agent frameworks:
 
-| Format | Crate | Typical source frameworks |
-|--------|-------|--------------------------|
-| JSON | `serde_json` | LangChain exports, AutoGPT configs |
-| YAML | `serde_yaml` | Semantic Kernel, CrewAI |
-| JSON5 | `json5` | Hand-written configs with comments |
-| TOML | `toml` | Rust-native agent tools, custom setups |
+| Format | Use Case |
+|--------|----------|
+| **JSON** (`serde_json`) | Standard structured configs, API exports |
+| **YAML** (`serde_yaml`) | Human-authored configs, CI/CD pipelines |
+| **JSON5** (`json5`) | Extended JSON with comments, used by some Node-based frameworks |
+| **TOML** (`toml`) | Rust-ecosystem configs, some Python tooling |
 
-## Key Dependencies
+## Key Capabilities
 
-- **`librefang-types`** — The target data model. All import output is expressed as types from this crate.
-- **`walkdir`** — Recursive directory traversal for batch imports of entire project trees.
-- **`chrono`** — Timestamp normalisation. Foreign frameworks use varied date formats; `chrono` provides a unified parsing and comparison layer.
-- **`dirs`** — Resolves standard platform directories (e.g. locating a user's existing agent framework config path).
-- **`thiserror`** — Derives structured error types for import failures.
-- **`tracing`** — Instrumentation for diagnosing failures during large batch imports.
+### Directory Walking
+
+Uses `walkdir` to recursively scan directories for importable configuration files. This supports batch migrations where an entire framework installation's config tree needs processing.
+
+### Path Resolution
+
+The `dirs` dependency provides access to standard platform directories (config home, data home, etc.), enabling the import engine to locate framework configurations installed in conventional locations without requiring explicit paths.
+
+### Temporal Metadata
+
+`chrono` is included to handle timestamp parsing and normalization. Many agent frameworks encode creation dates, last-modified timestamps, or scheduling information in disparate formats that need reconciliation during import.
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    A[Foreign Config Files] --> B[Format Detection]
-    B --> C{JSON?}
-    B --> D{YAML?}
-    B --> E{TOML?}
-    B --> F{JSON5?}
-    C & D & E & F --> G[Intermediate Representation]
-    G --> H[librefang-types conversion]
-    H --> I[Validated LibreFang Config]
+graph LR
+    A[Source Framework Configs] --> B[Format Detection]
+    B --> C[Parse JSON/YAML/JSON5/TOML]
+    C --> D[Validate Against Schema]
+    D --> E[Transform to librefang-types]
+    E --> F[LibreFang Native Format]
+    
+    G[walkdir Scanner] --> A
+    H[dirs Path Resolution] --> G
 ```
 
-The import pipeline follows three stages:
+## Integration with the Codebase
 
-1. **Discovery** — `walkdir` scans a given root directory for candidate files based on extension (`.json`, `.yaml`/`.yml`, `.toml`, `.json5`).
-2. **Parsing** — Each file is deserialised using the appropriate serde-based parser into an intermediate representation.
-3. **Conversion** — The intermediate representation is mapped to `librefang-types` structs, validated, and returned to the caller.
+This module depends on **`librefang-types`**, which defines the canonical data structures for LibreFang agents, tools, policies, and related entities. The import engine's job is to produce valid instances of those types from foreign representations.
+
+The relationship is unidirectional at the type level:
+
+- **Reads from**: `librefang-types` (imports type definitions and validation logic)
+- **Does not depend on**: runtime services, server infrastructure, or database layers
+
+This keeps the import engine as a pure transformation layer that can be run as a standalone CLI tool, a build step, or a library call without pulling in heavy dependencies.
 
 ## Error Handling
 
-Import failures are expressed through enums derived with `thiserror`. Common failure modes include:
+Errors are structured through `thiserror`, providing typed error variants for common failure modes:
 
-- Unsupported or unrecognised file formats
-- Malformed configuration that cannot be deserialised
-- Missing required fields in the source framework's config
-- Semantic validation errors after conversion (e.g. an agent definition with no tools)
+- Unrecognized or malformed configuration files
+- Missing required fields in source data
+- Schema validation failures after parsing
+- Filesystem errors during directory traversal
 
-All errors carry enough context (file path, field name, expected type) to generate actionable `tracing` events.
+Consumers can pattern-match on these variants to decide whether to skip a file, log a warning, or halt the import.
 
-## Integration with LibreFang
+## Logging and Observability
 
-`librefang-import` is a standalone library crate. It has no incoming or outgoing runtime calls to other LibreFang crates — it depends only on `librefang-types` for the shared data model. This isolation means it can be used:
+`tracing` spans are used throughout to provide structured, filterable output during import runs. This is particularly important for batch migrations processing hundreds of files, where understanding progress and pinpointing failures matters.
 
-- As a CLI subcommand for one-off migrations
-- As part of a setup wizard in a TUI or web UI
-- In CI pipelines that validate imported configurations
+## Development
 
-## Testing
+```toml
+# Run tests (uses tempfile for isolated filesystem fixtures)
+cargo test -p librefang-import
+```
 
-The dev-dependency on `tempfile` supports integration tests that construct directory trees of foreign config files on disk, run the import pipeline against them, and assert the resulting `librefang-types` output — then clean up automatically.
+The test suite uses `tempfile` to create temporary directory trees that simulate source framework installations, keeping tests hermetic and repeatable.

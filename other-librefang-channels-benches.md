@@ -1,104 +1,124 @@
 # Other — librefang-channels-benches
 
-# librefang-channels-benches: Dispatch Hot-Path Benchmarks
+# librefang-channels Benchmarks — Dispatch Hot Paths
 
-Criterion microbenchmark suite covering the performance-critical paths in `librefang-channels`: JSON (de)serialization of channel messages, agent routing resolution, and cross-platform message formatting.
+Location: `librefang-channels/benches/dispatch.rs`
 
-**File:** `librefang-channels/benches/dispatch.rs`
+## Overview
 
-## Purpose
+Criterion micro-benchmark suite covering the three hottest paths in the channel dispatch pipeline: **message serialization**, **agent routing**, and **output formatting**. These are the operations executed on every inbound/outbound message, so regressions here directly impact perceived latency.
 
-These benchmarks guard against regressions in the three operations that execute on every inbound or outbound message:
-
-| Operation | Why it matters |
-|---|---|
-| `ChannelMessage` serde | Every persisted or transmitted message is serialized at least once |
-| `AgentRouter::resolve` / `resolve_with_context` | Runs per-incoming-message to determine which agent handles it |
-| `format_for_channel` / `split_message` / `default_phase_emoji` | Runs per-outgoing-message to adapt content for the target platform |
-
-## Running
+Run with:
 
 ```bash
-# All groups
-cargo bench -p librefang-channels
-
-# Single group
-cargo bench -p librefang-challenges -- serialization
-cargo bench -p librefang-channels -- routing
-cargo bench -p librefang-channels -- formatting
-
-# Individual benchmark
-cargo bench -p librefang-channels -- router_resolve_direct
+cargo bench -p librefang-channels -- dispatch
 ```
 
-Results are saved under `target/criterion/` with HTML reports.
+Results are stored under `target/criterion/` and can be compared across commits using `criterion::Criterion`'s built-in regression detection.
 
 ## Benchmark Groups
 
-### Serialization (`serialization`)
+### 1. Serialization (`serialization`)
 
-Measures `serde_json` throughput on `ChannelMessage`.
-
-| Benchmark | What it does |
+| Benchmark | What it measures |
 |---|---|
-| `message_serialize` | `serde_json::to_string` on a sample `ChannelMessage` |
-| `message_deserialize` | `serde_json::from_str::<ChannelMessage>` from pre-serialized JSON |
-| `message_roundtrip` | Serialize then immediately deserialize — catches combined overhead |
+| `message_serialize` | `serde_json::to_string` for a typical `ChannelMessage` |
+| `message_deserialize` | `serde_json::from_str` back into `ChannelMessage` |
+| `message_roundtrip` | Serialize + deserialize in one iteration |
 
-**Fixture:** `make_sample_message()` constructs a Telegram `ChannelMessage` with a text payload, a sender (`ChannelUser` with `platform_id` and `display_name`), a timestamp, and empty metadata. The `black_box` wrapper prevents the compiler from eliding the work.
+All three use `make_sample_message()` which constructs a representative Telegram text message with a sender, timestamp, and empty metadata map. The message is realistic enough to exercise all struct fields without inflating timing with large payloads.
 
-### Routing (`routing`)
+**What to watch for:** Any change to `ChannelMessage`, `ChannelUser`, `ChannelContent`, or `ChannelType` derive macros will show up here. Adding fields with expensive `Serialize`/`Deserialize` impls is the most common regression.
 
-Measures `AgentRouter` resolution under increasingly complex configurations.
+### 2. Routing (`routing`)
 
-| Benchmark | Router setup | Resolution path |
-|---|---|---|
-| `router_resolve_direct` | One default agent + one direct route (`Telegram`/`user-42` → agent) | Direct-route hit — fastest path |
-| `router_resolve_default_fallback` | One default agent, no channel/user routes | Falls through to default |
-| `router_resolve_binding_match` | Agent registered as `"support"`, binding matches `telegram` + `vip-user` | Binding rule match via `load_bindings` |
-| `router_resolve_with_context` | Agent registered as `"admin-bot"`, binding matches `discord` + `guild_id` + `roles` | Context-aware resolution with `BindingContext` including guild and role data |
+Four benchmarks covering the `AgentRouter` resolution paths, from fastest to most complex:
 
-The progression is intentional: each successive benchmark exercises additional matching logic in the router, so comparing them reveals the marginal cost of binding evaluation and context matching.
+```
+router_resolve_direct
+  └─ router.resolve(channel, peer_id, thread_id)
+       with a pre-loaded direct route for telegram:user-42 → agent
 
-### Formatting (`formatting`)
+router_resolve_default_fallback
+  └─ router.resolve(channel, peer_id, thread_id)
+       no match found → falls back to the default agent
 
-Measures the `format_for_channel` conversion pipeline and related utilities.
+router_resolve_binding_match
+  └─ router.load_bindings(...) → router.resolve(...)
+       evaluates loaded AgentBinding rules (channel + peer_id match)
 
-| Benchmark | Input | Output format |
-|---|---|---|
-| `format_markdown_passthrough` | Multi-paragraph markdown (`SAMPLE_MARKDOWN`) | `OutputFormat::Markdown` |
-| `format_telegram_html` | Same markdown | `OutputFormat::TelegramHtml` |
-| `format_slack_mrkdwn` | Same markdown | `OutputFormat::SlackMrkdwn` |
-| `format_plain_text` | Same markdown | `OutputFormat::PlainText` |
-| `format_telegram_html_short` | `"Hello world!"` | `OutputFormat::TelegramHtml` |
-| `split_message_short` | `"Hello!"` with limit 4096 | No split needed |
-| `split_message_long` | 500 repeated lines with limit 4096 | Multiple chunks |
-| `default_phase_emoji_all` | All six `AgentPhase` variants | Emoji lookup per phase |
+router_resolve_with_context
+  └─ router.load_bindings(...) → router.resolve_with_context(..., &BindingContext)
+       evaluates binding rules against a full BindingContext including
+       guild_id and roles
+```
 
-The `SAMPLE_MARKDOWN` constant exercises bold, italic, code spans, links, and bullet lists — the full set of markup constructs the formatter must handle.
+**Key setup patterns:**
+
+- `router_resolve_direct` — Uses `set_default` + `set_direct_route` to create an exact user-to-agent mapping. This is the happy path for returning users.
+- `router_resolve_default_fallback` — Queries a channel/user pair with no configured routes, falling through to the default agent. Measures the miss penalty.
+- `router_resolve_binding_match` — Registers an agent by name (`register_agent`), loads `AgentBinding` entries with `BindingMatchRule` constraints, then resolves. Exercises the rule-evaluation loop.
+- `router_resolve_with_context` — The most expensive path. Constructs a `BindingContext` with `guild_id` and multiple `roles`, then calls `resolve_with_context`. This is the path taken when Discord role-based routing is active.
+
+**What to watch for:** Changes to `BindingMatchRule` evaluation, the binding storage structure, or the context-matching logic in `router.rs`. The binding-match and context benchmarks are sensitive to the number and complexity of rules.
+
+### 3. Formatting (`formatting`)
+
+Benchmarks for `format_for_channel` and helper functions, covering all `OutputFormat` variants:
+
+| Benchmark | Input | Format | Notes |
+|---|---|---|---|
+| `format_markdown_passthrough` | Full markdown | `Markdown` | Identity case, measures overhead alone |
+| `format_telegram_html` | Full markdown | `TelegramHtml` | Converts bold/italic/code/links to HTML |
+| `format_slack_mrkdwn` | Full markdown | `SlackMrkdwn` | Converts to Slack's mrkdwn dialect |
+| `format_plain_text` | Full markdown | `PlainText` | Strips all formatting |
+| `format_telegram_html_short` | `"Hello world!"` | `TelegramHtml` | Short-input overhead (no formatting to convert) |
+| `split_message_short` | `"Hello!"` | — (limit 4096) | Single-chunk fast path |
+| `split_message_long` | 500 lines | — (limit 4096) | Multi-chunk split, exercises chunking logic |
+| `default_phase_emoji_all` | All 6 phases | — | Iterates Queued → Thinking → tool_use → Streaming → Done → Error |
+
+The `SAMPLE_MARKDOWN` constant is a multi-paragraph block containing bold, italic, inline code, and links — representative of typical agent output.
+
+**What to watch for:** Regex changes in the formatter, changes to `split_message`'s chunking strategy, or additions to the `AgentPhase` enum.
+
+## Test Data
+
+### `make_sample_message()`
+
+Returns a `ChannelMessage` with these characteristics:
+
+- **Channel:** `Telegram`
+- **Message ID:** `"msg-12345"`
+- **Sender:** platform_id `"user-42"`, display_name `"Alice"`, no linked librefang user
+- **Content:** `ChannelContent::Text("Hello, how can you help me today?")`
+- **Group:** `false`, no thread, empty metadata
+- **Timestamp:** `Utc::now()` at construction time
+
+### `SAMPLE_MARKDOWN`
+
+A 6-line markdown string with `**bold**`, `*italic*`, `` `code` ``, and `[links](url)` — exercises every inline formatting rule.
 
 ## Dependencies on Library Code
 
 ```mermaid
 graph LR
-    dispatch_rs["dispatch.rs<br/>(benchmarks)"]
-    dispatch_rs --> types["types module<br/>ChannelMessage, split_message,<br/>default_phase_emoji, AgentPhase"]
-    dispatch_rs --> router["router module<br/>AgentRouter, BindingContext"]
-    dispatch_rs --> formatter["formatter module<br/>format_for_channel"]
-    dispatch_rs --> librefang_types["librefang-types<br/>AgentId, AgentBinding,<br/>BindingMatchRule, OutputFormat"]
+    B[dispatch.rs benches] --> F[formatter::format_for_channel]
+    B --> R[router::AgentRouter]
+    B --> R2[router::BindingContext]
+    B --> T[types::ChannelMessage]
+    B --> T2[types::split_message]
+    B --> T3[types::default_phase_emoji]
+    B --> T4[types::AgentPhase]
+    B --> C[librefang_types::agent::AgentId]
+    B --> C2[librefang_types::config::AgentBinding]
 ```
 
-Key API surfaces exercised:
-
-- **`librefang_channels::types`** — `ChannelMessage`, `ChannelUser`, `ChannelContent`, `ChannelType`, `split_message`, `default_phase_emoji`, `AgentPhase`
-- **`librefang_channels::router`** — `AgentRouter::new`, `set_default`, `set_direct_route`, `register_agent`, `load_bindings`, `resolve`, `resolve_with_context`; `BindingContext`
-- **`librefang_channels::formatter`** — `format_for_channel`
-- **`librefang_types::agent`** — `AgentId`
-- **`librefang_types::config`** — `OutputFormat`, `AgentBinding`, `BindingMatchRule`
+The bench depends on `librefang_channels` (the crate under test) and `librefang_types` for shared config/identity types. It does **not** depend on any channel SDK backends — all routing and formatting is tested against in-memory data structures.
 
 ## Adding New Benchmarks
 
-1. Place the benchmark function in the appropriate section of `dispatch.rs` (or create a new section with a comment header).
-2. Add the function to the relevant `criterion_group!` macro invocation, or define a new group and include it in `criterion_main!`.
-3. Use `black_box` on all inputs and outputs to prevent dead-code elimination.
-4. For router benchmarks, construct the `AgentRouter` setup inside the benchmark function (before the `bench_function` closure) so setup cost is excluded from the measurement. The closure should contain only the `resolve`/`resolve_with_context` call.
+1. **New output format** — Add a `bench_format_*` function calling `format_for_channel` with the new `OutputFormat` variant, then add it to the `formatting` group.
+2. **New routing scenario** — Construct the `AgentRouter` state you need in the bench setup (outside the `iter` closure), add the bench function, and register it in the `routing` group.
+3. **New message type** — If `ChannelContent` gains variants (e.g., `Image`, `File`), add serialize/deserialize benches using a sample message containing that variant.
+
+Keep all setup work **outside** the `b.iter(|| ...)` closure — only the code being measured should run inside it. Use `black_box` on inputs to prevent the compiler from constant-folding or eliminating computations.

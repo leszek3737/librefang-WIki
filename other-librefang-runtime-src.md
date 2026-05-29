@@ -1,202 +1,285 @@
 # Other — librefang-runtime-src
 
-# Agent Loop Test Suite (`librefang-runtime/src/agent_loop/tests/`)
+# librefang-runtime Test Suite: Agent Loop
 
 ## Overview
 
-This is the test module for the agent loop — the core iterative conversation engine that drives LLM completion, tool execution, response assembly, and session persistence. The tests validate correctness guards for edge cases that have caused production incidents: empty responses, cascade leaks, hallucinated actions, and lost metadata across streaming/non-streaming paths.
+This module contains the complete test suite for the agent loop — the core iterative execution engine that drives LLM conversations, tool invocations, and response assembly. The tests span unit-level helper validation, integration-level loop behavior, and recovery-edge-case coverage for malformed tool call output.
 
-The test suite is organized into four submodules:
+The test suite lives under `librefang-runtime/src/agent_loop/tests/` and is organized into four submodules:
 
-| Module | Focus |
-|---|---|
-| `mod.rs` | Unit tests for utilities, sanitizers, leak detectors, tool resolution caching, and invariant guards |
-| `integration.rs` | End-to-end integration tests with mock LLM drivers driving `run_agent_loop` and `run_agent_loop_streaming` |
-| `recovery.rs` | Exhaustive coverage of text-to-tool-call recovery across 9+ model-specific output patterns |
-| `sender.rs` / `utilities.rs` | Message preparation, session repair, tool staging, and proactive memory (not shown in source) |
+| File | Scope |
+|------|-------|
+| `mod.rs` | Unit tests for internal helpers, detectors, caches, and grep-guards |
+| `integration.rs` | End-to-end agent loop tests using mock LLM drivers |
+| `recovery.rs` | Edge-case tests for text-to-tool-call pattern recovery |
+| `sender.rs` | Message sender prefix resolution tests |
+| `utilities.rs` | General utility function tests |
 
-## Architecture
+---
+
+## Test Infrastructure
+
+### Mock LLM Drivers
+
+Integration tests rely on composable mock implementations of the `LlmDriver` trait. Each mock simulates a specific LLM behavior pattern using an `AtomicU32` call counter to vary responses across iterations.
 
 ```mermaid
 graph TD
-    subgraph "Test Infrastructure"
-        MD[Mock Drivers]
-        TM[test_manifest]
-        FS[fresh_session]
-        RAL["run_agent_loop / run_agent_loop_streaming"]
-    end
-
-    subgraph "What's Being Validated"
-        ER[Empty Response Guards]
-        CL[Cascade Leak Detection]
-        HF[Hallucinated Action Detection]
-        TF[Text Tool-Call Recovery]
-        HR[History Fold Persistence]
-        DP[Directive Preservation]
-        SP[Session Ephemeral Options]
-    end
-
-    MD --> RAL
-    TM --> RAL
-    FS --> RAL
-    RAL --> ER
-    RAL --> CL
-    RAL --> DP
-    RAL --> SP
-    RAL --> HR
+    LlmDriver[trait LlmDriver]
+    LlmDriver --> EmptyAfterToolUseDriver["EmptyAfterToolUseDriver<br/>Call 0: ToolUse, Call 1: empty EndTurn"]
+    LlmDriver --> FailThenTextDriver["FailThenTextDriver<br/>Call 0: ToolUse, Call 1: text"]
+    LlmDriver --> AlwaysFailingToolDriver["AlwaysFailingToolDriver<br/>Every call: unregistered tool"]
+    LlmDriver --> EmptyMaxTokensDriver["EmptyMaxTokensDriver<br/>Every call: empty + MaxTokens"]
+    LlmDriver --> NormalDriver["NormalDriver<br/>Single call: text + EndTurn"]
+    LlmDriver --> DirectiveDriver["DirectiveDriver<br/>Configurable text + stop_reason"]
+    LlmDriver --> NotifyOwnerThenMaxTokensDriver["NotifyOwnerThenMaxTokensDriver<br/>Call 0: notify_owner tool, then MaxTokens"]
+    LlmDriver --> CascadeLeakTimedOutDriver["CascadeLeakTimedOutDriver<br/>stream() emits text then TimedOut"]
+    LlmDriver --> MultiToolCycleDriver["MultiToolCycleDriver<br/>N tool-use rounds then EndTurn"]
+    LlmDriver --> FoldSummaryDriver["FoldSummaryDriver<br/>Deterministic fold summary"]
+    LlmDriver --> TextToolCallDriver["TextToolCallDriver<br/>Tool calls as text, not structured"]
 ```
 
-## Mock Driver Infrastructure
+Key driver behaviors:
 
-All integration tests inject mock `LlmDriver` implementations that return deterministic `CompletionResponse` values without network calls. Each driver simulates a specific LLM misbehavior.
+- **EmptyAfterToolUseDriver** — Reproduces the bug where the LLM returns an empty response after a tool-use cycle. First call emits a `ToolUse` stop reason with no text; second call returns `EndTurn` with empty content.
+- **AlwaysFailingToolDriver** — Every iteration emits a call to a nonexistent tool (`nonexistent_tool`), triggering the `RepeatedToolFailures` circuit breaker after `MAX_CONSECUTIVE_ALL_FAILED` consecutive failures.
+- **NotifyOwnerThenMaxTokensDriver** — Simulates a multi-step scenario: first call invokes `notify_owner` (a registered tool), then subsequent calls return `MaxTokens` with partial text. An optional `final_tool_calls` flag controls whether continuation iterations also emit tool calls.
+- **CascadeLeakTimedOutDriver** — Implements only the `stream()` method (the `complete()` path is marked unreachable). Emits a `TextDelta` containing structural markers, then returns `LlmError::TimedOut` with a partial text that also contains leak markers.
+- **MultiToolCycleDriver** — Emits `N` tool-use rounds targeting the meta-tool `tool_search`, then finishes with `EndTurn`. Records all `CompletionRequest` message lists it receives for assertion.
 
-### Available Mock Drivers
+### Shared Fixtures
 
-| Driver | Behavior | Tests |
-|---|---|---|
-| `NormalDriver` | Returns `"Hello from the agent!"` with `EndTurn` | Sanity baseline — normal responses pass through unchanged |
-| `EmptyAfterToolUseDriver` | Call 0: `ToolUse` with no text. Call 1: empty `EndTurn` | Empty response after tool-use cycle returns fallback, not empty string |
-| `EmptyMaxTokensDriver` | Always returns empty content with `MaxTokens` | Max continuations cap returns fallback message |
-| `EmptyThenNormalDriver` | Call 0: empty `EndTurn`. Call 1: normal text | Iteration-0 empty response retry logic |
-| `AlwaysEmptyDriver` | Always returns empty `EndTurn` | Fallback when retry also fails |
-| `AlwaysFailingToolDriver` | Always emits tool call for unregistered tool | `RepeatedToolFailures` circuit breaker |
-| `FailThenTextDriver` | Call 0: tool call. Call 1: text response | Loop retries after tool failure |
-| `DirectiveDriver` | Returns configurable text with `[[reply:...]]` directives | Directive parsing in `EndTurn` and `MaxTokens` paths |
-| `NotifyOwnerThenMaxTokensDriver` | Call 0: `notify_owner` tool. Call 1+: `MaxTokens` (optional tool calls) | Owner notice, `actual_provider`, session persistence with continuations |
-| `CascadeLeakTimedOutDriver` | Streams text then returns `LlmError::TimedOut` | Cascade leak suppression of timeout partial text |
-| `MultiToolCycleDriver` | N tool-use rounds then `EndTurn`; records all `CompletionRequest` messages | History fold stub appearance in LLM request |
-| `FoldSummaryDriver` | Returns deterministic fold summary | Aux driver for history fold summarization |
+**`test_manifest()`** — Produces a minimal `AgentManifest` with name `"test-agent"` and a basic system prompt. All integration tests use this as the baseline configuration.
 
-All drivers use `AtomicU32` call counters for thread-safe state tracking in async contexts.
+**`fresh_session()`** — Creates a new in-memory `Session` with fresh IDs, no messages, and no model override.
 
-### Helper Functions
+**`fake_tool(name)`** — Constructs a `ToolDefinition` with a placeholder JSON schema, used for tool registration in tests.
 
-- **`test_manifest()`** — Returns a minimal `AgentManifest` with a test agent name and system prompt.
-- **`fresh_session()`** — Creates a new in-memory `Session` with fresh IDs and no messages.
-- **`fake_tool(name)`** — Creates a `ToolDefinition` with a JSON object schema.
-- **`notify_owner_tool_definition()`** — Returns the `notify_owner` tool definition used in owner-notice tests.
-- **`run_streaming_for_test()`** — Wraps `run_agent_loop_streaming` with sensible defaults for test ergonomics.
+**`cascade_leak_fixture()`** — Shared setup for cascade-leak tests: returns a `(MemorySubstrate, Session, AgentManifest, Arc<dyn LlmDriver>)` tuple with a `DirectiveDriver` configured to emit two structural markers.
 
-## Key Behaviors Validated
+### Loop Entry Points
+
+Tests invoke the agent loop through two entry points:
+
+- **`run_agent_loop`** — Non-streaming (synchronous) path. Tests pass a large number of `None` parameters for unused subsystems (media engine, Docker config, hooks, etc.) along with the mock driver and `LoopOptions`.
+- **`run_streaming_for_test`** — Streaming path wrapper that calls `run_agent_loop_streaming` with an `mpsc::Sender<StreamEvent>`. Tests can inspect emitted events by draining the receiver after the loop completes.
+
+---
+
+## Integration Test Coverage
 
 ### Empty Response Guards
 
-The agent loop must never return an empty string to the caller. `finalize_end_turn_text` implements a three-way fallback:
+Three critical scenarios where the LLM produces no usable text:
 
-1. **Final text non-empty** → use it (accumulated buffer ignored)
-2. **Final text empty + accumulated non-empty** → use accumulated buffer
-3. **Both empty** → emit canned guard message:
-   - Tools were executed → `"Task completed"`
-   - No tools → `"empty response"` message
+| Test | Driver | Scenario | Expected Behavior |
+|------|--------|----------|-------------------|
+| `test_empty_response_after_tool_use_returns_fallback` | `EmptyAfterToolUseDriver` | ToolUse → empty EndTurn | Non-empty fallback containing "Permission denied" or "Task completed" |
+| `test_empty_response_max_tokens_returns_fallback` | `EmptyMaxTokensDriver` | Repeated empty MaxTokens | Non-empty fallback containing "token limit" |
+| `test_normal_response_not_replaced_by_fallback` | `NormalDriver` | Normal text EndTurn | Exact original text passes through unchanged |
 
-Tests cover this for both `run_agent_loop` and `run_agent_loop_streaming` paths, including the iteration-0 retry that gives the LLM a second chance before emitting the fallback.
+The empty-first-response retry logic is also tested:
 
-### Cascade Leak Detection
-
-`is_cascade_leak` detects when the LLM leaks internal conversation structure (envelope markers like `[Group message from ...]` plus turn frames like `User asked:` / `I responded:`) into its output. The detector requires **two or more** structural markers to trip — single markers and thematic-only headers (`## Calendar`, `## Tasks`) are legitimate and must not trigger false positives.
-
-Key properties:
-- Envelope prefixes (`ENVELOPE_LINE_PREFIXES`) are a subset of cascade structural markers — ensures `sanitize_for_memory` and the leak guard agree
-- Thematic headers alone are legitimate (prevents false positives on help replies)
-- The guard fires in both streaming and non-streaming paths, including when `stop_reason` is `ToolUse`
-- Timeout partial text (`LlmError::TimedOut` with `partial_text`) is also suppressed when the cascade leak fires — no `TextDelta` events reach the caller
-
-### Hallucinated Action Detection
-
-`looks_like_hallucinated_action` catches when the LLM claims to have completed a domain action (file creation, message sending, payment booking) without actually calling a tool. It covers:
-
-- **English**: `"I've created..."`, `"Successfully modified..."`, `"I've sent the message..."`
-- **Italian present perfect**: `"Ho registrato..."`, `"Ho inviato..."`, `"Ho prenotato..."`
-- **Italian impersonal**: `"è stato inviato"`, `"Operazione completata"`
-
-Neutral text (`"Vuoi che registri questa spesa?"`) must never trigger — a false positive wastes an in-loop retry iteration.
+- **`test_empty_first_response_retries_and_recovers`** — Uses `EmptyThenNormalDriver`: iteration 0 returns empty `EndTurn`, triggering a one-shot retry; iteration 1 returns normal text. Asserts `iterations == 2` and correct recovered text.
+- **`test_empty_first_response_fallback_when_retry_also_empty`** — Uses `AlwaysEmptyDriver`: both iterations return empty `EndTurn`. Asserts fallback message containing "empty response" (no-tools-executed variant).
 
 ### Reply Directive Preservation
 
-Directives (`[[reply:msg_id]]`, `[[@current]]`) must survive through all response paths:
-- Normal `EndTurn` — directives parsed, stripped from visible text
-- `MaxTokens` partial — directives preserved even in short-circuited single-iteration path
-- Streaming `MaxTokens` — identical preservation as non-streaming
-- Streaming empty + `MaxTokens` — directives absent (correct, since no text to parse)
+The `DirectiveDriver` produces responses containing inline directives like `[[reply:msg_123]]` and `[[@current]]`. Tests verify that the loop strips these markers from the visible response text while preserving them in the `result.directives` field:
 
-### Session Persistence and Ephemeral Options
+- **`test_success_response_preserves_reply_directives`** — EndTurn with directives: response = `"Visible reply"`, `reply_to = Some("msg_123")`, `current_thread = true`.
+- **`test_max_tokens_partial_response_preserves_reply_directives`** — MaxTokens with directives: verifies short-circuit on iteration 1 (issue #2310 fix) and directive survival through the MaxTokens continuation path.
+- **Streaming variants** — `test_streaming_max_continuations_with_directives_preserves_reply_directives` and `test_streaming_max_continuations_return_preserves_reply_directives` verify the same invariants on the streaming path.
 
-Session saves respect three modes:
+### Owner Notice and Provider Tracking
 
-| Option | Persists Session? |
-|---|---|
-| Default | ✅ Yes |
-| `incognito: true` | ❌ No |
-| `is_fork: true` | ❌ No |
+The `NotifyOwnerThenMaxTokensDriver` exercises the `notify_owner` tool integration:
 
-Tests verify persisted sessions contain the original user message, assistant partial, and (when continuations ran) the `"Please continue."` prompt — all verified against the in-memory `MemorySubstrate`.
+- **`test_max_tokens_owner_notice_and_actual_provider_survive_non_streaming`** — Asserts `result.owner_notice` contains the formatted `"[NOTIFY] handoff_needed: ..."` string and `result.actual_provider` carries the `"fallback-b"` value from the driver's second call.
+- **`test_streaming_max_tokens_owner_notice_and_actual_provider_survive_result`** — Same assertions on the streaming path, plus verification that a `StreamEvent::OwnerNotice` was emitted on the channel.
 
-### History Fold Persistence (Issue #4866)
+### Session Persistence and Ephemeral Modes
 
-`maybe_fold_stale_tool_results` must:
-1. Rewrite stale `ToolResult` blocks in the working clone with `[history-fold]` stubs
-2. **Replay the same rewrites onto `session.messages`** (the durable record)
-3. Advance `messages_generation` via `mark_messages_mutated()` so `save_session_async` detects the mutation
-4. Preserve every original `tool_use_id` — pairing invariant
-5. **Skip rewriting on subsequent calls** (the `is_already_folded` short-circuit) — without this, every turn refolds from scratch
+Session save behavior is parameterized across three `LoopOptions` variants:
+
+| Label | Options | Should Persist |
+|-------|---------|---------------|
+| `default` | `LoopOptions::default()` | ✅ |
+| `incognito` | `incognito: true` | ❌ |
+| `fork` | `is_fork: true` | ❌ |
+
+Two test matrices cover this:
+
+- **`test_max_tokens_session_save_respects_ephemeral_options`** — Non-continuation case (no tool calls in MaxTokens responses). Verifies the `"Please continue."` prompt is **absent** from persisted messages.
+- **`test_max_tokens_session_save_respects_ephemeral_options_on_continuation`** — Continuation case (tool calls present in MaxTokens responses, hitting `MAX_CONTINUATIONS + 1` iterations). Verifies the continuation prompt **is present** when persisted.
+
+Streaming equivalents (`test_streaming_max_tokens_session_save_respects_ephemeral_options` and its continuation variant) assert the same invariants.
+
+Helper `assert_saved_max_tokens_session` validates persisted session contents:
+- Original user message present
+- MaxTokens assistant partial present
+- Continuation prompt presence matches expectation
+
+### History Fold Integration
+
+**`test_history_fold_stub_appears_in_llm_request_after_enough_tool_cycles`** — Drives the loop through 10 `tool_search` cycles with `fold_after_turns=3` and `fold_min_batch_size=1`. The `MultiToolCycleDriver` records all `CompletionRequest` messages. The test asserts that at least one `ToolResult` block in a received request starts with `"[history-fold]"`, proving the fold path replaced stale tool results before the final LLM call.
+
+**`maybe_fold_stale_tool_results_persists_rewrites_to_session_messages`** — Regression test for issue #4866 (axis 2). Verifies five invariants:
+
+1. **Working copy folded** — The returned message list contains ≥8 fold stubs.
+2. **Session durable copy folded** — `session.messages` carries the same stubs (without this, every turn re-folds from scratch).
+3. **Generation advanced** — `session.messages_generation` incremented, ensuring `save_session_async` detects the mutation.
+4. **tool_use_id pairing preserved** — All 10 original tool_use_ids remain in `session.messages`.
+5. **Second-call no-op** — Re-running fold on an already-folded session does NOT advance `messages_generation`.
+
+### Cascade Leak Detection
+
+The cascade-leak guard prevents the agent from echoing back conversational context (envelopes, turn frames) that leaked into the LLM's context window.
+
+**Non-streaming and streaming end-turn drops:**
+- `cascade_leak_guard_drops_endturn_in_non_streaming_path`
+- `cascade_leak_guard_drops_endturn_in_streaming_path`
+
+Both use `cascade_leak_fixture()` with an emoji-only inbound message and a `DirectiveDriver` emitting two structural markers (`[Group message from Alice]` + `User asked: ... \n I responded: ...`). Assert `result.silent == true` and `result.response.is_empty()`.
+
+**ToolUse stop-reason abort (M-2 regression):**
+- `cascade_leak_guard_aborts_tool_use_stop_reason_in_streaming_path` — When the incremental cascade-leak guard fires mid-stream but the driver's final `ContentComplete` carries `StopReason::ToolUse`, the loop must NOT proceed to tool execution. Asserts silent drop with no tool invocation (empty tool registry ensures any execution would fail).
+
+**Timeout partial text suppression:**
+- `cascade_leak_guard_suppresses_timeout_partial_text_delta_in_streaming_path` — Uses `CascadeLeakTimedOutDriver` which emits `TextDelta` with structural markers then times out. Asserts the timeout error propagates but **no `TextDelta` events** were emitted on the stream channel — the cascade leak guard suppresses the partial text to prevent leaking context.
+
+---
+
+## Unit Test Coverage
+
+### `push_accumulated_text` — Bounded Text Accumulation
+
+Tests for the text buffer that accumulates partial responses across continuations:
+
+- **Append with separator** — Second push joins with `"\n\n"`.
+- **Cap enforcement** — Buffer sealed at exactly `ACCUMULATED_TEXT_MAX_BYTES`; prefix preserved; subsequent pushes ignored.
+- **Empty initial** — No leading separator on first push.
+- **Under-cap accumulation** — Many small pushes below the cap grow normally.
+
+### `finalize_end_turn_text` — Three-Way Fallback
+
+| Condition | Behavior |
+|-----------|----------|
+| Final text non-empty | Use final text, ignore accumulated buffer |
+| Final text empty, accumulated non-empty | Use accumulated buffer |
+| Both empty, tools executed | Guard message containing "Task completed" |
+| Both empty, no tools | Guard message containing "empty response" |
 
 ### Tool Resolution and Caching
 
-`ResolvedToolsCache` provides `Arc<[ToolDefinition]>` caching with lazy/eager mode:
+**`resolve_request_tools`** fallback logic:
+- When the tool pool exceeds `LAZY_TOOLS_THRESHOLD` but does **not** include `tool_load`, lazy mode must bypass and return the full eager list (regression for PR #3047 — otherwise non-native tools silently disappear).
 
-- **Lazy mode** (tool count > `LAZY_TOOLS_THRESHOLD` + `tool_load` present): trims to session-loaded tools
-- **Eager fallback**: if `tool_load` is absent from the pool, returns full list regardless of threshold
-- **Cache identity**: stable inputs return the same `Arc` (verified via `Arc::ptr_eq`)
-- **Cache invalidation**: growing `session_loaded_tools` rebuilds the cache in lazy mode; non-lazy mode never rebuilds on session growth
+**`ResolvedToolsCache`** behavior:
+- **Stable input reuses Arc** — Same pool + session_loaded → `Arc::ptr_eq` returns true.
+- **Growing session_loaded rebuilds** — Adding a tool via `tool_load` invalidates the cache and includes the new tool.
+- **Non-lazy mode never rebuilds** — When lazy mode is off, `session_loaded` changes are ignored.
 
-### Text Tool-Call Recovery
+### Sentinel Detection
 
-`recover_text_tool_calls` parses tool calls from LLM text output when models fail to use proper structured tool-use fields. Supports 9+ patterns:
+**`is_no_reply`** — Detects the `NO_REPLY` token (with whitespace tolerance), `[no reply needed]` bracketed form, and bare `no reply needed` (exact match only). Multi-line prose ending with "no reply needed" intentionally does not match.
 
-| Pattern | Example | Origin |
-|---|---|---|
-| `<function=NAME>JSON</function>` | `<function=web_search>{"query":"rust"}</function>` | Groq/Llama |
-| `<function>NAME{JSON}</function>` | `<function>web_search{"query":"x"}</function>` | Variant format |
-| `<tool>NAME{JSON}</tool>` | `<tool>exec{"command":"ls"}</tool>` | Alternative tag |
-| Markdown code block | `` ```json\nweb_search {"query":"x"}\n``` `` | Some models |
-| Backtick-wrapped | `` `exec {"command":"pwd"}` `` | Inline code |
-| `[TOOL_CALL]...[/TOOL_CALL]` with JSON or arrow syntax | Issue #354 format | |
-| `<Qwen-style tags>` | Issue #332 format | Qwen3 |
-| Bare JSON object | `{"name":"exec","arguments":{...}}` | Fallback |
-| XML attribute style | `<function name="..." parameters="..." />` | XML-structured output |
+**`is_progress_text_leak`** — Catches ellipsis-terminated progress text like `"Waiting for the script to complete..."`. Over 120 characters, even with ellipsis, is treated as real content.
 
-All patterns validate against the registered tool allowlist — unknown tools are silently rejected. Duplicate recovery across patterns is prevented. The parser handles nested JSON, stringified args, whitespace variants, and edge cases (unclosed tags, missing brackets).
+**`silent_response_single_source_of_truth`** — A grep-guard test that runs `grep -rln --include=*.rs NO_REPLY` across `crates/` and asserts the literal only appears in an explicit allow-list of files. Any new file using the literal must be added to the list or delegate to the canonical `is_silent_response` detector.
+
+### Memory Sanitization
+
+**`sanitize_for_memory`** strips known message envelope prefixes:
+- `[Group message from X]`, `[In risposta a: "Y"]`, `[Replying to: "Y"]`
+- `[Stranger from +39...]`, `[Forwarded]`, `[User]`
+
+Key invariants tested:
+- Inline brackets (not starting a line) are preserved.
+- Envelope-only input returns `None` (prevents half-empty memory rows).
+- Leading whitespace before envelopes is tolerated.
+- The `:\"` variant (no space after colon) is handled.
+- **Subset invariant**: every `ENVELOPE_LINE_PREFIXES` and `ENVELOPE_STANDALONE_MARKERS` entry must also be detected by `is_cascade_leak`, preventing unrepaired legacy memories.
+
+### Cascade Leak Detection
+
+**`is_cascade_leak`** requires ≥2 structural markers (envelope prefixes + turn frames). Thematic headers alone (`## Calendar`, `## Tasks`) are explicitly exempted — they represent legitimate help replies (houko-flagged false positive). Single markers in clean text do not trip.
+
+### Hallucinated Action Detection
+
+**`looks_like_hallucinated_action`** catches first-person claims of completed actions without tool backing:
+
+- **English**: `"I've created the file"`, `"I've sent the message"`, `"Order has been placed."`
+- **Italian present perfect**: `"Ho registrato la spesa"`, `"Ho inviato il messaggio"`, `"Ho bonificato 500 euro"`
+- **Italian impersonal**: `"Il messaggio è stato inviato"`, `"Operazione completata"`, `"Bonifico effettuato"`
+
+Neutral text like questions and conditional offers (`"Vuoi che registri questa spesa?"`) must not trigger.
+
+**`user_message_has_action_intent`** — Companion function that checks whether the user's original message actually requested the claimed action, used to avoid false positives on the corrective retry path.
+
+---
+
+## Recovery Test Coverage (Text-to-Tool-Call Patterns)
+
+The `recover_text_tool_calls` function extracts structured tool invocations from free-form LLM text output. This is critical for models (Groq/Llama, Qwen) that emit tool calls as prose rather than structured `tool_calls` fields.
+
+### Supported Patterns
+
+| Pattern | Example | Test |
+|---------|---------|------|
+| `<function=NAME>JSON</function>` | `<function=web_search>{"query":"rust"}</function>` | `test_recover_text_tool_calls_basic` |
+| `<function>NAME{JSON}</function>` | `<function>web_fetch{"url":"https://x.com"}</function>` | `test_recover_variant2_basic` |
+| `<tool>NAME{JSON}</tool>` | `<tool>exec{"command":"ls"}</tool>` | `test_recover_tool_tag_variant` |
+| Markdown code block | ```` ```\nexec {"command": "ls"}\n``` ```` | `test_recover_markdown_code_block` |
+| Backtick-wrapped | `` `exec {"command":"pwd"}` `` | `test_recover_backtick_wrapped` |
+| `[TOOL_CALL]...[/TOOL_CALL]` | `[TOOL_CALL]\n{"name":"shell_exec",...}\n[/TOOL_CALL]` | `test_recover_tool_call_block_json` |
+| `JsonObject JsonObject` (Qwen3) | `("{\"name\":\"shell_exec\",...}")` | `test_recover_tool_call_xml_basic` |
+| Bare JSON object | `{"name":"shell_exec","arguments":{...}}` | `test_recover_bare_json_tool_call` |
+| XML attribute style | `<function name="..." parameters="..." />` | `test_recover_xml_attribute_basic` |
+
+### Deduplication
+
+When the same tool call appears in multiple patterns, it is extracted only once (`test_recover_no_duplicates_across_patterns`).
+
+### Validation Rules
+
+- **Unknown tools rejected** — Only tools present in the provided `&[ToolDefinition]` are accepted.
+- **Invalid JSON skipped** — Malformed JSON is silently ignored.
+- **Unclosed tags skipped** — Missing `</function>` or `[/TOOL_CALL]` prevents extraction (though bare JSON fallback may still recover the call).
+- **Bare JSON deprioritized** — When structured tags are present, bare JSON extraction is skipped to avoid double-extraction (`test_recover_bare_json_skipped_when_tags_found`).
+
+### Helper Functions
+
+**`parse_dash_dash_args`** — Parses `{--key "value", --flag}` syntax into a JSON map. Handles quoted values, unquoted values, and boolean flags.
+
+**`parse_json_tool_call_object`** — Extracts tool name and arguments from a JSON object, accepting `"name"`/`"function"` as the name field and `"arguments"`/`"parameters"` as the args field. Supports stringified (double-encoded) argument values.
+
+---
 
 ## Constants Verified by Tests
 
-| Constant | Value | Purpose |
-|---|---|---|
-| `MAX_ITERATIONS` | Matches `AutonomousConfig::DEFAULT_MAX_ITERATIONS` | Per-turn iteration cap |
-| `MAX_RETRIES` | 3 | LLM retry attempts |
-| `BASE_RETRY_DELAY_MS` | 1000 | Retry backoff base |
-| `DEFAULT_MAX_HISTORY_MESSAGES` | 60 | History window size |
-| `ACCUMULATED_TEXT_MAX_BYTES` | (defined in `message` module) | Buffer growth cap |
+| Constant | Value | Test |
+|----------|-------|------|
+| `MAX_ITERATIONS` | `AutonomousConfig::DEFAULT_MAX_ITERATIONS` | `test_max_iterations_constant` |
+| `DEFAULT_MAX_HISTORY_MESSAGES` | 60 | `test_max_history_messages_constant` |
+| `MAX_RETRIES` | 3 | `test_retry_constants` |
+| `BASE_RETRY_DELAY_MS` | 1000 | `test_retry_constants` |
 
-## Invariant Guards
+---
 
-### `silent_result_has_empty_response`
+## Silent Response Contract
 
-When `result.silent == true`, `result.response` must be `""`. No sentinel string ever escapes the runtime as visible text. Enforced by `build_silent_agent_loop_result`.
+The test `silent_result_has_empty_response` enforces a critical invariant: when `result.silent == true`, `result.response` must be `""`. No sentinel string (including `NO_REPLY`) may ever escape the runtime as visible text. The shared constructor `build_silent_agent_loop_result` enforces this.
 
-### `silent_response_single_source_of_truth`
-
-A grep-guard test that enforces the literal `NO_REPLY` appears only in an explicit allow-list of files. Any new occurrence must either delegate to the canonical `silent_response::is_silent_response` detector or be added to the allow-list with rationale. This prevents divergent silent-detection logic from accumulating across the codebase.
-
-### `envelope_prefixes_are_a_subset_of_cascade_structural_markers`
-
-Every envelope that `sanitize_for_memory` strips must also be detectable by `is_cascade_leak`. Without this invariant, a legacy memory row containing an envelope would keep tripping the leak guard without ever being repaired.
+---
 
 ## Adding New Tests
 
-1. **For a new mock driver**: implement `LlmDriver` with `AtomicU32` call counting. Place the struct in `integration.rs` if used by multiple tests, or inline in the test function if single-use.
+When adding integration tests:
 
-2. **For testing a new response path**: use `run_agent_loop` for non-streaming, `run_streaming_for_test` for streaming. Both accept the same mock driver infrastructure. Pass `&[]` for tools when testing tool-free paths.
-
-3. **For new text recovery patterns**: add tests in `recovery.rs` following the existing pattern — create a `Vec<ToolDefinition>`, call `recover_text_tool_calls(text, &tools)`, assert on the returned calls. Verify both valid and unknown-tool rejection.
-
-4. **For session persistence tests**: use `MemorySubstrate::open_in_memory(0.01)` and verify via `memory.get_session(session.id)` after the loop completes.
+1. **Choose or create a mock driver** — Implement `LlmDriver` with `AtomicU32`-based call counting. Keep driver logic minimal and deterministic.
+2. **Use shared fixtures** — `test_manifest()`, `fresh_session()`, and `fake_tool()` reduce boilerplate.
+3. **Test both paths** — Many behaviors (empty response fallback, directive preservation, cascade leak) must work identically on both `run_agent_loop` and `run_agent_loop_streaming`. Add both variants.
+4. **Update the grep-guard allow-list** — If a new file references the `NO_REPLY` literal, add it to the `silent_response_single_source_of_truth` allow-list with a rationale comment.
+5. **Use `tool_search` for multi-cycle tests** — The meta-tool succeeds against an empty registry, avoiding the `MAX_CONSECUTIVE_ALL_FAILED` circuit breaker that would abort the loop prematurely.

@@ -2,135 +2,120 @@
 
 # librefang-channels
 
-Channel Bridge Layer for LibreFang — the infrastructure crate that connects the kernel to out-of-process channel adapters (sidecars) and provides shared messaging utilities.
+Channel Bridge Layer for LibreFang — provides the trampoline, shared bridge types, and infrastructure that connect the kernel to out-of-process channel sidecar adapters.
 
-## Purpose
+## Overview
 
-This crate does **not** contain channel adapters. Every channel adapter (Telegram, Discord, Slack, Matrix, ntfy, Signal, etc.) runs as an out-of-process Python sidecar located at `sdk/python/librefang/sidecar/adapters/`. This crate owns:
+This crate does **not** contain channel adapters. Every channel integration (Telegram, Discord, Slack, Matrix, ntfy, etc.) runs as an out-of-process Python sidecar under `sdk/python/librefang/sidecar/adapters/`. This crate owns:
 
-- **The sidecar trampoline** (`sidecar.rs`) — spawns, communicates with, and manages the lifecycle of sidecar processes.
-- **Bridge types** (`bridge`, `types`) — the shared protocol every adapter speaks over the sidecar boundary.
-- **Shared infrastructure** — HTTP client, rate limiter, message formatting, sanitization, attachment handling, and other utilities the kernel and sidecars both need.
+- **The sidecar trampoline** (`sidecar.rs`) — the mechanism by which the kernel spawns, communicates with, and manages sidecar processes.
+- **Shared bridge types** — the serialized message protocol every sidecar adapter speaks.
+- **Shared infrastructure** — HTTP client, rate limiter, message formatting, sanitization, and other utilities common to all channels.
 
 ## Architecture
 
 ```mermaid
 graph LR
-    K[librefang-kernel] -->|dispatches| C[librefang-channels]
-    C -->|"sidecar.rs<br>trampoline"| S1[sidecar adapter<br>Telegram]
-    C -->|"sidecar.rs<br>trampoline"| S2[sidecar adapter<br>Discord]
-    C -->|"sidecar.rs<br>trampoline"| SN[sidecar adapter<br>...]
-    C -->|bridge types| S1
-    C -->|bridge types| S2
-    C -->|bridge types| SN
-    S1 -->|ChannelMessage| C
-    S2 -->|ChannelMessage| C
-    SN -->|ChannelMessage| C
-    C -->|unified events| K
+    K[librefang-kernel] -->|dispatches events| BR[bridge / router]
+    BR -->|spawns + manages| SC[sidecar trampoline]
+    SC -->|stdin/stdout or HTTP| PY[Python sidecar adapters]
+    PY -->|webhook callbacks| API[librefang-api]
+    API -->|inbound messages| K
+    subgraph "this crate"
+        BR
+        SC
+    end
+    subgraph "sdk/python"
+        PY
+    end
 ```
 
-The kernel sends outgoing messages to `librefang-channels`, which routes them through the sidecar trampoline to the appropriate Python adapter. Inbound messages from external platforms flow back through the same bridge in reverse, arriving at the kernel as unified `ChannelMessage` events.
+All channel adapters live in the Python SDK. The kernel sends outbound messages through the bridge and router into the sidecar trampoline, which relays them to the appropriate adapter process. Inbound messages arrive via webhook callbacks into `librefang-api`, which converts them into kernel events.
 
-## Modules
+## Module Reference
 
-All modules compile unconditionally — there are no feature gates. The full list declared in `src/lib.rs`:
+Every module compiles unconditionally — there are no feature gates. Verify against `src/lib.rs` for the canonical list.
 
-### Core sidecar infrastructure
+| Module | Purpose |
+|---|---|
+| `sidecar` | Trampoline that spawns and communicates with out-of-process sidecar adapters |
+| `bridge` | Bridge types defining the serialized protocol between kernel and sidecars |
+| `router` | Routes outbound messages to the correct sidecar adapter |
+| `types` | Shared type definitions used across all channel infrastructure |
+| `http_client` | Shared HTTP client with TLS configuration (rustls, system cert roots) |
+| `embedded_sdk` | Embeds `sdk/python/librefang/` into the daemon binary; extracts at runtime and injects `PYTHONPATH` so sidecars work without a prior `pip install` |
+| `rate_limiter` | Per-channel or global rate limiting |
+| `message_truncator` | UTF-16-aware message splitting and truncation for platform limits |
+| `formatter` | Message formatting shared across channels |
+| `sanitizer` | Input sanitization |
+| `attachment_enrich` | Attachment processing and enrichment (image thumbnailing via `image`, PDF text extraction via `pdf-extract`) |
+| `commands` | Channel command handling |
+| `group_history` | Group conversation history management |
+| `message_journal` | Message journaling/logging |
+| `roster` | Channel participant roster management |
+| `thread_ownership` | Thread/conversation ownership tracking |
 
-| Module | Role |
-|--------|------|
-| `sidecar` | Trampoline that launches and communicates with out-of-process Python sidecar adapters |
-| `bridge` | Shared protocol types exchanged across the sidecar boundary |
-| `types` | Channel-related type definitions |
-| `embedded_sdk` | Embeds `sdk/python/librefang/` into the daemon binary and extracts it at runtime |
+## Public Re-exports
 
-### Message processing
-
-| Module | Role |
-|--------|------|
-| `router` | Routes outgoing messages to the correct sidecar adapter |
-| `formatter` | Formats agent replies for channel-specific constraints |
-| `message_truncator` | Splits/truncates messages to platform limits (UTF-16 aware) |
-| `message_journal` | Journals message history for auditing and replay |
-| `sanitizer` | Sanitizes inbound/outbound message content |
-| `attachment_enrich` | Enriches attachment metadata (image dimensions, PDF extraction) |
-| `commands` | Channel-specific command parsing and handling |
-
-### Session and conversation management
-
-| Module | Role |
-|--------|------|
-| `thread_ownership` | Tracks which thread/conversation belongs to which channel session |
-| `group_history` | Manages group chat history context |
-| `roster` | Maintains the roster of known contacts/participants across channels |
-
-### Shared utilities
-
-| Module | Role |
-|--------|------|
-| `http_client` | Shared HTTP client with TLS configuration (rustls, aws_lc_rs backend) |
-| `rate_limiter` | Per-channel rate limiting |
-| `group_history` | Group chat history retrieval |
-
-## Embedded SDK
-
-The `embedded_sdk` module uses the `include_dir` crate to bundle the entire Python SDK (`sdk/python/librefang/`) into the daemon binary. At runtime, it:
-
-1. Computes a content hash of the embedded SDK tree (using `sha2`).
-2. Extracts the SDK to `<home>/sidecar-python/<hash>/`.
-3. Injects that directory into `PYTHONPATH` when spawning sidecar processes.
-
-This means a new user needs only `python3` on `PATH` to enable a sidecar channel — no `pip install` required. When the daemon upgrades and the SDK changes, the new hash causes extraction to a fresh subdirectory.
-
-## Sidecar-Only Policy
-
-This crate enforces a strict policy: **all channel adapters must be out-of-process sidecars**. Adding a new `ChannelAdapter` implementation directly in this crate is rejected by:
-
-- `scripts/hooks/pre-commit` (local)
-- `cargo xtask channel-policy` (CI)
-
-Both check that any file under `crates/librefang-channels/src/` containing `ChannelAdapter for` has a basename present in `channels-allowlist.txt`. That allowlist currently contains only `sidecar` and is documented to only ever shrink. Re-adding a name requires an explicit maintainer decision in a separate reviewed commit.
-
-**To add a new channel:** create a new adapter under `sdk/python/librefang/sidecar/adapters/`. See `docs/architecture/sidecar-channels.md` for the canonical onboarding flow.
-
-## Key Re-exports
-
-Message truncation utilities used across the codebase:
+The crate exposes message-truncation utilities used by sidecar adapters and the kernel:
 
 - `split_to_utf16_chunks`
 - `truncate_to_utf16_limit`
 - `utf16_len`
-- `DISCORD_MESSAGE_LIMIT` (2000)
-- `TELEGRAM_CAPTION_LIMIT` (1024)
-- `TELEGRAM_MESSAGE_LIMIT` (4096)
+- `DISCORD_MESSAGE_LIMIT`
+- `TELEGRAM_CAPTION_LIMIT`
+- `TELEGRAM_MESSAGE_LIMIT`
+
+## Embedded SDK
+
+The `embedded_sdk` module uses the `include_dir` crate to bake `sdk/python/librefang/` into the daemon binary. At runtime it:
+
+1. Computes a SHA-256 content hash of the embedded SDK tree.
+2. Extracts to `<home>/sidecar-python/<hash>/`.
+3. Injects that directory into `PYTHONPATH` when spawning sidecar processes.
+
+This means a new installation with only `python3` on `PATH` can run sidecar channels without first installing the SDK via pip. A daemon upgrade with a changed SDK produces a new hash, so it extracts to a fresh subdirectory without conflicting with the previous version.
+
+## Shared HTTP Client
+
+`http_client` builds a `reqwest` client configured with rustls (using the `aws_lc_rs` crypto backend) and loads certificate roots from both `webpki-roots` and `rustls-native-certs`. All sidecars and in-crate HTTP consumers share this client.
+
+## Sidecar-Only Policy
+
+**Adding a new channel adapter as a Rust module in this crate is rejected by CI.** Two enforcement points:
+
+1. **Pre-commit hook** (`scripts/hooks/pre-commit`) — scans files under `crates/librefang-channels/src/` for `ChannelAdapter for` implementations.
+2. **CI check** (`cargo xtask channel-policy`) — same scan in CI.
+
+Both reject any file whose basename is not listed in `src/channels-allowlist.txt`. That allowlist currently contains only `sidecar` and is documented to only ever shrink. Adding a name back requires an explicit maintainer decision in a separate reviewed commit.
+
+To add a new channel, create a Python sidecar adapter under `sdk/python/librefang/sidecar/adapters/`. See `docs/architecture/sidecar-channels.md` for the canonical onboarding flow.
+
+## Cross-cutting Concerns
+
+These are documented in detail elsewhere — this crate's sources consume them but do not define the contracts:
+
+- **Webhook HMAC verification** — runs inside each Python sidecar, not in this crate.
+- **SSRF guards on `WEBHOOK_CALLBACK_URL`** — enforced at the API boundary.
+- **`SessionId::for_channel` contract** — defined in `librefang-types`.
+- **Boundary with `librefang-kernel` / `librefang-runtime`** — documented in the top-level `CLAUDE.md`.
 
 ## Dependencies
 
-The crate depends on `librefang-types` for shared domain types and a standard async runtime stack (`tokio`, `futures`, `async-trait`). Notable dependencies:
+Key dependencies and why they're here:
 
-- **rustls** — TLS provider for the shared HTTP client, using the default `aws_lc_rs` backend (no extra feature flags).
-- **reqwest** — the HTTP client itself.
-- **axum** — used for inbound webhook receiver endpoints in the sidecar trampoline.
-- **image** — JPEG/PNG/WebP processing for attachment enrichment (no default features, only needed decoders).
-- **pdf-extract** — text extraction from PDF attachments.
-- **subtle** — constant-time comparison for HMAC-style operations at the bridge boundary.
+| Dependency | Consumer |
+|---|---|
+| `librefang-types` | Shared domain types |
+| `reqwest` + `rustls` + `webpki-roots` + `rustls-native-certs` | Shared HTTP client |
+| `axum` | Sidecar communication endpoints |
+| `image` (jpeg, png, webp) | `attachment_enrich` thumbnailing |
+| `pdf-extract` | `attachment_enrich` PDF text extraction |
+| `include_dir` + `sha2` | `embedded_sdk` bundling and content hashing |
+| `dashmap` | Concurrent maps in rate limiter, roster |
+| `tokio` + `tokio-stream` + `futures` | Async runtime |
+| `subtle` | Constant-time comparison |
 
-Dependencies that were **removed** during the sidecar migration (their consumers moved to Python sidecars):
+## Historical Context
 
-- `hmac`, `sha1` — webhook signature verification (now in sidecars)
-- `aes`, `cbc` — AES-CBC envelope decryption for WeCom/Feishu payloads
-- `tokio-tungstenite` — WebSocket gateway connections (Socket Mode, etc.)
-- `lettre`, `imap`, `mailparse` — email adapter
-- `rsa` — Google Chat service account JWT signing
-- `hex`, `html-escape`, `urlencoding`, `zeroize` — no remaining in-crate callers
-
-## Cross-Cutting Concerns
-
-The following topics are documented in the top-level `CLAUDE.md` and in the live sidecar adapter sources rather than here, to avoid duplication drift:
-
-- Webhook HMAC verification (runs inside each Python sidecar)
-- SSRF guards on `WEBHOOK_CALLBACK_URL`
-- `SessionId::for_channel` contract
-- Boundary contracts with `librefang-kernel` and `librefang-runtime`
-
-Refer to `docs/architecture/sidecar-channels.md` and `CONTRIBUTING.md` for authoritative details.
+Previous versions of this crate contained in-process channel adapters gated behind cargo features (`channel-webhook`, `channel-email`, `channel-telegram`, etc.) with an `all-channels` aggregate flag. These were progressively migrated to Python sidecars. The `Cargo.toml` no longer declares any features (`default = []`), and dependencies that only served in-process adapters (`hmac`, `sha1`, `aes`, `cbc`, `tokio-tungstenite`, `lettre`, `imap`, `rsa`, `hex`, `html-escape`, `urlencoding`, `zeroize`) have been removed.

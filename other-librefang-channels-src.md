@@ -2,78 +2,75 @@
 
 # librefang-channels-src — Channel Adapter Allowlist
 
-## Purpose
+## Overview
 
-This module contains a single file, `channels-allowlist.txt`, which acts as a **policy ratchet** governing which channel adapters may be compiled in-process within the `librefang-channels` crate. It enforces LibreFang's **sidecar-first architecture**: all new channel adapters must be implemented as out-of-process sidecar adapters, not as in-process modules.
+`librefang-channels/src/channels-allowlist.txt` is a **policy ratchet** that controls which channel adapters may be compiled in-process. It is the single source of truth enforced by both the pre-commit hook and the CI job `cargo xtask channel-policy`.
 
-The allowlist exists to grandfather in adapters that predate this policy. It is not a security boundary — it is a development guardrail.
+The file has no runtime behaviour — it is never loaded at build time or at run time. It exists purely as a static reference consumed by the CI/pre-commit tooling.
 
-## How It Works
+## Sidecar-First Policy
 
-### Enforcement Points
+LibreFang mandates that **all new channel adapters ship as out-of-process sidecars**. Out-of-process adapters:
 
-Two mechanisms read this file and reject violations:
+- Run in their own process, communicating with the core over a defined IPC protocol.
+- Live under `librefang.sidecar.adapters.*` in the SDK, or follow the template in `examples/sidecar-channel-python/adapter.py`.
+- Can be written in any language that speaks the sidecar protocol.
 
-1. **Pre-commit hook** — runs locally before a commit is finalized.
-2. **`cargo xtask channel-policy`** — executed in CI on every pull request.
+The allowlist exists solely to **grandfather** the small set of in-process adapters that predate this policy.
 
-Both check every file under `crates/librefang-channels/src/` (both `<name>.rs` and `<name>/*.rs` patterns). If a file contains the token `ChannelAdapter for` and its basename (without `.rs`) is **not** listed in `channels-allowlist.txt`, the check fails.
+## How Enforcement Works
 
-### Current Allowlist
+On every pull request (and locally via pre-commit), the `cargo xtask channel-policy` task performs a static analysis:
 
-```
-sidecar
-```
-
-Only the `sidecar` module is permitted to contain an in-process `ChannelAdapter` implementation. This is the bootstrap/bridge module that connects the in-process world to the sidecar world.
-
-## Policy Rules
-
-| Rule | Detail |
-|---|---|
-| **List only shrinks** | When an adapter is migrated to a sidecar and its source module deleted, its name is removed from this file. |
-| **No re-addition** | Once a name is removed, it can never be reintroduced without explicit maintainer approval. |
-| **One name per line** | Basenames only — no `.rs` extension. Entries are kept sorted alphabetically. |
-
-## Known Limitations
-
-The detection is text-based: it looks for the literal string `ChannelAdapter for` in source files. The following cases are **not** caught:
-
-- **Macro-generated implementations.** A proc macro that expands to `impl ChannelAdapter for X` will not trigger the check.
-- **New adapters in already-allowlisted files.** Adding a second `ChannelAdapter for Y` inside a file whose basename is already listed will pass the check.
-
-These are accepted gaps. The allowlist is a ratchet to prevent *growth*, not a comprehensive audit tool.
-
-## Migration Path for Contributors
-
-When migrating an in-process adapter to a sidecar:
-
-1. Implement the adapter as an out-of-process sidecar (see `librefang.sidecar.adapters.*` in the SDK or `examples/sidecar-channel-python/adapter.py` for a generic template).
-2. Delete the in-process module (`crates/librefang-channels/src/<name>.rs` or `crates/librefang-channels/src/<name>/`).
-3. Remove the module's basename from `channels-allowlist.txt`.
-4. Verify that `cargo xtask channel-policy` passes.
+1. Scans every file under `crates/librefang-channels/src/` — both `<name>.rs` and `<name>/*.rs` patterns.
+2. Looks for Rust `ChannelAdapter for` impl blocks inside those files.
+3. Extracts the file's basename (without `.rs`).
+4. Rejects the PR if the basename is **not** present in `channels-allowlist.txt.
 
 ```mermaid
 flowchart LR
-    A[In-process adapter] -->|migrate| B[Sidecar adapter]
-    A -->|delete source| C[Remove module]
-    C -->|shrink| D[channels-allowlist.txt]
-    B --> E[SDK: librefang.sidecar.adapters]
+    PR[PR opened] --> CI[cargo xtask channel-policy]
+    CI --> Scan[Scan src/ for ChannelAdapter for]
+    Scan --> Check{Basename in allowlist?}
+    Check -- Yes --> Pass[CI passes]
+    Check -- No --> Fail[CI rejects PR]
 ```
 
-## Relationship to the Codebase
+## File Format
 
-```
-librefang-channels/
-└── src/
-    ├── channels-allowlist.txt   ← this file (policy)
-    ├── sidecar.rs               ← only allowlisted in-process module
-    └── ...
-```
+- **One basename per line**, without the `.rs` extension.
+- Lines beginning with `#` are comments; blank lines are ignored.
+- Entries must be kept **sorted alphabetically**.
 
-The allowlist is referenced by:
-- **Pre-commit hooks** — local enforcement.
-- **`xtask channel-policy`** — CI enforcement.
-- **Contributor workflow** — anyone adding or migrating channel adapters.
+### Current Entries
 
-Out-of-process adapters live outside this crate entirely and are not subject to this allowlist. They interact with LibreFang through the sidecar protocol defined in the SDK.
+| Basename | Notes |
+|----------|-------|
+| `sidecar` | The sidecar bridge adapter itself |
+
+## Policy Rules
+
+### The list only ever shrinks
+
+When an in-process adapter is migrated to a sidecar and its source module is deleted, its entry is removed from the allowlist. This prevents silent reintroduction of in-process adapters in future PRs.
+
+### Adding a name back requires maintainer approval
+
+Re-adding a previously removed entry — or introducing a brand-new one — is not routine and requires explicit sign-off from a maintainer.
+
+### Known limitations
+
+- **Macro-generated impls** are not detected. If a `ChannelAdapter for` impl is produced by a macro invocation inside an already-allowlisted file, the tooling will not flag it.
+- **New adapters inside allowlisted files** likewise pass undetected, because enforcement operates at the file-basename level.
+
+This is intentional. The allowlist is a **policy ratchet**, not a security boundary.
+
+## Related Code
+
+| Location | Purpose |
+|----------|---------|
+| `crates/librefang-channels/src/<name>.rs` | In-process adapter modules under the allowlist's jurisdiction |
+| `librefang.sidecar.adapters.*` (SDK) | Out-of-process sidecar adapter interface |
+| `examples/sidecar-channel-python/adapter.py` | Generic sidecar adapter template |
+| `cargo xtask channel-policy` | CI enforcement task that reads this allowlist |
+| Pre-commit hook | Local enforcement before push |

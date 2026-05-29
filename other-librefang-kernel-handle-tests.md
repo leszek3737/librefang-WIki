@@ -1,108 +1,107 @@
 # Other — librefang-kernel-handle-tests
 
-# librefang-kernel-handle — Integration Tests
+# librefang-kernel-handle Tests
 
 ## Purpose
 
-This test module validates the **default trait method implementations** provided by `librefang-kernel-handle`. The crate defines a large surface of kernel capability traits (`AgentControl`, `MemoryAccess`, `TaskQueue`, etc.) where most methods carry default implementations so that downstream kernel adapters only override the capabilities they actually support. These tests ensure those defaults behave correctly and that higher-level convenience methods correctly delegate to their lower-level counterparts.
+This is the integration test suite for the `librefang-kernel-handle` crate. It validates the **default method implementations** provided by the kernel handle traits — ensuring that delegating methods, fallback return values, and error behaviors are correct and remain stable across refactors.
+
+The tests do not test a real kernel. Instead, they build minimal stub implementors of each trait and assert the behavior of the **provided (default) method bodies** that ship inside the trait definitions.
+
+## Architecture
+
+```mermaid
+graph TD
+    subgraph "Test Files"
+        DA[defaults_approval]
+        DD[defaults_delegation]
+        DR[defaults_returns]
+        ZC[send_channel_file_data_zero_copy]
+    end
+
+    subgraph "Traits Under Test"
+        AG[ApprovalGate]
+        TP[ToolPolicy]
+        AC[AgentControl]
+        CS[ChannelSender]
+        CC[CronControl]
+        WA[WikiAccess]
+    end
+
+    DA --> AG
+    DA --> TP
+    DD --> AC
+    DD --> CS
+    DR --> TP
+    DR --> CC
+    DR --> WA
+    ZC --> CS
+```
 
 ## Test Files
 
-| File | Focus |
-|------|-------|
-| `defaults_approval.rs` | Default gating decisions — approval and tool denial |
-| `defaults_delegation.rs` | Convenience methods delegate to base trait methods |
-| `defaults_returns.rs` | Default return values, error variants, and configuration constants |
-| `send_channel_file_data_zero_copy.rs` | Regression test for zero-copy `Bytes` semantics (#3553) |
+### `defaults_approval.rs`
 
-## Test Strategy
+Validates default implementations for approval and tool-policy gates when a kernel does **not** override them.
 
-Every test file follows the same pattern:
+| Test | Trait | Asserted Default |
+|------|-------|-----------------|
+| `test_request_approval_default_auto_approves` | `ApprovalGate` | `request_approval()` returns `ApprovalDecision::Approved` |
+| `test_is_tool_denied_with_context_default_false` | `ToolPolicy` | `is_tool_denied_with_context()` returns `false` |
+| `test_requires_approval_default_false` | `ApprovalGate` | `requires_approval()` returns `false` |
 
-1. **Define a stub struct** (e.g., `NoopKernelHandle`, `TrackingSendHandle`) that implements all required kernel traits.
-2. Most trait methods are given no-op or error-returning bodies — the tests never call these.
-3. Methods that *are* under test are either left as the **default implementation** (to verify its behavior) or instrumented with an `AtomicBool` (to verify delegation).
-4. The test asserts on the return value or on whether the base method was invoked.
+Uses a single `NoopKernelHandle` stub where every required method returns `Err("not implemented")`.
 
-This approach avoids depending on a real kernel runtime while exercising the trait dispatch layer that production code uses.
+### `defaults_delegation.rs`
 
-## Default Behavior Verified
+Proves that convenience methods delegate to their primitive counterparts. Each test uses an `AtomicBool` inside the stub to detect whether the base method was actually called.
 
-### Approval and Tool Policy (`defaults_approval.rs`)
+| Test | Caller → Callee | Mechanism |
+|------|-----------------|-----------|
+| `test_send_to_agent_as_delegates_to_send_to_agent` | `send_to_agent_as` → `send_to_agent` | `TrackingSendHandle.send_called` |
+| `test_spawn_agent_checked_delegates_to_spawn_agent` | `spawn_agent_checked` → `spawn_agent` | `TrackingSpawnHandle.spawn_called` |
+| `test_requires_approval_with_context_delegates_to_requires_approval` | `requires_approval_with_context` → `requires_approval` | `TrackingApprovalHandle.approval_checked` |
+| `test_send_to_agent_with_key_delegates_to_send_to_agent` | `send_to_agent_with_key` → `send_to_agent` | `TrackingSendHandle.send_called` |
+| `test_send_to_agent_as_with_key_delegates_to_send_to_agent_as` | `send_to_agent_as_with_key` → `send_to_agent_as` → `send_to_agent` | `TrackingSendHandle.send_called` |
 
-The default implementations create a **permissive** execution environment:
+The key insight: `send_to_agent_as_with_key` chains through `send_to_agent_as`, which itself falls through to `send_to_agent`. The test confirms the full delegation chain reaches the base method.
 
-| Method | Default | Rationale |
-|--------|---------|-----------|
-| `request_approval` | `ApprovalDecision::Approved` | Auto-approve when no approval backend is configured |
-| `is_tool_denied_with_context` | `false` | No tools are denied in the absence of a policy |
-| `requires_approval` | `false` | No tools require human sign-off by default |
+### `defaults_returns.rs`
 
-### Delegation Chains (`defaults_delegation.rs`)
+Validates default return values for traits that provide sensible fallbacks. Uses `NoopKernelHandle` where all required methods error.
 
-Several trait methods exist as convenience wrappers that delegate to a simpler base method. Each test uses an `AtomicBool` to confirm the base method was actually called:
+| Test | Trait Method | Expected Return |
+|------|-------------|-----------------|
+| `test_resolve_user_tool_decision_default_allow` | `ToolPolicy::resolve_user_tool_decision` | `UserToolGate::Allow` |
+| `test_memory_acl_for_sender_default_none` | `MemoryAccess::memory_acl_for_sender` | `None` |
+| `test_cron_defaults_return_errors` | `CronControl::cron_create`, `cron_list`, `cron_cancel` | `KernelOpError::Unavailable("Cron scheduler")` |
+| `test_tool_timeout_defaults` | `ToolPolicy::tool_timeout_secs`, `tool_timeout_secs_for` | `120` |
+| `test_max_agent_call_depth_default` | `ToolPolicy::max_agent_call_depth` | `5` |
+| `test_workspace_prefix_defaults_empty` | `ToolPolicy::readonly_workspace_prefixes`, `named_workspace_prefixes` | empty `Vec` |
+| `test_wiki_access_defaults_return_unavailable_with_method_name` | `WikiAccess::wiki_get`, `wiki_search`, `wiki_write` | `KernelOpError::Unavailable("wiki_get")` etc. |
 
-```
-send_to_agent_as(agent, msg, parent)
-  └─► send_to_agent(agent, msg)
+The cron and wiki tests specifically match on the `KernelOpError::Unavailable` variant with its capability name, ensuring callers can programmatically distinguish *which* capability is missing rather than string-matching error messages.
 
-send_to_agent_as_with_key(agent, msg, parent, key)
-  └─► send_to_agent_as(agent, msg, parent)
-       └─► send_to_agent(agent, msg)
+### `send_channel_file_data_zero_copy.rs`
 
-send_to_agent_with_key(agent, msg, key)
-  └─► send_to_agent(agent, msg)
+Regression test for issue #3553. Validates that `ChannelSender::send_channel_file_data` accepts `bytes::Bytes` without copying the underlying buffer.
 
-spawn_agent_checked(toml, parent, capabilities)
-  └─► spawn_agent(toml, parent)
+Three tests:
 
-requires_approval_with_context(tool, sender, channel)
-  └─► requires_approval(tool)
-```
+1. **`cloning_bytes_shares_underlying_allocation`** — Confirms that `Bytes::clone()` is a reference-count bump, not a deep copy. Clones a 10 MiB payload and asserts all clones share the same pointer address.
 
-The `TrackingSendHandle`, `TrackingSpawnHandle`, and `TrackingApprovalHandle` stubs each embed a single `AtomicBool` to detect whether the leaf method fires. The test passes only if the flag is set **and** the return value propagates correctly.
+2. **`send_channel_file_data_does_not_copy_buffer`** — Uses `CapturingFileKernel` which records the pointer address and length of received `Bytes`. The test clones `Bytes` at the call site (simulating retry/metering wrappers) and asserts the kernel received the same allocation.
 
-### Return Values and Error Variants (`defaults_returns.rs`)
+3. **`vec_to_bytes_round_trip_is_zero_copy_for_unique_bytes`** — Pins the `Vec<u8> → Bytes → Vec<u8>` round-trip as O(1) when `Bytes` uniquely owns its allocation, so future `bytes` crate changes are caught.
 
-Default implementations for traits that require a kernel backend return structured errors rather than panicking:
+## Stub Implementor Pattern
 
-| Trait | Method | Default Return |
-|-------|--------|---------------|
-| `ToolPolicy` | `resolve_user_tool_decision` | `UserToolGate::Allow` |
-| `MemoryAccess` | `memory_acl_for_sender` | `None` |
-| `ToolPolicy` | `tool_timeout_secs` / `tool_timeout_secs_for` | `120` (seconds) |
-| `ToolPolicy` | `max_agent_call_depth` | `5` |
-| `ToolPolicy` | `readonly_workspace_prefixes` / `named_workspace_prefixes` | empty `Vec` |
-| `CronControl` | `cron_create`, `cron_list`, `cron_cancel` | `Err(KernelOpError::Unavailable("Cron scheduler"))` |
-| `WikiAccess` | `wiki_get` | `Err(KernelOpError::Unavailable("wiki_get"))` |
-| `WikiAccess` | `wiki_search` | `Err(KernelOpError::Unavailable("wiki_search"))` |
-| `WikiAccess` | `wiki_write` | `Err(KernelOpError::Unavailable("wiki_write"))` |
+Every test file builds one or more stub structs that implement all kernel handle traits. The pattern is:
 
-The `KernelOpError::Unavailable` variant carries a **capability name** string, enabling callers to match on the specific unavailable subsystem rather than parsing error messages. The wiki methods each report their own verb (`"wiki_get"`, `"wiki_search"`, `"wiki_write"`) so audit logs can identify which entry point was invoked while the vault was disabled.
+- **Required methods**: Return `Err("not implemented")` or `Ok(default)` depending on whether the test needs them to succeed.
+- **Marker traits** (`CronControl`, `HandsControl`, `A2ARegistry`, `PromptStore`, `WorkflowRunner`, `GoalControl`, `ToolPolicy`): Empty `impl` blocks relying entirely on default method bodies.
+- **Tracking variants**: Some stubs (`TrackingSendHandle`, `TrackingSpawnHandle`, `TrackingApprovalHandle`) embed `AtomicBool` fields to detect whether a specific base method was invoked, proving delegation occurred.
 
-### Zero-Copy File Transfer (`send_channel_file_data_zero_copy.rs`)
+## Relationship to `librefang-kernel-handle`
 
-Regression test for **#3553**. The `ChannelSender::send_channel_file_data` method accepts `bytes::Bytes` instead of `Vec<u8>`. This matters because channel adapters (retry wrappers, metering, fan-out) clone the buffer, and `Bytes::clone()` is a reference-count bump — not a heap allocation.
-
-Three properties are verified:
-
-1. **Cloning shares the allocation** — Multiple `Bytes::clone()` calls produce handles pointing at the same underlying memory address.
-2. **The kernel sees the caller's allocation** — `CapturingFileKernel` records the pointer passed into `send_channel_file_data`. The test confirms it matches the address the caller held (after `.clone()`), proving no silent copy occurred at the trait boundary.
-3. **`Vec ↔ Bytes` round-trip is O(1)** — When `Bytes` uniquely owns its allocation, `Vec::from(bytes)` reuses the same pointer. This pins the `bytes` crate vtable behavior documented for 1.x.
-
-```rust
-// The critical assertion — clone at the call site, kernel sees the same address
-kernel
-    .send_channel_file_data("telegram", "user@example", original.clone(), ...)
-    .await;
-
-assert_eq!(seen_addr, expected_addr);
-```
-
-## How to Add a New Default-Method Test
-
-1. Create or reuse a stub struct in the appropriate test file.
-2. Implement all required traits. Boilerplate-heavy traits (`MemoryAccess`, `TaskQueue`, `KnowledgeGraph`, etc.) can return `Err("not used".into())` since they won't be called.
-3. If testing delegation, add an `AtomicBool` field to your stub and set it in the base method.
-4. If testing a return value, leave the method as the default impl and assert on the result.
-5. For `Unavailable` error variants, pattern-match on `KernelOpError::Unavailable(capability_name)`.
+The parent crate defines the kernel handle traits with **provided methods** that offer sensible defaults. These tests are the correctness gate for those defaults. When adding a new default method to any trait in `librefang-kernel-handle`, a corresponding test should be added here to pin its behavior. The stubs must also be updated to satisfy any new required trait methods.
