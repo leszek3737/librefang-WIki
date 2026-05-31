@@ -1,176 +1,140 @@
 # Kernel Core — librefang-kernel-metering-src
 
-# Kernel Core — `librefang-kernel-metering`
+# Kernel Core — Metering Engine (`librefang-kernel-metering`)
 
-Cost-tracking and quota-enforcement engine for LLM calls. Every request that reaches an LLM provider passes through this module to record spend and verify that none of the configured budget ceilings have been breached.
+Tracks LLM call costs and enforces spending quotas across four scopes: **global**, **per-agent**, **per-provider**, and **per-user**. All persistent data flows through a SQLite-backed `UsageStore`; an in-memory reservation ledger prevents concurrent requests from collectively overshooting caps before their costs settle.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    Caller["Kernel / Trigger dispatch"] --> Reserve["reserve_global_budget()"]
-    Reserve --> Ledger["CostReservationLedger<br/>(in-process Mutex&lt;f64&gt;)"]
-    Reserve --> UsageStore["UsageStore<br/>(SQLite via librefang-memory)"]
-    Caller -->|"dispatch LLM call"| LLM["Provider"]
-    LLM -->|"response + usage"| Record["check_all_and_record()"]
-    Record --> UsageStore
-    Record -->|"on provider cap breach"| Exhaustion["ProviderExhaustionStore<br/>(shared with FallbackChain)"]
-    Reserve -->|"MeteringReservation"| Caller
-    Caller -->|"settle() / release()"| Ledger
+    Caller -->|"1. reserve_global_budget()"| ME[MeteringEngine]
+    ME -->|estimated_usd| RL[CostReservationLedger]
+    RL -->|Mutex| RESERVED["reserved_usd (f64)"]
+    ME -->|"2. dispatch LLM call"| LLM[LLM Provider]
+    LLM -->|usage| ME
+    ME -->|"3. settle() or release()"| RL
+    ME -->|"check_all_and_record()"| US[UsageStore (SQLite)]
+    ME -->|"flag_provider_budget_exhausted()"| PES[ProviderExhaustionStore]
+    PES -->|skip exhausted provider| FC[FallbackChain]
 ```
 
-The engine sits between the kernel's trigger-dispatch loop and the LLM provider layer. It does **not** call LLMs itself — it gates and records.
+## Budget Enforcement Scopes
 
-## Core Types
+| Scope | Methods | Time Windows |
+|---|---|---|
+| Global | `check_global_budget`, `reserve_global_budget`, `check_global_budget_and_record` | hourly, daily, monthly |
+| Per-agent | `check_quota`, `check_quota_and_record` | hourly, daily, monthly |
+| Per-provider | `check_provider_budget` | hourly, daily, monthly + hourly tokens |
+| Per-user | `check_user_budget` | hourly, daily, monthly |
 
-### `MeteringEngine`
+All scopes share the convention that a **zero limit means unlimited** — the corresponding window is skipped during enforcement.
 
-The primary entry point. Holds three pieces of state:
+### Atomic vs. Non-Atomic Checks
 
-| Field | Purpose |
-|-------|---------|
-| `store: Arc<UsageStore>` | SQLite-backed persistent usage store. All settled cost lives here. |
-| `pending: Arc<CostReservationLedger>` | In-memory `Mutex<f64>` tracking reserved-but-unsettled USD. Prevents concurrent-request budget overshoot (#3616). |
-| `exhaustion: Option<ProviderExhaustionStore>` | Shared with the LLM fallback chain. When a per-provider budget cap trips, the provider is flagged as `BudgetExceeded` so subsequent calls skip it entirely (#4807). |
+Non-atomic methods (`check_quota`, `check_global_budget`, `check_provider_budget`, `check_user_budget`) query settled spend from SQLite and return a pass/fail. They are suitable for dashboards and pre-dispatch gating.
 
-Construction uses a builder pattern:
+Atomic methods (`check_quota_and_record`, `check_global_budget_and_record`, `check_all_and_record`) perform the check and the insert inside a **single SQLite transaction**, closing the TOCTOU race where concurrent requests both pass the check before either writes its cost. Use `check_all_and_record` as the preferred post-call recording path — it validates per-agent, global, and per-provider budgets simultaneously.
+
+## In-Flight Cost Reservation
+
+The core concurrency problem (#3616): when N triggers fire simultaneously, they all read the same pre-call total from SQLite, all pass the budget gate, and all commit — producing multi-x overshoots.
+
+`CostReservationLedger` solves this by holding an estimated USD cost for every in-flight LLM call in a single `Mutex<f64>`. The critical section in `check_and_add` performs the limit check and the addition under the same lock acquisition, so the second concurrent caller sees the first's reservation.
+
+### Reservation Lifecycle
+
+1. **Reserve** — call `MeteringEngine::reserve_global_budget(&budget, estimated_usd)` before dispatching the LLM request. Returns a `MeteringReservation`.
+2. **Dispatch** — send the request to the LLM provider.
+3. **Settle or release**:
+   - `reservation.settle()` — the call completed and actual usage was recorded. Releases the estimated hold so the ledger doesn't double-count against the settled SQLite row.
+   - `reservation.release()` — the call failed before incurring cost. Releases the hold immediately.
+   - **Drop guard** — if the reservation is dropped without calling `settle()` or `release()` (e.g. due to a panic), `Drop::drop` releases the hold as a safety net.
+
+`MeteringReservation` is annotated `#[must_use]` so the compiler warns if a reservation is silently discarded.
+
+### Intentional Asymmetry in Comparison Operators
+
+- `reserve_global_budget` uses `>` (strictly greater than) when projecting spend — a single call that exactly reaches the cap is still allowed through.
+- `check_global_budget` (post-call gate) uses `>=` (greater than or equal) — once the limit is fully consumed, no further calls are dispatched.
+
+This ensures a single call at the boundary succeeds while subsequent calls are blocked.
+
+## Provider Exhaustion Integration (#4807)
+
+When a per-provider budget gate refuses a provider, the engine can flag it in a shared `ProviderExhaustionStore` so the LLM fallback chain skips that slot for `DEFAULT_LONG_BACKOFF` without re-dispatching a request that would only be denied again.
 
 ```rust
-let engine = MeteringEngine::new(usage_store)
-    .with_exhaustion_store(shared_exhaustion_store);
+let engine = MeteringEngine::new(store)
+    .with_exhaustion_store(exhaustion_store.clone());
 ```
 
-### `CostReservationLedger` (private)
+Wire the **same** `ProviderExhaustionStore` instance into both the metering engine and the `FallbackChain` so both layers observe a coherent view. Retrieve the store later via `engine.exhaustion_store()` to pass to downstream clients.
 
-An in-process `Mutex<f64>` that holds the total estimated USD for all in-flight LLM calls. The key method is `check_and_add`, which atomically validates a set of budget caps and commits the reservation under a single lock acquisition — closing the check-then-add race described in #3616.
-
-### `MeteringReservation`
-
-A `#[must_use]` RAII token returned by `reserve_global_budget`. It carries the reserved USD estimate and releases it on drop as a safety net (so panics between reserve and settle don't permanently lock the budget). Explicit lifecycle:
-
-- **`settle()`** — call after the LLM response is recorded. Releases the reservation so the in-memory ledger stops double-counting against the now-persisted SQLite row.
-- **`release()`** — call on dispatch failure when no cost was actually incurred.
-- **`Drop`** — defensive fallback. Releases if neither `settle` nor `release` was called.
-
-### `BudgetStatus`
-
-A serializable snapshot of current spend versus configured limits across hourly, daily, and monthly windows. Used by dashboard/API routes.
-
-## Budget Enforcement Layers
-
-The engine enforces four independent budget scopes, each with hourly/daily/monthly windows:
-
-### 1. Global Budget
-
-Applies across all agents and providers.
-
-| Method | When to use |
-|--------|-------------|
-| `reserve_global_budget` | **Pre-call.** Reserves estimated cost in the in-memory ledger. Rejects if `settled + pending + this_call > limit` (uses `>`, not `>=`, so a single call landing exactly at the cap is allowed). |
-| `check_global_budget` | **Post-call or dashboard.** Reads settled spend from SQLite plus current pending. Uses `>=` (reject at limit). The asymmetry with `reserve_global_budget` is intentional: pre-call allows the final call that exactly fills the cap; post-call blocks everything after. |
-| `check_global_budget_and_record` | **Atomic.** Checks and records in a single SQLite transaction. |
-
-### 2. Per-Agent Quota
-
-Each agent has its own `ResourceQuota` with `max_cost_per_hour_usd`, `max_cost_per_day_usd`, `max_cost_per_month_usd`.
-
-- `check_quota(agent_id, quota)` — non-atomic check (pre-call gating or dashboards).
-- `check_quota_and_record(record, quota)` — atomic check + insert in one transaction (closes the TOCTOU race between separate check and record calls).
-
-### 3. Per-Provider Budget
-
-Operator-configured caps in `BudgetConfig.providers`, keyed by provider name. Supports both cost (`max_cost_per_hour_usd`, etc.) and token (`max_tokens_per_hour`) limits.
-
-- `check_provider_budget(provider, budget)` — non-atomic, for pre-dispatch gating. When a cap trips **and** an exhaustion store is wired, the provider is automatically flagged as `BudgetExceeded` for `DEFAULT_LONG_BACKOFF`. The LLM fallback chain reads this flag and skips the provider on subsequent calls instead of attempting a request that would only be denied again.
-- Per-provider limits are also enforced atomically inside `check_all_and_record`.
-
-### 4. Per-User Budget (RBAC M5)
-
-Post-call enforcement keyed by `UserId`. Checked **after** `check_all_and_record` succeeds — the LLM call already happened, so "exceeded" means the *next* call from this user is denied, not that the current one is rolled back.
-
-- `check_user_budget(user_id, budget)`
-
-### Combined Atomic Check
-
-`check_all_and_record(record, quota, budget)` is the preferred post-call method. It checks per-agent quota, global budget, and per-provider budget (including per-provider token limits) in a single SQLite transaction, then inserts the usage record. On failure, no row is inserted.
+The exhaustion flag is set by the private method `flag_provider_budget_exhausted`, which:
+- Logs at `info` level with target `metering`.
+- Calls `store.mark_exhausted(provider, ExhaustionReason::BudgetExceeded, Some(instant + DEFAULT_LONG_BACKOFF))`.
+- Is a no-op when no exhaustion store is attached (backward compatible).
 
 ## Cost Estimation
 
-Two paths exist for estimating USD cost from token counts:
+### Token-to-USD Calculation
 
-### `estimate_cost` (catalog-free)
+The private function `estimate_cost_from_rates` handles all pricing math:
 
-Uses hardcoded default rates ($1.00/M input, $3.00/M output). Exists as a fallback when no catalog is available (unit tests, bootstrapping).
+| Token Type | Pricing |
+|---|---|
+| Regular input | `(tokens / 1M) × input_per_m` |
+| Cache-read input | `(tokens / 1M) × input_per_m × 0.10` |
+| Cache-creation input | `(tokens / 1M) × input_per_m × 1.25` |
+| Output | `(tokens / 1M) × output_per_m` |
 
-### `estimate_cost_with_catalog` (preferred)
+Regular input tokens are derived as `input_tokens.saturating_sub(cache_read + cache_creation)` where the cache sum uses `saturating_add` to prevent overflow from malicious provider responses.
 
-Looks up pricing from the `ModelCatalog`. Falls back to default rates when the model isn't found. Handles a special case for ChatGPT session-auth models (`provider == "chatgpt"`): when catalog pricing is $0/$0 (subscription-based, not token-billed), the function applies the default rates instead so budget enforcement still works with a conservative estimate. Local models with zero pricing remain at $0 — no legacy override.
+### Two Estimation Paths
 
-### Token Pricing Rules
+- **`estimate_cost`** — static method, uses hardcoded default rates ($1/$3 per million tokens). Independent of any catalog. Use in unit tests or when no catalog is available.
+- **`estimate_cost_with_catalog`** — reads pricing from the `ModelCatalog`. Falls back to default rates when the model is unknown. Special-cases ChatGPT session-auth models (provider `"chatgpt"`) that report zero catalog pricing — these use the legacy default rates so budgets still get a conservative non-zero estimate. Subscription-only providers like `alibaba-coding-plan` intentionally report $0 cost.
 
-| Token type | Price multiplier |
-|------------|-----------------|
-| Regular input | 1.0× input rate |
-| Cache-read input | 0.10× input rate |
-| Cache-creation input | 1.25× input rate |
-| Output | 1.0× output rate |
+## Public API Reference
 
-Cache tokens are deducted from the regular input count: `regular_input = input_tokens.saturating_sub(cache_read + cache_creation)`. Both the inner addition and outer subtraction use saturating arithmetic to prevent overflow from malicious or buggy provider responses (audit: `metering-token-overflow`).
+### `MeteringEngine`
 
-## Integration Points
+Constructed via `new(store)` with an optional `with_exhaustion_store(store)` builder call.
 
-### `librefang-memory`
+**Pre-call reservation:**
+- `reserve_global_budget(&budget, estimated_usd) → Result<MeteringReservation>`
+- `pending_reserved_usd() → f64`
 
-The `UsageStore` provides SQLite-backed persistence. Key queries used by this module:
+**Non-atomic quota checks:**
+- `check_quota(agent_id, &quota)`
+- `check_global_budget(&budget)` — includes in-flight pending cost
+- `check_provider_budget(provider, &provider_budget)`
+- `check_user_budget(user_id, &user_budget)`
 
-- `query_hourly` / `query_daily` / `query_monthly` — per-agent spend in time windows.
-- `query_global_hourly` / `query_today_cost` / `query_global_monthly` — global spend.
-- `query_provider_hourly` / `query_provider_daily` / `query_provider_monthly` / `query_provider_tokens_hourly` — per-provider spend.
-- `query_user_hourly` / `query_user_daily` / `query_user_monthly` — per-user spend.
-- `check_all_with_provider_and_record` — atomic multi-scope check + insert.
+**Atomic check-and-record:**
+- `check_quota_and_record(&record, &quota)`
+- `check_global_budget_and_record(&record, &budget)`
+- `check_all_and_record(&record, &quota, &budget)` — preferred post-call path
 
-### `librefang-llm-driver`
+**Cost estimation (static):**
+- `estimate_cost(model, input_tokens, output_tokens, cache_read, cache_creation) → f64`
+- `estimate_cost_with_catalog(&catalog, model, input_tokens, output_tokens, cache_read, cache_creation) → f64`
 
-Only the `exhaustion` module is imported — specifically `ProviderExhaustionStore`, `ExhaustionReason`, and `DEFAULT_LONG_BACKOFF`. The metering engine writes to this store; the fallback chain reads from it. Both layers share the same instance so they observe a coherent view of provider availability.
+**Query and maintenance:**
+- `record(&record)`
+- `budget_status(&budget) → BudgetStatus`
+- `get_summary(agent_id: Option<AgentId>) → UsageSummary`
+- `get_by_model() → Vec<ModelUsage>`
+- `cleanup(days) → usize`
+- `exhaustion_store() → Option<ProviderExhaustionStore>`
 
-### `librefang-types`
+### `BudgetStatus`
 
-Domain types: `AgentId`, `UserId`, `ResourceQuota`, `BudgetConfig`, `ProviderBudget`, `UserBudgetConfig`, `ModelCatalogEntry`, `LibreFangError`.
+Serialized snapshot returned by `budget_status` containing current spend, limits, and utilization percentages for hourly/daily/monthly windows plus the alert threshold and default token limit.
 
-### `librefang-runtime`
+## Concurrency Safety Notes
 
-`ModelCatalog` for pricing lookups. The engine never constructs a catalog itself — callers pass a reference.
-
-## Concurrency Model
-
-`CostReservationLedger` uses a `std::sync::Mutex`. The critical section in `check_and_add` is deliberately tight: it reads the current pending total, validates against all caps, and either commits the addition or returns an error — all under one lock hold. SQLite queries run *outside* the lock because they can be slow and may fail; the settled-spend values they return are monotonic within a time window, so stale reads can only make the gate stricter, not more permissive.
-
-This only synchronizes in-process callers. Two separate processes (or a process + an out-of-band SQL writer) can still race on the settled total. The post-call `check_all_and_record` path provides the SQLite-level atomicity for that case.
-
-## Common Patterns
-
-### Typical pre-call flow
-
-```rust
-let reservation = engine.reserve_global_budget(&budget, estimated_usd)?;
-
-// Check provider-specific budget (also flags exhaustion store on breach).
-engine.check_provider_budget("openai", &provider_budget)?;
-
-match dispatch_llm_call().await {
-    Ok(response) => {
-        let record = build_usage_record(response);
-        engine.check_all_and_record(&record, &agent_quota, &budget)?;
-        engine.check_user_budget(user_id, &user_budget)?;
-        reservation.settle();
-    }
-    Err(_) => {
-        reservation.release();
-    }
-}
-```
-
-### Key asymmetry to remember
-
-- **Pre-call** (`reserve_global_budget`): rejects when `spent + pending + this_call > limit` — the `>` allows one final call that exactly reaches the cap.
-- **Post-call** (`check_global_budget`): rejects when `spent + pending >= limit` — once the limit is fully consumed, nothing else gets through.
+- The in-process `CostReservationLedger` only synchronizes callers within a single process. Multi-process deployments can still race at the SQLite level; the post-call `check_all_and_record` transaction is the authoritative gate for that scenario.
+- SQLite reads in `reserve_global_budget` happen outside the in-memory lock because they can be slow and may fail. Settled spend is monotonic within a time window, so the just-observed value cannot under-count the gate.
+- All arithmetic on token counts from provider wire data uses `saturating_add` and `saturating_sub` to prevent overflow from `u64::MAX/2 + 1` style inputs that previously caused debug panics and silent release-mode wrapping.

@@ -2,45 +2,78 @@
 
 # Agent Runtime
 
-The Agent Runtime is the execution layer that drives LibreFang agents. It encompasses the core agent loop, audit logging, external tool integration, media capabilities, and sandboxed code execution.
+The Agent Runtime module group is the execution backbone of LibreFang. It provides everything needed to run autonomous agent sessions: the core agent loop, audit logging, external tool connectivity via MCP, multi-modal media processing, and sandboxed code execution.
 
-## Sub-modules
-
-| Sub-module | Purpose |
-|---|---|
-| [Core Runtime](librefang-runtime.md) | Agent loop, A2A protocol, context loading, message history, security boundaries, plugin management, provider health |
-| [Audit](librefang-runtime-audit.md) | Merkle hash chain audit trail for tamper-evident logging of security-critical agent actions |
-| [MCP Client](librefang-runtime-mcp.md) | Model Context Protocol client — transport lifecycle, tool discovery, argument validation, taint scanning, and dispatch |
-| [Media](librefang-runtime-media.md) | Provider-agnostic media generation (image, TTS, video, music) and understanding (image description, audio transcription) |
-| [Docker Sandbox](librefang-runtime-sandbox-docker.md) | OS-level isolation for untrusted agent code execution via Docker containers |
-
-## How they fit together
+## Architecture
 
 ```mermaid
-graph LR
-    Core["Core Runtime<br/>(agent loop, A2A)"]
-    Audit["Audit<br/>(merkle log)"]
-    MCP["MCP Client<br/>(external tools)"]
-    Media["Media<br/>(generation & understanding)"]
-    Sandbox["Docker Sandbox<br/>(code isolation)"]
+graph TB
+    subgraph "Consumers"
+        Kernel["librefang-daemon<br/>(kernel)"]
+        API["librefang-api<br/>(API layer)"]
+        CLI["CLI tooling"]
+    end
+
+    subgraph "Agent Runtime"
+        Core["librefang-runtime<br/>Agent Loop & Session Management"]
+        Audit["librefang-runtime-audit<br/>Merkle Audit Trail"]
+        MCP["librefang-runtime-mcp<br/>MCP Client"]
+        Media["librefang-runtime-media<br/>Media Engine"]
+        Sandbox["librefang-runtime-sandbox-docker<br/>Docker Sandbox"]
+    end
+
+    subgraph "External"
+        LLM["LLM Providers"]
+        MCPS["MCP Servers"]
+        Prov["Media Providers<br/>(ElevenLabs, Gemini, Google…)"]
+        Docker["Docker Engine"]
+    end
+
+    Kernel --> Core
+    API --> Core
+    CLI --> Core
 
     Core -->|"tool dispatch"| MCP
-    Core -->|"tool_runner::media"| Media
-    Core -->|"security-critical events"| Audit
-    Core -->|"exec_in_sandbox"| Sandbox
+    Core -->|"media routes/tool_runner"| Media
+    Core -->|"code execution"| Sandbox
+    Core -->|"auditable events"| Audit
+
+    MCP --> MCPS
+    MCP -->|"taint scanning"| Audit
+    Media --> Prov
+    Sandbox --> Docker
 ```
 
-The **Core Runtime** orchestrates everything. During each agent turn, the loop loads per-turn context, assembles prompts (with hook-driven section collection and experiment selection), calls the LLM provider (with retry logic), and processes the response — which may include tool calls. Tool dispatch routes to the appropriate handler:
+## How the Sub-Modules Fit Together
 
-- **MCP Client** handles calls to external tool servers over stdio, SSE, or HTTP transports, with taint scanning and caller-context injection.
-- **Media** handles image generation, TTS, video, and music requests through a driver cache that selects the right provider (ElevenLabs, Gemini, OpenAI, etc.).
-- **Docker Sandbox** executes untrusted code in isolated containers with network isolation, capability dropping, and resource limits.
+The [core runtime](librefang-runtime-src.md) (`librefang-runtime`) owns the agent loop—the cycle of receiving a user message, dispatching to an LLM, executing tools, and returning a response. It handles session health concerns like history trimming, context overflow recovery via the `compactor`, per-turn context loading, and SSRF-hardened outbound networking. The kernel and API layer consume this crate directly; CLI tooling calls into specific subsystems (catalog sync, registry sync, provider health probes) without running the agent loop.
 
-Every security-critical action flows into the **Audit** module, which appends it to a SHA-256 hash chain backed by SQLite — surviving restarts and detectable if tampered.
+When the agent loop executes a tool, it may route through one of three specialized subsystems:
 
-## Key cross-module workflows
+- **[MCP Client](librefang-runtime-mcp-src.md)** (`librefang-runtime-mcp`) — connects the runtime to external MCP tool servers over stdio, SSE, Streamable HTTP, or plain HTTP transports. It handles tool discovery, argument validation, caller context injection, and outbound taint scanning before invoking any external tool.
 
-- **Provider listing and health probing** flows from API routes through the core's `probe_provider_cached` into the shared HTTP/TLS layer, used by both LLM providers and media drivers.
-- **Plugin hooks** are loaded and version-checked by the core's plugin manager, then tested via API routes — the hook system feeds into prompt assembly during the agent loop.
-- **Tool budget enforcement** in the core governs how many tool calls an agent turn can make, applying equally to MCP tools and media tools.
-- **Sandbox validation** is configured through the core's `SandboxConfig`, with the Docker crate enforcing the actual container boundaries.
+- **[Media Engine](librefang-runtime-media-src.md)** (`librefang-runtime-media`) — provides a trait-based driver abstraction for image generation, text-to-speech, video, and music generation across providers (ElevenLabs, Gemini, Google TTS, etc.), plus a media understanding engine for image description and audio transcription. A `MediaDriverCache` manages driver instances keyed by provider alias.
+
+- **[Docker Sandbox](librefang-runtime-sandbox-docker-src.md)** (`librefang-runtime-sandbox-docker`) — isolates agent code execution inside hardened Docker containers with resource limits, network isolation, dropped capabilities, and read-only root filesystems.
+
+The [audit module](librefang-runtime-audit-src.md) (`librefang-runtime-audit`) is the cross-cutting security layer. It maintains a Merkle hash chain where every auditable event—tool calls, sandbox operations, security-sensitive actions—is appended with a SHA-256 hash linking to the previous entry. The chain persists to SQLite (`audit_entries` table, schema V8+) with an optional external anchor file storing the chain tip to detect full table rewrites. The MCP taint scanner feeds into this audit trail via `TaintSink::mcp_tool_call()`.
+
+## Key Workflows
+
+**Agent loop streaming with compression** — `run_agent_loop_streaming` drives the turn cycle. When token estimates (via `estimate_token_count` / `estimate_message_tokens` in the `compactor`) exceed limits, `gateway_compression` applies `drop_oldest_until_under` to trim history while preserving session integrity.
+
+**Plugin hook execution** — Routes call `get_plugin_info` → `load_plugin_manifest` → `version_satisfies` to resolve and validate plugins before invoking hooks.
+
+**MCP tool invocation** — `tool_runner::dispatch` routes to `McpConnection`, which selects a transport, runs arguments through the taint scanner, injects `CallerContext`, and invokes the external tool.
+
+**Sandboxed code execution** — `create_sandbox` validates the image name, config, network, and capabilities, then launches a hardened container. `exec_in_sandbox` validates commands for shell metacharacters before executing inside the container. `destroy_sandbox` tears it down.
+
+**Media generation and understanding** — The `MediaEngine` resolves a provider alias through `MediaDriverCache::get_or_create`, then dispatches to the appropriate driver. For understanding tasks (image description, audio transcription), it handles transcoding (e.g., OGA → OGG Opus) before sending to the provider.
+
+## Consumers
+
+| Consumer | Usage |
+|---|---|
+| `librefang-daemon` | Runs the full agent loop |
+| `librefang-api` | Exposes runtime via HTTP routes |
+| CLI / extensions | Catalog sync, registry sync, provider health probes (no agent loop) |

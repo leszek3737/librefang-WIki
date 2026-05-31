@@ -1,197 +1,255 @@
 # Kernel Core — librefang-kernel-router-src
 
-# Kernel Core — `librefang-kernel-router`
+# Kernel Router (`librefang-kernel-router`)
 
-The router determines which agent or multi-agent workflow should handle an incoming user message. It combines keyword matching (English + CJK), manifest metadata, and optional embedding-based semantic similarity into a single scoring pipeline, then selects the best candidate or falls back to the orchestrator.
+## Purpose
+
+The kernel router dispatches inbound user messages to the best-matching specialist agent template or hand. It combines three scoring signals—hardcoded keyword rules, dynamically loaded manifest metadata, and optional embedding-based semantic similarity—into a single ranked selection. When multiple specialists tie or the intent is ambiguous, the router falls back to the `orchestrator` template for multi-step delegation.
 
 ## Architecture Overview
 
 ```mermaid
 flowchart TD
-    MSG[Incoming Message] --> ASH[auto_select_hand]
-    MSG --> AST[auto_select_template]
+    MSG["Inbound message"] --> HAND["auto_select_hand()"]
+    MSG --> TPL["auto_select_template()"]
 
-    ASH --> HRC[hand_route_candidates]
-    HRC --> HANDS[HAND.toml files]
-    ASH --> SEM_H[semantic_scores]
+    HAND --> HRC["hand_route_candidates()"]
+    HRC --> HDIR["HAND.toml files<br/>(registry/hands/*/)"]
+    HRC --> HRC_CACHE["HandRouteCache"]
 
-    AST --> RULES[TEMPLATE_RULES]
-    AST --> META[auto_select_template_from_metadata]
-    META --> MRC[manifest_route_candidates]
-    MRC --> MANIFESTS[agent.toml files]
+    TPL --> RULES["TEMPLATE_RULES<br/>(builtin keyword rules)"]
+    TPL --> META["auto_select_template_from_metadata()"]
+    META --> MC["manifest_route_candidates()"]
+    MC --> ADIR["agent.toml files<br/>(workspaces/agents/*/)"]
+    MC --> MC_CACHE["ManifestCache"]
 
-    ASH --> RESULT_H[HandSelection]
-    AST --> RESULT_T[TemplateSelection]
+    HAND --> SEM["semantic_scores<br/>(optional, from embeddings)"]
+    TPL --> SEM
+
+    RULES --> RC["RegexCache<br/>(bounded FIFO)"]
+    META --> RC
 ```
-
-Two independent routing paths exist:
-
-| Path | Function | Source of routing data | Selects |
-|---|---|---|---|
-| **Hand routing** | `auto_select_hand` | `HAND.toml` `[routing]` sections | A hand (multi-agent workflow) |
-| **Template routing** | `auto_select_template` | Hardcoded `TEMPLATE_RULES` + `agent.toml` metadata | A single agent template |
-
-Both paths use the same scoring model and can blend in embedding similarity scores for cross-lingual support.
 
 ## Public API
 
-### `auto_select_hand(message, semantic_scores) -> HandSelection`
+### `auto_select_template(message, agents_dir, semantic_scores) → TemplateSelection`
 
-Routes a message to a hand. Loads candidate phrases from all installed `HAND.toml` files under `$LIBREFANG_HOME/registry/hands/`, scores each candidate, and returns the best match.
+The primary entry point for template routing. Given a user message, the agents directory on disk, and optional embedding similarity scores, returns a [`TemplateSelection`](#template-selection) identifying the best-matching agent template.
 
-```rust
-let sel = auto_select_hand("deploy to production", None);
-// HandSelection { hand_id: Some("devops"), reason: "matched devops via deploy", score: 6 }
+**Routing priority:**
 
-let sel = auto_select_hand("こんにちは", None);
-// HandSelection { hand_id: None, reason: "no hand match", score: 0 }
-```
+1.  **Builtin keyword rules** (`TEMPLATE_RULES`) — curated regex patterns for 29 specialist templates, bilingual (English + Chinese).
+2.  **Manifest metadata** — per-agent `[metadata.routing]` aliases read from `agent.toml` files on disk.
+3.  **Semantic-only fallback** — when no keywords match, templates whose embedding cosine similarity exceeds `SEMANTIC_ONLY_THRESHOLD` (0.55) become candidates.
+4.  **Orchestrator default** — if nothing matches, the message routes to `orchestrator`.
 
-When `semantic_scores` is provided, cosine similarity values (0.0–1.0) are converted to bonus points (up to `MAX_SEMANTIC_BONUS = 5`) and added to the keyword score. This enables routing messages in languages not covered by keyword rules.
+**Multi-domain detection:** When two different templates both score above zero and the message contains tokens like "同时", "分别", "协作", "多个", "multi", or "together", the router re-routes to `orchestrator` instead of picking a single winner.
 
-### `auto_select_template(message, agents_dir, semantic_scores) -> TemplateSelection`
+### `auto_select_hand(message, semantic_scores) → HandSelection`
 
-Routes a message to a template agent. Runs two sub-pipelines in parallel:
+Routes a message to a [hand](#hand-routing) (a named group of agents). Loads routing phrases from `HAND.toml` files under the configured home directory. Returns [`HandSelection`](#hand-selection) with the top-scoring hand or `None` if no hand meets the minimum score threshold (`MIN_HAND_SCORE = 2`).
 
-1. **Hardcoded rules** (`TEMPLATE_RULES`) — curated regex patterns for ~30 built-in templates covering both English and CJK keywords.
-2. **Manifest metadata** (`auto_select_template_from_metadata`) — dynamically loaded from `agent.toml` files, using user-configured aliases, auto-generated phrases from name/description/tags, and weak tokens.
+### `set_hand_route_home_dir(home_dir)`
 
-If multiple specialties score equally and the message contains multi-domain cues (e.g. "同时", "协作", "multi"), the result escalates to `"orchestrator"`.
+Sets the LibreFang home directory used to discover `HAND.toml` files. Must be called at startup before any hand routing occurs. Falls back to `$LIBREFANG_HOME`, then `~/.librefang`.
 
-Returns a default of `"orchestrator"` when no specialist matches.
+### `invalidate_manifest_cache()` / `invalidate_hand_route_cache()`
 
-### `load_template_manifest(home_dir, template) -> Result<AgentManifest, String>`
+Clear the internal caches so subsequent routing calls rebuild candidates from disk. Call after config hot-reload, agent install/uninstall, or hand definition changes.
 
-Loads and parses an `agent.toml` for the given template name from `$home_dir/workspaces/agents/<template>/`.
+### `load_template_manifest(home_dir, template) → Result<AgentManifest, String>`
 
-### `all_template_descriptions(agents_dir) -> Vec<(String, String)>`
+Reads and parses `workspaces/agents/<template>/agent.toml`. Validates the template name is safe (alphanumeric, `-`, `_` only).
 
-Returns `(template_name, embed_text)` for every routable template. The embed text combines name, description, and tags — designed for computing embedding vectors for semantic routing. Templates in `ROUTING_EXCLUDED_TEMPLATES` (currently `["assistant"]`) are excluded.
+### `all_template_descriptions(agents_dir) → Vec<(String, String)>`
 
-### Cache Invalidation
+Returns `(template_name, embed_text)` pairs for every routable template (excludes `assistant`). The embed text is formatted as `"<name>: <description>. Tags: <tags>"` — designed for computing embedding vectors for semantic routing.
 
-```rust
-pub fn set_hand_route_home_dir(home_dir: &Path)  // set the base directory for hand loading
-pub fn invalidate_hand_route_cache()              // clear hand candidate cache
-pub fn invalidate_manifest_cache()                // clear manifest candidate cache
-```
+## Return Types
 
-Call these after config hot-reload, agent install/uninstall, or when the home directory changes.
+### `TemplateSelection`
 
-## Scoring Model
+| Field      | Type     | Description                                                     |
+|------------|----------|-----------------------------------------------------------------|
+| `template` | `String` | Selected template name (e.g., `"coder"`, `"orchestrator"`)      |
+| `reason`   | `String` | Human-readable explanation of why this template was chosen      |
+| `score`    | `usize`  | Aggregate routing score (higher = more confident)               |
 
-All routing uses a three-tier keyword system:
+### `HandSelection`
 
-| Tier | Source | Weight | Constant |
-|---|---|---|---|
-| **Explicit aliases** | `[routing].aliases` / `[routing].strong_aliases` / hardcoded rule `strong` | 6 pts | `EXPLICIT_ALIAS_WEIGHT` |
-| **Generated phrases** | Auto-extracted from name, description, tags | 2 pts | `GENERATED_PHRASE_WEIGHT` |
-| **Weak phrases** | `[routing].weak_aliases` + id-derived tokens | 1 pt | `WEAK_PHRASE_WEIGHT` |
+| Field     | Type            | Description                                              |
+|-----------|-----------------|----------------------------------------------------------|
+| `hand_id` | `Option<String>`| Matched hand ID, or `None` if no hand met the threshold  |
+| `reason`  | `String`        | Explanation of the match or "no hand match"              |
+| `score`   | `usize`         | Aggregate routing score                                  |
 
-Semantic bonus is added on top: `(similarity × 5.0).round()` points, capped at 5.
+## Scoring System
 
-### Hand Routing Threshold
+The router uses a weighted keyword scoring model with an optional semantic bonus:
 
-Hand routing requires a minimum score of `MIN_HAND_SCORE = 2`. A single weak hit (score 1) is too noisy and is rejected. A single strong hit (score 6) always passes.
+| Signal              | Weight constant                | Value |
+|---------------------|-------------------------------|-------|
+| Explicit alias hit  | `EXPLICIT_ALIAS_WEIGHT`       | 6     |
+| Generated phrase hit| `GENERATED_PHRASE_WEIGHT`     | 2     |
+| Weak alias hit      | `WEAK_PHRASE_WEIGHT`          | 1     |
+| Semantic similarity | `MAX_SEMANTIC_BONUS` (scaled) | 0–5   |
 
-### Multi-Domain Escalation (Template Routing)
+For **hand routing**, the minimum score threshold is `MIN_HAND_SCORE = 2`. A single weak hit (score 1) is considered too noisy. For **template routing**, any score > 0 is sufficient, though the highest-scoring template wins.
 
-When the top two template candidates are different and the message contains multi-domain tokens (`"同时"`, `"分别"`, `"协作"`, `"多个"`, `"multi"`, `"together"`), routing escalates to `"orchestrator"` instead of picking one specialist.
+Semantic similarity is blended additively: `bonus = round(similarity × 5.0)`. A cosine similarity of 0.9 adds 5 points; 0.4 adds 2 points.
 
-### Semantic-Only Fallback
+## Template Routing in Detail
 
-When keyword matching produces zero hits, both routing paths check `semantic_scores` for any candidate with similarity ≥ `SEMANTIC_ONLY_THRESHOLD` (0.55). The semantic bonus alone becomes the score, enabling cross-lingual routing without any keyword overlap.
+### Builtin Rules (`TEMPLATE_RULES`)
 
-## Phrase Extraction Pipeline
+29 hardcoded `RouteRule` entries cover the most common specialist intents. Each rule defines:
 
-The router extracts routing phrases from several sources, handling both ASCII and CJK text:
+-   **`target`** — template name (e.g., `"coder"`, `"debugger"`, `"architect"`)
+-   **`strong`** — high-confidence regex patterns (labeled), bilingual
+-   **`weak`** — lower-confidence regex patterns
 
-```
-description/tags → split_phrase_chunks → normalize_phrase_chunk → ascii_phrase_candidates / direct inclusion
-```
+Strong patterns match specific intents ("implement a Rust API", "排查报错"), while weak patterns catch broader signals ("code", "日志"). Both are scored as explicit aliases (weight 6 and 1 respectively) because they are hand-curated.
 
-Key functions:
+### Manifest-Based Routing
 
-- **`description_phrases(text)`** — Splits on punctuation (both ASCII and CJK: `、。，（）—` etc.), strips generic English words (`"the"`, `"helper"`, `"specialist"` etc. from `GENERIC_ENGLISH_WORDS`), and generates phrase candidates.
-- **`tag_phrases(tags)`** — Similar processing for tag strings.
-- **`english_variants(text)`** — For hyphenated names like `"code-reviewer"`, generates `"code reviewer"`, `"code"`, `"reviewer"`.
-- **`ascii_phrase_candidates(text, min_len)`** — Extracts content words ≥ `min_len` chars and bigram windows.
+For templates not covered by builtin rules, routing phrases are extracted from `agent.toml`:
 
-All outputs pass through `dedupe()` which preserves insertion order while removing duplicates.
-
-## Regex Cache
-
-The router compiles regex patterns for keyword matching. To avoid unbounded memory growth (each message could trigger new pattern compilations), patterns are cached in a bounded FIFO structure:
-
-```
-RegexCache {
-    entries: HashMap<String, Option<Regex>>,  // pattern → compiled (or None for invalid)
-    order: VecDeque<String>,                  // insertion order for FIFO eviction
-}
-```
-
-- **Capacity**: `MAX_REGEX_CACHE_ENTRIES = 4096`
-- **Eviction**: FIFO — oldest pattern evicted when capacity is exceeded
-- **Invalid patterns**: Cached as `None` to prevent recompilation floods
-- **Case insensitivity**: All patterns are compiled with `(?i)` prefix
-
-The cache is a global `OnceLock<Mutex<RegexCache>>` accessed via `regex_matches()`.
-
-## Data Sources
-
-### Hand Route Candidates
-
-Loaded from `$LIBREFANG_HOME/registry/hands/*/HAND.toml` using `librefang_hands::registry::parse_hand_toml_with_agents_dir`. Each hand contributes:
-
-- **Strong phrases**: `[routing].aliases` + phrases extracted from `description`
-- **Weak phrases**: `[routing].weak_aliases` + tokens from the hand ID (filtered by length ≥ 3 and not in `GENERIC_ENGLISH_WORDS`)
-
-Parse failures are logged at WARN level and the hand is excluded from routing.
-
-### Manifest Route Candidates
-
-Loaded from `<agents_dir>/<template>/agent.toml`. Each manifest contributes:
-
-- **Explicit aliases**: `[metadata.routing].aliases` + `strong_aliases`
-- **Generated phrases**: English variants of template name + tag phrases + description phrases (unless `exclude_generated = true`)
-- **Weak phrases**: `[metadata.routing].weak_aliases` + ID-derived tokens
-
-The `[metadata.routing]` TOML section supports:
 ```toml
 [metadata.routing]
-aliases = ["release notes"]
+aliases = ["release notes", "changelog generator"]
 weak_aliases = ["changelog"]
 exclude_generated = false
 ```
 
-### Hardcoded Template Rules
+Three phrase tiers are built per template:
 
-`TEMPLATE_RULES` is a static array of `RouteRule` structs, each containing a `target` template name, `strong` regex patterns (label + regex pairs), and `weak` patterns. Each rule supports both English and CJK patterns. These ~30 rules cover built-in templates like `coder`, `debugger`, `architect`, `security-auditor`, `translator`, etc.
+1.  **`explicit_aliases`** — from `[metadata.routing].aliases` and `strong_aliases`. Scored at weight 6.
+2.  **`generated_phrases`** — auto-extracted from the template name, description, and tags (stripping generic English words). Scored at weight 2. Set `exclude_generated = true` to suppress.
+3.  **`weak_phrases`** — from `[metadata.routing].weak_aliases` plus ID-derived tokens (hyphen/split, filtered by length ≥ 3 and not in `GENERIC_ENGLISH_WORDS`). Scored at weight 1.
 
-### Home Directory Resolution
+## Hand Routing in Detail
 
-The hand route home directory is resolved in order:
+Hands are higher-level agent groupings defined by `HAND.toml` files in `<home>/registry/hands/<hand-id>/HAND.toml`. The router:
 
-1. Explicitly set via `set_hand_route_home_dir()`
-2. `LIBREFANG_HOME` environment variable
-3. `~/.librefang` (falling back to temp dir if no home exists)
+1.  Scans all `HAND.toml` files in `registry/hands/`.
+2.  Parses each via `librefang_hands::registry::parse_hand_toml_with_agents_dir` (passing the agents directory so `base = "<template>"` declarations resolve correctly).
+3.  Extracts strong phrases (explicit `aliases` + description-derived phrases) and weak phrases (explicit `weak_aliases` + ID-derived tokens).
+4.  Scores each hand against the message using the same weighted keyword model.
 
-## Return Types
+Parse failures are logged at `WARN` level so misconfigured hands are visible without crashing the router.
+
+## Phrase Extraction
+
+The router extracts routing phrases from free-text descriptions, tags, and template names:
+
+-   **`description_phrases(text)`** — Splits on CJK and ASCII punctuation, filters generic English stop words, and generates phrase candidates. English text produces word-level and bigram candidates; CJK text is kept whole (2–32 characters).
+-   **`tag_phrases(tags)`** — Same logic applied to individual tags.
+-   **`english_variants(text)`** — For hyphenated names like `"code-reviewer"`, generates `["code-reviewer", "code reviewer", "code", "reviewer"]`.
+-   **`ascii_phrase_candidates(text, min_len)`** — Extracts content words (≥ `min_len` characters, not in stop list) and adjacent-word bigrams.
+
+Generic English words (the `GENERIC_ENGLISH_WORDS` list of 44 entries: "a", "agent", "helper", "the", etc.) are stripped from all generated phrases to reduce false positives.
+
+## Regex Cache
+
+All regex matching goes through a bounded FIFO cache (`RegexCache`) backed by a global `OnceLock<Mutex<RegexCache>>`:
+
+-   **Capacity:** `MAX_REGEX_CACHE_ENTRIES = 4096` compiled patterns.
+-   **Eviction:** FIFO — oldest pattern evicted when capacity is reached.
+-   **Failure caching:** Invalid patterns are cached as `None` so a flood of bad patterns doesn't repeatedly invoke the regex compiler.
+-   **Case insensitivity:** All patterns are compiled with the `(?i)` flag automatically.
+
+The cache prevents unbounded memory growth from dynamically generated routing patterns (addressing the `regex-cache-unbounded` audit finding).
+
+## Caching and Invalidation
+
+| Cache               | Key                   | Invalidated by                     |
+|---------------------|-----------------------|------------------------------------|
+| `MANIFEST_CACHE`    | `agents_dir` path     | `invalidate_manifest_cache()`      |
+| `HAND_ROUTE_CACHE`  | `home_dir` path       | `invalidate_hand_route_cache()`    |
+| `REGEX_CACHE`       | pattern string        | FIFO eviction only                 |
+
+Both metadata caches are keyed by the directory path they were built from. If the path changes (e.g., a different agents directory is passed), the cache rebuilds automatically. Explicit invalidation is needed when the *contents* of a directory change without the path changing (hot-reload, agent install).
+
+## Configuration
+
+### Environment Variables
+
+| Variable           | Purpose                                             | Fallback             |
+|--------------------|-----------------------------------------------------|----------------------|
+| `LIBREFANG_HOME`   | Root directory for hand/agent discovery             | `~/.librefang`       |
+
+### Constants
+
+| Constant                   | Value  | Purpose                                                    |
+|----------------------------|--------|------------------------------------------------------------|
+| `MIN_HAND_SCORE`           | 2      | Minimum score for a hand match to be accepted              |
+| `EXPLICIT_ALIAS_WEIGHT`    | 6      | Score per explicit alias / strong rule hit                 |
+| `GENERATED_PHRASE_WEIGHT`  | 2      | Score per auto-generated phrase hit                        |
+| `WEAK_PHRASE_WEIGHT`       | 1      | Score per weak alias hit                                   |
+| `MAX_SEMANTIC_BONUS`       | 5.0    | Maximum bonus points from embedding similarity             |
+| `SEMANTIC_ONLY_THRESHOLD`  | 0.55   | Minimum cosine similarity for semantic-only matching       |
+| `MAX_REGEX_CACHE_ENTRIES`  | 4096   | Capacity of the compiled regex FIFO cache                  |
+| `ROUTING_EXCLUDED_TEMPLATES` | `["assistant"]` | Templates excluded from routing candidate lists |
+
+## Dependencies
+
+-   **`librefang_types::agent::AgentManifest`** — deserialized from `agent.toml`.
+-   **`librefang_hands::registry::parse_hand_toml_with_agents_dir`** — parses `HAND.toml` definitions with agent template resolution.
+-   **`regex_lite::Regex`** — lightweight regex engine for pattern matching.
+-   **`serde_json::Value`** — used to read `[metadata.routing]` from the manifest's metadata field.
+
+## Adding a New Route
+
+### New builtin template rule
+
+Add a `RouteRule` entry to the `TEMPLATE_RULES` array with `target` set to the template name and bilingual `strong`/`weak` regex patterns:
 
 ```rust
-pub struct HandSelection {
-    pub hand_id: Option<String>,  // None means no match
-    pub reason: String,           // human-readable routing explanation
-    pub score: usize,             // total routing score
-}
-
-pub struct TemplateSelection {
-    pub template: String,  // always set — defaults to "orchestrator"
-    pub reason: String,
-    pub score: usize,
+RouteRule {
+    target: "my-specialist",
+    strong: &[
+        ("specialist intent", r"\bmy specialist intent\b"),
+        ("专员意图", r"专员意图|特定操作"),
+    ],
+    weak: &[("generic", r"\bgeneric\b")],
 }
 ```
 
-## Thread Safety
+### New manifest-routed template
 
-All caches use `Mutex` guards over `OnceLock`-initialized storage. The regex cache, hand route cache, and manifest cache are each independent. Lock poisoning is handled by `unwrap_or_else(|e| e.into_inner())` — a poisoned lock recovers its data rather than panicking.
+Create `workspaces/agents/my-specialist/agent.toml`:
+
+```toml
+name = "my-specialist"
+description = "Handles specialist tasks for domain X."
+tags = ["domain-x", "specialist"]
+module = "builtin:chat"
+
+[model]
+provider = "default"
+model = "default"
+system_prompt = "..."
+
+[metadata.routing]
+aliases = ["domain x specialist", "x handler"]
+weak_aliases = ["domain x"]
+```
+
+No code changes needed — the manifest scanner picks it up automatically.
+
+### New hand route
+
+Create `<home>/registry/hands/my-hand/HAND.toml`:
+
+```toml
+id = "my-hand"
+name = "My Hand"
+description = "Handles domain X operations"
+category = "data"
+
+[routing]
+aliases = ["domain x operations"]
+weak_aliases = ["domain x"]
+```
+
+Call `invalidate_hand_route_cache()` after installation.

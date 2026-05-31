@@ -1,35 +1,26 @@
 # Other — librefang-runtime-mcp-tests
 
-# librefang-runtime-mcp-tests — HttpCompat Integration Tests
+# HttpCompat Integration Tests
 
 ## Overview
 
-This module contains end-to-end integration tests for the `HttpCompat` MCP transport. `HttpCompat` is the simplest MCP transport variant: it maps declared tool calls onto plain HTTP/JSON requests against a user-supplied base URL, without performing an MCP `initialize` handshake. Because it requires no MCP-protocol-speaking peer, it is the ideal entry point for integration testing the connection and dispatch pipeline.
-
-The tests spin up real `wiremock` HTTP servers to verify the full path from `McpConnection::connect` through `call_tool`, including path-template rendering, header injection, query-parameter handling, and error cases.
+This module provides end-to-end integration tests for the `HttpCompat` MCP transport. `HttpCompat` is the simplest transport in the MCP subsystem — it maps declared tool calls onto plain HTTP/JSON requests against a user-supplied base URL without performing an MCP `initialize` handshake. Because it doesn't require a peer that speaks the MCP protocol, it is the ideal transport for exercising the full connect → register → call pipeline against a mock HTTP server.
 
 ## What Is Being Tested
 
-| Behavior under test | Test function |
-|---|---|
-| `connect` registers declared tools under the namespaced `mcp_<server>_<tool>` convention | `http_compat_connect_registers_namespaced_tools` |
-| `call_tool` renders `{path}` parameters from arguments, consumes them, sends remaining args as query/body, and forwards the response | `http_compat_call_tool_renders_path_and_returns_body` |
-| `call_tool` rejects unknown tool names with a descriptive error | `http_compat_call_tool_unknown_name_errors` |
+The tests validate three behaviours that are critical to correct tool dispatch across the agent loop and dashboard:
 
-## Architecture
+1. **Namespaced tool registration** — `McpConnection::connect` must register each declared tool under the `mcp_<server>_<tool>` naming convention. The namespaced form is the key that all API consumers use for tool dispatch; a regression here breaks the entire call chain.
 
-```mermaid
-graph LR
-    T[Test] -->|connect| C[McpConnection]
-    C -->|GET /| W[wiremock Server]
-    C -->|GET /weather/Paris?units=metric| W
-    C -->|x-test-token header| W
-    W -->|JSON response| C
-```
+2. **Path rendering, parameter consumption, and response forwarding** — `call_tool` must interpolate path-template placeholders (e.g. `{city}`), consume those keys from the arguments, send the remaining keys as query parameters or a JSON body, attach configured headers, and return the backend response verbatim when `response_mode` is `Json`.
 
-Each test builds an `McpServerConfig` with `McpTransport::HttpCompat`, starts a `wiremock::MockServer`, mounts stubbed responses, and asserts on the behavior of `McpConnection`.
+3. **Unknown-tool error handling** — calling a tool name that was never registered must produce an error rather than silently issuing an unrelated HTTP request.
 
-## Test Fixtures
+## Test Infrastructure
+
+All tests use **`wiremock`** to spin up an ephemeral mock HTTP server. This avoids external dependencies and provides deterministic request matching via `method`, `path`, `query_param`, and `header` matchers. Each test starts its own `MockServer`, mounts the expectations it needs, and lets the server drop at the end of the test scope.
+
+## Fixture Functions
 
 ### `http_compat_config`
 
@@ -37,13 +28,18 @@ Each test builds an `McpServerConfig` with `McpTransport::HttpCompat`, starts a 
 fn http_compat_config(base_url: String, tools: Vec<HttpCompatToolConfig>) -> McpServerConfig
 ```
 
-Constructs a fully-wired `McpServerConfig` for the `"test-server"` server. Key defaults:
+Builds a complete `McpServerConfig` wired to the `HttpCompat` transport. It configures:
 
-- **Transport**: `McpTransport::HttpCompat` with the given `base_url` and tool declarations.
-- **Headers**: A single static header `x-test-token: integration-fixture` injected on every request. This lets tests assert that configured headers actually reach the backend.
-- **Taint scanning**: Disabled (`taint_scanning: false`), with a no-op rule-set handle from `empty_taint_rule_sets_handle()`.
-- **Timeout**: 5 seconds.
-- **OAuth**: None.
+| Field | Value |
+|---|---|
+| `name` | `"test-server"` |
+| `transport` | `McpTransport::HttpCompat` with a single static header `x-test-token: integration-fixture` |
+| `timeout_secs` | 5 |
+| `taint_scanning` | disabled |
+| `taint_rule_sets` | empty handle via `empty_taint_rule_sets_handle()` |
+| `oauth_provider` / `oauth_config` | `None` |
+
+Every test composes its own tool list and passes the `wiremock` base URL, so each test is isolated.
 
 ### `weather_tool`
 
@@ -51,64 +47,86 @@ Constructs a fully-wired `McpServerConfig` for the `"test-server"` server. Key d
 fn weather_tool() -> HttpCompatToolConfig
 ```
 
-Returns a canonical test tool declaration modeling a weather-lookup endpoint:
+Returns a representative tool declaration used by most tests:
 
-| Field | Value |
-|---|---|
-| `name` | `"get_weather"` |
-| `path` | `"/weather/{city}"` — `{city}` is a path-template parameter |
-| `method` | `HttpCompatMethod::Get` |
-| `request_mode` | `HttpCompatRequestMode::Query` — remaining args become query parameters |
-| `response_mode` | `HttpCompatResponseMode::Json` — backend JSON is forwarded verbatim |
-| `input_schema` | Requires `"city"` (string); optional `"units"` (string) |
+- **name**: `get_weather`
+- **path**: `/weather/{city}` — contains one path-template parameter
+- **method**: `GET`
+- **request_mode**: `Query` — remaining arguments become query parameters
+- **response_mode**: `Json`
+- **input_schema**: requires `city` (string), optional `units` (string)
 
-The combination of `path`, `request_mode`, and `response_mode` exercises the core parameter-splitting logic: the driver extracts `city` to fill the path template, then sends whatever is left (`units`) as a query string.
+This tool is chosen specifically because its path template lets the tests verify that `{city}` is interpolated and consumed, while `units` is forwarded as a query parameter.
 
-## Test Details
+## Test Cases
 
 ### `http_compat_connect_registers_namespaced_tools`
 
-Verifies that after `McpConnection::connect`, the tool list contains the namespaced name produced by `format_mcp_tool_name("test-server", "get_weather")`. The agent loop and dashboard all key off this prefixed form (`mcp_<server>_<tool>`), so a regression here breaks tool dispatch.
+**Validates**: Tool registration during `connect`.
 
-The test also confirms `conn.name()` returns `"test-server"`.
-
-A mock for `GET /` is mounted because `connect` may issue a connectivity probe. The probe's response (or even failure) is non-blocking for `HttpCompat`.
+Steps:
+1. Start a `wiremock` server with a stub for `GET /` (the connectivity probe issued during connect).
+2. Build an `McpServerConfig` with the weather tool and call `McpConnection::connect`.
+3. Assert that the returned connection's tool list contains `mcp_test-server_get_weather` (produced by `format_mcp_tool_name("test-server", "get_weather")`).
+4. Assert that `conn.name()` returns `"test-server"`.
 
 ### `http_compat_call_tool_renders_path_and_returns_body`
 
-This is the main round-trip test. It verifies:
+**Validates**: Path interpolation, argument consumption, header forwarding, and response round-tripping.
 
-1. **Path interpolation**: `{city}` in `/weather/{city}` is replaced with the `"city"` argument value (`"Paris"`), producing `/weather/Paris`.
-2. **Argument consumption**: The `city` key is consumed by the path template and does **not** appear as a query parameter. Only `units=metric` arrives in the query string.
-3. **Header injection**: The `x-test-token: integration-fixture` header from the config is present on the outbound request.
-4. **Response forwarding**: The JSON body returned by the mock (`{"city": "Paris", "tempC": 18}`) is forwarded verbatim to the caller (because `response_mode` is `Json`).
-5. **Wiremock verification**: `expect(1)` ensures the mock was hit exactly once.
+Steps:
+1. Mount stubs for the connectivity probe (`GET /`) and the actual tool call (`GET /weather/Paris?units=metric` with header `x-test-token: integration-fixture`).
+2. Connect, then call `call_tool` with `{"city": "Paris", "units": "metric"}` using the namespaced tool name.
+3. Assert the response body contains the JSON fields from the wiremock stub (`"city"`, `"Paris"`, `"18"`).
+4. The wiremock `expect(1)` assertion verifies the backend was hit exactly once with the correct path, query param, and header.
 
-The test calls `call_tool` with the **namespaced** tool name (obtained via `format_mcp_tool_name`), not the raw tool name, matching the real dispatch path.
+This test confirms that `{city}` was consumed from the arguments during path rendering, so only `units` appeared as a query parameter.
 
 ### `http_compat_call_tool_unknown_name_errors`
 
-Confirms that calling a tool name not present in the registered list returns an error rather than silently issuing a request. The error message must contain language like `"not found"`, `"unknown"`, or `"does not exist"` to be useful for callers.
+**Validates**: Error handling for unregistered tool names.
+
+Steps:
+1. Connect with the weather tool registered.
+2. Call `call_tool` with a fabricated tool name `mcp_test-server_does_not_exist`.
+3. Assert the result is an `Err` whose message contains "not found", "unknown", or "does not exist".
+
+This prevents a silent fallback to an unrelated HTTP request — a critical safety property for the agent loop.
 
 ## Relationship to the Codebase
 
-These tests exercise the public API of `librefang-runtime-mcp`:
-
-- **`McpConnection::connect`** — the primary entry point that resolves a `McpServerConfig` into a live connection with a populated tool list.
-- **`McpConnection::call_tool`** — dispatches a tool invocation by name, routing through the appropriate transport.
-- **`format_mcp_tool_name`** — the naming convention function that produces the `mcp_<server>_<tool>` identifier used everywhere in tool dispatch.
-- **`empty_taint_rule_sets_handle`** — provides a no-op taint handle so that tests don't need to set up real taint infrastructure.
-
-The test types (`HttpCompatToolConfig`, `HttpCompatMethod`, `HttpCompatRequestMode`, `HttpCompatResponseMode`, `HttpCompatHeaderConfig`) come from `librefang_types::config`, confirming that the config layer is the shared contract between the runtime and its consumers.
-
-## Running the Tests
-
-```bash
-# Run all HttpCompat integration tests
-cargo test -p librefang-runtime-mcp --test http_compat_integration
-
-# Run a single test
-cargo test -p librefang-runtime-mcp --test http_compat_integration -- http_compat_call_tool_renders_path_and_returns_body
+```mermaid
+graph TD
+    A["http_compat_integration.rs<br/>(this module)"] -->|uses| B["McpConnection::connect"]
+    A -->|uses| C["McpConnection::call_tool"]
+    A -->|uses| D["format_mcp_tool_name"]
+    A -->|uses| E["empty_taint_rule_sets_handle"]
+    A -->|constructs| F["McpServerConfig"]
+    A -->|constructs| G["McpTransport::HttpCompat"]
+    A -->|constructs| H["HttpCompatToolConfig"]
+    B -->|returns registered tools under| D
+    C -->|"renders path templates,<br/>sends HTTP request"| I["HTTP backend<br/>(wiremock in tests)"]
+    H -->|typed config from| J["librefang_types::config"]
 ```
 
-The tests are fully self-contained — `wiremock` starts an in-process HTTP server on a random port, so no external infrastructure is required.
+The tests depend on the following public API surface from `librefang_runtime_mcp`:
+
+- **`McpConnection::connect`** — establishes the transport and registers tools.
+- **`McpConnection::call_tool`** — dispatches a tool call through the transport.
+- **`McpConnection::tools`** / **`McpConnection::name`** — accessors on the established connection.
+- **`format_mcp_tool_name`** — produces the `mcp_<server>_<tool>` namespaced identifier.
+- **`empty_taint_rule_sets_handle`** — provides a no-op taint-rule handle for configs that disable scanning.
+
+Config types (`HttpCompatToolConfig`, `HttpCompatHeaderConfig`, `HttpCompatMethod`, `HttpCompatRequestMode`, `HttpCompatResponseMode`) come from `librefang_types::config`.
+
+## Running
+
+```bash
+# Run just these integration tests
+cargo test -p librefang-runtime-mcp --test http_compat_integration
+
+# Run with output visible
+cargo test -p librefang-runtime-mcp --test http_compat_integration -- --nocapture
+```
+
+No external services or environment variables are required — `wiremock` handles all HTTP interactions in-process.

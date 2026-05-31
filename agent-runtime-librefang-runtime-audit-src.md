@@ -2,219 +2,186 @@
 
 # librefang-runtime-audit
 
-Merkle hash chain audit trail for security-critical agent actions.
+Merkle hash chain audit trail for security-critical actions in the agent runtime.
 
-Every auditable event is appended to an append-only log where each entry contains the SHA-256 hash of its own contents concatenated with the hash of the previous entry, forming a tamper-evident chain. When backed by SQLite, entries survive daemon restarts. An optional external anchor file closes the full-rewrite detection gap.
+Every auditable event is appended to an append-only log where each entry contains the SHA-256 hash of its own contents concatenated with the hash of the previous entry, forming a tamper-evident chain. When a database connection is provided, entries are persisted to the `audit_entries` table (schema V8+) so the trail survives daemon restarts. An optional external anchor file stores the chain tip outside SQLite, making a full table rewrite detectable.
 
 ## Architecture
 
 ```mermaid
-graph TD
-    A[AuditLog::record_with_context] -->|compute hash| B[compute_entry_hash]
-    B -->|SHA-256| C[hex::encode]
-    A -->|persist| D[SQLite audit_entries]
-    A -->|update tip| E[in-memory entries Vec]
-    A -->|write tip| F[anchor file on disk]
-    G[verify_integrity] -->|recompute| B
-    G -->|fallback| H[compute_entry_hash_legacy]
-    G -->|compare tip| F
-    I[trim / prune] -->|drop prefix| E
-    I -->|DELETE prefix| D
-    I -->|update| F
+sequenceDiagram
+    participant Caller as route / middleware
+    participant Log as AuditLog
+    participant DB as SQLite
+    participant Anchor as anchor file
+
+    Caller->>Log: record_with_context(...node[")"]
+    Log->>Log: compute_entry_hash(seq, ..., prev_hash=tip)
+    Log->>DB: BEGIN IMMEDIATE
+    Log->>DB: INSERT INTO audit_entries
+    Log->>DB: COMMIT
+    Log->>Log: entries.push(entry), tip = hash
+    Log->>Anchor: write_anchor(seq, hash) via tmp+rename
+    Log-->>Caller: hash (hex SHA-256)
 ```
 
-## Threat Model
-
-The in-database Merkle chain alone is **self-consistent but not self-anchored**: an attacker with write access to `audit_entries` can delete every row, fabricate a new history, and recompute every hash from the genesis sentinel forward. `verify_integrity` would return `Ok(())` because there is nothing to compare the tip against.
-
-The **anchor file** closes that gap. It stores the latest `seq:hash` pair on the filesystem, outside the SQLite row store. A full DB rewrite is detectable because the fabricated chain's tip will not match the anchor. For stronger guarantees, point `anchor_path` at a location the daemon can write to but unprivileged code cannot (a chmod-0400 file owned by a different user, a systemd `ReadOnlyPaths=` mount, an NFS share, or a pipe to `logger`).
+The chain is a linked list of SHA-256 hashes. Each `AuditEntry` stores its own `hash` and the `prev_hash` of its predecessor. The "genesis" sentinel is 64 zero characters. Verification walks the entire list recomputing each hash and checking the `prev_hash` linkage.
 
 ## Core Types
 
 ### `AuditAction`
 
-Enum of auditable action categories. Each variant folds into the per-entry SHA-256 via its `Display` representation (which derives from `Debug`).
+Enum of all auditable event categories. The variant's `Display` output (derived from `Debug`) is folded into the SHA-256 hash, so **this enum is append-only** — renaming or reordering a variant invalidates every persisted hash that references it.
 
-**Stability contract**: adding new variants is safe — old entries continue to verify because their action string is unchanged. **Renaming or reordering variants is a breaking change** that invalidates every persisted hash. Treat this enum as append-only.
+Notable variants:
 
-Variants include: `ToolInvoke`, `CapabilityCheck`, `AgentSpawn`, `AgentKill`, `AgentMessage`, `MemoryAccess`, `FileAccess`, `NetworkAccess`, `ShellExec`, `AuthAttempt`, `WireConnect`, `ConfigChange`, `DreamConsolidation`, `UserLogin`, `RoleChange`, `PermissionDenied`, `BudgetExceeded`, `RetentionTrim`, `A2aDiscovered`, `A2aTrusted`.
+| Variant | Purpose |
+|---|---|
+| `ToolInvoke` | Agent tool execution |
+| `AuthAttempt` | Authentication events |
+| `UserLogin` | RBAC credential exchange |
+| `RoleChange` | RBAC role mutation |
+| `PermissionDenied` | Authorization rejection |
+| `BudgetExceeded` | Spend cap hit |
+| `RetentionTrim` | Trim job self-audit |
+| `A2aDiscovered` / `A2aTrusted` | A2A agent lifecycle |
 
 ### `AuditEntry`
 
-A single entry in the Merkle hash chain:
-
-| Field | Description |
-|---|---|
-| `seq` | Monotonically increasing sequence number (0-indexed) |
-| `timestamp` | ISO-8601 timestamp of when the entry was recorded |
-| `agent_id` | Agent that triggered or is the subject of the action |
-| `action` | Category of action being audited |
-| `detail` | Free-form detail (tool name, file path, etc.) |
-| `outcome` | Result of the action ("ok", "denied", error message) |
-| `user_id` | `Option<UserId>` — the LibreFang user who triggered the action |
-| `channel` | `Option<String>` — origin channel ("telegram", "slack", "dashboard", "cli") |
-| `prev_hash` | SHA-256 hash of the previous entry (all-zeros for genesis) |
-| `hash` | SHA-256 hash of this entry's content concatenated with `prev_hash` |
-
-### `TrimReport`
-
-Summary returned by `trim()`:
-
-- `dropped_by_action`: `BTreeMap<String, usize>` — per-action-type drop counts
-- `total_dropped`: sum of all drops
-- `new_chain_anchor`: `Option<String>` — hash of the last dropped entry
+A single chain entry carrying `seq` (monotonic 0-indexed), ISO-8601 `timestamp`, `agent_id`, `action`, free-form `detail`, `outcome`, optional `user_id` / `channel` for attribution, and the Merkle fields `prev_hash` and `hash`.
 
 ### `AuditLog`
 
-The main audit log struct. Thread-safe — all access is serialized through internal mutexes. Optionally backed by SQLite for persistence and/or an external anchor file for tamper detection.
+The main struct. Thread-safe via internal `Mutex` guards on `entries`, `tip`, and `chain_anchor`. Constructed in one of three modes:
 
-Internal state:
+- **`AuditLog::new()`** — in-memory only, no persistence.
+- **`AuditLog::with_db(pool)`** — loads existing entries from SQLite on construction, verifies chain integrity, persists new entries on every `record`.
+- **`AuditLog::with_db_anchored(pool, anchor_path)`** — extends `with_db` with an external tip-anchor file. On boot, compares the anchor against the in-DB tip; mismatches are logged at `ERROR` and surface via `verify_integrity`.
 
-| Field | Purpose |
-|---|---|
-| `entries` | `Mutex<Vec<AuditEntry>>` — the in-memory chain window |
-| `tip` | `Mutex<String>` — hash of the most recent entry |
-| `db` | `Option<Pool<SqliteConnectionManager>>` — SQLite connection pool |
-| `anchor_path` | `Option<PathBuf>` — filesystem path for the tip anchor |
-| `chain_anchor` | `Mutex<Option<String>>` — hash of the most recent **dropped** entry, used to bridge verification across trim boundaries |
-| `max_in_memory_entries` | `AtomicUsize` — configured soft cap (0 = use hard default) |
+### `TrimReport`
 
-## Construction
-
-### `AuditLog::new()`
-
-Creates an empty in-memory log with no persistence. The initial tip is 64 zero characters (the genesis sentinel).
-
-### `AuditLog::with_db(pool)`
-
-Creates a log backed by SQLite. On construction:
-
-1. Loads all existing entries from the `audit_entries` table (schema V22 columns: `seq`, `timestamp`, `agent_id`, `action`, `detail`, `outcome`, `user_id`, `channel`, `prev_hash`, `hash`).
-2. Recovers any chain anchor from a prior trim cycle (if the first surviving entry's `prev_hash` is non-genesis, that value becomes the anchor).
-3. Runs `verify_integrity()` and logs the result at WARN on failure.
-
-Rows persisted before the V22 migration return NULL for `user_id`/`channel`, which deserializes to `None`. The hash function omits absent fields, so original hashes remain valid.
-
-### `AuditLog::with_db_anchored(pool, anchor_path)`
-
-Creates a log with both SQLite persistence **and** an external anchor file. In addition to the `with_db` steps:
-
-1. If the anchor file exists, compares its `seq:hash` against the in-DB tip. On mismatch, logs a loud ERROR — the daemon still starts, but `verify_integrity()` will return `Err`.
-2. If the DB has rows but no anchor exists yet, seeds the anchor from the current tip.
-3. If the anchor file is corrupt, logs an ERROR and refuses to overwrite it.
+Returned by `trim()`. Contains `dropped_by_action` (per-action counts), `total_dropped`, and `new_chain_anchor` (hash of the last dropped entry, or `None` if nothing was trimmed).
 
 ## Recording Events
 
-### `record(agent_id, action, detail, outcome) -> String`
+Two entry points, both returning the SHA-256 hex hash of the new entry:
 
-Convenience wrapper that omits user/channel attribution. Pre-M1 call sites use this form.
+```rust
+// Without user/channel attribution (pre-M1 call sites)
+fn record(&self, agent_id, action, detail, outcome) -> String;
 
-### `record_with_context(agent_id, action, detail, outcome, user_id, channel) -> String`
+// With full attribution
+fn record_with_context(&self, agent_id, action, detail, outcome, user_id, channel) -> String;
+```
 
-The primary recording path. Flow:
+### Write ordering
 
-1. **Derive seq** from the last entry's `seq + 1` (not `entries.len()`, because a retention trim may have dropped a prefix).
-2. **Compute hash** using the v2 delimited layout via `compute_entry_hash`.
-3. **Persist to SQLite** inside `BEGIN IMMEDIATE` / `COMMIT`. This acquires a RESERVED lock so concurrent processes cannot interleave appends against the same `prev_hash`. On DB failure, the entry is **dropped** and the chain is NOT advanced — this preserves on-disk integrity at the cost of losing one audit event. The next call reuses the same `seq` with a fresh timestamp.
-4. **Push to in-memory entries** and advance the tip.
-5. **Enforce soft cap** — if `entries.len()` exceeds the effective ceiling, drain the oldest prefix and update `chain_anchor`. Entries are already persisted to SQLite before this drain, so no forensic data is lost.
-6. **Update the anchor file** — atomic rewrite via `.tmp` + `rename`. Failures are logged but not propagated (the entry is already in SQLite).
+When SQLite is configured, the append path is:
 
-Returns the SHA-256 hash of the new entry.
+1. Derive `seq` from the last entry's `seq + 1` (not `entries.len()`, which would collide after a trim).
+2. Compute the hash under the **v2 delimited layout** via `compute_entry_hash`.
+3. Open a `BEGIN IMMEDIATE` transaction, `INSERT`, `COMMIT`.
+4. Only on commit success: push to the in-memory `entries` Vec and advance `tip`.
+5. If configured, rewrite the anchor file atomically (`<path>.tmp` + `rename`).
 
-## Hash Computation
+If the database write fails, the entry is **dropped** — the chain is not advanced, and the next call retries the same `seq` with a fresh timestamp. This avoids the corruption scenario where an unpersisted entry's hash becomes another entry's `prev_hash`, producing a permanent chain break on restart.
 
-### `compute_entry_hash` (v2 — current)
+### In-memory soft cap
 
-Every field is prefixed with a `\x1f`-delimited tag (e.g. `\x1fseq=`, `\x1ftimestamp=`, etc.) so byte content cannot shift across field boundaries without changing the digest. Without delimiters, `agent_id="a", detail="bc"` and `agent_id="ab", detail="c"` produced identical hashes, allowing field-reshuffle attacks.
+`record_with_context` enforces a soft cap on the in-memory buffer after every successful append:
 
-`user_id` and `channel` are included only when present, so pre-M1 entries (recorded before user attribution existed) verify with their original hashes.
+- If `max_in_memory_entries` is configured (via `set_max_in_memory_entries`), the effective ceiling is `configured × 1.5`.
+- Otherwise the hard default `MAX_AUDIT_ENTRIES` (10,000) applies.
+- When the buffer exceeds the ceiling, the oldest prefix is drained and `chain_anchor` is updated to the hash of the last dropped entry. All drained entries are already persisted to SQLite, so no forensic data is lost.
 
-### `compute_entry_hash_legacy` (v1 — verification only)
+## Persistence and the Anchor File
 
-The original layout concatenated the six core fields with no separators, then optionally tagged `user_id`/`channel`, then bare `prev_hash`. Retained exclusively for `verify_integrity` to validate entries written before the delimiter fix. **Never used to write new entries.**
+### SQLite schema
+
+Entries are stored in `audit_entries` with columns `seq` (INTEGER PRIMARY KEY), `timestamp`, `agent_id`, `action`, `detail`, `outcome`, `user_id` (nullable, schema v22), `channel` (nullable, schema v22), `prev_hash`, `hash`. The `user_id`/`channel` columns default to `NULL` for pre-migration rows, which deserializes as `None` and matches the original hash (absent fields are omitted from the digest).
+
+### Anchor file
+
+The anchor file (`<seq> <hex-hash>\n`) is an external witness stored outside SQLite. Its threat model:
+
+> An attacker with write access to `audit_entries` can delete every row, fabricate a new history, and recompute all hashes from genesis — `verify_integrity` returns `Ok` against the DB alone. The anchor file closes this gap by requiring the attacker to also tamper with a separate file.
+
+`with_db_anchored` seeds the anchor from the current tip on first run. On subsequent boots, it compares the anchor against the DB tip. Mismatches are logged at `ERROR` and cause `verify_integrity` to return `Err`. For stronger guarantees, point `anchor_path` at a location unprivileged code cannot write (chmod-0400, read-only mount, NFS share, pipe to `logger`).
+
+The anchor is rewritten atomically after every successful append and after every `trim`/`prune`.
 
 ## Verification
 
-### `verify_integrity() -> Result<(), String>`
+```rust
+fn verify_integrity(&self) -> Result<(), String>;
+```
 
-Walks the entire chain and recomputes every hash:
+Walks the entire chain and:
 
-1. **Chain anchor seeding**: starts from `chain_anchor` (or the genesis sentinel if no entries have been trimmed), so the walk correctly handles trimmed prefixes.
-2. **Linked-list check**: each entry's `prev_hash` must equal the hash of the preceding entry.
-3. **Hash recomputation**: tries v2 (`compute_entry_hash`) first, falls back to v1 (`compute_entry_hash_legacy`) for entries written before the delimiter fix. An upgrade does not raise false tamper alarms on existing logs.
-4. **Anchor file check**: if configured, compares the on-disk `seq:hash` against the in-memory tip. A missing anchor file fails closed — a silent disappearance is indistinguishable from an attacker deleting it.
+1. **Linkage check** — each entry's `prev_hash` matches the previous entry's `hash` (or the `chain_anchor` for the first surviving entry after a trim, or the genesis sentinel).
+2. **Hash recomputation** — recomputes each entry's SHA-256 and compares against the stored `hash`. Accepts both the current v2 (delimited) layout and the legacy v1 (undelimited) layout so upgrades don't raise false alarms on existing entries.
+3. **Anchor check** — if an anchor file is configured, compares its `seq:hash` against the in-DB tip. This is the step that catches a full table rewrite.
 
-Returns `Ok(())` if the chain is intact, or `Err(msg)` describing the first inconsistency.
+Exposed via `audit_verify` in `src/routes/audit.rs` (called by `GET /api/audit/verify`).
 
-## Retention & Memory Management
+### Chain anchor (trim boundary)
 
-### In-memory caps
+When `trim()` or `prune()` drops a prefix, `chain_anchor` is set to the hash of the last dropped entry. Verification seeds the walk from this anchor instead of the genesis sentinel, so the surviving suffix verifies cleanly across trim boundaries. The anchor is recovered on boot from the first surviving entry's `prev_hash` (if non-genesis, it points at the dropped predecessor).
 
-Two tiers:
+## Retention and Memory Management
 
-| Tier | Default | Source |
-|---|---|---|
-| **Hard cap** (`MAX_AUDIT_ENTRIES`) | 10,000 | Compile-time constant, fallback when no config |
-| **Soft cap** | `config × 1.5` | Operator `audit.retention.max_in_memory_entries`, multiplied by `3/2` |
+### `trim(policy, now)`
 
-The soft cap is enforced inside `record_with_context` on every append, keeping memory bounded between scheduled `trim()` cycles. When the buffer exceeds the ceiling, the oldest non-anchor prefix is drained. All drained entries have already been persisted to SQLite, so forensic data is preserved on disk.
+Applies an `AuditRetentionConfig` against the in-memory window. Two-pass logic:
 
-Set the soft cap via `set_max_in_memory_entries(entries)`. Pass `0` to fall back to the hard default.
+1. **Pass 1** — enforce `max_in_memory_entries` cap (hard floor on memory).
+2. **Pass 2** — walk forward from the cap boundary, extending the drop prefix as long as each entry's action has a configured retention window and the entry is older than it.
 
-### `trim(policy, now) -> TrimReport`
+Dropping is **prefix-only** (contiguous from the front) — you cannot punch holes in a Merkle list. The first surviving entry stops the trim regardless of later entries' eligibility.
 
-Applies a `AuditRetentionConfig` policy against the in-memory window:
+Returns a `TrimReport` with per-action drop counts. The trim itself is audited by writing a `RetentionTrim` entry (carrying the drop counts and new anchor hash), which by construction is the most recent entry and therefore survives every future trim.
 
-1. **Pass 1 — hard cap**: if `max_in_memory_entries` is set and `total > cap`, marks the oldest `total - cap` entries for dropping.
-2. **Pass 2 — per-action retention**: extends the drop prefix as long as entries have a configured retention window and are older than it. Stops at the first survivor.
-3. **Persist**: deletes the same prefix from SQLite (`DELETE FROM audit_entries WHERE seq < first_survivor_seq`).
-4. **Update chain_anchor** to the hash of the last dropped entry.
-5. **Refresh anchor file** so `seq` matches the new `entries.len()`.
+### `prune(retention_days)`
 
-**Prefix-only**: dropping is always a contiguous prefix from the front. You cannot punch holes in a Merkle list. The first entry whose retention keeps it stops the trim.
+Simpler time-based variant — walks the oldest contiguous prefix of entries whose RFC-3339 timestamps precede the cutoff, drops them, updates `chain_anchor`, deletes from SQLite, and refreshes the anchor file.
 
-### `prune(retention_days) -> usize`
+### `set_max_in_memory_entries(entries)`
 
-Simpler time-based variant: drops the oldest contiguous prefix of entries whose timestamps fall outside the retention window. Updates `chain_anchor`, persists the deletion to SQLite, and refreshes the anchor file. Returns the count of pruned entries.
+Sets the operator-configured cap from `audit.retention.max_in_memory_entries`. Stored as an `AtomicUsize` so it can be updated without taking the `entries` mutex. Typically called once at boot.
+
+## Hash Computation
+
+Two layouts exist:
+
+**v2 (current)** — `compute_entry_hash`: every field is `\x1f`-tagged (`\x1fseq=`, `\x1ftimestamp=`, etc.) to prevent field-boundary ambiguity. An attacker cannot shift bytes across fields without changing the digest. `user_id` and `channel` are included only when present, preserving hash stability for pre-M1 entries that lack these fields.
+
+**v1 (legacy)** — `compute_entry_hash_legacy`: the original six fields concatenated with no separators, then optionally-tagged `user_id`/`channel`, then bare `prev_hash`. Retained solely for `verify_integrity` to validate entries written before the delimiter fix. Never used to write new entries.
 
 ## Querying
 
 | Method | Description |
 |---|---|
-| `recent(n)` | Returns the most recent `n` entries (cloned) |
-| `since_seq(cursor)` | Returns every entry with `seq > cursor`, in insertion order. O(log n) seek + O(k) clone. Intended for cursor-based SSE streaming. Note: `since_seq(0)` skips seq=0 — initial backfill must use `recent()` |
-| `len()` | Number of entries in the in-memory window |
-| `is_empty()` | Whether the log is empty |
-| `tip_hash()` | Current tip hash (hash of the most recent entry, or genesis sentinel) |
-| `anchor_path()` | Configured external anchor path, if any |
-
-## Anchor File Format
-
-Single line: `<seq> <hex-hash>\n`
-
-Example: `47 a3f2b8c1d4e5...`
-
-Written atomically via `<path>.tmp` + `rename` so a crash mid-write never leaves a truncated anchor. Parsed by `read_anchor()` — malformed contents produce `Err` so verification fails closed.
+| `recent(n)` | Last `n` entries (cloned slice from the tail) |
+| `since_seq(cursor)` | All entries with `seq > cursor` — O(log n) seek via `partition_point`, intended for cursor-based SSE streaming (`/api/logs/stream`) |
+| `tip_hash()` | Current chain tip (genesis sentinel if empty) |
+| `len()` / `is_empty()` | Buffer size queries |
 
 ## Thread Safety
 
-All shared state is protected by `Mutex` (entries, tip, chain_anchor) or `AtomicUsize` (max_in_memory_entries). Poisoned mutexes are recovered via `unwrap_or_else(|e| e.into_inner())` — the daemon prefers degraded operation over a panic.
+All mutable state is guarded by `Mutex`:
 
-SQLite writes use `BEGIN IMMEDIATE` transactions to prevent concurrent writers from interleaving appends against the same `prev_hash`.
+- `entries: Mutex<Vec<AuditEntry>>` — the in-memory window
+- `tip: Mutex<String>` — the current chain tip hash
+- `chain_anchor: Mutex<Option<String>>` — the trim-boundary anchor
+- `max_in_memory_entries: AtomicUsize` — the configured cap (atomic for lock-free updates)
 
-## Error Handling Philosophy
+The `entries` mutex is held for the full duration of `record_with_context` (including the SQLite INSERT). This serializes appends, which is correct — the Merkle chain's integrity depends on exactly one writer deriving `prev_hash` and committing between derivation and INSERT. `BEGIN IMMEDIATE` provides the same serialization at the SQLite layer for concurrent processes.
 
-| Failure mode | Behavior |
-|---|---|
-| SQLite INSERT fails | Entry dropped, chain NOT advanced, ERROR logged. Next `record()` retries the same seq. |
-| SQLite pool exhausted | Same as INSERT failure. Metric `librefang_memory_pool_get_failed_total` incremented. |
-| Anchor file write fails | WARN logged, append still succeeds. Entry is in SQLite. |
-| Anchor file missing on verify | `Err` returned — fails closed. |
-| Anchor file corrupt on boot | ERROR logged, file not overwritten, verification will fail. |
-| Chain integrity failure on boot | WARN logged, daemon still starts. Surface via `/api/audit/verify`. |
-| Anchor mismatch on boot | ERROR logged with remediation instructions, daemon still starts. |
+## Integration Points
 
-Recovery commands:
-- `librefang security verify` — inspect chain state
-- `librefang security audit-reset` — truncate chain and re-anchor at zero (**never in production/compliance environments**)
+The audit log is called from across the codebase:
+
+- **Middleware** — `auth` and `rbac_denied_response` in `librefang-api/src/middleware.rs` record `UserLogin`, `AuthAttempt`, and `PermissionDenied` events with user attribution.
+- **Route handlers** — budget routes (`update_budget`, `update_agent_budget`, etc.) record `BudgetExceeded`; config routes (`config_set`, `config_reload`, `shutdown`) record `ConfigChange`; network routes (`a2a_discover_external`, `a2a_approve_external`, `comms_send`) record A2A lifecycle events; user routes (`rotate_user_key`) record security-relevant mutations.
+- **API surface** — `audit_recent` reads `tip_hash()`; `audit_verify` calls `verify_integrity()` and inspects `anchor_path()`; `logs_stream` uses `since_seq` for cursor-based SSE delivery.
+- **Approval flow** — `approve_request` in `src/routes/approvals.rs` records the approval action.

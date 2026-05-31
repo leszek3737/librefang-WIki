@@ -2,167 +2,148 @@
 
 # librefang-kernel
 
-Central orchestrator for the LibreFang Agent OS. Manages agent lifecycles, scheduling, permissions, inter-agent communication, and the message-handling loop that dispatches requests to LLM drivers, tools, and the memory substrate.
+Core orchestration crate for the LibreFang Agent Operating System. Manages agent lifecycles, scheduling, permissions, inter-agent communication, and the message-handling loop that dispatches requests to LLM drivers, tools, and the memory substrate.
 
 ## Architecture
+
+The kernel sits between the HTTP/WebSocket surface layer and the execution layer. It does **not** own the agent loop body, tool dispatch, channel adapters, or HTTP routing — those responsibilities belong to `librefang-runtime`, `librefang-channels`, and `librefang-api` respectively.
 
 ```mermaid
 graph TD
     API["librefang-api<br/>(HTTP/WS surface)"]
-    K["librefang-kernel<br/>(orchestration)"]
-    RT["librefang-runtime<br/>(execution / agent loop)"]
-    MEM["librefang-memory<br/>(storage)"]
-    KH["librefang-kernel-handle<br/>(KernelHandle trait)"]
-
-    API --> K
-    K --> RT
-    K --> MEM
-    RT -.->|"callback via trait"| KH
-    K -.->|"re-exports"| KM["kernel-metering"]
-    K -.->|"re-exports"| KR["kernel-router"]
+    KERNEL["librefang-kernel<br/>(orchestration)"]
+    RUNTIME["librefang-runtime<br/>(execution, agent loop)"]
+    MEMORY["librefang-memory<br/>(storage)"]
+    CHANNELS["librefang-channels<br/>(channel adapters)"]
+    API --> KERNEL
+    KERNEL --> RUNTIME
+    KERNEL --> MEMORY
+    RUNTIME --> KERNEL
+    API --> CHANNELS
 ```
 
-The kernel sits between the HTTP surface layer (`librefang-api`) and the execution layer (`librefang-runtime`). Downstream crates that need kernel access do so through the `KernelHandle` trait defined in `librefang-kernel-handle`, keeping the dependency arrow pointing inward.
+Dependency direction is strictly downward. The kernel never depends on `librefang-api` or `librefang-extensions`. When those crates need a kernel callback, they go through the `KernelHandle` trait defined in `librefang-kernel-handle`, reversing the dependency.
 
-## Boundary
+## Entry Points
 
-**Owned subsystems:** registry, scheduling, approval, auth, auto_dream, cron, event_bus, inbox, pairing, scheduler, session_lifecycle, metering, router.
-
-**Not owned** (live elsewhere):
-- Agent loop body, tool dispatch → `librefang-runtime`
-- Channel adapters → `librefang-channels`
-- HTTP routing, dashboard SPA → `librefang-api`
-
-**No dependencies on** `librefang-api` or `librefang-extensions`. If runtime or extensions need a kernel callback, reverse the dependency through `KernelHandle`.
-
-## Module Map
-
-### `kernel::LibreFangKernel`
-
-Top-level orchestrator. Boot with:
+### Boot
 
 ```rust
-let kernel = LibreFangKernel::boot_with_config(config);
+let kernel = LibreFangKernel::boot_with_config(kernel_config);
 ```
 
-This is currently a large struct (~18k LOC, 50+ fields — tracked in #3565). Do not add new fields without coordination. See [Adding a New Field](#adding-a-new-field-to-librefangkernel) for the required steps.
+`kernel::LibreFangKernel` is the top-level orchestrator. It is currently a large struct (~18k LOC, 50+ fields — tracked in #3565). Do not add new fields without coordination.
 
-### `registry::AgentRegistry`
+### Subsystem Modules
 
-Concurrent agent table. Supports spawn, lookup, and kill operations for agent instances.
+| Module | Responsibility |
+| --- | --- |
+| `registry::AgentRegistry` | Concurrent agent table: spawn, lookup, kill |
+| `kernel::cron` | Cron scheduling; `session_mode` resolution (per-job > manifest > historical Persistent) |
+| `kernel::event_bus` | Broadcast event bus |
+| `kernel::session_lifecycle` | Session state machine |
+| `approval` | Approval flows |
+| `auth` | Authentication and authorization |
+| `auto_dream` | Automatic dreaming/consolidation |
+| `inbox` | Agent inbox management |
+| `pairing` | Agent pairing |
+| `scheduler` | Task scheduling |
+| `metering` | Re-exported from `librefang-kernel-metering` — token and cost accounting; uses kernel's `model_catalog` |
+| `router` | Re-exported from `librefang-kernel-router` — model router, alias resolution |
 
-### `kernel::cron`
+## Concurrency and Lock Strategies
 
-Cron-based scheduling. Resolves `session_mode` per-job using the priority chain: **per-job config → manifest → historical Persistent**.
+The kernel uses different synchronization primitives depending on access patterns. Choosing the wrong one causes performance regressions or subtle bugs.
 
-### `kernel::event_bus`
+### `model_catalog: arc_swap::ArcSwap<ModelCatalog>`
 
-Broadcast event bus. Internal history buffer is `parking_lot::Mutex<VecDeque<Arc<Event>>>` (changed in #3385). Do not switch back to `RwLock<VecDeque<Event>>` — the previous design caused contention issues.
+Hot read, rare write. Readers get an atomic-load snapshot (#3384). Writers go through `model_catalog_update(|cat| ...)` which performs an RCU-style swap. **Do not** replace with `RwLock<ModelCatalog>`.
 
-### `kernel::session_lifecycle`
+### `skill_registry: std::sync::RwLock<SkillRegistry>`
 
-Session state machine. Manages transitions between session states.
+Hot-reload on install/uninstall. Reads must be brief — copy out what you need, then drop the lock guard.
 
-### `metering` (re-exported from `librefang-kernel-metering`)
+### `running_tasks: dashmap::DashMap<(AgentId, SessionId), RunningTask>`
 
-Token and cost accounting. Uses the kernel's `model_catalog` for pricing data.
+Keyed by `(agent, session)` tuple, **not** by `AgentId` alone. Pre-#3172 it was keyed by `AgentId`, which silently overwrote concurrent agent loops. Do not degrade this.
 
-### `router` (re-exported from `librefang-kernel-router`)
+### `mcp_oauth_provider: Arc<dyn McpOAuthProvider + Send + Sync>`
 
-Model router with alias resolution. Selects the appropriate LLM provider/model for a given request.
+Pluggable trait object. Implemented in `librefang-api` to keep the daemon free of HTTP concerns. New OAuth flows must go through this trait, not direct kernel logic.
 
-## Concurrency and Locking Strategies
+### event_bus history: `parking_lot::Mutex<VecDeque<Arc<Event>>>`
 
-The kernel uses different locking primitives based on access patterns. Choosing the wrong one causes either contention bugs or silent data loss. Follow these rules:
+Changed from `RwLock<VecDeque<Event>>` in #3385. Do not switch back. `Arc<Event>` allows cheap cloning for subscribers; the `Mutex` avoids read-starvation issues the old `RwLock` caused.
 
-| Access pattern | Strategy | Example field |
-|---|---|---|
-| Hot read, rare write | `arc_swap::ArcSwap<T>` | `model_catalog` |
-| Hot read, hot write | `parking_lot::Mutex<T>` or `DashMap<K, V>` | `running_tasks` |
-| Append-only history | `parking_lot::Mutex<VecDeque<Arc<T>>>` | event bus history |
-| Hot-reload on install/uninstall | `std::sync::RwLock<T>` | `skill_registry` |
+### Decision Guide for New Fields
 
-### Critical field details
+| Access pattern | Use |
+| --- | --- |
+| Hot read, rare write | `arc_swap::ArcSwap` |
+| Hot read, hot write | `parking_lot::Mutex` or `dashmap::DashMap` |
+| Append-only history | `parking_lot::Mutex<VecDeque<Arc<T>>>` |
 
-**`model_catalog: arc_swap::ArcSwap<ModelCatalog>`** — Readers use atomic-load (zero contention, #3384). Writers go through `model_catalog_update(|cat| ...)` which performs an RCU-style swap. Never replace this with `RwLock<ModelCatalog>`.
+## Determinism
 
-**`skill_registry: std::sync::RwLock<SkillRegistry>`** — Hot-reloaded on skill install/uninstall. Keep reads brief; copy out what you need immediately.
+Anything that reaches an LLM prompt **must** be ordered before stringification. Use `BTreeMap` and `BTreeSet`. `HashMap` iteration order varies across processes and silently invalidates provider prompt caches (refs #3298).
 
-**`running_tasks: dashmap::DashMap<(AgentId, SessionId), RunningTask>`** — Keyed by the composite `(AgentId, SessionId)`, not `AgentId` alone. Before #3172 it was keyed only by `AgentId`, which silently overwrote concurrent agent loops. Do not regress this.
+Regression tests guard this at each boundary. See `kernel::tests::mcp_summary_is_byte_identical_across_input_orders`.
 
-**`mcp_oauth_provider: Arc<dyn McpOAuthProvider + Send + Sync>`** — Pluggable trait object. The implementation lives in `librefang-api` to keep the daemon free of HTTP concerns. All new OAuth flows must go through this trait, not through direct kernel logic.
+## Configuration
 
-## Determinism (#3298)
+Key knobs exposed through `KernelConfig`:
 
-Any data that reaches an LLM prompt **must** be ordered before stringification. Use `BTreeMap` / `BTreeSet` for these fields. `HashMap` iteration order varies across processes and silently invalidates provider prompt caches (leading to wasted tokens and cost).
+| Field | Default | Notes |
+| --- | --- | --- |
+| `max_history_messages` | — | Global default; clamped up to `MIN_HISTORY_MESSAGES = 4` with a WARN log. Per-agent override in `agent.toml`. |
+| `queue.concurrency.trigger_lane` | 8 | Global semaphore on `Lane::Trigger`. |
+| `queue.concurrency.default_per_agent` | 1 | Fallback when `agent.toml: max_concurrent_invocations` is unset. |
+| `workflow_stale_timeout_minutes` | — | Cutoff used by `recover_stale_running_runs` at boot. |
 
-Regression tests guard these boundaries. See `kernel::tests::mcp_summary_is_byte_identical_across_input_orders` for an example.
+## Adding a Field to `LibreFangKernel`
 
-**Rule:** No `HashMap<K, V>` in any field that ends up in an LLM prompt. Use `BTreeMap`.
-
-## Configuration Knobs
-
-| Knob | Default | Description |
-|---|---|---|
-| `KernelConfig.max_history_messages` | varies | Global default for message history. Clamped up to `MIN_HISTORY_MESSAGES = 4` with a WARN log if set lower. Per-agent override in `agent.toml`. |
-| `KernelConfig.queue.concurrency.trigger_lane` | 8 | Global semaphore size for `Lane::Trigger`. |
-| `KernelConfig.queue.concurrency.default_per_agent` | 1 | Fallback concurrency when `agent.toml: max_concurrent_invocations` is unset. |
-| `KernelConfig.workflow_stale_timeout_minutes` | varies | Cutoff used by `recover_stale_running_runs` at boot to detect stale workflows. |
-
-## Adding a New Field to `LibreFangKernel`
-
-Follow all four steps:
-
-1. **Visibility.** The field must be `pub(crate)` unless an external crate genuinely needs read access. Default to `pub(crate)`.
-
-2. **`Default` impl.** If the field has a config-side counterpart, add it to the `Default` impl on `KernelConfig`. Missing this silently breaks the build.
-
+1. **Visibility.** Field must be `pub(crate)` unless an external crate genuinely needs read access.
+2. **Config default.** If the field has a config-side counterpart, add it to the `Default` impl on `KernelConfig`. Otherwise the build breaks silently.
 3. **Trait objects.** If the field is `Option<Arc<dyn Trait>>`, mark it `#[serde(skip)]` and implement `Serialize`, `Deserialize`, `Clone`, and `Debug` manually.
+4. **Lock strategy.** Choose using the decision guide above.
 
-4. **Lock strategy.** Choose based on the access pattern:
-   - Hot read, rare write → `arc_swap::ArcSwap`
-   - Hot read, hot write → `parking_lot::Mutex` or `dashmap::DashMap`
-   - Append-only history → `parking_lot::Mutex<VecDeque<Arc<T>>>`
+## Dependencies
+
+### Internal
+
+The kernel depends on sibling crates for types, memory, runtime, skills, hands, LLM drivers, wire protocol, and channels. It re-exports `librefang-kernel-metering` and `librefang-kernel-router` as `metering` and `router` respectively.
+
+Notable: `librefang-extensions` is a dependency, but the kernel does **not** depend on `librefang-api`. That crate calls into the kernel via `KernelHandle`.
+
+### External
+
+Key external dependencies include `tokio`, `dashmap`, `arc-swap`, `parking_lot`, `rusqlite` (via `r2d2`/`r2d2_sqlite` connection pool), `tera` (sandboxed Jinja2-style templating for workflow `Transform` operators), `cron`, and standard serialization crates.
+
+### Binary Target
+
+`purge_sentinels` — a utility binary at `bin/purge_sentinels.rs`.
 
 ## Testing
 
-**Unit tests** live inside `crates/librefang-kernel/src/kernel/` alongside the code they test.
+- **Unit tests** live inside `crates/librefang-kernel/src/kernel/`, co-located with the code they test.
+- **Integration tests** against a real router belong in `librefang-api/tests/` using `#[tokio::test]` against `TestServer` (refs #3721).
+- Time-dependent tests (workflow, cron timing) use `tokio::time::{pause, advance, resume}` via the `test-util` feature on `tokio`.
 
-**Integration tests** that need a real router or HTTP server belong in `librefang-api/tests/` using `#[tokio::test]` against `TestServer` (#3721).
+### Commands
 
-### Build and test commands
+| What you want | Command |
+| --- | --- |
+| Run kernel unit tests | `cargo test -p librefang-kernel` |
+| Type-check the workspace | `cargo check --workspace --lib` |
 
-```bash
-# Run kernel tests only
-cargo test -p librefang-kernel
+**Forbidden commands:**
+- `cargo test` (workspace-wide) — causes target/ contention with the user's running session.
+- `cargo build` — use `cargo check` instead. Real builds run in CI.
 
-# Check the whole workspace compiles (no full build)
-cargo check --workspace --lib
-```
+## Rules
 
-**Do not** run `cargo test` (workspace-wide) — it causes target/ contention with the user's active session. **Do not** run `cargo build` — full builds belong in CI.
-
-## Taboos
-
-- **No daemon spawning.** The CLI binary owns `start`. The kernel just runs.
-- **No `tokio::runtime::Handle::block_on`.** The kernel runs inside an existing runtime. Nesting runtimes causes panics or deadlocks.
-- **No direct LLM HTTP calls.** All LLM communication goes through `librefang-runtime` drivers.
-- **No `Result<_, String>` on new `KernelHandle` methods** (#3541). Use typed errors.
-- **No `HashMap` in LLM-bound data** (#3298). Use `BTreeMap`/`BTreeSet`.
-
-## Key Dependencies
-
-| Crate | Role |
-|---|---|
-| `librefang-types` | Shared type definitions |
-| `librefang-memory` | Storage substrate |
-| `librefang-runtime` | Execution engine, agent loop, LLM drivers |
-| `librefang-skills` | Skill definitions and loading |
-| `librefang-hands` | Tool/hand dispatch |
-| `librefang-llm-driver` / `librefang-llm-drivers` | LLM provider abstraction |
-| `librefang-kernel-router` | Model routing and alias resolution (re-exported) |
-| `librefang-kernel-metering` | Token and cost accounting (re-exported) |
-| `tera` | Sandboxed Jinja2-style templating for workflow `Transform` operations (#4980) |
-| `parking_lot` | Low-contention mutex types |
-| `arc-swap` | Atomic RCU-style pointer swaps |
-| `dashmap` | Concurrent hash map |
+- No daemon spawning. The CLI binary owns `start`; the kernel just runs.
+- No `tokio::block_on` in this crate. The kernel runs inside an existing runtime.
+- No direct LLM HTTP calls. Route through `librefang-runtime` drivers.
+- No `KernelHandle` methods returning `Result<_, String>` (#3541). Use typed errors.
+- No `HashMap<K, V>` in any field that ends up in an LLM prompt. Use `BTreeMap` (#3298).

@@ -1,145 +1,154 @@
 # Other — librefang-api-src
 
-# LibreFang Login Page (`librefang-api/src/login_page.html`)
+# LibreFang API Login Page (`login_page.html`)
 
-## Purpose
+## Overview
 
-This is the authentication entry point for the LibreFang dashboard. It is a fully self-contained, single-file HTML page with inline CSS and JavaScript — no external dependencies, no build step, and no framework. It is served directly by the API server to unauthenticated users and handles credential collection, optional TOTP two-factor authentication, token storage, and post-login redirect.
+A self-contained, single-file HTML login page for the LibreFang dashboard. It collects credentials, handles optional two-factor authentication (TOTP), stores the resulting session token in `localStorage`, and redirects the user into the single-page application shell.
 
-## When This Page Is Served
+No build step, no external dependencies, no framework. Pure HTML/CSS/JS delivered as-is by the API server.
 
-The server renders this page at `/dashboard` and `/dashboard/` (and potentially `/` depending on configuration) when the requesting user lacks a valid session. After successful authentication, the user is redirected to `/`, where the main SPA shell is served.
+## Purpose in the Architecture
+
+This file is served at `/dashboard` and `/dashboard/` — paths that exist **solely** to host this login page and any SPA build assets under `/dashboard/<asset>`. Once authenticated, the user is redirected to `/`, where the main SPA shell lives. This separation means unauthenticated users never load the full SPA bundle.
 
 ## Authentication Flow
 
 ```mermaid
 sequenceDiagram
-    participant User
-    participant LoginPage
+    participant U as User
+    participant LP as login_page.html
     participant API as /api/auth/dashboard-login
 
-    User->>LoginPage: Submit username + password
-    LoginPage->>API: POST {username, password}
-    API-->>LoginPage: Response
+    U->>LP: Submit username + password
+    LP->>API: POST {username, password}
+    API-->>LP: {ok, token}
+    LP->>LP: Store token in localStorage
+    LP->>U: Redirect to original path (or /)
 
-    alt Success with token
-        API-->>LoginPage: {ok: true, token: "..."}
-        LoginPage->>LoginPage: Store token in localStorage
-        LoginPage->>User: Redirect to original destination
-    else TOTP required
-        API-->>LoginPage: {requires_totp: true}
-        LoginPage->>User: Show TOTP input field
-        User->>LoginPage: Submit TOTP code
-        LoginPage->>API: POST {username, password, totp_code}
-    else Failure
-        API-->>LoginPage: {error: "..."}
-        LoginPage->>User: Display error message
-    end
+    Note over LP,API: If TOTP required
+    U->>LP: Submit username + password
+    LP->>API: POST {username, password}
+    API-->>LP: {requires_totp: true}
+    LP->>U: Show TOTP input
+    U->>LP: Submit TOTP code
+    LP->>API: POST {username, password, totp_code}
+    API-->>LP: {ok, token}
 ```
 
-## Key Components
+### Two-Phase Login
 
-### HTML Structure
+The form starts with only username and password fields. The TOTP field (`#totp-row`) is hidden by default.
 
-| Element | ID | Role |
-|---------|----|------|
-| `<form>` | `f` | The single form wrapping all inputs and the submit button |
-| Username input | `u` | Collects the username, with `autocomplete="username"` |
-| Password input | `p` | Password field with `autocomplete="current-password"` |
-| TOTP row | `totp-row` | Container for the TOTP input, hidden by default |
-| TOTP input | `t` | 6-digit numeric code input, `inputmode="numeric"`, `pattern="[0-9]{6}"` |
-| Submit button | `btn` | Disabled during in-flight requests to prevent double submission |
-| Error display | `err` | `aria-live="polite"` region for accessible error announcements |
+1. **First submission** — sends `{ username, password }` to `POST /api/auth/dashboard-login`.
+2. If the server responds with `{ requires_totp: true }`, the TOTP row is revealed, the user is prompted for their 6-digit code, and `requires_totp` is set to `true` for all subsequent submissions.
+3. **Second submission** — sends `{ username, password, totp_code }`.
+4. If the server responds with `{ ok: true, token: "..." }`, the token is persisted and the user is redirected.
 
-### Two-Step TOTP Handling
+## Token Storage
 
-The login flow is **two-step**, not two-phase. There is no separate "does this user require TOTP?" probe. Instead:
+On successful authentication, the JWT is written to:
 
-1. The user submits username + password.
-2. If the backend responds with `{requires_totp: true}`, the JavaScript unhides the `totp-row`, focuses the TOTP input, and prompts the user.
-3. On the next submission, the payload includes `totp_code` alongside the credentials.
-4. The `requiresTotp` flag is tracked in closure scope so subsequent retries continue sending the TOTP field.
-
-### Token Storage
-
-On a successful response containing `{ok: true, token: "..."}`:
-
-```javascript
-localStorage.setItem('librefang-api-key', d.token);
+```
+localStorage.setItem('librefang-api-key', token)
 ```
 
-The token is stored under the key **`librefang-api-key`**. The surrounding `try/catch` silently ignores failures (e.g., localStorage is full or disabled in private browsing).
+The rest of the SPA reads from this same key to authorize API requests.
 
-### Post-Login Redirect Logic
+## Redirect Logic
 
-The redirect logic handles a historical edge case documented in issue **#4860**:
+After storing the token, the page redirects using `location.replace()` to preserve the user's original destination when possible:
 
 ```javascript
 var path = location.pathname;
 var target = path + location.search + location.hash;
+
 if (path === '/' || path === '/dashboard' || path === '/dashboard/') {
-    target = '/';
+  target = '/';
 }
+
 location.replace(target);
 ```
 
-- **Normal case**: If the user was deep-linked to a specific path (e.g., `/dashboard/settings?tab=alerts#smtp`), they are redirected back to that exact URL after login, preserving query string and hash.
-- **Collapse case**: If the path is `/`, `/dashboard`, or `/dashboard/`, the redirect target collapses to `/` with no search or hash. These paths only exist to host the inline login page (or SPA build assets under `/dashboard/<asset>`), so any query/hash on them is not meaningful application state.
+- **If the user landed on `/dashboard` or `/dashboard/`**: redirect to `/` (the SPA shell). Search params and hash are intentionally dropped because those paths were 404s before the login page was added — any query/hash on them is not meaningful application state. See issue **#4860**.
+- **Any other path**: redirect back to `pathname + search + hash`, so deep-linking into protected routes works correctly.
 
-`location.replace()` is used instead of `location.href` assignment so the login page is not retained in browser history — the user cannot press Back to return to the login form.
+`location.replace()` is used instead of `location.href` to prevent the login page from staying in browser history (the back button skips it).
 
-## API Contract
+## UI / UX Details
 
-The page communicates with a single endpoint:
+### Theming
 
-**`POST /api/auth/dashboard-login`**
+The page supports both dark and light mode via `prefers-color-scheme`:
 
-Request body (JSON):
+| Mode    | Background   | Card background | Text       |
+|---------|-------------|-----------------|------------|
+| Dark    | `#0b0d12`   | `#12151c`       | `#e6e8ee`  |
+| Light   | `#f6f7fb`   | `#fff`          | `#1a1c22`  |
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `username` | `string` | Yes | Trimmed before sending |
-| `password` | `string` | Yes | Sent as-is (no trimming) |
-| `totp_code` | `string` | On retry | 6-digit numeric string, included only after the server has indicated TOTP is required |
+The `:root` declares `color-scheme: light dark` so native form controls also adapt.
 
-Expected response shapes:
+### Error Display
 
+Errors are rendered into `#err` (with `aria-live="polite"` for screen reader announcement). Sources:
+
+| Scenario                | Message shown                  |
+|------------------------|-------------------------------|
+| Server returns error    | `d.error` from the response   |
+| TOTP required           | `"Enter your 6-digit TOTP code."` |
+| Generic failure         | `"Sign in failed."`           |
+| Network/fetch error     | `"Network error."`            |
+
+### Accessibility Notes
+
+- All inputs have associated `<label>` elements.
+- The `aria-live="polite"` region announces errors without interrupting.
+- Autocomplete attributes (`username`, `current-password`, `one-time-code`) help password managers and browser autofill.
+- The username field has `autofocus`.
+
+## DOM Structure Reference
+
+| Element       | ID        | Role                                      |
+|--------------|-----------|-------------------------------------------|
+| Form         | `f`       | Wraps all inputs and the submit button    |
+| Username     | `u`       | `name="username"`, required               |
+| Password     | `p`       | `name="password"`, `type="password"`, required |
+| TOTP row     | `totp-row`| Container, `hidden` until needed          |
+| TOTP input   | `t`       | `name="totp_code"`, numeric, max 6 chars  |
+| Submit button| `btn`     | Disabled during in-flight requests        |
+| Error display| `err`     | `aria-live="polite"` text region          |
+
+## Server-Side Integration Contract
+
+The page expects the backend endpoint `POST /api/auth/dashboard-login` to accept JSON with the following shapes:
+
+**Request (phase 1):**
 ```json
-// Success
-{ "ok": true, "token": "<jwt-or-api-key>" }
+{ "username": "string", "password": "string" }
+```
 
-// TOTP required
+**Request (phase 2, if TOTP required):**
+```json
+{ "username": "string", "password": "string", "totp_code": "123456" }
+```
+
+**Response — success:**
+```json
+{ "ok": true, "token": "jwt-string" }
+```
+
+**Response — TOTP required:**
+```json
 { "requires_totp": true }
+```
 
-// Failure
+**Response — failure:**
+```json
 { "ok": false, "error": "Human-readable message" }
 ```
 
-Credentials are sent via `credentials: 'same-origin'` so cookies (if any) are included, but the auth mechanism itself is token-based — the token goes into `localStorage`, not a cookie.
+The page does not check HTTP status codes for business logic — it reads only the JSON body. Any non-200 status that still returns valid JSON with the above shape will work correctly.
 
-## Styling and Theming
+## Configuration
 
-The page supports both dark and light modes via `prefers-color-scheme`:
-
-- **Dark mode** (default): Dark background (`#0b0d12`), card background `#12151c`, light text.
-- **Light mode**: Light background (`#f6f7fb`), white card, dark text, adjusted border and shadow colors.
-
-The `:root { color-scheme: light dark; }` declaration ensures native form controls (scrollbars, focus rings) also adapt. All transitions between states are handled purely through CSS — no JavaScript class toggling.
-
-The layout uses `display: grid; place-items: center` on the body to vertically and horizontally center the card. The card width is constrained to `min(92vw, 380px)` for mobile responsiveness.
-
-## Security Considerations
-
-- The page sets `<meta name="robots" content="noindex, nofollow">` to prevent search engine indexing.
-- The form uses `autocomplete="username"` and `autocomplete="current-password"` so password managers can correctly identify and fill credentials.
-- The TOTP field uses `autocomplete="one-time-code"` to trigger browser autofill from authenticator apps on supported devices.
-- `aria-live="polite"` on the error container ensures screen readers announce authentication failures without interrupting.
-- The button is disabled during the `fetch` call (set in the submit handler, re-enabled in `.finally()`) to prevent duplicate submissions.
-- The password value is **not** trimmed (`document.getElementById('p').value` is sent as-is), while the username and TOTP code are trimmed. This preserves passwords that intentionally contain leading/trailing whitespace.
-
-## Integration Notes
-
-- This file is embedded directly in the API binary at compile time (not served from disk).
-- It has **no external dependencies** — no CDN links, no frameworks, no icon libraries. This ensures the login page loads reliably even in restricted network environments.
-- The `<code>config.toml</code>` reference in the footer tells administrators where to modify authentication settings, but this is purely informational.
-- There are no outgoing or incoming code-level calls within the project — this module is entirely self-contained, interacting with the backend only through the HTTP endpoint.
+The footer text references `config.toml`, indicating that authentication is a configurable feature. The page itself is static and requires no configuration — all behavior is determined by the server's response.

@@ -2,63 +2,61 @@
 
 # Kernel Core
 
-The kernel core is the foundation of the LibreFang agent runtime. It provides the services every agent depends on: stable identity, safe execution, cost control, message routing, and the trait boundary that connects everything together.
+The kernel core module group forms the central runtime infrastructure for the agent platform. It manages agent identity, execution safety, cost control, message routing, and defines the interface contract between the agent runtime and the kernel backend.
 
-## Sub-modules at a glance
+## Sub-module Overview
 
-| Sub-module | Role |
+| Sub-module | Responsibility |
 |---|---|
-| [**Kernel Core (kernel)**](librefang-kernel-src.md) | Identity registry, approval gating, auth, orchestration, workflow engine, config loading |
-| [**Kernel Handle**](librefang-kernel-handle-src.md) | 19 role traits that define the kernel's API surface — the contract between runtime and kernel |
-| [**Metering**](librefang-kernel-metering-src.md) | LLM cost tracking, budget reservation, and provider exhaustion handling |
-| [**Router**](librefang-kernel-router-src.md) | Agent/workflow selection via keyword matching, manifest metadata, and semantic similarity |
+| [Kernel Core (`librefang-kernel-src`)](librefang-kernel-src.md) | Agent identity persistence across respawns; approval gating for dangerous tool operations |
+| [Kernel Handle (`librefang-kernel-handle-src`)](librefang-kernel-handle-src.md) | Role traits that define the seam between agent runtime and kernel backend — 19 focused capability interfaces |
+| [Metering Engine (`librefang-kernel-metering`)](librefang-kernel-metering-src.md) | LLM cost tracking and quota enforcement across global, agent, provider, and user scopes |
+| [Kernel Router (`librefang-kernel-router`)](librefang-kernel-router-src.md) | Dispatches inbound messages to the best-matching specialist agent template or hand |
 
-## How they fit together
+## How They Fit Together
 
-```mermaid
-flowchart LR
-    subgraph Boot
-        ID["AgentIdentityRegistry<br/>(TOML)"]
-        CFG["Config Loader"]
-    end
-
-    subgraph API Boundary
-        KH["KernelHandle<br/>19 role traits"]
-    end
-
-    subgraph Request Path
-        RTR["Router<br/>keyword + semantic"]
-        WF["Workflow Engine"]
-        APR["ApprovalManager<br/>(DashMap + SQLite)"]
-        MTR["Metering<br/>ledger + usage store"]
-    end
-
-    MSG["Incoming message"] --> RTR
-    RTR -->|selected agent/workflow| WF
-    WF -->|tool invocation| APR
-    APR -->|approved| MTR
-    MTR -->|budget cleared| LLM["LLM Provider"]
-
-    KH --- ID
-    KH --- CFG
-    KH --- WF
-    KH --- APR
-    KH --- MTR
-    KH --- RTR
+```
+Inbound message
+      │
+      ▼
+┌─────────────┐    selects agent
+│   Router     │─────────────────┐
+└─────────────┘                  │
+                                 ▼
+                      ┌──────────────────┐
+                      │ Identity Registry │  reuses canonical AgentId
+                      └──────────────────┘
+                                 │
+                                 ▼
+                       Agent runtime loop
+                      ┌────────┴─────────┐
+                      │                  │
+               ┌──────▼──────┐   ┌───────▼───────┐
+               │  Metering   │   │   Approval    │
+               │  Engine     │   │   Manager     │
+               └─────────────┘   └───────────────┘
+                      │                  │
+               reserve → settle    block or defer
 ```
 
-**On boot**, the kernel loads configuration (with TOML include resolution and deep-merge) and initializes the `AgentIdentityRegistry` to ensure every agent retains its UUID across restarts, renames, and crashes.
+All of these subsystems are accessed exclusively through the **role traits** defined in Kernel Handle. Agent code never touches concrete kernel types — it calls methods on bounded trait objects like `dyn MeteringHandle` or `dyn ApprovalHandle`, keeping each subsystem independently testable and replaceable.
 
-**On each incoming message**, the [Router](librefang-kernel-router-src.md) scores candidates via keyword matching (English and CJK), manifest metadata, and optional embedding-based semantic similarity. It selects the best agent hand or workflow template, falling back to the orchestrator when nothing matches.
+## Key Workflows Spanning Sub-modules
 
-**During execution**, the [Workflow Engine](librefang-kernel-src.md) orchestrates steps with loop-until constructs, DAG dependencies, and gate conditions. Dangerous tool invocations are routed through the `ApprovalManager`, which enforces blocking or deferred approval flows with TOTP-based MFA, session-level caching, and persistent SQLite audit logs.
+### Message dispatch and agent spawn
 
-**Every LLM call** passes through [Metering](librefang-kernel-metering-src.md), which reserves against global and per-provider budgets before dispatch and records actual spend on response. Provider exhaustion is surfaced so the runtime can fail over.
+An inbound user message hits the **Router**, which scores candidates via keyword rules, manifest metadata, and optional embedding similarity. The selected template name feeds into the spawn path, which consults the **Identity Registry** to reuse a canonical `AgentId` if one was previously recorded for that agent name. First UUID wins; subsequent respawns honor it even across renames or namespace changes.
 
-All of this is exposed to the agent runtime through the narrow [role traits](librefang-kernel-handle-src.md) — callers depend on `T: ApprovalGate` or `T: MeteringGate` rather than a monolithic kernel trait, keeping bounds tight and test mocks manageable.
+### LLM call with cost control and safety gates
 
-## Key cross-cutting workflows
+During execution, every LLM dispatch flows through the **Metering Engine**, which reserves estimated budget against four scopes (global, agent, provider, user) before the call proceeds. If the tool is flagged as dangerous, the **Approval Manager** intercepts it — either blocking the agent loop until a human resolves the request, or deferring the execution into a `DeferredToolExecution` package. After the LLM returns, metering settles the actual cost against the reservation.
 
-- **Skill approval pipeline**: A pending candidate skill is approved through the route handler → storage → evolution → verification chain, with prompt scanning and file locking before the skill is created.
-- **Config hot-reload**: `render_status_daemon` triggers `load_config` → `resolve_config_includes` → `deep_merge_toml`, propagating changes to all kernel services.
-- **Approval + metering handshake**: A tool approval via `approve_pending_candidate` must succeed before `reserve_global_budget` is called — the kernel never commits spend on an unapproved operation.
+### Agent restart and identity preservation
+
+When an agent panics or is killed, the **Supervisor** orchestrates restart. The identity registry entry survives a normal kill (preserving sessions, memories, and cron keyed under the UUID). Only an explicit purge (`?purge_identity=true`) removes the entry, allowing a clean identity on next spawn. Disk persistence uses atomic rename writes so concurrent `register` calls never corrupt the TOML file.
+
+## Design Principles
+
+- **Trait-seamed architecture.** Every kernel capability is behind a role trait. New code narrows to only the bounds it needs; legacy code continues using the blanket `KernelHandle` supertrait alias.
+- **In-memory authoritative, disk best-effort.** Both the identity registry and metering ledger treat their in-memory state as the source of truth. Disk I/O failures log warnings but never halt kernel operation.
+- **Reserve-then-settle costing.** The metering engine reserves estimated budget upfront, preventing concurrent requests from collectively overshooting caps before their actual costs are known.

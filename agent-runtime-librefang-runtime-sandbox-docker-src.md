@@ -1,219 +1,228 @@
 # Agent Runtime — librefang-runtime-sandbox-docker-src
 
-# Docker Sandbox Runtime (`librefang-runtime-sandbox-docker`)
+# Docker Container Sandbox (`librefang-runtime-sandbox-docker`)
 
-## Purpose
-
-This crate provides OS-level isolation for agent code execution by running commands inside Docker containers. It enforces a strict security boundary—network isolation, capability dropping, read-only filesystems, resource limits, and command sanitization—so that untrusted agent code cannot escape its sandbox or compromise the host system.
+OS-level isolation for agent code execution using Docker containers. Agents run commands inside hardened containers with strict resource limits, network isolation, dropped capabilities, and read-only root filesystems.
 
 ## Architecture
 
 ```mermaid
-graph TD
-    A[create_sandbox] --> B[validate_sandbox_config]
-    A --> C[validate_image_name]
-    A --> D[agent_id_container_suffix]
-    A --> E["docker run -d ..."]
-    F[exec_in_sandbox] --> G[validate_command]
-    F --> H["docker exec ..."]
-    H --> I[safe_truncate_str]
-    J[destroy_sandbox] --> K["docker rm -f"]
-    B --> L[validate_network]
-    B --> M[validate_capability]
-    G --> N[contains_shell_metacharacters]
+flowchart TD
+    A[create_sandbox] --> B[validate_image_name]
+    A --> C[validate_sandbox_config]
+    C --> D[validate_network]
+    C --> E[validate_capability]
+    A --> F[sanitize_container_name]
+    A --> G["docker run -d ..."]
+    G --> H[SandboxContainer]
+    I[exec_in_sandbox] --> J[validate_command]
+    J --> K[contains_shell_metacharacters]
+    I --> L["docker exec sh -c ..."]
+    L --> M[ExecResult]
+    N[destroy_sandbox] --> O["docker rm -f"]
+    P[ContainerPool] --> A
+    P --> N
 ```
 
-Every public entry point validates its inputs before shelling out to `docker`. Validation failures are typed `Err(String)` and also emit `error!`-level log spans so that rejections are recorded at daemon startup even if the caller discards the result.
+## Sandbox Lifecycle
 
----
+### 1. Creation — `create_sandbox`
 
-## Security Validation
+```rust
+pub async fn create_sandbox(
+    config: &DockerSandboxConfig,
+    agent_id: &str,
+    workspace: &Path,
+) -> Result<SandboxContainer, String>
+```
 
-All validation is designed to **fail closed**: syntactically valid but dangerous values are rejected with explicit error messages, and shell metacharacters are blocked before they ever reach a `docker` invocation.
+Spawns a long-lived container (`sleep infinity`) with the following hardening:
 
-### Network (`validate_network`)
+| Layer | Mechanism |
+|-------|-----------|
+| Capabilities | `--cap-drop ALL`, then selectively re-adds only allowlisted caps via `--cap-add` |
+| Privilege escalation | `--security-opt no-new-privileges` |
+| Network | Isolated to a validated non-host network (default: `none`) |
+| Filesystem | Optional `--read-only` root; workspace mounted `:ro` |
+| Resources | Memory limit, CPU limit, PID limit |
+| Temp storage | Configurable tmpfs mounts |
 
-Restricts the `--network` argument passed to `docker run`:
+The container name is derived as `{container_prefix}-{sha256(agent_id)[..8]}`, ensuring bijective mapping from agent IDs to container names (no collisions between `"foo/bar"` and `"foo-bar"`).
 
-| Value | Allowed? | Reason |
-|---|---|---|
-| `bridge` | ✅ | Default Docker bridge; isolated from host |
-| `none` | ✅ | No network at all |
-| `my-custom-net` | ✅ | User-defined bridge networks (`[A-Za-z0-9_-]+`) |
-| `host` | ❌ | Shares host network namespace; exposes loopback, cloud metadata endpoint `169.254.169.254`, and the daemon's own listener |
-| `container:*` | ❌ | Joins another container's namespace; can transitively inherit `host` access |
+### 2. Execution — `exec_in_sandbox`
 
-Case-insensitive rejection — `HOST`, `Host`, etc. are all blocked.
+```rust
+pub async fn exec_in_sandbox(
+    container: &SandboxContainer,
+    command: &str,
+    timeout: Duration,
+) -> Result<ExecResult, String>
+```
 
-### Capabilities (`validate_capability`, `SAFE_CAPS`)
+Runs a command via `docker exec … sh -c <command>`. Output is truncated at 50,000 characters to prevent unbounded memory growth. The timeout kills the `docker exec` subprocess; it does **not** send `SIGKILL` inside the container (the container itself keeps running).
 
-Applies the principle of least privilege via a two-step process:
+### 3. Destruction — `destroy_sandbox`
 
-1. `--cap-drop ALL` removes every Linux capability.
-2. Only capabilities in the `SAFE_CAPS` allowlist (14 entries) may be added back via `--cap-add`.
+```rust
+pub async fn destroy_sandbox(container: &SandboxContainer) -> Result<(), String>
+```
 
-**Excluded by design** (sandbox-collapse vectors):
+Force-removes the container (`docker rm -f`). Logs a warning on failure but returns `Ok(())` — a stale container is a resource leak, not a functional error.
 
-- `SYS_ADMIN` — mount, kexec, BPF, namespace manipulation
-- `NET_ADMIN` — interface reconfiguration, firewall rules, raw sockets
-- `SYS_PTRACE` — process attachment; defeats `no-new-privileges`
-- `SYS_MODULE`, `SYS_BOOT`, `SYS_RAWIO`, `SYS_TIME`, `BPF`, `PERFMON`, `CHECKPOINT_RESTORE`, and all `MAC_*`, `IPC_*`, `AUDIT_*` capabilities
+## Security Validation Layer
 
-Capability matching is case-insensitive and tolerates an optional `CAP_` prefix (both `CHOWN` and `CAP_CHOWN` are accepted).
+All validation runs **before** any `docker` subprocess is spawned. The design principle is fail-closed: any invalid or dangerous configuration produces a typed `Err(String)` and an `error!` log entry.
 
-### Commands (`validate_command` → `helpers::contains_shell_metacharacters`)
+### Network — `validate_network`
 
-Blocks injection vectors before commands are passed to `docker exec … sh -c`:
+Rejects configurations that share or join host-level network namespaces:
 
-| Pattern | Blocked? | Rationale |
-|---|---|---|
-| Backticks `` ` `` | ❌ Raw string | Command substitution fires inside double quotes |
-| `$(` | ❌ Raw string | Same — POSIX command substitution |
-| `${` | ❌ Raw string | Variable expansion works inside double quotes |
-| `\n`, `\r`, `\0` | ❌ Raw string | Newline injection / null bytes |
-| `;`, `\|`, `>`, `<`, `&`, `{`, `}` | ❌ Unquoted regions only | These are literals inside quoted strings; legitimate quoted arguments like `echo "a && b"` must not false-positive |
+- **`host`** — exposes loopback, cloud metadata at `169.254.169.254`, and the daemon's listener port.
+- **`container:<name>`** — transitively inherits whatever the target container can reach.
+- **Bad syntax** — anything outside `[A-Za-z0-9_-]+` fails fast.
 
-The `strip_quoted_regions` helper strips away single- and double-quoted spans (handling backslash escapes in double quotes) before scanning for chaining/redirection metacharacters, while always scanning the raw string for substitution patterns that fire regardless of quoting.
+Accepted values: `bridge`, `none`, or user-defined Docker network names.
 
-### Bind Mounts (`validate_bind_mount`)
+### Capabilities — `validate_capability` and `SAFE_CAPS`
 
-Prevents mounting sensitive host paths into the container:
+After `--cap-drop ALL`, only the 14 capabilities in `SAFE_CAPS` may be re-added:
 
-**Always-blocked paths** (`BLOCKED_MOUNT_PATHS`):
-`/etc`, `/proc`, `/sys`, `/dev`, `/var/run/docker.sock`, `/root`, `/boot`
+```
+CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL,
+SETGID, SETUID, SETPCAP, NET_BIND_SERVICE,
+NET_RAW, SYS_CHROOT, MKNOD, AUDIT_WRITE, SETFCAP
+```
 
-Additional checks:
-- **Non-absolute paths** — rejected outright
-- **Path traversal** (`..` components) — rejected
-- **Symlink escape** — canonicalizes the path (or its nearest existing ancestor) and re-checks against blocked paths to catch symlink-based evasion
-- **User-configured blocklist** — additional paths blocked via configuration
+Dangerous capabilities excluded by design (each is a sandbox-collapse vector):
 
-### Container Names (`sanitize_container_name`, `agent_id_container_suffix`)
+| Capability | Risk |
+|-----------|------|
+| `SYS_ADMIN` | Mount, kexec, BPF, namespace manipulation |
+| `NET_ADMIN` | Interface reconfiguration, firewall rules, raw sockets |
+| `SYS_PTRACE` | Process attachment; defeats `no-new-privileges` |
+| `BPF`, `PERFMON` | eBPF loading, kernel observation |
+| `SYS_MODULE`, `SYS_BOOT` | Kernel module loading, reboot |
 
-Container names are limited to `[a-zA-Z0-9-]` (max 63 chars). Agent IDs are mapped to a collision-resistant suffix via `SHA-256(agent_id)[..8 hex chars]`, which is bijective with cryptographic confidence for realistic agent counts. This replaced an earlier lossy character-replacement scheme that collapsed distinct IDs like `foo/bar` and `foo-bar` into the same container name.
+Capability matching is case-insensitive and strips the optional `CAP_` prefix (Docker accepts both `CHOWN` and `CAP_CHOWN`).
 
----
+### Image Name — `validate_image_name`
 
-## Container Lifecycle
+Allows only `[a-zA-Z0-9.:/-_]`. Rejects shell metacharacters that could escape the `docker run` argument vector.
 
-### `is_docker_available()`
+### Command Sanitization — `validate_command`
 
-Probes the system for a working Docker daemon by running `docker version --format {{.Server.Version}}`. Returns `false` (never panics) if Docker is absent or the daemon is unreachable.
+Delegates to `helpers::contains_shell_metacharacters`, which applies a two-phase scan:
 
-### `create_sandbox(config, agent_id, workspace)`
+1. **Raw string scan** (fires inside double quotes too): backticks, `$(`, `${`, newlines, null bytes.
+2. **Unquoted-region scan** (after stripping single/double-quoted regions): `;`, `|`, `>`, `<`, `{`, `}`, `&`.
 
-Creates and starts a detached container:
+This split is intentional — command substitution and variable expansion execute inside `"…"` in `sh -c`, while pipes and redirections do not.
 
-1. Validates the image name, sandbox config, and derived container name.
-2. Constructs a `docker run -d` command with:
-   - **Resource limits**: `--memory`, `--cpus`, `--pids-limit`
-   - **Capability drop**: `--cap-drop ALL` + `--security-opt no-new-privileges`, then selectively adds back only allowlisted caps
-   - **Read-only root**: `--read-only` when `config.read_only_root` is true
-   - **Network**: `--network <validated-network>`
-   - **tmpfs mounts**: ephemeral writable filesystems from `config.tmpfs`
-   - **Workspace**: agent workspace mounted read-only at `config.workdir`
-   - **Keepalive**: runs `sleep infinity` so the container stays alive for `exec` calls
-3. Returns a `SandboxContainer` with the container ID, agent ID, and creation timestamp.
+### Bind Mount Validation — `validate_bind_mount`
 
-### `exec_in_sandbox(container, command, timeout)`
+Blocks mounts into sensitive host paths:
 
-Executes a command inside a running container:
+```
+/etc, /proc, /sys, /dev, /var/run/docker.sock, /root, /boot
+```
 
-1. Validates the command against the shell-metacharacter denylist.
-2. Runs `docker exec <container_id> sh -c <command>` with a `tokio::time::timeout`.
-3. Truncates stdout/stderr to 50,000 characters (UTF-8-boundary-safe via `safe_truncate_str`) to prevent unbounded memory growth.
-4. Returns an `ExecResult` with captured stdout, stderr, and exit code.
+Plus any user-configured `blocked_mounts`. Performs:
 
-### `destroy_sandbox(container)`
+- Absolute path check
+- `..` traversal rejection
+- **Symlink escape detection**: canonicalizes the path (or its nearest existing ancestor) and verifies the resolved target is not under a blocked path. This prevents TOCTOU attacks where a symlink is created after validation but before Docker resolves it.
 
-Force-stops and removes the container via `docker rm -f`. Failures are logged at `warn!` level but do not propagate as errors (the container may already be gone).
+### Container Name — `sanitize_container_name`
 
----
+Validates the final Docker container name is `[a-zA-Z0-9-]{1,63}`. The previous approach of silently replacing disallowed characters with `-` caused collisions (e.g. `"foo/bar"` and `"foo-bar"` both became `"foo-bar"`). Validation now rejects bad input; the `agent_id_container_suffix` function ensures the input is always well-formed.
 
-## Container Pool (`ContainerPool`)
+## Container Pool — `ContainerPool`
 
-Reuses containers across sessions to avoid the overhead of repeated `docker run` / `docker rm` cycles.
+Reuses containers across agent sessions to amortize creation cost.
 
 ```rust
 let pool = ContainerPool::new();
 
-// Acquire a matching container (None if pool is empty or cool-down hasn't elapsed)
-if let Some(container) = pool.acquire(config_hash(&config), 0) {
+// Return a container for reuse
+pool.release(container, config_hash(&config));
+
+// Retrieve a matching container (if cool_secs have elapsed since last use)
+if let Some(container) = pool.acquire(config_hash(&config), cool_secs) {
     // reuse
-} else {
-    let container = create_sandbox(&config, agent_id, workspace).await?;
-    // use it
-    pool.release(container, config_hash(&config));
 }
 
-// Periodically clean up stale entries
+// Periodic cleanup — destroy stale containers
 pool.cleanup(idle_timeout_secs, max_age_secs).await;
 ```
 
-**Key details:**
+Containers are matched by `config_hash`, which hashes the image, network, memory limit, and working directory. A container with a different image but same agent ID will **not** be reused.
 
-- **Concurrency-safe**: backed by `DashMap<String, PoolEntry>`.
-- **Config matching**: `config_hash` hashes the image, network, memory limit, and workdir. Containers are only reused when the hash matches exactly.
-- **Cool-down**: `acquire` only returns entries whose `last_used` timestamp is at least `cool_secs` seconds old.
-- **Cleanup**: `cleanup` destroys containers that are either idle beyond `idle_timeout_secs` or older than `max_age_secs`, calling `destroy_sandbox` for each and removing them from the map.
-
----
-
-## Helpers Module (`helpers`)
-
-A self-contained, ~60 LOC duplicate of string utilities from `librefang-runtime::subprocess_sandbox` and `librefang-runtime::str_utils`. Duplicated here to avoid a cyclic dependency back into the parent runtime crate.
-
-| Function | Purpose |
-|---|---|
-| `safe_truncate_str(s, max_bytes)` | Truncates a string to `max_bytes`, falling back to the nearest UTF-8 char boundary to avoid panics |
-| `contains_shell_metacharacters(command)` | Returns `Some(reason)` if the command contains injection vectors, `None` if clean |
-
-These are exposed as `pub` so the parent crate can run a parity test (`docker_sandbox_helpers_parity.rs`) asserting byte-for-byte equivalence with the canonical implementations. This guards against silent drift when the upstream denylist gains new entries.
-
----
-
-## Data Structures
+### `config_hash`
 
 ```rust
-struct SandboxContainer {
-    container_id: String,   // Docker container ID (hex)
-    agent_id: String,       // Owning agent identifier
-    created_at: DateTime<Utc>,
-}
+pub fn config_hash(config: &DockerSandboxConfig) -> u64
+```
 
-struct ExecResult {
-    stdout: String,    // Captured stdout (truncated at 50k chars)
-    stderr: String,    // Captured stderr (truncated at 50k chars)
-    exit_code: i32,    // Process exit code (-1 if unavailable)
+Deterministic hash of key config fields (image, network, memory_limit, workdir). Used by the pool to decide whether a returned container is compatible with a new request.
+
+## Availability Check — `is_docker_available`
+
+```rust
+pub async fn is_docker_available() -> bool
+```
+
+Runs `docker version --format {{.Server.Version}}` and returns whether the Docker daemon is reachable. Use this at startup to decide whether Docker sandboxing can be offered.
+
+## Data Types
+
+### `SandboxContainer`
+
+```rust
+pub struct SandboxContainer {
+    pub container_id: String,   // Docker container ID (hex)
+    pub agent_id: String,       // Owning agent
+    pub created_at: DateTime<Utc>,
 }
 ```
 
----
+### `ExecResult`
 
-## Configuration (`DockerSandboxConfig`)
+```rust
+pub struct ExecResult {
+    pub stdout: String,    // Truncated at 50,000 chars
+    pub stderr: String,    // Truncated at 50,000 chars
+    pub exit_code: i32,    // Process exit code (-1 if unknown)
+}
+```
 
-Defined in `librefang_types::config`. Defaults:
+## Helpers Module
 
-| Field | Default | Notes |
-|---|---|---|
-| `enabled` | `false` | Must be explicitly enabled |
-| `image` | `python:3.12-slim` | |
-| `container_prefix` | `librefang-sandbox` | |
-| `workdir` | `/workspace` | |
-| `network` | `none` | Most restrictive by default |
-| `memory_limit` | `512m` | |
-| `cpu_limit` | `1.0` | |
-| `timeout_secs` | `60` | |
-| `read_only_root` | `true` | |
-| `cap_add` | `[]` (empty) | No capabilities beyond the drop-all baseline |
-| `tmpfs` | `["/tmp:size=64m"]` | Ephemeral writable `/tmp` |
-| `pids_limit` | `100` | |
+Inlined from `librefang-runtime::subprocess_sandbox` and `librefang-runtime::str_utils` to avoid a cyclic dependency back into the parent runtime crate. Published as `pub` so a parity test (`crates/librefang-runtime/tests/docker_sandbox_helpers_parity.rs`) can verify these implementations stay byte-for-byte identical to the canonical versions.
 
----
+| Function | Purpose |
+|----------|---------|
+| `safe_truncate_str(s, max_bytes)` | UTF-8-boundary-safe string truncation |
+| `contains_shell_metacharacters(command)` | Shell injection denylist scanner |
 
-## Typical Integration Flow
+**When updating the denylist in either location, the other must be updated in lockstep.** The parity test catches silent drift.
 
-1. **Startup**: Call `is_docker_available()` to detect Docker. Load `DockerSandboxConfig` and run `validate_sandbox_config()` to fail fast on unsafe settings.
-2. **Agent session**: Call `create_sandbox()` to provision a container (or `ContainerPool::acquire` for reuse).
-3. **Execution**: Call `exec_in_sandbox()` for each agent command, passing a per-command timeout.
-4. **Teardown**: Call `destroy_sandbox()` (or `ContainerPool::release` for reuse). Run `ContainerPool::cleanup` periodically to garbage-collect stale entries.
+## Configuration Defaults
+
+From `DockerSandboxConfig::default()`:
+
+| Field | Default |
+|-------|---------|
+| `enabled` | `false` |
+| `image` | `python:3.12-slim` |
+| `container_prefix` | `librefang-sandbox` |
+| `workdir` | `/workspace` |
+| `network` | `none` |
+| `memory_limit` | `512m` |
+| `cpu_limit` | `1.0` |
+| `timeout_secs` | `60` |
+| `read_only_root` | `true` |
+| `cap_add` | `[]` (empty) |
+| `tmpfs` | `["/tmp:size=64m"]` |
+| `pids_limit` | `100` |
+
+The default network is `none` — no outbound connectivity. Agents that need network access must be explicitly configured with a safe Docker network.

@@ -2,232 +2,198 @@
 
 # API Server (`librefang-api`)
 
-The API server is the daemon-attached layer that exposes the LibreFang kernel to external consumers: editor integrations via the Agent Client Protocol (ACP), and messaging channels (Telegram, Slack, WhatsApp, etc.) via the channel bridge. It runs inside the long-lived daemon process and multiplexes concurrent connections onto a shared `LibreFangKernel`.
+The API server is the transport layer between external clients—editors, messaging platforms, CLI tools—and the LibreFang kernel. It does not implement agent logic itself; instead, it wires transport-specific listeners and adapters around the shared `LibreFangKernel`, translating between client protocols and the kernel's internal APIs.
 
-## Architecture
+## Architecture Overview
 
 ```mermaid
 graph TD
-    subgraph "Daemon Process"
-        Kernel["LibreFangKernel (shared, Arc)"]
-        Bridge["KernelBridgeAdapter"]
-        StreamBridge["start_stream_text_bridge"]
-        ACP["KernelAdapter (per-connection)"]
+    subgraph Transports
+        Editor["Editor / CLI"]
+        Channels["WhatsApp, Telegram, Slack, etc."]
+        HTTP["HTTP / SSE Dashboard"]
     end
 
-    subgraph "ACP Transports"
-        UDS["Unix Domain Socket<br/>(acp_uds.rs)"]
-        Pipe["Windows Named Pipe<br/>(acp_pipe.rs)"]
+    subgraph "librefang-api"
+        ACP["ACP Listener<br/>(UDS + Named Pipe)"]
+        Bridge["Channel Bridge<br/>(KernelBridgeAdapter)"]
+        Routes["HTTP Routes"]
     end
 
-    subgraph "Channel Adapters"
-        Sidecar["Sidecar Adapters<br/>(Telegram, WhatsApp, etc.)"]
-    end
+    Kernel["LibreFangKernel"]
 
-    UDS -->|per-connection| ACP
-    Pipe -->|per-connection| ACP
+    Editor -->|JSON-RPC| ACP
+    Channels -->|Platform API| Bridge
+    HTTP -->|REST/SSE| Routes
     ACP --> Kernel
-    Sidecar -->|ChannelBridgeHandle trait| Bridge
-    Bridge -->|KernelApi trait| Kernel
-    Bridge --> StreamBridge
-    StreamBridge -->|mpsc::Receiver&lt;String&gt;| Sidecar
+    Bridge --> Kernel
+    Routes --> Kernel
 ```
 
-## ACP Listeners
+## ACP Listener: Daemon-Attached Editor Connections
 
-ACP lets editor plugins (VS Code, JetBrains) communicate with a daemon-attached kernel over a local transport. Each connection gets its own `KernelAdapter` backed by the shared kernel, so agent state and approval decisions persist across editor restarts.
+The Agent Client Protocol (ACP) listener allows multiple editor sessions to share a single long-running kernel. When the daemon is active, editors connect via ACP and all see the same agent state, approval decisions, and session history.
 
-Both platform variants share the same JSON-RPC wire protocol — only the transport layer differs.
+Two platform-specific implementations exist, both wire-compatible (same JSON-RPC framing, same `KernelAdapter`):
 
-### Unix Domain Socket (`acp_uds.rs`)
+### Unix Domain Sockets (`acp_uds.rs`)
 
-Platform: `#[cfg(unix)]`
+**Path:** `~/.librefang/acp.sock`
 
-Entry point: `run_listener(kernel, sock_path)`
+The `run_listener` function binds a `UnixListener` and spawns a background task per connection. Each task creates a `KernelAdapter` backed by the shared kernel and runs `librefang_acp::run_with_transport` over the framed JSON-RPC stream.
 
-**Socket path:** `~/.librefang/acp.sock` (configured by the daemon)
+#### Trust model: same-user, same-host
 
-**Security model — two-layer same-user, same-host defense:**
+Two layers defend against multi-user host hijack:
 
-1. **Atomic owner-only bind.** `bind_atomic_owner_only` avoids the TOCTOU window between `bind()` and `chmod()` by binding to a randomised tempfile (`.acp.sock.<pid>.<nanos>`), setting mode `0o600`, then renaming into place. The rename atomically overwrites any stale socket from a crashed daemon.
+1. **Atomic `0o600` socket creation** — `bind_atomic_owner_only` binds to a randomized tempfile (`.{stem}.{pid}.{nanos}`), `chmod`s it to `0o600`, then `rename`s it into place. This avoids the `bind() → chmod()` TOCTOU window where another local user could connect between the two syscalls.
 
-2. **`SO_PEERCRED` peer-uid match.** Every accepted connection's `peer_cred().uid()` is compared against the daemon's own `geteuid()`. Mismatches are dropped before any ACP bytes are read — defense in depth against a permissive umask or container mount leaking the socket.
+2. **`SO_PEERCRED` peer-uid match** — Every accepted connection's `peer_cred()` is compared against the daemon's own euid. Mismatches are dropped before any ACP bytes are read.
 
-**Stale orphan cleanup.** On macOS Docker Desktop bind-mount volumes, `rename(2)` can succeed on the host without unlinking the source inside the container, so tempfiles accumulate across restarts. After a successful bind, `sweep_stale_orphans` scans the parent directory for `.<stem>.<pid>.<nanos>` files and removes them under three guards:
+#### Stale orphan cleanup
 
-| Guard | Purpose |
-|-------|---------|
-| UID equality | Only delete files owned by daemon's euid |
-| Recency window (10s) | Protect fresh tempfiles still in bind→rename flow |
-| PID liveness (`kill(pid, 0)`) | Only remove files whose PID is dead (`ESRCH`) |
+On macOS Docker Desktop bind-mount volumes, `rename(2)` succeeds on the host but the source file persists in the container's view. After a successful bind+rename, `sweep_stale_orphans` scans the parent directory for `.{stem}.{pid}.{nanos}` tempfiles from previous runs. Three guards prevent accidental deletion of live files:
 
-### Windows Named Pipe (`acp_pipe.rs`)
+| Guard | Check | Purpose |
+|-------|-------|---------|
+| UID | File owner matches daemon euid | Cross-user safety on PID wrap |
+| Recency | File mtime > 10 seconds old | Protect in-flight bind→rename |
+| PID liveness | `kill(pid, 0)` returns `ESRCH` | Don't touch concurrent daemon's tempfile |
 
-Platform: `#[cfg(windows)]`
+### Windows Named Pipes (`acp_pipe.rs`)
 
-Entry point: `run_listener(kernel)`
+**Pipe name:** `\\.\pipe\librefang-acp` (local-only namespace)
 
-**Pipe name:** `\\.\pipe\librefang-acp` (hard-coded, must stay in sync with `librefang-cli::acp::run_pipe_proxy`)
+Named pipes work differently from UDS: the server creates one pipe instance, awaits a connect, then creates the next instance for the next connection. The loop in `run_listener` follows this pattern—hand the connected pipe to a background task, immediately create a fresh instance.
 
-**Security model — owner-only DACL:**
+#### Trust model: owner-only DACL
 
-Named pipes on Windows default to a permissive DACL (`GENERIC_READ`/`GENERIC_WRITE` for all local users). The code hardens this with SDDL `D:P(A;;GA;;;OW)` — a protected DACL granting `GENERIC_ALL` only to the pipe's owner (the daemon's user SID). The `P` flag blocks inheritance from the parent `\\.\pipe\` directory.
+The default Windows named pipe DACL grants `GENERIC_READ`/`GENERIC_WRITE` to anyone on the local machine. `create_owner_only_instance` installs an explicit DACL via SDDL `D:P(A;;GA;;;OW)`:
 
-**Instance lifecycle:**
+- `D:` — DACL (not SACL)
+- `P` — protected (block inheritance from parent `\\.\pipe\`)
+- `(A;;GA;;;OW)` — one ACE: allow GENERIC_ALL to OWNER only
 
-Windows named pipes work differently from Unix sockets — there's no single listener. The server creates one pipe instance, awaits a connect, then creates the next instance for the next connection:
+Every pipe instance—including rebinds after a connect—uses this descriptor. The `first_pipe_instance(true)` flag is set only on the very first instance to prevent name-squatting races during daemon restart.
 
-```
-create_owner_only_instance(first=true)  // first_pipe_instance prevents name-squatting
-  → await connect()
-  → spawn handle_connection(connected)
-  → create_owner_only_instance(first=false)  // ready for next client
-```
+## Channel Bridge
 
-`first_pipe_instance(true)` is set only on the very first instance after process start. This prevents a second daemon from racing to `CreateNamedPipe` between the old daemon dying and the new one starting. Subsequent rebinds pass `false`.
-
-**Internal types:**
-
-- `OwnerOnlyDescriptor` — wraps a `PSECURITY_DESCRIPTOR` allocated from the SDDL string; freed via `LocalFree` in `Drop`.
-- `SecurityAttributes` — borrows an `OwnerOnlyDescriptor` and exposes `as_raw_mut()` for the unsafe `create_with_security_attributes_raw` call.
-
-### Connection handling (shared pattern)
-
-Both transports follow the same per-connection flow in `handle_connection`:
-
-1. Create a `KernelAdapter` wrapping the shared kernel
-2. Resolve the default agent (`"assistant"`) via `adapter.resolve_agent()`
-3. Split the stream into read/write halves
-4. Adapt tokio's `AsyncRead`/`AsyncWrite` to futures' traits via `tokio_util::compat`
-5. Construct a `ByteStreams` transport and call `librefang_acp::run_with_transport()`
-
-## Channel Bridge (`channel_bridge.rs`)
-
-The channel bridge connects the kernel to messaging adapters (Telegram, Slack, WhatsApp, Discord, etc.). All channel adapters have been migrated to a sidecar architecture — the bridge implements `ChannelBridgeHandle` and translates channel operations into kernel API calls.
-
-### `KernelBridgeAdapter`
-
-Implements `ChannelBridgeHandle` over `Arc<dyn KernelApi>`. Key method groups:
-
-**Message sending:**
-
-| Method | Purpose |
-|--------|---------|
-| `send_message` | Synchronous (wait for full response) |
-| `send_message_streaming` | Returns `mpsc::Receiver<String>` with live text |
-| `send_message_streaming_with_sender` | Streaming with sender context (group/DM aware) |
-| `send_message_streaming_with_sender_status` | Streaming + `oneshot::Receiver<Result<(), String>>` for delivery tracking |
-| `send_message_ephemeral` | One-shot message without session persistence |
-
-All methods handle the `silent` flag — when the agent responds with `NO_REPLY`/`[[silent]]`, the bridge returns an empty string so the adapter skips sending.
-
-**Session management:**
-
-- `reset_session` / `reboot_session` / `compact_session` — operate on the agent-wide session
-- `reset_channel_session` / `reboot_channel_session` / `compact_channel_session` — scoped to a specific `(channel, chat_id)` via `SessionId::for_sender_scope`
-
-**Slash commands exposed to channels:**
-
-The bridge implements text-based interfaces for commands like `/models`, `/providers`, `/skills`, `/hands`, `/workflows`, `/triggers`, `/schedule`, `/approve`, `/reject`, `/budget`, `/peers`, `/a2a`. These format kernel state into human-readable text strings.
+The channel bridge connects the kernel to messaging platform adapters (WhatsApp, Telegram, Slack, Discord, etc.). `KernelBridgeAdapter` wraps `Arc<dyn KernelApi>` and implements `ChannelBridgeHandle`, translating platform messages into kernel API calls and streaming kernel responses back to users.
 
 ### Streaming Text Bridge
 
-`start_stream_text_bridge_with_status` converts kernel `StreamEvent`s into a channel-friendly text stream. This is the core of the live-editing UX on streaming adapters (Telegram message editing, Slack streaming).
+When a channel adapter requests a streaming response (e.g., for Telegram's live message editing), the bridge creates a pipeline:
 
-**Event handling:**
+```
+kernel.send_message_streaming_with_routing()
+  → mpsc::Receiver<StreamEvent>
+  → start_stream_text_bridge()
+  → mpsc::Receiver<String>  (user-visible text)
+```
 
-| Event | Behavior |
-|-------|----------|
-| `TextDelta` | Buffered until `ContentComplete` |
-| `ContentComplete` | Flush buffer (unless filtered — see below) |
-| `ToolUseStart` | Inject `🔧 Tool Name` progress line (if `show_progress`) |
-| `ToolExecutionResult` (error) | Inject `⚠️ Tool Name failed` (localized) |
-| `PhaseChange` (context_warning) | Surface context-window trim warning |
+`start_stream_text_bridge` processes `StreamEvent` variants and produces user-facing text:
 
-**Content filtering:**
+| Event | Action |
+|-------|--------|
+| `TextDelta` | Buffer text per iteration |
+| `ContentComplete` | Flush buffered text (if not tool-call noise) |
+| `ToolUseStart` | Inject `🔧 Tool Name` progress line |
+| `ToolExecutionResult` (error) | Inject `⚠️ Tool Name failed` line |
+| `PhaseChange` (`context_warning`) | Inject `⚠️ Context window trimmed` |
 
-Several classes of text are suppressed before reaching the user:
+#### Tool call filtering
 
-1. **Leaked tool calls** — `looks_like_tool_call()` detects raw JSON tool-call syntax, XML function tags, markdown code blocks containing tool invocations, and backtick-wrapped tool calls. Long responses (>2000 chars) only match start-of-text patterns to avoid false positives on natural language that discusses tools.
+Some LLM providers emit tool calls as plain text instead of using the proper tool_use API. The bridge filters these before they reach the user via `looks_like_tool_call`, which detects:
 
-2. **Silent responses** — `NO_REPLY` and `[[silent]]` sentinels are suppressed.
+- JSON arrays/objects starting with `[{` or `{"type":"function"`
+- XML-style tags: `<function=`, `<tool>`, `[TOOL_CALL]`
+- Markdown code blocks or backtick-wrapped JSON containing named tool calls
+- Provider-specific markers like ` Durham` (Claude tool-use tags)
 
-3. **Tool-use-adjacent text** — when a `ToolUseStart` was seen in the current iteration, any accompanying text is the provider echoing the tool call as content.
+Long responses (>2000 chars) only match start-of-text patterns to avoid false positives from natural language that discusses tools.
 
-**Progress deduplication:**
+#### Error sanitization
 
-Within a single iteration, repeated calls to the same tool collapse into one `🔧` line (tracked via `iter_tools_seen: HashSet`). The set is cleared at `ContentComplete` so a tool retried in the next iteration still gets its own line.
+`sanitize_channel_error` prevents raw technical details from leaking to end users:
 
-**Error handling and status channel:**
+| Error pattern | User sees |
+|--------------|-----------|
+| Timeout / inactivity | "The task timed out due to inactivity." |
+| Rate limit / 429 / quota | "I've hit my usage limit and need to rest." |
+| Auth / 401 | "I'm having trouble with my credentials." |
+| Content filter | "The request was blocked by the model's safety filter." |
+| LLM driver crash | "Something went wrong on my end." |
+| Other | "Something went wrong" + truncated reference |
 
-The `oneshot::Receiver<Result<(), String>>` returned by `_with_status` variants carries the kernel task's terminal state:
+Group chats suppress all error messages; DMs show sanitized versions. Timeouts with partial output are treated as soft successes (the user already saw streamed content).
 
-- **Ok(Ok(result))** → success, log token counts
-- **Ok(Err(e))** → kernel error, sanitize for user display
-- **Err(cancelled)** → task was superseded by a newer message for the same agent
-- **Err(panicked)** → unexpected failure, generic error message
+### Slash Commands via the Bridge
 
-Timeout errors that produced partial output are treated as soft successes (`Ok(())`) — the user already saw streamed content, and marking it as a failure would incorrectly show ❌.
+`KernelBridgeAdapter` implements a full set of administrative and operational slash commands that channel users can invoke:
 
-**Error sanitization:**
+**Session management:**
+- `/reset`, `/reboot`, `/compact` — per-agent or per-channel-session scope
+- `/model [name]` — switch or inspect the agent's model
+- `/stop` — cancel an active agent run
 
-`sanitize_channel_error` prevents raw technical details from leaking to end users on messaging platforms. Recognized patterns:
+**Agent management:**
+- `/agents` — list non-hand agents
+- `/spawn <name>` — load an agent from `~/.librefang/workspaces/agents/{name}/agent.toml`
 
-| Pattern | User message |
-|---------|-------------|
-| Timeout/inactivity | "The task timed out due to inactivity." |
-| Rate limit (429/quota) | "I've hit my usage limit and need to rest." |
-| Auth failure | "I'm having trouble with my credentials." |
-| Content filtered | "The request was blocked by the model's safety filter." |
-| Exit code/driver error | "Something went wrong on my end." |
-| Generic | "Something went wrong: please try again. (ref: …)" |
+**Automation:**
+- `/workflows`, `/run_workflow <name> <input>` — list and execute workflows
+- `/triggers`, `/trigger add <agent> <pattern> <prompt>`, `/trigger del <id>` — manage event triggers
+- `/schedule add|del|run` — manage cron jobs with standard 5-field expressions
 
-**Localization:**
+**Approvals with TOTP:**
+- `/approvals` — list pending
+- `/approve <id> [totp]` / `/reject <id>` — resolve with optional second factor
 
-`tr_progress_failed` resolves the "failed" suffix for tool-failure progress lines based on the kernel's configured language (zh-CN, es, ja, de, fr, default English).
+TOTP handling includes replay protection (codes are recorded as consumed), lockout after repeated failures, and recovery code support with atomic redeem to prevent double-consumption.
 
-### Reply Intent Classification
-
-`classify_reply_intent` determines whether a group-chat message is directed at the bot. It uses a one-shot LLM call with the prompt "Output REPLY or NO_REPLY" after sanitizing inputs (truncation, character escaping). Bot name and aliases are included in the classification prompt. The classifier is fail-open — on any error, it assumes the message warrants a reply.
-
-### Approval Flow (Channel)
-
-`resolve_approval_text` handles `/approve` and `/reject` from messaging channels:
-
-1. Match pending request by ID prefix
-2. If TOTP is required for the tool:
-   - Check lockout status first
-   - Accept recovery codes via atomic `vault_redeem_recovery_code` (prevents concurrent consumption)
-   - Accept TOTP codes with replay protection (`record_totp_code_used`)
-   - Record failed attempts atomically via `check_and_record_totp_failure`
-3. Resolve through `ApprovalManager::resolve()`
-4. Double-click / duplicate-command detection: `resolve_no_pending_message` checks the audit log for recently-resolved requests with matching prefix, returning an idempotent ack instead of "not found"
+**System:**
+- `/models`, `/providers`, `/skills`, `/hands` — inspect available resources
+- `/budget` — hourly/daily/monthly spend with limits
+- `/peers`, `/a2a` — OFP network and A2A agent status
+- `/uptime` — daemon uptime and agent count
 
 ### Media Processing
 
-| Method | Flag | Default |
-|--------|------|---------|
-| `transcribe_inbound_audio` | `[media] audio_transcription` | OFF |
-| `describe_inbound_image` | `[media] image_description` | ON |
+The bridge handles inbound media from channels:
 
-Both methods construct a `MediaAttachment` over the already-downloaded file and dispatch to `MediaEngine`. They return `Ok(None)` when the feature is disabled, allowing the bridge to fall back to raw delivery.
+- **Audio transcription** (`transcribe_inbound_audio`) — gated by `[media] audio_transcription` config flag. When enabled, downloaded audio files are dispatched to `MediaEngine::transcribe_audio` and the transcript is prepended to the message.
+- **Image description** (`describe_inbound_image`) — gated by `[media] image_description` (default ON). Produces a natural-language description alongside the `ImageFile` block, enabling text-only models to understand images.
+
+### Reply Intent Classification
+
+In group chats, `classify_reply_intent` uses a one-shot LLM call to determine whether a message is directed at the bot or is casual human-to-human conversation. The classifier:
+
+- Sanitizes both `message_text` and `sender_name` (attacker-controlled on Telegram)
+- Truncates inputs (500 chars for message, 64 for names)
+- Strips backticks, newlines, and brackets to reduce prompt injection surface
+- Considers bot name, aliases, and @mentions as directed intent
+- Fails open: any error or ambiguous response defaults to replying
+
+### Authorization
+
+`authorize_channel_user` gates channel actions through the kernel's RBAC system. When auth is not configured, all access is allowed. When configured, platform user IDs are mapped to internal user IDs, and actions (`chat`, `spawn`, `kill`, `install_skill`) are checked against the user's permissions.
 
 ## Approval Re-export (`approval.rs`)
 
-A thin re-export of `librefang_kernel::approval::ApprovalManager`. API routes reach for `ApprovalManager` through this module rather than importing the kernel internal path directly, keeping the kernel's module structure out of the API crate's import surface.
+A thin re-export of `librefang_kernel::approval::ApprovalManager`. API route modules should import through this re-export rather than reaching into `librefang_kernel` directly, keeping the kernel's internal module structure out of the API crate's import surface.
 
-## Registering Channel Adapters
+## Key Interfaces
 
-All channel adapters (Telegram, WhatsApp, Slack, Discord, Teams, Matrix, Signal, Google Chat, Webhook, LINE, Feishu, Webex, DingTalk, QQ, WeChat, WeCom, Email) have been migrated to the sidecar architecture. They are registered via `SIDECAR_CATALOG` in `routes/channels.rs` rather than as in-process imports. The bridge communicates with sidecars through the `ChannelBridgeHandle` trait.
+| Component | Implements | Purpose |
+|-----------|-----------|---------|
+| `KernelBridgeAdapter` | `ChannelBridgeHandle` | Routes channel messages to kernel |
+| `run_listener` (UDS) | — | Accepts ACP connections on Unix |
+| `run_listener` (pipe) | — | Accepts ACP connections on Windows |
+| `start_stream_text_bridge` | — | Converts `StreamEvent` to user-visible text |
 
-## Testing
+## Thread Safety and Concurrency
 
-The UDS module includes tests for:
-
-- `bind_atomic_owner_only_sets_mode_0600` — verifies socket mode after atomic bind
-- `bind_atomic_owner_only_overwrites_stale_file` — verifies stale-socket overwrite
-- `bind_atomic_owner_only_sweeps_dead_pid_orphans` — verifies orphan cleanup with dead PID
-- `sweep_preserves_live_pid_tempfile` — verifies live-PID files are not deleted
-- `sweep_preserves_recent_tempfile` — verifies recency window protection
-
-The channel bridge tests verify streaming behavior including tool-progress deduplication and error status propagation.
+- The kernel (`Arc<LibreFangKernel>` or `Arc<dyn KernelApi>`) is shared across all connections and channel tasks.
+- Each ACP connection gets its own `KernelAdapter` (per-connection isolation) backed by the shared kernel.
+- The streaming bridge uses `mpsc::channel` with capacity 64 for text chunks, providing backpressure from slow channel adapters to the kernel.
+- The status channel (`oneshot`) carries the kernel task's terminal result so lifecycle management (delivery tracking, error responses) remains accurate even if the text bridge is cancelled mid-flush.

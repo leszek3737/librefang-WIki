@@ -1,202 +1,332 @@
 # Other — librefang-api-tests
 
-# librefang-api-tests
+# librefang-api Integration Tests
 
-Integration test suite for the LibreFang HTTP API layer. Every test exercises route handlers through the real router and middleware stack—either via `tower::ServiceExt::oneshot` against an in-process `axum::Router` or via `reqwest` against a live loopback TCP listener. No test makes outbound network calls or hits a real LLM provider.
+## Overview
 
-## Architecture
+This is the integration test suite for the `librefang-api` HTTP layer. It exercises the **production router** — real middleware stack, real route registration, real handler wiring — without making any outbound network calls or LLM requests. Every test is hermetic and runs against a temporary directory that is cleaned up on drop.
 
 ```mermaid
 graph TD
-    subgraph "Harness Patterns"
-        FP["Full Production Router<br/>server::build_router<br/>+ tower::oneshot"]
-        MK["Mock Kernel<br/>MockKernelBuilder<br/>+ TestAppState"]
-        TCP["TCP Listener<br/>build_router + reqwest"]
+    subgraph "Test Harness Styles"
+        A["Full Production Router<br/>server::build_router"]
+        B["Mock Kernel Router<br/>MockKernelBuilder"]
     end
-
-    subgraph "Middleware Under Test"
-        AUTH["Auth middleware"]
-        LOG["Request logging"]
-        ERR["Error envelope"]
+    subgraph "Execution"
+        C["tower::oneshot<br/>(in-process)"]
+        D["reqwest::Client<br/>(TCP loopback)"]
     end
-
-    subgraph "Route Families"
-        AGENTS["/api/agents/*"]
-        A2A["/api/a2a/*"]
-        MEMORY["/api/memory/*"]
-        BULK["/api/agents/bulk/*"]
+    A --> C
+    A --> D
+    B --> C
+    subgraph "Route Families Under Test"
+        E[agents CRUD]
+        F[clone / bulk ops]
+        G[files / capabilities]
+        H[A2A federation]
+        I[channel allowlists]
+        J[identity registry]
+        K[KV authz]
+        L[access-log markers]
     end
-
-    FP --> AUTH
-    FP --> LOG
-    FP --> ERR
-    MK --> AUTH
-    TCP --> AUTH
-    AUTH --> AGENTS
-    AUTH --> A2A
-    AUTH --> MEMORY
-    AUTH --> BULK
+    C --> E
+    C --> F
+    C --> G
+    C --> H
+    C --> I
+    C --> J
+    C --> K
+    C --> L
+    D --> J
 ```
 
-## Test Files and Coverage
+## Running
 
-| File | Route Family | Issue Ref | Harness Type |
-|---|---|---|---|
-| `agents_routes_integration.rs` | CRUD + lifecycle (GET, PATCH, suspend, resume, mode) | #3571 | Full router |
-| `agents_clone_bulk_integration.rs` | Clone, reload, push, bulk create/delete/start/stop | agents-mutation umbrella | Full router |
-| `agents_capabilities_files_integration.rs` | Identity files, tools, skills, MCP servers | agents-mutation slice 2 | Full router |
-| `agent_channels_routes_test.rs` | Per-agent channel allowlist (GET/PUT) | #4961 | Full router |
-| `agent_identity_registry_test.rs` | Canonical UUID registry, delete confirm, respawn | #4614 | TCP + reqwest |
-| `agent_kv_authz_integration.rs` | Owner-scoping on KV get/set/delete/export/import | #3749 | Mock kernel |
-| `a2a_routes_integration.rs` | A2A federation, discover, send, trust gates, SSRF | #3571 | Full router |
-| `access_log_agent_id_test.rs` | `AgentIdField` response extension marker | #3511 | Mock kernel |
-| `access_log_session_id_test.rs` | `SessionIdField` response extension marker | #3511 | Mock kernel |
+```bash
+# All integration tests in this crate
+cargo test -p librefang-api
 
-## Harness Patterns
+# Individual test files
+cargo test -p librefang-api --test agents_routes_integration
+cargo test -p librefang-api --test a2a_routes_integration
+cargo test -p librefang-api --test agent_identity_registry_test
+# ... etc
+```
 
-### Full Production Router (most tests)
+All tests use `#[tokio::test(flavor = "multi_thread")]` because the kernel's async runtime requires a multi-threaded Tokio context.
 
-Boots `LibreFangKernel::boot_with_config` with a temp directory, then calls `server::build_router` to get the complete middleware stack. Requests are dispatched with `tower::oneshot`—no TCP listener needed.
+## Harness Architecture
+
+There are two harness styles, chosen based on what the test needs to exercise.
+
+### Full Production Router
+
+Used by most test files. Boots the real `LibreFangKernel` and the full `server::build_router` including auth middleware, rate limiting, error envelope, and body-size layers.
 
 ```rust
-struct Harness {
-    app: axum::Router,
-    state: Arc<AppState>,
-    _tmp: tempfile::TempDir,
-}
-
 async fn boot(api_key: &str) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
+
+    // Pre-populate registry cache so kernel boots without network
     librefang_kernel::registry_sync::sync_registry(tmp.path(), /* ... */);
+
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
         api_key: api_key.to_string(),
-        default_model: DefaultModelConfig {
-            provider: "ollama".to_string(),
-            model: "test-model".to_string(),
-            // ...
-        },
+        default_model: DefaultModelConfig { provider: "ollama", /* ... */ },
         ..KernelConfig::default()
     };
+
     let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boot"));
     kernel.set_self_handle();
+
     let (app, state) = server::build_router(kernel, "127.0.0.1:0".parse().unwrap()).await;
     Harness { app, state, _tmp: tmp }
 }
 ```
 
-Key details:
-- **`_tmp` must be a named field**, not `_`. The `TempDir` is dropped when the struct drops, cleaning up the kernel's home directory.
-- **`kernel.shutdown()` in `Drop`** ensures background tasks stop before the tempdir is removed.
-- **`api_key` parameter** controls whether auth is enforced. Empty string `""` activates the single-user dev fast-path; a non-empty string requires `Bearer` tokens.
+Key properties:
+- **`tempfile::TempDir`** — each test gets an isolated home directory; dropped on harness drop
+- **`provider: "ollama"` with fake model** — no real LLM calls
+- **`api_key` parameter** — empty string enables dev-mode (no auth required); non-empty enables bearer-token auth, letting tests assert 401 behavior
+- **`kernel.shutdown()`** called in `Harness::drop` to clean up background tasks
 
-### Mock Kernel (authz / extension marker tests)
-
-Uses `librefang_testing::MockKernelBuilder` and `TestAppState` for tests that don't need the full middleware pipeline. Route modules are mounted directly on a bare `Router::new().nest(...)`. The `AuthenticatedApiUser` extension is inserted manually to simulate the auth middleware.
+Requests are sent via `tower::ServiceExt::oneshot` (in-process, no TCP):
 
 ```rust
-fn boot() -> Harness {
-    let test = TestAppState::with_builder(MockKernelBuilder::new());
-    let state = test.state.clone();
-    let app = Router::new()
-        .nest("/api", routes::memory::router().merge(routes::agents::router()))
-        .with_state(state.clone());
-    Harness { app, state, _test: test }
+async fn send(app: Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+    let resp = app.oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, json)
 }
 ```
 
-### TCP Listener (identity registry tests)
+### TCP Loopback Server
 
-Binds a real `tokio::net::TcpListener` on `127.0.0.1:0` and serves the router with `into_make_service_with_connect_info::<SocketAddr>()`. This is necessary because the auth middleware reads `ConnectInfo<SocketAddr>` to determine loopback vs. remote callers.
+Used by `agent_identity_registry_test.rs` where the test needs a real HTTP client (e.g., to verify `ConnectInfo<SocketAddr>` injection for loopback auth bypass). The harness binds a random loopback port and spawns `axum::serve` in a background task:
 
 ```rust
 async fn start_full_router(api_key: &str) -> TestServer {
     // ... kernel boot ...
+    let (app, state) = server::build_router(kernel, addr).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+
     tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
-    TestServer { base_url: format!("http://{}", addr), state, _tmp: tmp }
+
+    TestServer { base_url: format!("http://{}", addr), state, _tmp }
 }
 ```
 
-## Request Helpers
+Tests then use `reqwest::Client` to make real HTTP requests.
 
-Every test file provides a small set of typed request builders:
+### Mock Kernel Router
 
-| Helper | Purpose |
-|---|---|
-| `send(app, req)` | Dispatch a request, return `(StatusCode, serde_json::Value)` |
-| `get(path)` | Authenticated GET with `Bearer` header |
-| `post_json(path, body)` | Authenticated POST with JSON body |
-| `put_json(path, body)` | Authenticated PUT with JSON body |
-| `put_empty(path, bearer)` | PUT with no body (lifecycle routes) |
-| `delete(path)` | Authenticated DELETE |
-| `patch_json(path, body, bearer)` | PATCH with optional bearer |
-| `spawn_named(state, name)` | Create an agent via the kernel and return its `AgentId` |
+Used by `access_log_agent_id_test.rs`, `access_log_session_id_test.rs`, and `agent_kv_authz_integration.rs` — tests that don't need the full middleware stack but do need route-specific handler wiring:
 
-## Cross-Cutting Concerns Verified
-
-### Auth Middleware
-
-Tests confirm that routes not on the public allowlist return `401 Unauthorized` when no token is provided, and that routes on `PUBLIC_ROUTES` or `PUBLIC_ROUTES_DASHBOARD_READS` remain accessible. The identity registry tests (`agent_identity_registry_test.rs`) are the most thorough: they boot the router with a real `api_key`, make unauthenticated and authenticated requests, and assert the auth layer blocks writes and gated reads while allowing public endpoints through.
-
-### Error Envelope
-
-Every error response is verified to contain a structured JSON body with at least an `error` or `message` field. Status codes are checked individually—tests explicitly guard against regressions where a kernel error was previously mapped to `500 Internal Server Error` (e.g., clone duplicate name → `409 Conflict`, unknown agent → `404 Not Found`).
-
-### Path Traversal Defense
-
-The files cluster (`agents_capabilities_files_integration.rs`) tests that filenames like `%2e%2e%2f%2e%2e%2fetc%2fpasswd` and `arbitrary.txt` are rejected at the `KNOWN_IDENTITY_FILES` whitelist boundary with `400 Bad Request`, never `500`. Read-back after a rejected write confirms nothing was persisted outside the workspace.
-
-### SSRF and Trust Gates
-
-The A2A discover endpoint tests confirm that `localhost` URLs are rejected by `is_url_safe_for_ssrf` before any outbound socket is opened. The A2A send endpoint tests confirm that unapproved targets are rejected at the trust gate with a message containing "trusted" or "approve".
-
-### Response Extension Markers
-
-The access-log tests (`access_log_agent_id_test.rs`, `access_log_session_id_test.rs`) verify that handlers set `AgentIdField` and `SessionIdField` on `response.extensions()` so the `request_logging` middleware can emit structured fields. Tests cover three cases:
-
-1. **Happy path** — marker present on success responses
-2. **Unknown entity** — marker still present when the agent ID was parsed but the entity doesn't exist
-3. **Malformed path** — marker absent when the `AgentIdPath` extractor rejects before the handler runs
-
-### Owner-Scoping / Authorization
-
-`agent_kv_authz_integration.rs` verifies that the `assert_kv_owner_or_admin` helper blocks non-owner viewers from KV list, get, set, delete, export, and import endpoints (returning `404`), while admins and the agent owner get `200 OK`. The anonymous (no `AuthenticatedApiUser` extension) path intentionally fails open—the global auth middleware handles that case in production.
-
-### Bulk Size Guards
-
-Bulk operations (`agents_clone_bulk_integration.rs`) enforce a maximum of 50 agent IDs via `validate_bulk_size`. Empty arrays also return `400 Bad Request`. Tests verify the guard fires before any spawn/allocation occurs by checking that no agents were created in the registry after a rejected request.
-
-### Pagination Envelope
-
-A2A agent listing tests pin the `PaginatedResponse{items, total, offset, limit}` envelope shape per #3842, and explicitly assert the legacy `agents` field is absent.
-
-## Running the Tests
-
-```bash
-# All API integration tests
-cargo test -p librefang-api --test '*_integration' --test '*_test'
-
-# Individual files
-cargo test -p librefang-api --test agents_routes_integration
-cargo test -p librefang-api --test a2a_routes_integration
-cargo test -p librefang-api --test agent_identity_registry_test
-
-# With output
-cargo test -p librefang-api --test agents_clone_bulk_integration -- --nocapture
+```rust
+fn boot_agents() -> Harness {
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| { /* ... */ }));
+    let state = test.state.clone();
+    let app = Router::new()
+        .nest("/api", routes::agents::router())
+        .with_state(state);
+    Harness { app, _test: test }
+}
 ```
 
-All tests use `#[tokio::test(flavor = "multi_thread")]` because the kernel spawns background tasks during boot.
+This nests only the route module under test, without the global auth middleware. Tests that need to inject `AuthenticatedApiUser` do so by inserting it directly into `request.extensions_mut()`.
 
-## Adding a New Test
+## Test Files and Route Coverage
 
-1. **Pick the right harness.** If you need the full auth/rate-limit/error-envelope middleware, use the full router pattern (`server::build_router`). If you're testing handler-level logic or authz with injected `AuthenticatedApiUser`, the mock kernel is simpler.
+### `agents_routes_integration.rs` — Core Agent CRUD + Lifecycle
 
-2. **Boot with the appropriate `api_key`.** Use `""` for the dev fast-path or a fixed string like `"test-secret"` to exercise auth enforcement. Every request helper should include the `Bearer` header when the key is non-empty.
+| Route | What's tested |
+|---|---|
+| `GET /api/agents` | Empty listing, populated listing with filters |
+| `GET /api/agents/{id}` | Happy path, invalid UUID → 400, unknown → 404 |
+| `PATCH /api/agents/{id}` | Field update + read-after-write, unknown → 404, auth gate → 401 |
+| `PUT /api/agents/{id}/suspend` | State transitions to Suspended |
+| `PUT /api/agents/{id}/resume` | State transitions to Running |
+| `PUT /api/agents/{id}/mode` | Mode change persisted + read-after-write |
 
-3. **Clean up.** Ensure `kernel.shutdown()` runs in `Harness::Drop` and the `TempDir` outlives the kernel.
+### `agents_clone_bulk_integration.rs` — Clone, Reload, Push, Bulk Ops
 
-4. **Assert status + body.** Always check both `StatusCode` and at least one field in the JSON body. For error cases, verify the error envelope exists and that the status is never `500` for expected failures.
+| Route | What's tested |
+|---|---|
+| `POST /api/agents/{id}/clone` | Independent copy, duplicate name → 409, unknown source → 404, `include_skills: false` stripping |
+| `POST /api/agents/{id}/reload` | Disk manifest changes applied, unknown → 404 |
+| `POST /api/agents/{id}/push` | Validation → 400, unknown → 404, no adapter → 502 |
+| `POST /api/agents/bulk` | Multi-create + read-back, empty array → 400, oversize → 400 |
+| `DELETE /api/agents/bulk` | Multi-delete, per-row failure reporting |
+| `POST /api/agents/bulk/start` | Sets Full mode, unknown → per-row failure |
+| `POST /api/agents/bulk/stop` | No-op success for inactive agents |
+
+Bulk operations enforce a size limit (50 entries). Requests exceeding this get 400 before any kernel interaction.
+
+### `agents_capabilities_files_integration.rs` — Files, Tools, Skills, MCP Servers
+
+| Route | What's tested |
+|---|---|
+| `GET/PUT /api/agents/{id}/files/{filename}` | Write + read round-trip, delete + read-back gone |
+| Path traversal defense | `../../etc/passwd` → 400 (whitelist boundary, not just `..` detection) |
+| Non-whitelisted filenames | → 400 |
+| `GET/PUT /api/agents/{id}/tools` | Allowlist + blocklist round-trip, empty body → 400 |
+| `GET/PUT /api/agents/{id}/skills` | Empty allowlist, valid allowlist with mode flip, unknown skill → 4xx |
+| `GET/PUT /api/agents/{id}/mcp_servers` | Empty allowlist, mode = "none" |
+
+The **path-traversal test** (`test_files_write_path_traversal_rejected_4xx`) is the highest-security-value test in the suite — it confirms `KNOWN_IDENTITY_FILES` whitelist rejection fires before any filesystem path resolution.
+
+### `agent_channels_routes_test.rs` — Per-Agent Channel Allowlist
+
+| Route | What's tested |
+|---|---|
+| `GET /api/agents/{id}/channels` | Default shape: empty assigned, mode = "all" |
+| `PUT /api/agents/{id}/channels` | Round-trip set + read-back, clear reverts to "all" |
+| Malformed agent ID | → 400 |
+| Unknown agent | GET → 404, PUT → 400 |
+
+### `agent_identity_registry_test.rs` — Canonical UUID Registry
+
+Tests the identity registry at the API ↔ kernel boundary:
+
+- `spawn_agent` registers a canonical UUID matching the agent's id
+- `DELETE` without `?confirm=true` → 409 (preserves registry); with `confirm=true` → purges
+- Respawn after confirmed delete recovers the same deterministic UUID via `AgentId::from_name`
+- `GET /api/agents/identities` surfaces registry contents
+- `POST /api/agents/identities/{name}/reset` gates on `?confirm=true`
+- **Auth layer enforcement** — with a non-empty `api_key`, unauthenticated writes are rejected 401 (regression test for middleware bug #3558)
+
+### `agent_kv_authz_integration.rs` — KV Store Owner-Scoping
+
+Tests the `assert_kv_owner_or_admin` authorization helper for per-agent key-value storage:
+
+- **List** (`GET /api/memory/agents/{id}/kv`) — admin reads any agent, viewer reads own only, other → 404
+- **Single-key get/set/delete** — non-owner viewer → 404 on all three
+- **Bulk export/import** — non-owner viewer → 404
+- Anonymous (no `AuthenticatedApiUser` extension) — fails open (global middleware enforces auth separately)
+
+The `AuthenticatedApiUser` is injected directly into request extensions since these tests use the mock-kernel harness without global auth middleware.
+
+### `a2a_routes_integration.rs` — Agent-to-Agent Federation
+
+| Route | What's tested |
+|---|---|
+| `GET /a2a/agents` | Public federation listing, canonical `PaginatedResponse` envelope, no legacy `agents` field |
+| `GET /api/a2a/agents` | Dashboard listing, reachable in no-auth dev mode |
+| `GET /api/a2a/agents/{id}` | Unknown → 404, requires auth |
+| `POST /api/a2a/discover` | Missing URL → 400, invalid URL → 400, localhost → 400 (SSRF guard) |
+| `POST /api/a2a/send` | Missing fields → 400, untrusted URL → 400 (trust gate) |
+| `GET /api/a2a/tasks/{id}/status` | Missing URL param → 400, untrusted URL → 400 |
+| `POST /api/a2a/agents/{id}/approve` | Unknown → 404, requires auth |
+
+Mutating endpoints that would make real outbound HTTP (`/discover`, `/send`, `/tasks/{id}/status`) are only tested on their **validation, SSRF, and trust-gate** paths — happy-path discovery requires a live external A2A server and is intentionally out of scope.
+
+### `access_log_agent_id_test.rs` & `access_log_session_id_test.rs` — Response Extension Markers
+
+These test the contract between handlers and the access-log middleware:
+
+- Handlers call `with_agent_id` / `with_session_id` to set `AgentIdField` / `SessionIdField` in `response.extensions()`
+- The middleware reads these markers to emit structured `tracing` fields
+- Tests assert on the extensions directly — they do **not** instrument a tracing subscriber
+- On 404 for an unknown agent, `AgentIdField` is still present (the path was well-formed)
+- On 400 for a malformed UUID, no marker is set (the handler never ran)
+- `SessionIdField` is present only when a session was actually resolved
+
+## Common Patterns
+
+### Auth Token Handling
+
+Tests that exercise the production router include a bearer token:
+
+```rust
+const TEST_TOKEN: &str = "test-secret";
+
+fn get(path: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .body(Body::empty())
+        .unwrap()
+}
+```
+
+To test the auth gate, send a request without the header and assert 401:
+
+```rust
+let req = Request::builder()
+    .method(Method::PUT)
+    .uri(format!("/api/agents/{id}/tools"))
+    .body(Body::from(body.to_string()))
+    .unwrap();
+// No authorization header → 401
+```
+
+### Agent Spawning
+
+Tests that need an agent in the registry use `spawn_agent_typed`:
+
+```rust
+fn spawn_named(state: &Arc<AppState>, name: &str) -> AgentId {
+    let manifest = AgentManifest { name: name.to_string(), ..Default::default() };
+    state.kernel.spawn_agent_typed(manifest).expect("spawn_agent")
+}
+```
+
+For ownership-sensitive tests (KV authz), the manifest's `author` field determines ownership:
+
+```rust
+fn spawn_owned_by(state: &Arc<AppState>, name: &str, author: &str) -> AgentId {
+    let manifest = AgentManifest {
+        name: name.to_string(),
+        author: author.to_string(),
+        ..Default::default()
+    };
+    state.kernel.spawn_agent_typed(manifest).expect("spawn_agent")
+}
+```
+
+### Registry Sync
+
+Tests using the full production kernel call `sync_registry` to populate the model catalog cache before boot, avoiding network access:
+
+```rust
+librefang_kernel::registry_sync::sync_registry(
+    tmp.path(),
+    librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
+    "",
+);
+```
+
+### Skill Seeding
+
+Tests exercising non-empty skill allowlists install a real `skill.toml` into the temp home directory and trigger a reload:
+
+```rust
+fn install_skill(home: &Path, name: &str) {
+    let skill_dir = home.join("skills").join(name);
+    fs::create_dir_all(&skill_dir).expect("mkdir");
+    fs::write(skill_dir.join("skill.toml"), manifest_toml).expect("write");
+}
+
+// After install:
+h.state.kernel.reload_skills();
+```
+
+## Design Decisions
+
+**Why `tower::oneshot` instead of a real TCP server?** Most tests don't need a real HTTP client — `oneshot` is faster, simpler, and avoids port allocation. Tests that need `ConnectInfo<SocketAddr>` (loopback auth bypass) use the TCP variant.
+
+**Why not test the tracing subscriber directly?** The middleware reads `response.extensions().get::<AgentIdField>()` — a one-liner. The only thing that can break is a handler forgetting to call `with_agent_id`. Asserting on extensions directly is the precise contract; testing through a subscriber would couple the test to subscriber configuration.
+
+**Why mock kernel for some tests?** Tests that need fine-grained control over extensions (injecting `AuthenticatedApiUser`) or that only exercise a single route module benefit from the mock's simpler setup. Tests that need the full middleware stack (auth, rate-limit, error-envelope) use the production router.

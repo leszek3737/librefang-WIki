@@ -2,73 +2,64 @@
 
 # librefang-hands
 
-Curated autonomous capability packages for the LibreFang system.
+## Purpose
 
-## Overview
+The `librefang-hands` module provides the **Hands system** for LibreFang — a mechanism for defining, loading, and managing curated autonomous capability packages called *hands*.
 
-A **hand** is a self-contained capability package — a unit of autonomous behavior that can be discovered, loaded, and managed by the LibreFang runtime. This crate defines the data model for hands, handles their deserialization from configuration (TOML), maintains a thread-safe registry, and provides error types specific to hand lifecycle operations.
-
-Hands are the primary extension mechanism in LibreFang. Each hand encapsulates a discrete capability (e.g., network scanning, file manipulation, system introspection) along with the metadata needed to curate, version, and safely execute it.
+A "hand" represents a discrete, composable unit of autonomous behavior that can be deployed into the LibreFang runtime. This module handles the lifecycle of these capability packages: discovery, deserialization from configuration (TOML), validation, storage, and runtime access.
 
 ## Architecture
 
+The module sits between the type definitions layer (`librefang-types`) and the execution layer (`librefang-runtime`). It does not execute hands itself — it is responsible for the **packaging and registry** concerns.
+
 ```mermaid
 graph TD
-    A[TOML Config Files] -->|Deserialized| B[Hand Definitions]
-    B --> C[HandRegistry]
-    C -->|Queried by| D[librefang-runtime]
-    E[librefang-types] -->|Shared types| B
-    C -->|Concurrent access| F[dashmap]
+    A[librefang-types] -->|provides shared types| B[librefang-hands]
+    B -->|registers & provides hands| C[librefang-runtime]
+    D[TOML / JSON config] -->|loaded by| B
+    B -->|concurrent access| E[DashMap Registry]
 ```
 
-## Key Dependencies and What They Signal
+## Key Dependencies and Their Roles
 
-| Dependency | Role in This Crate |
+| Dependency | Role in this module |
 |---|---|
-| `librefang-types` | Shared type definitions — hand structs likely derive or compose types from this crate |
-| `serde` / `serde_json` / `toml` | Serialization framework. Hands are defined in TOML and deserialized into Rust structs |
-| `thiserror` | Ergonomic error types for hand loading, validation, and registry operations |
-| `uuid` | Unique identifiers for each hand instance |
-| `chrono` | Timestamps — likely for hand creation, versioning, or last-executed tracking |
-| `dashmap` | Lock-free concurrent hash map — the `HandRegistry` is accessed from multiple threads |
-| `tracing` | Structured logging/instrumentation of registry operations |
+| `librefang-types` | Shared type definitions used across all LibreFang crates |
+| `serde`, `serde_json`, `toml` | Deserialization of hand definitions from configuration formats |
+| `dashmap` | Concurrent hashmap for thread-safe storage of the hand registry |
+| `uuid` | Unique identification of hand instances |
+| `chrono` | Timestamping hand creation, registration, and lifecycle events |
+| `thiserror` | Typed error definitions for hand loading and validation failures |
+| `tracing` | Structured logging throughout the hand lifecycle |
 
-## How Hands Work
+`librefang-runtime` and `tempfile` are dev-dependencies, used only in integration tests to verify that hands can be correctly loaded and handed off to the runtime.
 
-### Definition
+## Core Concepts
 
-A hand is defined via TOML configuration. The crate parses these files into strongly-typed Rust structs using `serde`. This gives hand authors a declarative, human-readable format while the runtime gets type-safe access.
+### Hands
+
+A hand is a curated package describing an autonomous capability. Hands are declaratively defined — typically via TOML configuration files — and then loaded into an in-memory registry at startup or on demand.
 
 ### Registry
 
-The `HandRegistry` (backed by `dashmap`) provides concurrent, lock-free access to loaded hands. The runtime and any number of worker threads can query the registry simultaneously without contention bottlenecks.
+The module uses `dashmap` to maintain a concurrent registry of loaded hands. This allows multiple runtime threads to query available hands without locking the entire data structure. Each hand is keyed by a unique identifier (UUID).
 
-### Lifecycle
+### Configuration Loading
 
-1. **Discovery** — TOML files are located (paths provided by the runtime or configuration)
-2. **Parsing** — Each file is deserialized into a hand definition struct
-3. **Validation** — Metadata is checked for completeness and correctness
-4. **Registration** — Valid hands are inserted into the registry, keyed by unique ID
-5. **Execution** — The runtime queries the registry and dispatches work to hands (execution itself lives in `librefang-runtime`)
+Hands are defined in configuration files (TOML or JSON). The module deserializes these into typed structures (inheriting shared types from `librefang-types`), validates them, and inserts them into the registry.
 
-## Relationship to Other Crates
+### Error Handling
 
-- **`librefang-types`** — This crate consumes shared types. Hand definitions compose or derive from types defined there, ensuring consistency across the workspace.
-- **`librefang-runtime`** — A dev-dependency only, used in tests. The runtime is the consumer of this crate's registry and hand definitions at production time. The dependency direction is `librefang-runtime` → `librefang-hands` at compile time, reversed only for test infrastructure.
+All fallible operations — parsing, validation, registry conflicts — return structured errors derived via `thiserror`. This ensures that callers (particularly the runtime) can handle failures gracefully and provide meaningful diagnostics.
 
-## Error Handling
+## Integration with the Wider System
 
-All errors specific to hand operations use `thiserror`-derived types. This keeps error variants explicit, adds context via `#[source]` annotations, and integrates cleanly with `tracing` spans. Callers can match on specific failure modes (parse failure, validation error, duplicate registration, etc.) without downcasting.
+1. **Upstream**: `librefang-types` provides the base types that hand definitions are built upon.
+2. **Downstream**: `librefang-runtime` consumes registered hands during execution. The dev-dependency on `librefang-runtime` confirms this integration path is tested.
+3. **Testing**: The `serial_test` dev-dependency indicates that some tests must run sequentially — likely those involving shared filesystem state via `tempfile` for temporary configuration files during integration tests.
 
-## Testing
+## Development Notes
 
-Tests use `serial_test` to serialize test functions that share state. This is necessary because the registry is a global or shared resource — parallel test execution could cause intermittent failures from concurrent registry mutations.
-
-`tempfile` is used to create temporary TOML fixtures in tests, keeping test data isolated and cleaned up automatically.
-
-## When to Modify This Crate
-
-- **Adding new hand metadata fields** — Extend the hand definition struct and update TOML parsing
-- **Changing registry semantics** — The `dashmap`-backed registry lives here
-- **Adding validation rules** — Hand validation logic is this crate's responsibility
-- **New error variants** — Add to the `thiserror`-derived error enum
+- When adding a new hand definition format, ensure the corresponding `serde` deserializers cover all required fields and that validation catches missing or malformed entries before they reach the registry.
+- The concurrent registry (`dashmap`) means that hand registration and lookup are safe to call from async or multi-threaded contexts without external synchronization.
+- Run tests with `cargo test -p librefang-hands`. Tests that touch the filesystem (via `tempfile`) are serialized with `serial_test` to avoid race conditions.

@@ -2,72 +2,77 @@
 
 # librefang-kernel-handle
 
-A trait abstraction for in-process callers to interact with the LibreFang kernel.
+A thin abstraction layer defining the `KernelHandle` trait — the primary interface for in-process callers to interact with the LibreFang kernel.
 
 ## Purpose
 
-This crate defines the `KernelHandle` trait — the primary interface through which in-process components communicate with the LibreFang kernel. It serves as the boundary layer between the kernel's core logic and the various callers that need to invoke it, without requiring out-of-process or IPC communication.
+This crate provides a stable, trait-based contract that decouples consumers of the LibreFang kernel from its concrete implementation. Any component running in the same process (services, plugins, middleware) that needs to invoke kernel operations does so through `KernelHandle`, rather than depending on the kernel directly.
 
-By abstracting the kernel interaction behind a trait, this module enables:
-
-- **Testability** — callers can be injected with mock or stub implementations.
-- **Decoupling** — the kernel's concrete implementation is separated from its consumers.
-- **Flexibility** — different handle implementations can be swapped at runtime (e.g., a direct handle vs. a sandboxed or rate-limited wrapper).
-
-## Dependencies and What They Imply
-
-| Dependency | Role |
-|---|---|
-| `librefang-types` | Shared type definitions (requests, responses, errors) exchanged across the kernel boundary |
-| `async-trait` | The `KernelHandle` trait is async — callers `await` kernel operations |
-| `bytes` | Efficient byte buffer handling for payload transport |
-| `serde_json` | JSON serialization/deserialization for message payloads |
-| `tracing` | Structured logging and span instrumentation for observability |
-| `uuid` | Unique identifiers for correlating requests and tracking sessions |
-
-## Architecture
+## Role in the Architecture
 
 ```mermaid
 graph TD
-    A[In-Process Caller] -->|depends on trait| B[KernelHandle Trait]
-    B -->|implemented by| C[Concrete Kernel Handle]
-    C -->|delegates to| D[LibreFang Kernel]
-    E[Test / Mock] -->|implements| B
+    A[In-process Caller] -->|depends on trait| B[KernelHandle]
+    B -->|implemented by| C[LibreFang Kernel]
+    D[Other Services] -->|depends on trait| B
+    E[Test Harnesses] -->|mocks| B
 ```
 
-The `KernelHandle` trait sits between callers and the kernel. Production code uses a concrete implementation that directly invokes kernel operations. Tests and specialized environments substitute their own implementations.
+`librefang-kernel-handle` sits between the kernel implementation and its consumers. Callers only need to depend on this lightweight crate — not the full kernel — keeping dependency graphs clean and compilation fast.
 
-## Usage
+## Dependencies and Their Roles
 
-Consumers depend on this crate to accept a `KernelHandle`-typed parameter, typically through dependency injection:
+| Dependency | Purpose |
+|---|---|
+| `librefang-types` | Shared domain types (messages, errors, identifiers) exchanged across the trait boundary |
+| `async-trait` | Enables `#[async_trait]` on the `KernelHandle` trait, since kernel operations are asynchronous |
+| `bytes` | Efficient byte buffer handling for raw data passing (e.g., network payloads, serialized messages) |
+| `serde_json` | JSON serialization/deserialization for structured data exchanged through the handle |
+| `tracing` | Instrumentation spans and diagnostic logging within trait operations |
+| `uuid` | Unique identifier generation for requests, sessions, or entity correlation |
+
+## Usage Patterns
+
+### Depending on the Trait
+
+Add this crate to your `Cargo.toml`:
+
+```toml
+[dependencies]
+librefang-kernel-handle = { path = "../librefang-kernel-handle" }
+```
+
+Accept a `KernelHandle` as a parameter rather than constructing one:
 
 ```rust
 use librefang_kernel_handle::KernelHandle;
 
-async fn process_request(handle: &dyn KernelHandle) {
-    // Call into the kernel through the trait interface
+async fn process_request(kernel: &dyn KernelHandle) {
+    // invoke kernel operations through the trait
 }
 ```
 
-Implementors provide the concrete behavior:
+### Implementing the Trait
+
+The kernel crate itself provides the concrete implementation. If you are extending or replacing the kernel, implement `KernelHandle` for your type:
 
 ```rust
-struct DirectKernelHandle { /* ... */ }
+use librefang_kernel_handle::KernelHandle;
+
+struct MyKernel { /* ... */ }
 
 #[async_trait]
-impl KernelHandle for DirectKernelHandle {
+impl KernelHandle for MyKernel {
     // trait method implementations
 }
 ```
 
-## Relationship to the Wider Codebase
+### Testing with Mocks
 
-- **librefang-types** — Defines the request/response/error types that flow through the `KernelHandle` interface. This crate re-exports or references those types in its trait signatures.
-- **LibreFang kernel** — The downstream consumer of requests dispatched through a handle. The kernel itself is unaware of the trait; the handle implementation bridges the gap.
-- **Callers** — Any in-process component that needs to submit work to the kernel accepts a `&dyn KernelHandle` or a generic `H: KernelHandle`.
+In dev/test contexts, `KernelHandle` can be mocked or stubbed since it is a trait. The crate's `dev-dependencies` include `tokio` with `macros` and `rt` features specifically to support writing async test harnesses.
 
-## Notes
+## Design Notes
 
-- This crate contains no executable logic of its own — it defines a trait and supporting types only.
-- The `async-trait` dependency indicates all trait methods are async, meaning callers must operate within an async runtime (e.g., Tokio, as reflected in dev-dependencies).
-- No incoming or outgoing call edges exist within this module's own code, confirming its role as a pure interface definition.
+- **Trait-only crate.** This module intentionally contains no business logic or runtime state. It exists solely to define the `KernelHandle` interface and any supporting types that should be visible to callers.
+- **No outgoing calls.** The crate has no internal execution flow — it is a pure type definition module. All behavior lives in the implementing crate.
+- **Stability surface.** Because in-process callers depend on this trait, changes to the `KernelHandle` signature are the primary compatibility concern. Avoid breaking changes; prefer adding new methods with default implementations or introducing extension traits.

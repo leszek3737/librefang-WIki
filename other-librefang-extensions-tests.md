@@ -1,108 +1,85 @@
 # Other — librefang-extensions-tests
 
-# librefang-extensions-tests: Vault Round-Trip Integration Tests
+# librefang-extensions-tests — Vault Roundtrip Integration Tests
 
-## Purpose
+Integration test suite for the `CredentialVault` (`librefang_extensions::vault`). Exercises the full encrypt → persist → reload → decrypt lifecycle and pins several invariants the daemon boot path depends on.
 
-This module (`vault_roundtrip.rs`) validates the **encrypt → persist → reload → decrypt** lifecycle of the `CredentialVault` and the `decode_master_key` utility. It operates entirely outside the OS keyring and without environment variables, using an explicit master key so tests are hermetic and repeatable on any host.
+## What These Tests Guard
 
-The tests protect four invariants that the daemon boot path and runtime depend on:
+The vault is the single source of truth for API keys and other secrets. If any of these tests break, the daemon's credential handling is compromised — do not merge without understanding why.
 
-1. Master key decoding enforces exactly 32 bytes after base64 decode.
-2. A vault initialised with key *K* can only be unlocked with the same key *K*.
-3. The internal sentinel key (`SENTINEL_KEY`, issue #3651) is invisible to `list_keys` and immutable via `set`/`remove`.
-4. Structured errors surface for every failure mode—no silent truncation or corruption.
+| Invariant | Test |
+|---|---|
+| Master key must decode to exactly 32 bytes | `decode_master_key_rejects_wrong_byte_length`, `decode_master_key_rejects_literal_32_ascii_chars` |
+| A vault initialized under key K can only be reopened with key K | `vault_unlock_with_wrong_key_fails` |
+| Credentials survive serialize to disk + deserialize from disk | `vault_roundtrip_encrypt_then_decrypt_with_same_key` |
+| `list_keys` hides the `#3651` sentinel | `vault_roundtrip_encrypt_then_decrypt_with_same_key` |
+| Sentinel key is immune to `set` / `remove` | `vault_rejects_writes_to_reserved_sentinel_key` |
 
-## Relationship to Production Code
+## Test Overview
 
-```mermaid
-graph TD
-    A[vault_roundtrip.rs] -->|tests| B[decode_master_key]
-    A -->|tests| C[CredentialVault]
-    C -->|uses| D[init_with_key]
-    C -->|uses| E[unlock_with_key]
-    C -->|uses| F["set / get / remove"]
-    C -->|uses| G[list_keys]
-    A -->|asserts| H[SENTINEL_KEY]
-    A -->|asserts| I[ExtensionError variants]
+### Key Decoding (`decode_master_key`)
+
+These tests pin a critical operator foot-gun: **32 ASCII characters ≠ 32 bytes**. The production recipe is `openssl rand -base64 32`, which produces a 44-character base64 string that decodes to 32 bytes. If an operator pastes a literal 32-character string instead, two failure modes exist:
+
+1. **Valid base64, wrong length** — 32 ASCII chars that are valid base64 decode to 24 bytes. `decode_master_key` must reject this with an "Invalid key length" error.
+2. **Invalid base64** — 32 chars outside the base64 alphabet fail at the decode step entirely.
+
+Both paths surface a structured `ExtensionError` rather than silently booting with a truncated key.
+
+### Full Roundtrip
+
+```
+init_with_key → set (multiple entries) → drop vault
+    ↓
+new → unlock_with_key (same key) → get → list_keys
 ```
 
-The module imports from two production surfaces:
+The vault writes AES-GCM encrypted data to a temporary file. After the `CredentialVault` is dropped (zeroing in-memory state), a fresh instance reopens the same file and decrypts everything. This validates that serialization, encryption, and key derivation are all consistent across sessions.
 
-- **`librefang_extensions::vault`** — `decode_master_key`, `CredentialVault`, `SENTINEL_KEY`
-- **`librefang_extensions::ExtensionError`** — `Vault(_)` and `VaultKeyMismatch { .. }` error variants
+### Wrong-Key Rejection
 
-## Test Fixtures
+AES-GCM authenticated encryption guarantees that a wrong key produces a decryption failure, not garbage plaintext. The test initializes under one key, then attempts `unlock_with_key` with a different key. The vault must remain locked (`!is_unlocked()`) and return either `ExtensionError::Vault` or `ExtensionError::VaultKeyMismatch`.
 
-### `fixture_key_b64() → String`
+### Sentinel Protection
 
-Returns a deterministic, all-zeros 32-byte key encoded as base64 (44 characters). This mirrors the production recipe (`openssl rand -base64 32` → 44 chars → 32 bytes). Cryptographic strength is irrelevant here; only key-length correctness and round-trip fidelity matter.
+The `SENTINEL_KEY` constant (the `#3651` internal marker) is used by the boot path to verify vault integrity. If external code could overwrite or remove it, the daemon would silently break on restart. Both `set(SENTINEL_KEY, ...)` and `remove(SENTINEL_KEY)` must return `ExtensionError::Vault`.
 
-### `fixture_vault_path(tmp: &TempDir) → PathBuf`
+## Test Helpers
 
-Resolves `vault.enc` inside the provided temporary directory. Every test creates its own `TempDir` so vaults are fully isolated.
+### `fixture_key_b64()`
 
-## Test Cases
+Returns a deterministic base64-encoded 32-byte key (all zeros). Not cryptographically strong — only used for reproducibility across test runs.
 
-### `decode_master_key_rejects_wrong_byte_length`
+### `fixture_vault_path(tmp: &TempDir)`
 
-**What it covers.** The 32-byte length contract. Base64-decoding a 24-byte payload produces valid base64 but the wrong length.
-
-**Behaviour pinned:**
-- A 24-byte payload (valid base64, wrong length) → `Err` containing `"Invalid key length"`.
-- A genuine 32-byte payload → `Ok`, with `key.as_ref()` matching the original bytes.
-
-### `decode_master_key_rejects_literal_32_ascii_chars`
-
-**What it covers.** The operator foot-gun documented in CLAUDE.md: typing 32 ASCII characters does **not** produce a 32-byte key. This test locks in two distinct failure modes plus the correct recipe.
-
-| Input | Length | Base64-valid? | Decoded bytes | Expected result |
-|---|---|---|---|---|
-| `"x" × 32` | 32 chars | Yes | 24 | `Err` — `"Invalid key length"` mentioning 32 |
-| `"!" × 32` | 32 chars | No | — | `Err` — contains `"decode"` |
-| `base64([0xAB; 32])` | 44 chars | Yes | 32 | `Ok` — key matches `[0xAB; 32]` |
-
-The third case is the sanity anchor confirming the documented `openssl rand -base64 32` shape (44 chars) is accepted.
-
-### `vault_roundtrip_encrypt_then_decrypt_with_same_key`
-
-**What it covers.** The full encrypt-persist-reload-decrypt lifecycle across vault drop and reopen.
-
-**Flow:**
-
-1. **Phase 1 — Write:** Create vault, `init_with_key`, `set` two entries (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`), then drop the vault. On drop, in-memory key material is zeroed; only the encrypted file survives on disk.
-2. **Phase 2 — Read:** Create a *new* `CredentialVault` at the same path, `unlock_with_key` with the identical key, then `get` each entry.
-
-**Assertions:**
-- Both values survive the round-trip exactly.
-- `list_keys` returns user-facing keys but **excludes** `SENTINEL_KEY`.
-
-### `vault_unlock_with_wrong_key_fails`
-
-**What it covers.** AES-GCM authenticated decryption guarantees: a wrong key produces a detectable error, not garbage plaintext.
-
-**Flow:**
-
-1. Initialise vault under key A, write entry `"K"`.
-2. Drop vault.
-3. Attempt `unlock_with_key` with key B (different 32 bytes).
-
-**Assertions:**
-- Result is `Err` matching either `ExtensionError::Vault(_)` or `ExtensionError::VaultKeyMismatch { .. }`. The test intentionally accepts both variants because the underlying AES-GCM failure message has been routed through either depending on format version.
-- `vault.is_unlocked()` remains `false` after the failed attempt.
-
-### `vault_rejects_writes_to_reserved_sentinel_key`
-
-**What it covers.** The `SENTINEL_KEY` (issue #3651) is owned by the vault implementation. External callers must not overwrite or remove it, as doing so would silently break the boot-path verification branch.
-
-**Assertions:**
-- `vault.set(SENTINEL_KEY, ...)` → `Err(ExtensionError::Vault(_))`
-- `vault.remove(SENTINEL_KEY)` → `Err(ExtensionError::Vault(_))`
+Joins `vault.enc` to a temporary directory path. Every test gets its own isolated vault file via `tempfile::tempdir()`.
 
 ## Running
 
-```sh
+```bash
+# From the workspace root
 cargo test -p librefang-extensions --test vault_roundtrip
+
+# Or run individual tests
+cargo test -p librefang-extensions --test vault_roundtrip -- decode_master_key_rejects_literal_32_ascii_chars --exact
 ```
 
-All five tests are standalone—no shared state, no environment variables, no OS keyring access. They can run in any order and in parallel.
+No OS keyring or environment variables are required. All tests are self-contained.
+
+## Dependencies on Production Code
+
+| Symbol | Source |
+|---|---|
+| `CredentialVault` | `librefang_extensions::vault` |
+| `decode_master_key` | `librefang_extensions::vault` |
+| `SENTINEL_KEY` | `librefang_extensions::vault` |
+| `ExtensionError` | `librefang_extensions` |
+| `Zeroizing<T>` | `zeroize` crate |
+
+## When Adding New Vault Tests
+
+- Use `fixture_key_b64()` and `fixture_vault_path()` to stay consistent with existing tests.
+- Always assert on the error variant (`ExtensionError::Vault` vs `VaultKeyMismatch`) — don't just check "it failed."
+- If testing a new vault operation, also verify it doesn't leak `SENTINEL_KEY` through the new path.
+- Keep tests hermetic: each test creates and owns its own `TempDir`.

@@ -2,54 +2,60 @@
 
 # LLM Drivers
 
-LibreFang's LLM integration layer, split into two cooperating crates: a core abstraction crate that defines the driver contract, and an infrastructure crate that provides concrete implementations, retry logic, credential management, and provider fallback.
-
-## Structure
-
-```mermaid
-graph LR
-    subgraph "librefang-llm-driver (core)"
-        LT[LlmDriver trait]
-        CR[CompletionRequest / CompletionResponse]
-        LE[LlmError + Error Classifier]
-        PES[ProviderExhaustionStore]
-    end
-
-    subgraph "librefang-llm-drivers (infrastructure)"
-        CD[Concrete Drivers<br/>Anthropic · OpenAI · Gemini · Bedrock · Vertex AI · Ollama · Claude Code · Qwen Code]
-        BO[Retry & Backoff]
-        CP[Credential Pool<br/>FillFirst · RoundRobin · Random · LeastUsed]
-        RLT[Rate Limit Tracker]
-        FC[Fallback Chain]
-        PC[Prompt Cache Mgmt]
-    end
-
-    CD -.->|implements| LT
-    FC -->|reads/writes| PES
-    CP -->|marks exhausted via| PES
-    BO -->|classifies via| LE
-    CD -->|acquires keys from| CP
-    CD -->|checks| RLT
-```
+Provider abstraction layer for LibreFang. This module group defines a uniform interface for multiple LLM providers and implements the fallback routing, credential management, and retry logic that keep completions flowing even when individual providers or keys degrade.
 
 ## Sub-modules
 
-- **[LLM Driver (Core)](librefang-llm-driver-src.md)** — The `LlmDriver` trait, request/response types (`CompletionRequest`, `CompletionResponse`), streaming event protocol, `LlmError` taxonomy with error classification, `FailoverReason`, and the `ProviderExhaustionStore` ledger. Every other crate in this module group depends on these types.
+| Crate | Role |
+|-------|------|
+| [**librefang-llm-driver**](librefang-llm-driver-src.md) | Core `LlmDriver` trait, `CompletionRequest`/response types, `LlmError` classification engine, `ProviderExhaustionStore`, and `FallbackChain` orchestration |
+| [**librefang-llm-drivers**](librefang-llm-drivers-src.md) | Concrete provider drivers (Anthropic, OpenAI/ChatGPT, Bedrock, CLI tools), `CredentialPool`, backoff/retry logic, and rate-limit guards |
 
-- **[LLM Drivers (Infrastructure)](librefang-llm-drivers-src.md)** — Concrete provider implementations, plus cross-cutting infrastructure: retry with configurable backoff, a credential pool with pluggable selection strategies, rate-limit bucket tracking, prompt-cache control, and the fallback chain that orchestrates provider failover.
+## How they fit together
 
-## Key Cross-Module Workflows
+`librefang-llm-driver` owns the *contract*: the trait every provider implements, the request/response types that flow through the system, and the error classifier that decides whether a failure is retryable, should trigger a provider switch, or requires a key rotation. It knows nothing about HTTP or subprocess calls.
 
-**Request lifecycle.** A `CompletionRequest` from the core crate is handed to a concrete driver (infrastructure crate), which acquires a credential from the `CredentialPool`, checks the `RateLimitTracker`, and dispatches over the wire. On transport errors, `transport_error_is_retryable` consults the core error classifier to decide whether to retry with backoff.
+`librefang-llm-drivers` fills in the *implementations*: each driver translates a `CompletionRequest` into provider-native HTTP or CLI subprocess calls, relies on `CredentialPool` to select an unexhausted API key, and applies jittered backoff on transient failures. Drivers return `LlmError` variants that the core crate classifies into `FailoverReason` values.
 
-**Credential exhaustion flow.** When a provider returns HTTP 429 or 402, the credential pool calls `mark_exhausted` on the shared `ProviderExhaustionStore`. The pool then skips that key during acquisition. The fallback chain also reads from the same store to skip entire providers when all their keys are exhausted.
+## Key cross-module workflow
 
-**Fallback chain.** The chain iterates over candidate drivers. On failure, `LlmError` is classified into a `FailoverReason`; retriable errors advance to the next provider, while non-retriable errors surface immediately. The exhaustion store prevents re-attempting providers that are known to be depleted.
+```
+Agent Loop
+  │
+  ▼
+FallbackChain (core)
+  │  checks ProviderExhaustionStore
+  │  selects next provider + credential
+  ▼
+Concrete Driver (drivers)
+  │  CredentialPool selects unexhausted key
+  │  jittered backoff on transient errors
+  │  HTTP / SSE / subprocess call
+  ▼
+Response ──or── LlmError
+                │
+                ▼
+           classify_error (core)
+                │
+                ▼
+           FailoverReason
+           ├─ Retryable    → backoff, same provider
+           ├─ KeyExhausted → rotate key via CredentialPool
+           └─ ProviderDown → mark exhausted, next provider
+```
 
-**Provider detection.** Higher-level code (e.g., the API server's provider routes) probes driver availability by checking for CLI tool presence and credential files, as seen in the `claude_code_available` → `claude_credentials_in_dir` and `qwen_code_available` → `home_dir` call chains.
+1. **Dispatch** — `FallbackChain` checks `ProviderExhaustionStore` for live providers, then hands a `CompletionRequest` to the chosen driver.
+2. **Credential selection** — The driver calls `CredentialPool::fill` to get an available key, skipping any previously marked exhausted.
+3. **Request** — The driver makes the provider-native call (HTTP for API providers, stdin/subprocess for CLI drivers like Claude Code, Gemini CLI, and Qwen Code).
+4. **Error classification** — On failure, `classify_error` inspects the raw error (HTML pages, JSON messages, timeouts, rate-limit headers) and produces a `FailoverReason`.
+5. **Feedback loop** — `ProviderExhaustionStore` marks providers or keys as exhausted; `CredentialPool::mark_success` clears exhaustion on recovery, incrementing request counts for diagnostics.
 
-## Design Principles
+## Provider landscape
 
-- The core crate is zero-dependency on any specific provider; it only defines the contract and shared error/exhaustion state.
-- The infrastructure crate owns all HTTP interaction, provider-specific serialization, and operational concerns like backoff and rate limiting.
-- Exhaustion state is shared via `ProviderExhaustionStore`, allowing the credential pool and fallback chain to coordinate without coupling.
+The drivers crate supports three families of providers:
+
+- **API drivers** — Anthropic, OpenAI/ChatGPT (including Responses API with JSON schema formats), and AWS Bedrock. These speak HTTP/SSE and use `CredentialPool` for key rotation.
+- **CLI drivers** — Claude Code, Gemini CLI, Qwen Code. These invoke local CLI tools via subprocess, discovering credentials from the user's home directory.
+- **Availability checks** — Each CLI driver exposes an `*_available` function that probes for the binary and its credentials, used by provider-test routes to report what's reachable.
+
+For implementation details, see the individual sub-module pages linked above.

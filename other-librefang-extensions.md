@@ -2,119 +2,125 @@
 
 # librefang-extensions
 
-The "everything-side-of-an-agent" toolkit — extension and integration utilities that don't belong in the kernel or runtime layers. Provides MCP server catalog management, encrypted credential storage, OAuth2 PKCE flows, provider health probing, plugin installation, shared HTTP client construction, and `.env` file parsing.
+Extension and integration toolkit for LibreFang — credential vault, MCP server catalog, OAuth2 PKCE flows, plugin installer, shared HTTP client, and workspace `.env` parsing.
+
+This crate lives above `librefang-kernel` and below the application layers (`librefang-api`, CLI, desktop). Nothing in this crate may depend on those higher-level crates.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[librefang-api / CLI / desktop] -->|depends on| EXT[librefang-extensions]
-    EXT -->|depends on| T[librefang-types]
-    K[librefang-kernel] -.->|used by| EXT
-    EXT -.->|McpOAuthProvider trait defined in| R[librefang-runtime]
-
-    subgraph EXT
-      C[catalog] V[vault] O[oauth]
-      CR[credentials] H[health] I[installer]
-      HC[http_client] DE[dotenv]
+    subgraph "librefang-extensions"
+        V[vault<br/>CredentialVault]
+        CAT[catalog<br/>MCP metadata]
+        OAUTH[oauth<br/>PKCE + DCR]
+        CREDS[credentials<br/>resolve / resolve_all]
+        INST[installer<br/>install / update / remove]
+        HC[http_client<br/>client_builder / new_client]
+        DOTENV[dotenv<br/>.env parsing]
+        HEALTH[health<br/>liveness probes]
     end
+
+    TYPES[librefang-types] --> V
+    TYPES --> CAT
+    TYPES --> OAUTH
+    TYPES --> CREDS
+    TYPES --> INST
+
+    V -->|stores encrypted creds| FS[filesystem]
+    V -->|master key| KR[OS keyring / file fallback]
+    OAUTH -->|RFC 7591 DCR| REMOTE[OAuth provider]
+    CAT -->|reads/writes| DIR[~/.librefang/mcp/catalog/]
+    HC -->|builds| REQ[reqwest::Client]
 ```
 
-**Dependency boundary:** This crate sits above `librefang-kernel` and depends only on `librefang-types`. Nothing in this crate may import from `librefang-api`, the CLI, or the desktop layer.
+## Module Reference
 
-## Module Map
+### `vault` — AES-256-GCM Credential Vault
 
-| Module | Purpose |
-|---|---|
-| `catalog` | MCP server catalog metadata stored under `~/.librefang/mcp/catalog/` |
-| `credentials` | Auth-source unification — `resolve()` and `resolve_all()` to gather credentials from multiple backends |
-| `dotenv` | `.env` file parsing for agent workspaces |
-| `health` | Provider liveness probes — check whether an MCP server or external service is reachable |
-| `http_client` | Shared `reqwest` client builder — `client_builder()` and `new_client()` |
-| `installer` | MCP server install, update, and uninstall flows |
-| `oauth` | OAuth2 PKCE client with Dynamic Client Registration (RFC 7591) for MCP servers |
-| `vault` | AES-256-GCM encrypted credential vault (`CredentialVault`) |
+The core credential storage, exposed through `CredentialVault`.
 
-## Key Components
+**Encryption**: Credentials are encrypted with AES-256-GCM. The master encryption key is derived via Argon2 key derivation.
 
-### Credential Vault (`vault`)
+**Master key storage** is platform-dependent:
 
-`CredentialVault` stores secrets using AES-256-GCM encryption. The master key has two storage strategies depending on the compile target and OS:
+| Platform | Keyring backend | Fallback |
+|---|---|---|
+| Linux (glibc) | libsecret via `keyring` crate | File-based AES-256-GCM store |
+| macOS | Keychain via `keyring` crate | File fallback |
+| Windows | Credential Manager via `keyring` crate | File fallback |
+| Linux (musl) | *Not compiled in* | File-based store |
+| Android | *Not compiled in* | File-based store |
 
-- **Linux (glibc) / Windows:** OS keyring via `libsecret` / Credential Manager (the `keyring` crate). macOS also supports this path but see note below.
-- **musl-static / Android / fallback:** File-based AES-256-GCM store. The vault transparently falls back when no OS keyring backend is compiled in.
-- **macOS:** File fallback is the default due to `use_os_keyring` gating — see the `use_os_keyring` plumbing in `vault.rs`.
+The `keyring` dependency is target-gated in `Cargo.toml` to avoid pulling `libdbus-sys` on musl and Android targets where there is no usable secret-service backend. When no OS keyring is compiled in, the vault transparently falls back to its file-based store.
 
-The `keyring` dependency is target-gated in `Cargo.toml` to avoid pulling `libdbus-sys` on musl and Android targets where no usable secret-service backend exists.
+The `LIBREFANG_VAULT_KEY` environment variable can provide the master key. Cross-cutting rules for vault key handling are documented in the top-level `CLAUDE.md`.
 
-> **Important:** The `LIBREFANG_VAULT_KEY` environment variable constraints and vault key handling rules are defined in the top-level `CLAUDE.md`. Do not duplicate them here.
+### `catalog` — MCP Server Catalog
 
-### OAuth2 PKCE (`oauth`)
+Manages MCP server metadata under `~/.librefang/mcp/catalog/`. Stores installation metadata, version information, and server capabilities for installed MCP servers.
 
-Implements the full OAuth2 PKCE flow plus Dynamic Client Registration (RFC 7591) for MCP servers that require authorization. This module owns the OAuth *client* logic, but the `McpOAuthProvider` trait that wires it into the kernel lives in `librefang-runtime`, and its concrete implementation lives in `librefang-api`. Cross-cutting rules about Docker callback URLs and OAuth flow ownership between daemon and API are in the top-level `CLAUDE.md`.
+### `credentials` — Auth Source Unification
 
-### Shared HTTP Client (`http_client`)
+Provides `resolve` and `resolve_all` functions that unify multiple auth sources (vault entries, environment variables, `.env` files, OAuth tokens) into a single credential resolution pipeline. This is the single entry point for code that needs to authenticate against an MCP server or external provider.
 
-Provides two entry points:
+### `oauth` — OAuth2 PKCE Client
 
-- **`client_builder()`** — returns a pre-configured `reqwest::ClientBuilder` with shared TLS settings (rustls + native cert roots), user-agent, and timeout defaults. Callers can add additional configuration before building.
-- **`new_client()`** — builds a client immediately with the default shared configuration.
+Implements OAuth2 Authorization Code flow with PKCE (Proof Key for Code Exchange) plus Dynamic Client Registration per RFC 7591. Used when MCP servers require OAuth-based authentication.
 
-> **Note:** There is no `shared_client()` function. Previous documentation references to one were incorrect. Use `client_builder()` when you need to customize, `new_client()` when defaults suffice.
+**Important boundary note**: The `McpOAuthProvider` trait lives in `librefang-runtime`. The concrete implementation lives in `librefang-api`. This crate provides the OAuth client primitives (PKCE generation, token exchange, DCR calls) but does not own the trait or the callback wiring.
 
-### MCP Catalog (`catalog`)
+### `installer` — MCP Server Install / Update / Uninstall
 
-Manages MCP server metadata entries stored as files under `~/.librefang/mcp/catalog/`. Each entry describes a registered MCP server's connection details, capabilities, and configuration.
+Handles one-click MCP server lifecycle: downloading, installing, updating, and removing MCP server packages. Works in concert with the `catalog` module to track installed state.
 
-### Credential Resolution (`credentials`)
+### `http_client` — Shared HTTP Client Builder
 
-`resolve()` and `resolve_all()` unify auth sources — they look up credentials from the vault, environment variables, catalog metadata, or other configured backends, returning a normalized credential set for the caller.
+Provides two functions for creating `reqwest::Client` instances:
 
-### Plugin Installer (`installer`)
+- **`client_builder()`** — Returns a pre-configured `reqwest::ClientBuilder` with shared TLS settings (rustls with webpki roots and native cert loading). Callers can add additional configuration before building.
+- **`new_client()`** — Builds a `reqwest::Client` directly with default settings.
 
-Handles the lifecycle of MCP server plugins: download, install, update, and uninstall. Orchestrates catalog updates alongside filesystem operations.
+There is no `shared_client()` singleton. Use whichever function fits the call site. TLS is backed by `rustls` (not native-tls), with both `webpki-roots` and `rustls-native-certs` loaded.
 
-### Provider Health (`health`)
+### `dotenv` — `.env` Parsing
 
-Liveness probes for external providers and MCP servers. Used to detect connectivity issues before attempting operations.
+Parses `.env` files in agent workspaces to surface environment variables for credential resolution and configuration. Integrates with the `credentials` module's resolution pipeline.
 
-### Dotenv (`dotenv`)
+### `health` — Provider Liveness Probes
 
-Parses `.env` files in agent workspaces to inject environment variables into the agent's execution context.
+Health check utilities for probing whether MCP servers and external providers are reachable and responsive.
 
-## Compile-Time Feature Gates
+## Dependency Notes
 
-The `keyring` crate (OS keyring integration) is conditionally compiled:
+### Target-gated OS keyring
 
 ```toml
 [target.'cfg(any(all(target_os = "linux", not(target_env = "musl")), target_os = "macos", target_os = "windows"))'.dependencies]
 keyring = { workspace = true }
 ```
 
-- **Included:** glibc Linux, macOS, Windows
-- **Excluded:** musl-static Linux, Android, and any target without a native secret-service backend
+This means `cargo build --target x86_64-unknown-linux-musl` will not pull in `libdbus-sys`. The vault code internally checks whether the OS keyring feature is compiled in and falls back gracefully.
 
-When `keyring` is not compiled in, the vault automatically falls back to file-based encryption. No feature flags or runtime toggles are needed — the `os_keyring` function in `vault.rs` handles this transparently.
+### TLS stack
 
-## Dependency Highlights
+Uses `rustls` + `webpki-roots` + `rustls-native-certs`. No OpenSSL dependency. The HTTP client builder configures rustls directly.
 
-| Dependency | Role |
-|---|---|
-| `aes-gcm` / `argon2` | Symmetric encryption and key derivation for the vault |
-| `rustls` / `webpki-roots` / `rustls-native-certs` | TLS for the shared HTTP client (no OpenSSL dependency) |
-| `reqwest` | HTTP client construction |
-| `axum` | Used for OAuth callback handling |
-| `zeroize` | Secure memory zeroing for key material |
-| `rand` / `sha2` / `hmac` / `subtle` | Cryptographic primitives for PKCE and vault operations |
-| `dashmap` | Concurrent map for caching (catalog entries, health state) |
-| `keyring` | OS-native keyring access (target-gated) |
+## Crate Boundaries
+
+**This crate owns**: vault, MCP catalog, OAuth client primitives, shared HTTP client builder, `.env` parsing, plugin installer.
+
+**This crate does NOT own**:
+- Kernel callback wiring (`McpOAuthProvider` trait is in `librefang-runtime`)
+- HTTP routing
+- Channel adapters
+- Auth middleware allowlist
+
+**Dependency direction**: `librefang-extensions` → `librefang-types`. No dependency on `librefang-api`, CLI, or desktop crates. Upper-layer crates depend on this one, never the reverse.
 
 ## Adding Code to This Crate
 
-Before adding code that crosses the crate boundary (especially OAuth flows, vault key handling, or auth middleware), read the cross-cutting rules in the top-level `CLAUDE.md`. Key constraints:
-
-1. **Do not depend on `librefang-api`, CLI, or desktop crates.** This crate is a leaf above the kernel.
-2. **OAuth flow ownership** is split: the trait lives in `librefang-runtime`, the implementation in `librefang-api`. This crate provides the client primitives.
-3. **Vault key rules** (environment variable constraints, rotation) are centralized. Reference them, don't restate them.
-4. **Auth middleware allowlist** rules live in the top-level project documentation.
-5. **When in doubt about API names**, check the actual `src/` files — the agent notes in this crate have drifted before.
+1. Check the top-level `CLAUDE.md` for cross-cutting rules (Docker callback URLs, OAuth flow ownership between daemon and API, vault key handling, `LIBREFANG_VAULT_KEY` constraints, auth middleware allowlist) before adding code that crosses crate boundaries.
+2. Do not duplicate those rules within this crate's documentation — they belong in the top-level file to avoid drift.
+3. New features that are "agent-side infrastructure" (not kernel primitives, not HTTP routing, not UI) belong here.
+4. If a new module needs types from `librefang-runtime`, consider whether the dependency should be inverted (trait in runtime, implementation here) or whether the type belongs in `librefang-types` instead.

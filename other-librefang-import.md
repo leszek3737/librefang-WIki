@@ -2,63 +2,77 @@
 
 # librefang-import
 
-Import engine for migrating agent configurations from other frameworks into LibreFang.
+Import engine for migrating configurations and agent definitions from other agent frameworks into LibreFang.
 
 ## Purpose
 
-This module provides the tooling needed to locate, parse, and convert configuration files authored for other agent frameworks into LibreFang-native types. It handles format detection, directory traversal, and data transformation so that operators can point the import engine at an existing deployment and produce a working LibreFang configuration without manual translation.
+This module handles the ingestion of external agent framework data—configuration files, agent definitions, conversation histories, and related metadata—and transforms them into LibreFang's native types. It provides a format-agnostic pipeline that can parse multiple configuration languages, normalize the data, and emit structures compatible with the rest of the LibreFang ecosystem.
+
+## Supported Input Formats
+
+The module accepts configuration and data files in the following formats:
+
+| Format | Use Case |
+|--------|----------|
+| JSON (`serde_json`) | Common structured config, API exports |
+| YAML (`serde_yaml`) | Human-readable agent configs |
+| JSON5 (`json5`) | Relaxed JSON with comments, trailing commas |
+| TOML (`toml`) | Rust-ecosystem configs, tool settings |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    A[Source Config Files] --> B[Directory Walker]
-    B --> C[Format Detection]
-    C --> D[Parser: JSON / YAML / JSON5 / TOML]
-    D --> E[Intermediate Representation]
+    A[Source Directory] -->|walkdir| B[File Discovery]
+    B -->|Detect format| C{Parser}
+    C -->|JSON/YAML/JSON5/TOML| D[Deserialize]
+    D --> E[Transform]
     E --> F[librefang-types]
+    G[Error Handler] -.->|thiserror| C
+    G -.-> D
+    H[Tracing] -.-> B
+    H -.-> E
 ```
 
-The import pipeline follows a straightforward flow: discover files on disk, detect their format, parse into a generic intermediate representation, and then convert into the strongly-typed structures defined in `librefang-types`.
+## Key Dependencies and Their Roles
 
-## Supported Input Formats
+### File Discovery — `walkdir`, `dirs`
 
-The engine can ingest configuration files in four formats, chosen based on file extension and content:
+- **`walkdir`** — Recursively traverses source directories to locate importable files. Used when importing from a framework's project tree or a user-provided directory.
+- **`dirs`** — Resolves standard OS directories (config home, data home). Enables discovery of agent framework configs installed in conventional locations without requiring explicit paths from the user.
 
-| Format | Crate | Typical Extension |
-|--------|-------|-------------------|
-| JSON | `serde_json` | `.json` |
-| YAML | `serde_yaml` | `.yaml`, `.yml` |
-| JSON5 | `json5` | `.json5` |
-| TOML | `toml` | `.toml` |
+### Parsing — `serde`, `serde_json`, `serde_yaml`, `json5`, `toml`
 
-All four are deserialized through `serde`, so any type implementing `Deserialize` can be populated from any supported format.
+All parsers feed into a common Serde deserialization pipeline. The module detects the file format based on extension or content, selects the appropriate parser, and deserializes into intermediate representations before mapping to `librefang-types`.
 
-## Key Dependencies
+### Type Conversion — `librefang-types`
 
-| Dependency | Role |
-|------------|------|
-| `librefang-types` | Shared type definitions that the importer produces as output |
-| `walkdir` | Recursive directory traversal to discover configuration files in nested layouts |
-| `dirs` | Resolves standard platform directories (home, config, data) when searching for default agent installation paths |
-| `chrono` | Timestamp parsing and conversion for log files, cron schedules, and time-based config values |
-| `thiserror` | Derives structured error types for parse failures, missing files, and conversion errors |
-| `tracing` | Structured logging throughout the import pipeline for diagnostics and progress reporting |
+The final output of any import operation is one or more types from `librefang-types`. This crate is the sole internal dependency, ensuring that imported data is immediately usable by other LibreFang modules without further transformation.
 
-## Error Handling
+### Error Handling — `thiserror`
 
-All fallible operations return `Result<T, E>` where `E` is derived via `thiserror`. Import errors generally fall into these categories:
+All import failures are expressed as typed errors using `thiserror` derives. This covers:
 
-- **IO errors** — files or directories not found, permission denied
-- **Parse errors** — malformed JSON/YAML/TOML, unexpected structure
-- **Conversion errors** — valid syntax but semantically incompatible with LibreFang types (e.g., unrecognized enum variant, out-of-range value)
+- File I/O errors (missing files, permission denied)
+- Parse errors (malformed JSON, invalid YAML structure)
+- Conversion errors (missing required fields, incompatible schemas)
 
-Errors are annotated with file paths and line/context information where possible, and propagated with `tracing` spans so operators can identify exactly which source file caused a failure.
+### Observability — `tracing`
 
-## Testing
+Import operations emit structured trace events at key points: file discovery, parse start/end, conversion results, and warnings for skipped or partially-imported data.
 
-The dev-dependency on `tempfile` indicates that tests create isolated temporary directory trees mimicking foreign agent installations, then assert that the import engine discovers and converts them correctly. This avoids depending on fixture files checked into the repository and keeps tests self-contained.
+### Timestamps — `chrono`
 
-## Relationship to Other Modules
+Used for parsing and normalizing date/time values found in source configs (e.g., agent creation timestamps, session metadata) into a consistent representation.
 
-This module depends only on `librefang-types` within the workspace. It has no incoming calls from other modules, meaning it is typically invoked as a standalone utility or CLI subcommand rather than being called during normal LibreFang runtime. The output of an import run is a set of `librefang-types` structures that can be serialized to disk and consumed by the rest of the system.
+## Integration with LibreFang
+
+This module sits at the edge of the system. It depends on `librefang-types` but is not depended upon by any other LibreFang crate. This means it can be included or excluded from a build without affecting core functionality—useful for reducing attack surface or binary size in production deployments that don't need migration support.
+
+Typical usage: a CLI command or one-shot utility invokes this module's import functions, writes the resulting types to the LibreFang data store, and then the import module is no longer involved.
+
+## Development Notes
+
+- **Adding a new source framework**: Implement detection logic (file patterns, directory structure), define an intermediate deserialization struct for the source schema, and write a mapper from that struct into the relevant `librefang-types`.
+- **Testing**: The `tempfile` dev-dependency supports integration tests that scaffold directory trees with sample config files, run the import pipeline, and assert the output. Prefer this approach over mocking the filesystem.
+- **Extending format support**: A new format only requires wiring another Serde-capable parser into the existing format-detection branch. The downstream transformation logic remains unchanged.

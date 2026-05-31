@@ -2,47 +2,120 @@
 
 # librefang-memory-wiki
 
-Durable markdown knowledge vault for the LibreFang Agent OS. Persists agent knowledge as Markdown files with provenance-tracking YAML frontmatter, exportable to Obsidian-compatible vaults.
+Durable markdown knowledge vault for the LibreFang Agent OS. Provides persistent, queryable storage for agent knowledge as Markdown documents with provenance-tracking YAML frontmatter and Obsidian-compatible export.
 
 ## Purpose
 
-This module provides a file-backed knowledge store that agents can read from and write to across sessions. Each knowledge entry is a Markdown document with structured YAML frontmatter capturing provenance metadata—who created it, when, from what source, and with what content hash. The output format targets Obsidian, enabling human operators to browse, search, and link agent-generated knowledge alongside their own notes.
+Agents accumulate knowledge during execution — facts, procedures, observations, and decisions. This crate provides a structured, durable store for that knowledge using plain Markdown files augmented with machine-readable frontmatter. The format is designed to be:
 
-## Dependencies
-
-| Dependency | Role |
-|---|---|
-| `librefang-types` | Shared type definitions across the LibreFang ecosystem |
-| `serde`, `serde_json`, `serde_yaml` | Serialization of frontmatter and document structures |
-| `chrono` | Timestamp generation for provenance metadata |
-| `sha2` | Content hashing for integrity verification and deduplication |
-| `thiserror` | Typed error definitions |
-| `tracing` | Structured logging of vault operations |
-
-**Dev dependencies:** `tempfile` for isolated filesystem tests, `librefang-kernel-handle` for integration scenarios.
+- **Human-readable**: Open any entry in a standard Markdown editor or Obsidian.
+- **Machine-queryable**: YAML frontmatter carries structured provenance and metadata.
+- **Content-addressed**: SHA-256 hashing ensures integrity and enables deduplication.
+- **Durable**: File-based storage that survives process restarts and crashes.
 
 ## Architecture
 
-The module is a self-contained library with no outgoing call edges to other LibreFang modules at runtime. It depends on `librefang-types` for shared data structures but operates independently on the filesystem.
-
 ```mermaid
 graph TD
-    A[librefang-memory-wiki] -->|reads/writes| FS[Filesystem Vault]
-    A -->|uses types from| LT[librefang-types]
-    A -->|produces| OBS[Obsidian-compatible Markdown]
+    A[Agent produces knowledge] --> B[MemoryWiki]
+    B --> C[YAML Frontmatter]
+    B --> D[Markdown Body]
+    C --> E[provenance: author, timestamp, hash]
+    B --> F["Obsidian-compatible .md vault"]
+    F --> G[Human browsing / search]
+    B --> H[Query by tag / source / hash]
 ```
 
-## Knowledge Document Format
+## Key Dependencies
 
-Each document consists of two parts:
+| Dependency | Role |
+|---|---|
+| `librefang-types` | Shared domain types (agent IDs, session handles, etc.) |
+| `serde` / `serde_json` / `serde_yaml` | Serialization of frontmatter and structured metadata |
+| `chrono` | Timestamp generation for provenance records |
+| `sha2` | SHA-256 content hashing for integrity and deduplication |
+| `thiserror` | Typed error definitions |
+| `tracing` | Instrumentation for debug/diagnostic logging |
 
-1. **YAML frontmatter** — provenance and metadata enclosed in `---` delimiters. This includes creation timestamp, authorship, content hash (SHA-256), and any source references.
-2. **Markdown body** — the actual knowledge content, written in standard Markdown with Obsidian-compatible wikilink syntax where applicable.
+## Document Structure
+
+Each wiki entry is a single Markdown file with two sections:
+
+1. **YAML frontmatter** (delimited by `---`): Contains provenance metadata — who wrote it, when, the content hash, tags, source module, and any cross-references. This is the machine-readable envelope.
+
+2. **Markdown body**: The actual knowledge content. Written in standard Markdown with support for Obsidian wiki-links (`[[other-entry]]`) to create a navigable knowledge graph.
+
+Example:
+
+```yaml
+---
+id: a1b2c3d4
+author: agent::planner
+created_at: "2025-06-12T14:30:00Z"
+content_hash: sha256:e3b0c44298fc1c149afbf4c8996fb924...
+tags: [networking, tls, incident-4421]
+source: session::planner-0092
+---
+
+# TLS Handshake Failure — Incident 4421
+
+## Summary
+During the planning phase, repeated TLS handshake failures were
+observed when connecting to `api.example.com:443`.
+
+## Root Cause
+The server's certificate chain was incomplete...
+
+## Resolution
+Adding the intermediate CA to the trust store resolved the issue.
+See [[tls-trust-configuration]] for the general procedure.
+```
+
+## Provenance Model
+
+Provenance frontmatter tracks the origin and history of each knowledge entry:
+
+- **`author`**: The agent or module that created the entry.
+- **`source`**: The originating session, task, or execution context.
+- **`created_at` / `updated_at`**: Timestamps for creation and modification.
+- **`content_hash`**: SHA-256 digest of the Markdown body, used to detect corruption or unauthorized changes.
+- **`tags`**: Freeform labels for categorization and querying.
+
+This provenance chain is critical for auditing agent behavior — you can trace any piece of stored knowledge back to the specific agent run and decision that produced it.
+
+## Obsidian Compatibility
+
+The vault directory produced by this module can be opened directly in Obsidian. Key compatibility features:
+
+- Standard Markdown files with YAML frontmatter (Obsidian's native property format).
+- Wiki-link syntax (`[[entry-name]]`) for inter-document references.
+- Tag-based organization compatible with Obsidian's tag pane.
+- Folder structure maps to logical namespaces within the agent's knowledge base.
+
+## Integration Points
+
+- **`librefang-types`**: Consumes shared types for agent identifiers, session tokens, and domain-specific enums. Any type that appears in frontmatter must derive `Serialize` / `Deserialize`.
+- **`librefang-kernel-handle`**: Used in dev-dependencies for integration testing. Tests spin up a kernel handle to verify that wiki operations behave correctly within the full agent lifecycle.
 
 ## Error Handling
 
-Errors are defined via `thiserror` and cover likely failure modes: file I/O errors, YAML parsing failures, hash mismatches, and vault integrity violations. Consumers should expect structured error variants rather than raw I/O errors.
+All fallible operations return typed errors via `thiserror`. Expected error categories include:
+
+- **I/O errors**: Filesystem operations on the vault directory.
+- **Serialization errors**: Malformed frontmatter during read or write.
+- **Integrity errors**: Content hash mismatches indicating corruption or tampering.
+- **Validation errors**: Missing required frontmatter fields or invalid values.
 
 ## Testing
 
-Tests use `tempfile` to create isolated directory trees, ensuring vault operations (creation, reading, listing, integrity checks) are verified without touching the real filesystem. Integration tests may pull in `librefang-kernel-handle` to validate end-to-end scenarios where the kernel interacts with the wiki store.
+Tests use `tempfile` to create isolated vault directories. This ensures tests are repeatable and don't pollute the filesystem. Integration tests exercise the full write → read → query cycle, including frontmatter round-tripping and hash verification.
+
+```rust
+// Typical test pattern
+let dir = tempfile::tempdir().unwrap();
+let wiki = MemoryWiki::open(dir.path()).unwrap();
+
+wiki.write_entry(/* ... */).unwrap();
+let entry = wiki.read_entry("some-id").unwrap();
+assert_eq!(entry.frontmatter.content_hash, computed_hash);
+```

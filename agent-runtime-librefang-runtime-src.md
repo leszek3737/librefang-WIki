@@ -2,222 +2,256 @@
 
 # LibreFang Runtime (`librefang-runtime`)
 
-The runtime crate houses the core agent execution infrastructure: the agent loop that drives multi-turn conversations, the A2A protocol layer for cross-framework agent interoperability, per-turn context loading, message-history management, and security boundaries for outbound network access.
+## Overview
+
+`librefang-runtime` is the core execution engine for LibreFang agents. It implements the agent loop (the cycle of receiving a user message, dispatching to an LLM, executing tools, and returning a response), cross-agent interoperability via the A2A protocol, per-turn context loading, and all the infrastructure that keeps long-running agent sessions healthy—history trimming, context overflow recovery, proactive memory, and SSRF-hardened outbound networking.
+
+The crate is consumed by the kernel (`librefang-daemon`) and the API layer (`librefang-api`). Extensions and CLI tooling call into specific runtime subsystems (catalog sync, registry sync, provider health probes) but never run the agent loop directly.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    Kernel["Kernel (injection)"] --> AgentLoop["Agent Loop"]
-    AgentLoop --> EndTurn["End-Turn Finalization"]
-    AgentLoop --> HistoryFold["History Fold / Trim"]
-    AgentLoop --> ToolExec["Tool Execution"]
-    
-    A2ARoutes["API Routes (network.rs)"] --> A2AClient["A2aClient"]
-    A2ARoutes --> A2ATaskStore["A2aTaskStore"]
-    A2ARoutes --> Discovery["discover_external_agents"]
-    
-    AgentLoop --> AgentContext["Agent Context Loader"]
-    EndTurn --> ProactiveMem["Proactive Memory"]
-    EndTurn --> ContextEngine["Context Engine"]
-    
-    A2AClient --> SSRF["SSRF Guard + DNS Pin"]
-    A2AClient --> BodyCap["read_capped_body"]
+    subgraph "Agent Loop"
+        A[run_agent_loop / run_agent_loop_streaming] --> B[Tool Resolution]
+        A --> C[LLM Completion]
+        C --> D{Tool calls?}
+        D -- yes --> E[Execute Tools]
+        E --> C
+        D -- no --> F[End-Turn Finalization]
+    end
+
+    subgraph "End-Turn Pipeline"
+        F --> G[Retry Classification]
+        F --> H[Session Persistence]
+        F --> I[Memory Writes]
+        F --> J[History Fold]
+        F --> K[Proactive Memory]
+        F --> L[Hooks]
+    end
+
+    subgraph "A2A Subsystem"
+        M[A2aClient] -->|discover| N[Agent Card fetch]
+        M -->|send_task / get_task| O[JSON-RPC to peers]
+        P[A2aTaskStore] -->|in-memory + SQLite| Q[Task lifecycle]
+    end
+
+    subgraph "Per-Turn I/O"
+        R[load_context_md] -->|disk read| S[context.md]
+        T[Context Overflow Recovery] -->|trims messages| A
+    end
+
+    F -.-> M
 ```
 
 ---
 
 ## A2A Protocol (`a2a.rs`)
 
-Implements Google's Agent-to-Agent protocol, enabling LibreFang agents to advertise capabilities via **Agent Cards** and coordinate work through **Tasks**.
+Implements Google's Agent-to-Agent protocol for cross-framework interoperability. LibreFang agents can both *expose* themselves to external systems and *consume* external agents.
 
 ### Core Types
 
-**`AgentCard`** — A JSON capability manifest served at `/.well-known/agent.json`. Built from an `AgentManifest` via `build_agent_card`, which converts each tool in the agent's capabilities into an `AgentSkill` descriptor. Cards declare streaming support, push notification support, and accepted input/output content types.
+| Type | Purpose |
+|---|---|
+| `AgentCard` | Capability manifest served at `/.well-known/agent.json`. Lists name, description, skills, supported I/O modes, and streaming capability. |
+| `A2aTask` | Unit of work exchanged between agents. Carries messages, artifacts, status, session continuity, and agent/caller identity. |
+| `A2aTaskStatus` | Six-state lifecycle: `Submitted` → `Working` → `Completed` / `Failed` / `Cancelled`, plus `InputRequired`. |
+| `A2aTaskStatusWrapper` | Polymorphic deserializer that accepts both bare `"completed"` and object `{"state": "completed", "message": …}` forms from different A2A implementations. |
+| `A2aMessage` / `A2aPart` | Conversation messages with multi-part content (text, file, structured data). |
+| `A2aArtifact` | Task output carrying optional metadata, indexing, and streaming chunk markers. |
 
-**`A2aTask`** — A unit of work exchanged between agents. Tracks:
-- `id` / `session_id` for correlation and conversation continuity
-- `status` (current lifecycle state)
-- `messages` — the conversation transcript
-- `artifacts` — outputs produced by the task
-- `agent_id` — which local agent was dispatched to
-- `caller_a2a_agent_id` — the external caller's identity (from `X-A2A-Agent-ID` header)
+### Agent Card Generation
 
-**`A2aTaskStatus`** — Enum: `Submitted` → `Working` → `Completed` / `Failed` / `Cancelled` / `InputRequired`. Wrapped in `A2aTaskStatusWrapper` which deserializes both the bare string form (`"completed"`) and the object form (`{"state": "completed", "message": null}`) used by different A2A implementations.
+`build_agent_card(manifest, base_url)` converts a `librefang_types::agent::AgentManifest` into an `AgentCard`. Each tool in `manifest.capabilities.tools` becomes an A2A skill descriptor.
 
-### Task Store (`A2aTaskStore`)
+### External Agent Discovery
 
-Bounded in-memory store with optional SQLite persistence. Tasks are created by `tasks/send`, polled by `tasks/get`, and cancelled by `tasks/cancel`.
+`discover_external_agents` runs at kernel boot for every `ExternalAgent` entry in `config.toml`. It fetches each peer's `/.well-known/agent.json` and returns `(canonical_url, AgentCard)` pairs. URL canonicalization (`canonicalize_a2a_url`) normalizes scheme casing, host casing, default port stripping, and fragment/query cleanup so the trust gate at `/api/a2a/send` matches reliably.
 
-**Eviction policy** (applied lazily on every `insert`):
+### A2aClient — Outbound A2A Networking
 
-1. **TTL sweep** — any task whose `updated_at` exceeds `task_ttl` (default 24 hours) is removed regardless of state. This prevents `Working`/`InputRequired` tasks from accumulating indefinitely.
-2. **Capacity eviction** — if still at capacity after the TTL sweep, the oldest terminal-state task (`Completed`/`Failed`/`Cancelled`) is evicted first. Falls back to the oldest task overall when no terminal tasks exist.
+All outbound requests go through `A2aClient`, which rebuilds a `reqwest::Client` per call for SSRF safety.
 
-**Persistence** (`with_persistence`):
+**SSRF prevention stack (Bugs #3563, #3782, #3785):**
 
-- Schema: `a2a_tasks_v2` table storing `messages_json` and `artifacts_json` as full JSON arrays plus `session_id`, `agent_id`, and `caller_a2a_agent_id`.
-- On startup: prunes rows older than 7 days, then loads the most recent `max_tasks` rows into memory. Older rows remain queryable through the SQLite fallback in `get()`.
-- Best-effort writes — SQLite failures log a warning but don't block the caller. A full disk silently degrades to in-memory-only behavior.
-- `get()` tries the in-memory map first (fast path), then falls back to a direct SQLite query for tasks evicted from memory.
+1. `build_client_for_url` calls `web_fetch::check_ssrf` to resolve DNS and validate addresses against private-IP/cloud-metadata ranges.
+2. Validated IPs are pinned via `ClientBuilder::resolve` so reqwest cannot re-resolve to a different IP (DNS rebinding TOCTOU).
+3. Redirect policy is `Policy::none` — the caller short-circuits on any 3xx. Following redirects would re-resolve DNS for the target, bypassing the pin.
+4. Response bodies are streamed through `read_capped_body` with caps of 256 KiB (agent cards) and 1 MiB (task RPCs). Transport decompression is disabled so `Content-Length` and actual byte count match.
 
-### Client (`A2aClient`)
+### A2aTaskStore — Task Lifecycle Persistence
 
-Discovers and interacts with external A2A agents. Key methods:
+Tracks all A2A tasks with a bounded in-memory map and optional SQLite backing.
 
-- **`discover(url)`** — Fetches the Agent Card from `{url}/.well-known/agent.json`. Response body capped at 256 KiB (`MAX_AGENT_CARD_BYTES`).
-- **`send_task(url, message, session_id)`** — Sends a JSON-RPC `tasks/send` request. Body capped at 1 MiB (`MAX_A2A_TASK_BYTES`).
-- **`get_task(url, task_id)`** — Polls task status via JSON-RPC `tasks/get`.
+**Construction:**
+- `A2aTaskStore::new(max_tasks)` — in-memory only.
+- `A2aTaskStore::with_persistence(max_tasks, db_path)` — opens/creates `a2a_tasks_v2` table, prunes rows older than 7 days, loads the most recent `max_tasks` rows into memory on boot.
 
-Each outbound call builds a fresh `reqwest::Client` rather than reusing one. This is deliberate: DNS resolution and SSRF validation happen together per request so resolved IPs can be pinned.
+**Eviction policy (applied lazily on `insert`):**
+1. TTL sweep removes all tasks whose `updated_at` exceeds the 24-hour TTL, regardless of status (prevents `Working`/`InputRequired` tasks from accumulating indefinitely).
+2. If still at capacity, evicts the oldest terminal-state task (`Completed`/`Failed`/`Cancelled`), falling back to the oldest task overall.
 
-### Security Hardening
+**Read path:** `get(task_id)` checks the in-memory map first. On miss, queries SQLite directly—so tasks evicted from memory by capacity pressure remain queryable via the DB fallback.
 
-**SSRF prevention** (`build_client_for_url`):
-
-1. Runs `web_fetch::check_ssrf` on the target URL to resolve DNS and validate addresses against private-IP/cloud-metadata ranges.
-2. Pins those exact IPs via `ClientBuilder::resolve`, closing the DNS-rebinding TOCTOU window (#3563).
-3. Redirect policy set to `Policy::none` — 3xx responses are explicitly rejected. Re-following redirects would re-resolve DNS for the redirect target, defeating the pin (#3563).
-
-**Body size caps** (`read_capped_body`):
-
-Enforces `MAX_AGENT_CARD_BYTES` (256 KiB) or `MAX_A2A_TASK_BYTES` (1 MiB) at two levels:
-- Upfront rejection when `Content-Length` exceeds the cap
-- Mid-stream abort once accumulated chunks trip the cap
-
-Transport decompression is disabled (`no_gzip`/`no_brotli`/`no_deflate`) so `Content-Length` reflects the actual wire bytes and a compressed bomb can't slip past the upfront check (#3785).
-
-**URL canonicalization** (`canonicalize_a2a_url`):
-
-Normalizes URLs for trust-list comparison: lowercases scheme/host, strips default ports (80 for HTTP, 443 for HTTPS), removes fragments and empty query strings. Used at both trust-insertion time and gate-check time so cosmetic variations don't bypass or falsely deny access (#3786).
-
-### Discovery (`discover_external_agents`)
-
-Called during kernel boot to populate the list of known external agents. Fetches Agent Cards for each configured `ExternalAgent`, stores them keyed by canonicalized URL so the trust gate in `/api/a2a/send` can match on the same key callers pass.
+**Schema note:** The v2 schema stores `messages` and `artifacts` as JSON arrays plus `session_id`, fixing the v1 bug that split messages into input/output columns and dropped artifacts entirely.
 
 ---
 
-## Agent Context (`agent_context.rs`)
+## Per-Turn Context Loading (`agent_context.rs`)
 
-Loads per-turn context from `context.md` files that external tools (cron jobs, scripts) write into the agent's workspace. This is the mechanism by which live external data reaches the LLM prompt.
+Loads the agent's `context.md` file—typically maintained by external tools (cron jobs, scripts)—before each LLM turn. Previously cached for the session lifetime; now re-read from disk every turn by default.
 
 ### File Resolution
 
+1. `{workspace}/.identity/context.md` (current layout)
+2. `{workspace}/context.md` (legacy fallback)
+
+First candidate that exists wins.
+
+### API
+
+```rust
+// Sync — use from non-async entry points (streaming sender path)
+fn load_context_md(workspace: &Path, cache_context: bool) -> Option<String>
+
+// Async — use from any tokio runtime context
+async fn load_context_md_async(workspace: &Path, cache_context: bool) -> Option<String>
 ```
-{workspace}/.identity/context.md   ← preferred (new layout)
-{workspace}/context.md             ← fallback (legacy / unmigrated)
-```
 
-`resolve_context_path` checks `.identity/` first; the first candidate that exists on disk wins.
+Pass `cache_context = true` to freeze on the first successful read (reads from `AgentManifest::cache_context`). Default (`false`) re-reads every turn.
 
-### Read Semantics
+### Behavior
 
-- **Per-turn re-read by default** — the file is read fresh before every system prompt assembly, so external updates propagate immediately.
-- **`cache_context` mode** — when `AgentManifest::cache_context` is `true`, the first successful read is frozen and returned verbatim on all subsequent calls.
-- **Size cap** — 32 KiB (`MAX_CONTEXT_BYTES`). Oversized files are truncated via `safe_truncate_str`.
-- **Read cap** — the I/O itself is bounded (`take(cap)`) so a multi-GB file is never fully loaded into memory.
-- **UTF-8 boundary safety** — if the cap lands mid-codepoint, bytes are trimmed back to the last valid UTF-8 boundary.
+| Condition | Result |
+|---|---|
+| File absent or empty (whitespace-only) | `None` |
+| File is a symlink | `None` with `warn!` — prevents prompt-injection exfil via `/etc/passwd` links |
+| File exceeds 32 KiB | Truncated at the last valid UTF-8 boundary |
+| Read fails after prior success | Returns cached content with `warn!` — graceful degradation during external writer mid-rewrite |
+| Binary / non-UTF-8 content | `None` or `Err` depending on whether valid UTF-8 prefix exists |
 
-### Failure Handling
-
-When a re-read fails (e.g. an external writer replaced the file mid-write with invalid UTF-8), the loader falls back to the previously cached content rather than dropping context mid-conversation. Returns `None` only when no context has ever been seen for the workspace.
-
-### Security
-
-- Uses `symlink_metadata` (not `metadata`) and explicitly refuses to follow symlinks. Without this guard, an attacker who can drop a symlink into the workspace could point `context.md` at `/etc/passwd` and have its contents injected into the LLM prompt.
-- Both sync (`load_context_md`) and async (`load_context_md_async`) variants enforce identical behavior.
-
-### Sync vs Async
-
-The sync variant exists because the streaming entry point (`send_message_streaming_with_sender_and_opts`) is a non-async wrapper returning a `JoinHandle`. Lifting it to async requires converting an entire kernel entry path (#3579). The async variant uses `tokio::fs` and never parks the executor during the read.
+The async variant is byte-for-byte identical in behavior (same cache, same symlink rejection, same caps) but uses `tokio::fs` to avoid parking the executor.
 
 ---
 
-## Agent Loop Submodules
+## Agent Loop: End-Turn Pipeline (`agent_loop/end_turn.rs`)
 
-### End-Turn Finalization (`agent_loop/end_turn.rs`)
+Handles everything that happens after the LLM emits a final text response (no more tool calls).
 
-Handles everything that happens after the LLM produces its final response for a turn.
+### Retry Classification
 
-**`finalize_successful_end_turn`** — the main finalization path:
+`classify_end_turn_retry` inspects the response and decides whether the loop should retry:
 
-1. Pushes the final response onto the session as an assistant message.
-2. Prunes stale heartbeat turns (configurable via `heartbeat_keep_recent`).
-3. Persists the session via `memory.save_session_async` — **skipped for fork and incognito turns** (ephemeral conversations must not leak into the parent's canonical history or long-term memory).
-4. Writes episodic memory (`remember_interaction_best_effort`) — the user message and response are sanitized via `sanitize_for_memory` to strip channel-envelope prefixes that would become toxic prompt scaffolding on recall.
-5. Updates the context engine (`engine.after_turn`).
-6. Fires the `AgentLoopEnd` hook.
-7. Runs proactive-memory auto-memorize on the new message slice, stamping memories with `sender_chat_scope` to prevent cross-chat leakage (#5227).
-8. Emits prompt-cache observability metrics.
-9. Assembles the final `AgentLoopResult`.
+| Retry Variant | Trigger |
+|---|---|
+| `EmptyResponse { is_silent_failure }` | Blank text + no tool calls. `is_silent_failure` is true when both input and output token counts are zero (API key / credits issue). Only fires on iteration 0 or silent failures to avoid infinite retry on legitimate empty-end turns. |
+| `HallucinatedAction` | Non-empty text, no tool calls, no tools executed this turn, `looks_like_hallucinated_action` matches (e.g. the model says "I'll run the script" but never produces the `tool_use` block). One-shot per turn. |
+| `ActionIntent` | User message has action intent (`user_message_has_action_intent`), model produced text but no tool calls. One-shot per turn; not fired if hallucination retry already consumed. |
 
-**Retry classification** (`classify_end_turn_retry`):
+### Text Finalization
 
-Before finalization, the loop checks whether the response warrants a retry:
-- **`EmptyResponse`** — empty text and no tool calls on iteration 0, or a silent failure (zero tokens both directions).
-- **`HallucinatedAction`** — non-empty text, no tool calls, tools were available, none were executed, and the text matches `looks_like_hallucinated_action`.
-- **`ActionIntent`** — same preconditions but the *user's* message has action intent and no hallucination retry was attempted.
+`finalize_end_turn_text` produces the response string:
+- Non-empty text passes through unchanged.
+- Empty text falls back to `accumulated_text` from intermediate tool-use iterations (agents commonly emit user-facing text alongside tool calls).
+- If both are empty: a context-appropriate placeholder message is returned depending on whether tools were executed.
 
-**`maybe_fold_stale_tool_results`** — shared fold pass for both streaming and non-streaming loops. Periodically rewrites stale tool results (old `tool_result` blocks replaced with summaries) to keep the context window viable. Fast-paths when there aren't enough messages for any tool result to be classified stale. Rewrites are projected back onto `session.messages` by `tool_use_id` so they persist across turns.
+### Successful Turn Finalization
 
-**Proactive-memory gating**:
+`finalize_successful_end_turn` orchestrates the post-turn pipeline:
 
-`gated_proactive_memory_for_retrieve` and `gated_proactive_memory_for_memorize` check per-agent overrides in `manifest.proactive_memory`. This allows operators to disable auto-retrieval or auto-memorization for specific agents (e.g. cron sub-agents) while keeping the global config enabled.
+1. **Session update** — appends the assistant message to `session.messages`.
+2. **Heartbeat pruning** — removes stale heartbeat turns per `autonomous.heartbeat_keep_recent`.
+3. **Session persistence** — `memory.save_session_async` (skipped for fork/incognito turns).
+4. **Episodic memory** — `remember_interaction_best_effort` writes a `[Past exchange]` entry with sanitized user/response text. Skipped for fork/incognito.
+5. **Context engine** — `engine.after_turn` callback (skipped for fork/incognito).
+6. **Proactive memory** — `ProactiveMemoryStore::auto_memorize` extracts memories from the new message slice. Gated per-agent via `gated_proactive_memory_for_memorize`.
+7. **Hooks** — fires `AgentLoopEnd` event.
+8. **Prompt-cache metrics** — emits `librefang::cache` log line with hit ratio, creation, and read token counts.
 
-### History Management (`agent_loop/history.rs`)
+Fork and incognito turns skip all persistence writes (steps 3–6) to keep ephemeral conversations from leaking into long-term state.
 
-Constants and resolution logic for the message-history trim cap:
+### History Folding
+
+`maybe_fold_stale_tool_results` is the shared fold pass used by both streaming and non-streaming loops. It:
+
+1. Checks a fast-path: if `fold_after_turns == 0` or the message count is under `2 × fold_after_turns`, skips entirely.
+2. Calls `history_fold::fold_stale_tool_results` which summarizes old tool-result blocks via the aux LLM.
+3. Replays rewrites onto `session.messages` by `tool_use_id` so the fold persists across `save_session_async` and future turns short-circuit via `is_already_folded`.
+
+### Proactive Memory Gating
+
+Two helpers control per-agent overrides:
+
+- `gated_proactive_memory_for_retrieve` — returns `Some(store)` only when both global config and the per-agent `manifest.proactive_memory` allow `auto_retrieve`.
+- `gated_proactive_memory_for_memorize` — same pattern for `auto_memorize`.
+
+Both return `Some(store)` without checking per-agent flags when `manifest.proactive_memory` is empty (i.e., no override configured, fall through to global).
+
+---
+
+## Agent Loop: History Configuration (`agent_loop/history.rs`)
+
+Manages the message-history trim cap that prevents unbounded context growth.
 
 | Constant | Value | Purpose |
 |---|---|---|
-| `DEFAULT_MAX_HISTORY_MESSAGES` | 60 | ~7–10 real turns, stable prompt-cache prefix |
-| `MAX_HISTORY_MESSAGES` | 500 | Hard ceiling; operator overrides above this are clamped |
-| `MIN_HISTORY_MESSAGES` | 4 | Floor; lower values defeat `safe_trim_messages`'s repair heuristic |
+| `DEFAULT_MAX_HISTORY_MESSAGES` | 60 | ~7–10 real turns, keeps prompt-cache prefix stable |
+| `MAX_HISTORY_MESSAGES` | 500 | Hard ceiling; operator overrides above this are clamped with a warning |
+| `MIN_HISTORY_MESSAGES` | 4 | Floor; caps below this defeat `safe_trim_messages` which needs at least one full tool round-trip |
 
-**`resolve_max_history(manifest, opts)`** — resolution order:
-1. `manifest.max_history_messages` (per-agent)
+**Resolution order** (`resolve_max_history`):
+1. `manifest.max_history_messages` (per-agent override)
 2. `opts.max_history_messages` (kernel config)
-3. `DEFAULT_MAX_HISTORY_MESSAGES` (fallback)
+3. `DEFAULT_MAX_HISTORY_MESSAGES` (compiled-in default)
 
-Result is clamped to `[MIN_HISTORY_MESSAGES, MAX_HISTORY_MESSAGES]` with a warning log on out-of-range values.
-
-### Message Helpers (`agent_loop/message.rs`)
-
-Utilities used across the agent loop for text classification, sanitization, and bounded accumulation.
-
-**Accumulated-text buffer** (`push_accumulated_text`):
-
-Agents sometimes emit intermediate text alongside `tool_use` blocks. The buffer captures this as a fallback for the empty-response guard. Bounded at 64 KiB (`ACCUMULATED_TEXT_MAX_BYTES`) — once the cap is reached the buffer is sealed with padding and further appends short-circuit. This prevents unbounded heap growth in long-running autonomous loops.
-
-**Response classifiers**:
-
-- **`is_no_reply(text)`** — delegates to `silent_response::is_silent_response` for `NO_REPLY` / `[no reply needed]` detection.
-- **`is_progress_text_leak(text)`** — detects short ellipsis-terminated preambles the model emits before tool calls that never materialize (e.g. `"Waiting for the script to complete..."`). Prevents nonsensical partial output from being delivered as the final reply.
-
-**Memory sanitizer** (`sanitize_for_memory`):
-
-Strips channel-envelope prefixes (WhatsApp-gateway envelope shapes) from messages before persisting as episodic memory. On recall, raw envelope text looks like training-data turn frames and causes the model to dump the literal scaffolding back into the chat reply. Returns `None` when nothing meaningful remains — callers must skip persistence to avoid creating leaky half-empty memory rows.
-
-**`safe_trim_messages`** — trims message history on conversation-turn boundaries with validation/repair to ensure the trimmed window always contains at least a minimal user-assistant exchange.
-
-**`truncate_tool_result_dynamic`** — delegates to the context-budget subsystem for dynamic tool-result truncation based on injection markers and current budget state.
+The result is then clamped into `[MIN_HISTORY_MESSAGES, MAX_HISTORY_MESSAGES]` with warning logs on out-of-range values.
 
 ---
 
-## Integration Points
+## Agent Loop: Message Helpers (`agent_loop/message.rs`)
 
-### Inbound (called by)
+### Bounded Text Accumulator
 
-- **Kernel injection** — `run_agent_loop` and `run_agent_loop_streaming` are the two entry points the kernel calls to execute an agent turn. They consume `LoopOptions`, `AgentManifest`, session state, and the driver chain.
-- **API routes** (`src/routes/network.rs`) — A2A routes instantiate `A2aClient`, call `discover_external_agents`, `send_task`, `get_task`, `complete`, and `canonicalize_a2a_url`.
-- **Cron compaction** (`src/kernel/cron_compaction.rs`) — uses `CompactionConfig` for background session summarization.
+`push_accumulated_text` manages the fallback buffer for the empty-response guard. Intermediate text from tool-use iterations is appended with `\n\n` separators, capped at 64 KiB (`ACCUMULATED_TEXT_MAX_BYTES`). Once the cap is hit, the buffer is sealed with a sentinel and padding—subsequent appends short-circuit. This prevents unbounded heap growth in long-running autonomous loops.
 
-### Outbound (calls into)
+### Response Classifiers
 
-- **LLM driver** (`librefang-llm-driver`) — `CompletionRequest` / `CompletionResponse` for all LLM interactions (summarization, folding, routing, the agent loop itself).
-- **Memory substrate** (`librefang-memory`) — session persistence (`save_session_async`), proactive memory (`auto_memorize`).
-- **HTTP client** (`librefang-http`) — `proxied_client_builder` for all outbound HTTP with proxy support.
-- **SSRF guard** (`web_fetch::check_ssrf`) — validates and pins DNS for every outbound A2A request.
-- **Context engine** — `after_turn` for post-turn state updates.
-- **History fold** (`history_fold.rs`) — `fold_stale_tool_results` for periodic tool-result summarization.
-- **Hooks** (`hooks.rs`) — `fire_hook_best_effort` for `AgentLoopEnd` and other lifecycle events.
+| Function | Purpose |
+|---|---|
+| `is_no_reply(text)` | Delegates to `silent_response::is_silent_response` — detects `NO_REPLY`, `[no reply needed]`, etc. |
+| `is_progress_text_leak(text)` | Catches short ellipsis-terminated preambles ("Let me check…") that the model emits before a tool call that never materializes. Filters by ≤120 chars + trailing `...` or `…`. |
+
+### Memory Sanitizer
+
+`sanitize_for_memory(text) → Option<String>` strips channel-envelope prefixes (`[Group message from …]`, `User asked:`, etc.) before persisting as episodic memory. Returns `None` when nothing meaningful remains—callers must skip persistence to avoid half-empty memory rows that trigger cascade-leak guards on recall.
+
+### Image Stripping
+
+- `strip_processed_image_data` — removes image data from the current turn's messages (already sent to the model).
+- `strip_prior_image_data` — removes image data from all messages before the current turn to reclaim context window space.
+
+Both delegate to `librefang_types::message` methods (`strip_images`, `has_images`).
+
+---
+
+## Connections to the Rest of the Codebase
+
+| Consumer | What it uses |
+|---|---|
+| `librefang-daemon` (kernel) | `run_agent_loop*`, `A2aClient`, `A2aTaskStore`, `discover_external_agents`, `build_agent_card` |
+| `librefang-api` | `A2aTaskStore` for `/api/a2a/*` endpoints; `workspace_context::get_file` for dashboard serving |
+| `librefang-extensions` (catalog) | `registry_sync::resolve_home_dir_for_tests` for catalog operations |
+| `librefang-cli` (bundled agents) | `registry_sync::sync_registry` for initial agent setup |
+| `agent_loop` integration tests | `push_accumulated_text`, `finalize_end_turn_text`, `tool_resolution::ResolvedToolsCache` |
+| Kernel provider probe | `model_catalog::is_suppressed`, `probe_provider`, `merge_discovered_models` |
+
+### Key Cross-Module Dependencies
+
+- **`web_fetch::check_ssrf`** — called by `A2aClient::build_client_for_url` for DNS resolution + address validation. Returns a `SsrfResolution` that pins validated IPs.
+- **`http_client::proxied_client_builder`** — base client builder for all A2A outbound requests.
+- **`history_fold`** — the stale tool-result summarization engine; `maybe_fold_stale_tool_results` is the agent-loop integration point.
+- **`context_budget`** — provides `truncate_tool_result_dynamic` for dynamic tool-result truncation.
+- **`silent_response`** — owns the canonical `is_silent_response` classifier and the envelope prefix/marker constants.
+- **`librefang_memory::ProactiveMemoryStore`** — the proactive memory subsystem; called at end-of-turn for `auto_memorize`.
+- **`librefang_types::message::Message`** / **`TokenUsage`** — core data types flowing through every agent-loop iteration.
