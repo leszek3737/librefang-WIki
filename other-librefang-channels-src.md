@@ -2,75 +2,60 @@
 
 # librefang-channels-src — Channel Adapter Allowlist
 
-## Overview
+## Purpose
 
-`librefang-channels/src/channels-allowlist.txt` is a **policy ratchet** that controls which channel adapters may be compiled in-process. It is the single source of truth enforced by both the pre-commit hook and the CI job `cargo xtask channel-policy`.
+LibreFang enforces a **sidecar-first** architecture for channel adapters. All new channel adapters must ship as out-of-process sidecar adapters, not as in-process implementations compiled into the main binary.
 
-The file has no runtime behaviour — it is never loaded at build time or at run time. It exists purely as a static reference consumed by the CI/pre-commit tooling.
+This module contains `channels-allowlist.txt`, a policy ratchet that grandfathers the in-process adapters that predate the sidecar mandate. It exists to prevent new in-process adapters from being silently reintroduced.
 
-## Sidecar-First Policy
+## How It Works
 
-LibreFang mandates that **all new channel adapters ship as out-of-process sidecars**. Out-of-process adapters:
+The allowlist is a plain-text file listing Rust source basenames (without `.rs`) that are permitted to contain `ChannelAdapter for` implementations. The current entries:
 
-- Run in their own process, communicating with the core over a defined IPC protocol.
-- Live under `librefang.sidecar.adapters.*` in the SDK, or follow the template in `examples/sidecar-channel-python/adapter.py`.
-- Can be written in any language that speaks the sidecar protocol.
-
-The allowlist exists solely to **grandfather** the small set of in-process adapters that predate this policy.
-
-## How Enforcement Works
-
-On every pull request (and locally via pre-commit), the `cargo xtask channel-policy` task performs a static analysis:
-
-1. Scans every file under `crates/librefang-channels/src/` — both `<name>.rs` and `<name>/*.rs` patterns.
-2. Looks for Rust `ChannelAdapter for` impl blocks inside those files.
-3. Extracts the file's basename (without `.rs`).
-4. Rejects the PR if the basename is **not** present in `channels-allowlist.txt.
-
-```mermaid
-flowchart LR
-    PR[PR opened] --> CI[cargo xtask channel-policy]
-    CI --> Scan[Scan src/ for ChannelAdapter for]
-    Scan --> Check{Basename in allowlist?}
-    Check -- Yes --> Pass[CI passes]
-    Check -- No --> Fail[CI rejects PR]
+```
+sidecar
 ```
 
-## File Format
+The enforcement tooling scans every file under `crates/librefang-channels/src/{<name>.rs, <name>/*.rs}` and checks whether it contains the token sequence `ChannelAdapter for`. If it does, the file's basename **must** appear in the allowlist. If it doesn't, the check fails.
 
-- **One basename per line**, without the `.rs` extension.
-- Lines beginning with `#` are comments; blank lines are ignored.
-- Entries must be kept **sorted alphabetically**.
+## Enforcement
 
-### Current Entries
+Two mechanisms enforce the allowlist:
 
-| Basename | Notes |
-|----------|-------|
-| `sidecar` | The sidecar bridge adapter itself |
+| Mechanism | When it runs | How to invoke manually |
+|---|---|---|
+| Pre-commit hook | On every `git commit` | Configured in `.git/hooks/` |
+| `cargo xtask channel-policy` | On every PR in CI | Local: `cargo xtask channel-policy` |
+
+If either detects a `ChannelAdapter for` impl in a file not listed in the allowlist, the operation is rejected.
 
 ## Policy Rules
 
 ### The list only ever shrinks
 
-When an in-process adapter is migrated to a sidecar and its source module is deleted, its entry is removed from the allowlist. This prevents silent reintroduction of in-process adapters in future PRs.
+When an adapter is migrated to a sidecar and its source module deleted, its basename is removed from the allowlist. This ensures it can never be reintroduced as an in-process adapter.
 
-### Adding a name back requires maintainer approval
+### Adding a name back requires explicit maintainer approval
 
-Re-adding a previously removed entry — or introducing a brand-new one — is not routine and requires explicit sign-off from a maintainer.
+Reverting a removal is not routine. Any addition to this file is a deliberate architectural decision that must be reviewed and approved.
 
-### Known limitations
+## Known Limitations
 
-- **Macro-generated impls** are not detected. If a `ChannelAdapter for` impl is produced by a macro invocation inside an already-allowlisted file, the tooling will not flag it.
-- **New adapters inside allowlisted files** likewise pass undetected, because enforcement operates at the file-basename level.
+The enforcement is a **grep-based heuristic**, not a semantic analysis:
 
-This is intentional. The allowlist is a **policy ratchet**, not a security boundary.
+- **Macro-generated impls** are not detected. If a `ChannelAdapter for` implementation is produced by a macro expansion, the scanner won't catch it.
+- **New adapters inside allowlisted files** are not detected. Adding a second `ChannelAdapter for` impl within an already-allowlisted file passes the check without complaint.
 
-## Related Code
+This is intentional. The file is a **policy ratchet**, not a security boundary. It prevents accidental growth of in-process adapters, not malicious circumvention.
 
-| Location | Purpose |
-|----------|---------|
-| `crates/librefang-channels/src/<name>.rs` | In-process adapter modules under the allowlist's jurisdiction |
-| `librefang.sidecar.adapters.*` (SDK) | Out-of-process sidecar adapter interface |
-| `examples/sidecar-channel-python/adapter.py` | Generic sidecar adapter template |
-| `cargo xtask channel-policy` | CI enforcement task that reads this allowlist |
-| Pre-commit hook | Local enforcement before push |
+## File Format
+
+- One basename per line.
+- No `.rs` extension.
+- Keep entries sorted alphabetically.
+- Lines beginning with `#` are comments.
+
+## Integration Points
+
+- **Sidecar adapter template**: `librefang.sidecar.adapters.*` modules in the SDK and `examples/sidecar-channel-python/adapter.py` provide reference implementations for out-of-process adapters.
+- **XTask**: `cargo xtask channel-policy` contains the scanning logic that reads this file and validates source tree compliance.

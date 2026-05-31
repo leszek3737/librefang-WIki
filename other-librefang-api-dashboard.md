@@ -1,69 +1,48 @@
 # Other — librefang-api-dashboard
 
-# LibreFang API Dashboard
+# LibreFang Dashboard
 
-## Overview
-
-The dashboard is a single-page application providing the web interface for the LibreFang autonomous agent operating system. It is built on **React 19**, **TanStack Router v1**, and **TanStack Query v5**, bundled with **Vite 8**, styled with **TailwindCSS 4**, and tested with **Vitest** and **Playwright**.
-
-Entry point: `src/main.tsx`. Pages live in `src/pages/`. The app mounts into `<div id="root">` in `index.html` and registers a service worker (`public/sw.js`) for offline-capable static asset caching.
+React 19 single-page application for managing and monitoring LibreFang agents. Built on TanStack Router v1 (routing) and TanStack Query v5 (server state), bundled with Vite, and linted with ESLint 9 flat config.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    subgraph "Pages & Components"
-        P[src/pages/*Page.tsx]
-        C[src/components/*]
-    end
-
-    subgraph "Data Layer (src/lib/)"
-        Q[queries/*.ts — useXxx hooks]
-        M[mutations/*.ts — useMutate hooks]
-        K[queries/keys.ts — key factories]
-    end
-
-    subgraph "Transport"
-        HT[http/client.ts — typed wrapper]
-        API[src/api.ts — raw fetch calls]
-    end
-
-    P --> Q
-    P --> M
-    C --> Q
-    C --> M
-    Q --> K
+    P["Pages & Components<br/><code>src/pages/</code>, <code>src/components/</code>"] --> Q["Query Hooks<br/><code>src/lib/queries/</code>"]
+    P --> M["Mutation Hooks<br/><code>src/lib/mutations/</code>"]
+    Q --> K["Query Key Factories<br/><code>src/lib/queries/keys.ts</code>"]
+    Q --> C["HTTP Client<br/><code>src/lib/http/client.ts</code>"]
+    M --> C
     M --> K
-    Q --> HT
-    M --> HT
-    HT --> API
-    API -->|fetch / WebSocket| BE[Backend API]
+    C --> A["Raw API Calls<br/><code>src/api.ts</code>"]
 ```
 
-The critical rule: **pages and components never call `fetch()` or `api.*` directly.** All data access flows through the shared hooks layer in `src/lib/queries/` and `src/lib/mutations/`. The only exceptions are streaming/SSE endpoints and imperative fire-and-forget control channels (e.g., `TerminalTabs.tsx`), which are documented inline.
+Pages and components never call `fetch()` or `api.*` directly — all data access flows through the shared hooks layer. The only exceptions are streaming/SSE endpoints, imperative fire-and-forget control channels (e.g. `TerminalTabs.tsx`), and one-shot probes that must not be cached.
 
 ## Data Layer
 
 ### Directory Layout
 
 ```
-src/lib/
-  http/
-    client.ts       # Thin wrapper over src/api.ts + typed re-exports
-    errors.ts       # ApiError class
-  queries/
-    keys.ts         # All query-key factories
-    keys.test.ts    # Anchoring / hierarchy smoke tests
-    <domain>.ts     # queryOptions + useXxx hooks per domain
-  mutations/
-    <domain>.ts     # useXxx mutation hooks with cache invalidation
+src/
+  api.ts                      # Raw fetch wrappers — canonical type source
+  lib/
+    http/
+      client.ts               # Thin wrapper over api.ts + typed re-exports
+      errors.ts               # ApiError class
+    queries/
+      keys.ts                 # All query-key factories
+      keys.test.ts            # Smoke tests for factory anchoring
+      <domain>.ts             # queryOptions + useXxx hooks per domain
+    mutations/
+      <domain>.ts             # useXxx mutation hooks with invalidation
 ```
 
-Current domains: `agents`, `analytics`, `approvals`, `channels`, `config`, `goals`, `hands`, `mcp`, `media`, `memory`, `models`, `network`, `overview`, `plugins`, `providers`, `runtime`, `schedules`, `sessions`, `skills`, `workflows`.
+Active domain files: `agents`, `analytics`, `approvals`, `channels`, `config`, `goals`, `hands`, `mcp`, `media`, `memory`, `models`, `network`, `overview`, `plugins`, `providers`, `runtime`, `schedules`, `sessions`, `skills`, `workflows`.
 
 ### Query Key Factories
 
-All query keys are centralized in `src/lib/queries/keys.ts` using a hierarchical pattern. Every sub-key must anchor to the root so broad invalidation works:
+All query keys live in `src/lib/queries/keys.ts` and follow a hierarchical pattern. Every sub-key **must** be anchored with `...fooKeys.all` so broad invalidation works:
 
 ```ts
 export const fooKeys = {
@@ -75,13 +54,11 @@ export const fooKeys = {
 };
 ```
 
-Consumers must never construct `queryKey` inline—always call the factory. If you need a subset of data, use `select` on the shared `queryOptions` rather than subscribing with a different key.
-
-`keys.test.ts` validates anchoring for every factory. Add the new factory to the "all factories exist" list when adding a domain, plus hierarchy tests for non-trivial structures.
+Never build a `queryKey` inline — always call the factory. Never subscribe to the same endpoint with a different key to get a subset; use `select` on the shared `queryOptions`.
 
 ### Query Hooks
 
-Each domain file exports a `queryOptions` factory and a corresponding `useXxx` hook:
+Each domain file exports a `queryOptions` factory and a corresponding `useFoo` hook:
 
 ```ts
 export const fooQueryOptions = (filters?: FooFilters) =>
@@ -96,7 +73,7 @@ export function useFoo(filters?: FooFilters) {
 }
 ```
 
-Hooks accept an optional `options` argument for per-call overrides (`enabled`, `staleTime`, `refetchInterval`). Every override at a call site must carry an inline comment explaining why.
+Hooks accept an optional `options` argument for per-call-site overrides (`enabled`, `staleTime`, `refetchInterval`). Every override must carry a short inline comment explaining why:
 
 ```ts
 type UseFooOptions = {
@@ -116,150 +93,93 @@ export function useFoo(filters?: FooFilters, options: UseFooOptions = {}) {
 }
 ```
 
+Reference examples in the codebase: `useApprovals({ enabled: open })`, `useCommsEvents(50, { refetchInterval: 5_000 })`, `useModels({}, { enabled: isModelArg })`, `useAgentTemplates({ enabled })`, `useApprovalCount({ refetchInterval: 5_000 })`.
+
 ### Mutation Hooks
 
-Every write operation must invalidate relevant cache entries. **Invalidation logic lives inside the hook**, not at call sites. Call sites may attach their own `onSuccess`/`onError` for UI feedback (toasts, modal dismissal), but that is orthogonal to cache invalidation.
+Every mutation **must** invalidate the relevant cache keys, and invalidation **must** live inside the hook. Call sites may additionally attach per-call `onSuccess`/`onError` for UI feedback (toasts, modal dismissal), but that is orthogonal to invalidation.
 
-Choose the **narrowest** key set that covers what actually changed:
+Pick the **narrowest** key set that covers what changed:
 
-| Scenario | Keys to invalidate | Example |
+| Scenario | Keys to invalidate | When to use |
 |---|---|---|
-| Per-id update where list projection changes | `detail(id)` + `lists()` | Patch, rename, status toggle |
-| List membership change, no existing detail stale | `lists()` | Create, delete, reorder |
-| Genuinely scoped to one detail or nested collection | `detail(id)` or nested sub-key | Field update not shown in list |
-| Bulk import / cache reset | `all` | Bulk import, schema migration |
+| Per-id update where list projection also changes | `fooKeys.detail(id)` + `fooKeys.lists()` | **Default template** — patch, rename, status flag surfaced in list row |
+| List-shape change, no existing detail to refresh | `fooKeys.lists()` | Create, delete, reorder |
+| Change scoped to one detail, list unaffected | `fooKeys.detail(id)` or nested sub-key | Genuinely local update |
+| Bulk import / cache reset | `fooKeys.all` | Only when *every* cached sub-key is potentially stale |
 
-`fooKeys.all` is **not** the default. It refetches the list plus every cached `detail(id)` and nested sub-key for each of N cached items—use only when that fan-out is intended.
+Invalidating `fooKeys.all` when N items are cached refetches the list plus every cached sub-key (`detail(id)`, nested keys like `sessions(id)`, `experiments(id)`) for each item. Use it only when that is the desired effect.
 
-### Adding a New Endpoint
+## Adding a New Endpoint
 
-1. Add the raw API call in `src/api.ts` (or re-export via `src/lib/http/client.ts`).
-2. If new domain: add a key factory in `src/lib/queries/keys.ts` following the hierarchical pattern.
-3. Add query in `src/lib/queries/<domain>.ts`.
-4. Add mutations in `src/lib/mutations/<domain>.ts`.
-5. Update `src/lib/queries/keys.test.ts` with the new factory.
+1. **Raw call** — Add the function in `src/api.ts` (or re-export via `src/lib/http/client.ts`).
+2. **Key factory** — If it is a new domain, add a factory in `src/lib/queries/keys.ts` following the hierarchical pattern above.
+3. **Query hook** — Add `queryOptions` + `useFoo` in `src/lib/queries/<domain>.ts`.
+4. **Mutation hook** — Add `useCreateFoo` / `useUpdateFoo` in `src/lib/mutations/<domain>.ts` with the narrowest invalidation keys.
+5. **Tests** — Add the factory to the `all factories exist` list in `src/lib/queries/keys.test.ts`. Add anchoring/hierarchy tests for non-trivial factories.
 
-## Transport Layer
+## Authentication
 
-### `src/api.ts`
+Tokens are stored in `sessionStorage` under the key `librefang-api-key` (never `localStorage`). The `setApiKey` function writes the token; `verifyStoredAuth` validates it against the backend and clears stale tokens on 401. WebSocket connections pass the token as a `Sec-WebSocket-Protocol` bearer sub-protocol (`bearer.<token>`).
 
-The canonical, hand-maintained source of API types and raw `fetch` calls. All types consumed by the SPA come from here.
+## Type System
 
-`openapi/generated.ts` (regenerated via `pnpm openapi:types`) is a cross-reference only—**never import from it**.
-
-### Authentication
-
-- `setApiKey(token)` stores the bearer token in `sessionStorage` (key: `librefang-api-key`), not `localStorage`.
-- `verifyStoredAuth()` probes a protected endpoint; on 401 it clears stored credentials and returns `false`.
-- `buildAuthenticatedWebSocket(path)` returns `{ url, protocols }` where `protocols` is `["bearer.<token>"]` when a token is present, or `[]` otherwise.
-- All HTTP helpers (`listTools`, `getMetricsText`, `patchAgentConfig`, etc.) attach the `Authorization: Bearer <token>` header automatically.
-
-### Service Worker (`public/sw.js`)
-
-- Precaches `/dashboard/` on install.
-- API requests (`/api/*`): **network only** (never cached).
-- Static GET assets: **stale-while-revalidate** strategy.
-- Non-GET and non-http(s) requests are passed through without caching.
-
-## UI Components
-
-### Layout & Navigation
-
-- **PWA manifest** (`public/manifest.json`): standalone display, starts at `/dashboard/#/overview`, dark theme (`#020617` background, `#0284c7` accent).
-- The e2e test (`e2e/dashboard.spec.ts`) verifies the shell loads with navigation links to all major sections: Overview, Agents, Sessions, Approvals, Comms, Providers, Channels, Skills, Hands, Workflows, Scheduler, Goals, Analytics, Memory, Runtime, Logs.
-
-### Drawer System
-
-The dashboard uses a global drawer slot managed by a Zustand store (`src/lib/drawerStore.ts`):
-
-- **`DrawerPanel`** — pushes content into the global slot. Tracks ownership to prevent sibling drawers from collateral-closing each other during picker→config transitions (regression #4714).
-- **`PushDrawer`** — renders the global slot. Responds to the `lg` breakpoint (CSS `--breakpoint-lg: 1000px`, JS `matchMedia("(max-width: 999px)")`) for mobile overlay vs. desktop side-panel. On mobile, Esc is handled only when the nearest `[role="dialog"]` is the drawer-root itself, allowing nested `Modal` instances to capture Esc first (regression #5254).
-
-### Modal
-
-`src/components/ui/Modal` supports variants (`panel-right`, `drawer-right`, default centered). Focus management:
-
-| Variant | Default focus target |
-|---|---|
-| `panel-right` / `drawer-right` | Close button |
-| Centred | First focusable descendant |
-| With `hideCloseButton` | Falls back to first focusable |
-
-Overridable via `autoFocus` prop (`"first"` or `"close"`).
-
-### MultiSelectCmdk
-
-A combobox-based multi-select built on `cmdk`. Supports:
-
-- Chip-based selected values with individual remove buttons.
-- Backspace to remove last chip.
-- Search filtering with description metadata (`optionMeta`).
-- `allowFreeText` mode for values outside the catalog (deduplicates on Enter).
-- Already-selected items are excluded from the dropdown.
-
-### Other Key Components
-
-- **`NotificationCenter`** — bell icon with pending approval count. Implements WAI-ARIA menu button pattern with roving tabindex, ArrowUp/Down/Home/End navigation, and Escape/Tab dismissal.
-- **`AgentManifestForm`** — agent creation/editing form. Uses catalog-driven comboboxes for tools, skills, and MCP servers (falls back to free-text `TagInput` when no catalog is supplied).
-- **`AgentSchedulePanel`** — schedule mode card (manual, continuous, periodic, proactive). Periodic/proactive modes show a "manifest-controlled" label and hide the toggle. Non-cron schedule kinds (`every`, `at`) disable the edit pencil to prevent silent kind conversion.
-- **`ToolCallsPanel`** — expandable panel showing tool call history with running/error badges.
-- **`WorkflowStepImageGallery`** — renders image refs extracted from workflow output JSON.
-- **`DeliveryTargetsEditor`** — validates delivery targets (channel, webhook, local_file, email) with SSRF protection (blocks localhost, loopback, link-local, cloud metadata IPs).
+`src/api.ts` is the **canonical, hand-maintained type source** consumed by the SPA. `openapi/generated.ts` is a regenerable cross-reference only — do not import from it. TypeScript strict mode is enforced; no `any` in new hooks.
 
 ## Internationalization
 
-- Powered by `i18next` + `react-i18next` + `i18next-browser-languagedetector`.
-- Locale files live in `src/locales/`. `en.json` is the reference.
-- **Parity enforcement**: `scripts/i18n-parity.mjs` (and its vitest mirror `src/lib/__tests__/locale-parity.test.ts`) flatten and diff every locale against `en.json`. CI fails on missing or extra keys.
+Locale files live in `src/locales/` with `en.json` as the reference. Parity is enforced by:
+
+- **Unit test**: `src/lib/__tests__/locale-parity.test.ts` (gates CI via `pnpm test`)
+- **CLI script**: `node scripts/i18n-parity.mjs` (quick pre-commit check)
+
+Both flatten each JSON file and compare key sets against `en.json`. Missing or extra keys cause failure.
 
 ## Build & Verification
 
-Run all four commands after any change to `src/lib/queries/`, `src/lib/mutations/`, or `src/api.ts`:
+Run all four commands after any change to `src/lib/queries/`, `src/lib/mutations/`, or `src/api.ts`. A passing typecheck alone is insufficient — the key-factory tests catch anchoring regressions that the compiler does not:
 
 ```bash
-pnpm lint          # ESLint 9 flat config — errors fail CI, warnings allowed
+pnpm lint          # ESLint — errors fail CI, warnings allowed
 pnpm typecheck     # tsc --noEmit
-pnpm test --run    # Vitest — includes key-factory anchoring tests
+pnpm test --run    # Vitest — unit + integration tests
 pnpm build         # Vite production build
 ```
 
-A passing typecheck alone is insufficient—the key-factory tests catch anchoring regressions that the compiler does not.
+End-to-end tests use Playwright against a dev server on port 4173:
+
+```bash
+pnpm e2e
+```
 
 ### Lint Policy
 
-`eslint.config.js` runs ESLint 9 flat config with two security rules at `error`:
+`eslint.config.js` uses ESLint 9 flat config. The security-critical rules promoted to `error`:
 
-- **`react/jsx-no-target-blank`** — blocks `target="_blank"` without `rel="noopener noreferrer"`. Prevents regression of the vulnerability class cleaned up in #5390.
-- **`react/no-danger-with-children`** — rejects `dangerouslySetInnerHTML` combined with `children`.
+- `react/jsx-no-target-blank` — blocks `target="_blank"` without `rel="noopener noreferrer"`
+- `react/no-danger-with-children` — rejects `dangerouslySetInnerHTML` combined with `children`
 
-Known baseline violations (`react-hooks/rules-of-hooks`, `no-unused-expressions`, `no-irregular-whitespace`, `no-control-regex`) are demoted to `warn` for incremental cleanup. Do not add `eslint-disable` comments; fix the violations or flip the rule to `error` once baseline is zero.
+Noisy or pre-existing baseline violations (`react-hooks/rules-of-hooks`, `no-unused-expressions`, `no-irregular-whitespace`, `no-control-regex`) are demoted to `warn`. Clean them up incrementally rather than adding `eslint-disable` comments. Flip a rule to `error` only after existing violations reach zero.
 
-### E2E Tests
+## Progressive Web App
 
-```bash
-pnpm e2e           # Playwright against http://127.0.0.1:4173
-```
+- `public/manifest.json` — PWA manifest with `standalone` display mode, dark theme (`#020617` background, `#0284c7` theme)
+- `public/sw.js` — Service worker with stale-while-revalidate for static assets, network-only for `/api/` requests, skip for non-GET methods
+- `index.html` — Registers the service worker on load
 
-`playwright.config.ts` starts the dev server on port 4173 and runs tests from `e2e/`. The primary spec (`e2e/dashboard.spec.ts`) verifies the shell loads with all navigation links and the sign-in dialog appears when credentials are required.
+## Dependency Audit Ignores
 
-## Dependency Audit
+Every GHSA listed under `pnpm.auditConfig.ignoreGhsas` in `package.json` must have a matching section in `AUDIT_IGNORES.md` explaining the rationale, risk if wrong, and unlock condition. Currently tracked:
 
-`pnpm.auditConfig.ignoreGhsas` in `package.json` lists deliberately ignored advisories. Each entry must have a matching section in `AUDIT_IGNORES.md` documenting:
+- **GHSA-rmmr-r34h-pfm5** (`@tanstack/history`) — Advisory covers a supply-chain hijack but its affected range (`>= 0`) also flags the clean `1.161.6` pinned in the lockfile. The malicious versions are never installed. Drops when the advisory is narrowed upstream, `@tanstack/react-router` bumps to a non-flagged version, or the dashboard drops the dependency.
 
-- **Why ignored** — the advisory's affected range is overly broad, or the pinned version is clean.
-- **Risk if wrong** — typically "none" because the lockfile pins to a safe version.
-- **Unlock condition** — advisory narrowed upstream, dependency bumped, or dependency removed.
-- **Owner / last review** — PR that introduced the ignore and when to re-evaluate.
-
-Currently ignored: `GHSA-rmmr-r34h-pfm5` (`@tanstack/history` supply-chain advisory with `>= 0` range that flags the clean `1.161.6` we resolve to).
+When adding a new ignore: verify the advisory doesn't apply to the resolved version, add the GHSA to `package.json`, document it in `AUDIT_IGNORES.md`, and reference both files in the PR body.
 
 ## Conventions
 
-- **TypeScript strict mode.** No `any` in new hooks. Types come from `src/api.ts`.
-- **Commit format**: `feat(dashboard/<area>):`, `refactor(dashboard/queries):`, `fix(dashboard/<area>):`. No `Co-Authored-By` footer.
-- **Mutation invalidation** is encapsulated in hooks. Callers never need to know which keys a mutation touches.
-- **Page consumption pattern**:
-  ```tsx
-  import { useFoo } from "../lib/queries/foo";
-  import { useCreateFoo } from "../lib/mutations/foo";
-  ```
+- **Commit format**: `feat(dashboard/<area>):`, `refactor(dashboard/queries):`, `fix(dashboard/<area>):`. Never include a `Co-Authored-By` footer.
+- **Mutation invalidation** lives in the hook — callers never need to know which keys a mutation touches.
+- **DrawerPanel** pushes content into a global drawer slot (`useDrawerStore`). Each instance tracks ownership to prevent sibling drawers from colliding when one closes in the same React commit another opens. See `DrawerPanel.test.tsx` for the edge cases.
+- **Modal focus management**: `panel-right` and `drawer-right` variants default focus to the close button; centred modals focus the first focusable descendant. Override with `autoFocus="first"` or `autoFocus="close"`.
+- **NotificationCenter** implements WAI-ARIA menu button pattern with roving tabindex, wrap-around arrow navigation, and Home/End jumps.
+- **MultiSelectCmdk** supports `optionMeta` for descriptions, `allowFreeText` for free-entry, and filters by both option name and description text.

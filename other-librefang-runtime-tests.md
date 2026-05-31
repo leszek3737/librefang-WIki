@@ -2,243 +2,199 @@
 
 # librefang-runtime-tests
 
-Integration test suite for the `librefang-runtime` crate. Tests exercise real runtime code paths against mock/stub implementations of `KernelHandle` and `LlmDriver`, asserting correct dispatch, security enforcement, and behavioral contracts without requiring a live kernel, database, or LLM provider.
+Integration test suite for the `librefang-runtime` crate. These tests exercise cross-module contracts that unit tests within individual submodules cannot reach — security boundaries, dispatch wiring, parity invariants, and end-to-end tool execution paths.
 
 ## Architecture
 
-Every test file follows the same pattern:
-
-1. **Mock kernel** — a struct implementing the full `KernelHandle` trait composition (via `librefang_kernel_handle::prelude::*`), stubbing unused role traits and recording calls on the trait(s) under test.
-2. **Context construction** — a `ToolExecContext` (or equivalent) wired to the mock kernel, optionally carrying `sender_id`, `caller_agent_id`, `channel`, etc.
-3. **Invoke production code** — call `execute_tool_raw`, `McpConnection::connect`, `extract_memories_with_agent_id`, or the function under test.
-4. **Assert side effects and return values** — check recorded calls on the mock, output strings, error conditions.
-
 ```mermaid
 graph TD
-    subgraph "Test Infrastructure"
-        MK[Mock KernelHandle]
-        MD[Mock LlmDriver]
-        CTX[ToolExecContext / Config]
+    subgraph "Test Modules"
+        PARITY[docker_sandbox_helpers_parity]
+        INSTR[instrument_span_fields]
+        OAUTH[mcp_oauth_integration]
+        MEM_OVERRIDE[proactive_memory_extraction_model_override]
+        CASCADE[streaming_cascade_leak]
+        BACKEND[tool_exec_backend_selection]
+        AGENT_EVT[tool_runner_agent_event]
+        FWD[tool_runner_forwarding]
+        CRON[tool_runner_forwarding_task_cron]
+        ACL[tool_runner_memory_acl]
+        MEM_ISO[tool_runner_memory_isolation]
+        WF_W[tool_runner_workflow_write]
+        WF_R[tool_runner_workflow_readonly]
+        WEB[web_fetch_to_file_test]
     end
-    subgraph "Production Paths"
-        TR[tool_runner::execute_tool_raw]
-        TE[tool_exec_backend::build_backend]
-        PM[proactive_memory::LlmMemoryExtractor]
-        MCP[mcp::McpConnection]
-        SL[stream_with_retry forward_task]
+
+    subgraph "Production Code Under Test"
+        RUNTIME[librefang-runtime]
+        TYPES[librefang-types]
+        KH[librefang-kernel-handle]
     end
-    MK --> CTX
-    MD --> PM
-    CTX --> TR
-    CTX --> TE
-    PM --> MD
-    MCP --> MK
+
+    PARITY --> RUNTIME
+    INSTR --> RUNTIME
+    OAUTH --> RUNTIME
+    MEM_OVERRIDE --> RUNTIME
+    MEM_OVERRIDE --> KH
+    CASCADE --> RUNTIME
+    BACKEND --> RUNTIME
+    BACKEND --> TYPES
+    AGENT_EVT --> RUNTIME
+    AGENT_EVT --> KH
+    FWD --> RUNTIME
+    FWD --> KH
+    CRON --> RUNTIME
+    CRON --> KH
+    ACL --> RUNTIME
+    ACL --> KH
+    ACL --> TYPES
 ```
 
-## Test Files
+## Test Modules
 
-### `docker_sandbox_helpers_parity.rs`
+### docker_sandbox_helpers_parity.rs
 
-**Feature-gated:** `#![cfg(feature = "docker-sandbox")]`
+**Gated on `#[cfg(feature = "docker-sandbox")]`.**
 
-Ensures the inlined `helpers` module in `librefang-runtime-sandbox-docker` stays byte-for-byte equivalent to the canonical implementations in `librefang-runtime`. The Docker sandbox crate duplicates these functions to avoid a circular dependency — a CVE fix in the canonical denylist must not silently leave the Docker path unprotected.
+Asserts byte-for-byte behavioral parity between two copies of security-critical helper functions:
 
-| Test function | What it asserts |
-|---|---|
-| `contains_shell_metacharacters_parity` | Both implementations return identical `Option<&str>` results (and reason strings) across 39 input cases covering every metacharacter class, quoting edge cases, and clean commands. |
-| `safe_truncate_str_parity` | Truncation results match for ASCII, 2-byte (é), 3-byte (中), and 4-byte (𝄞) strings across multiple length boundaries. |
+- **`contains_shell_metacharacters`** — the canonical version in `librefang_runtime::subprocess_sandbox` and the duplicate-by-design copy in `librefang_runtime::docker_sandbox::helpers`. The Docker sandbox crate inlines its own copy to avoid a circular dependency on the full runtime. If a CVE fix extends the canonical denylist without updating the duplicate, the Docker `exec` path silently accepts payloads the local subprocess sandbox would reject.
+- **`safe_truncate_str`** — canonical in `librefang_runtime::str_utils`, duplicate in `docker_sandbox::helpers`. Tests cover ASCII, 2-byte (é), 3-byte (中), and 4-byte (𝄞) characters at and across truncation boundaries.
 
-**Key constant:** `PARITY_INPUTS` — enumerated inputs covering command substitution, chaining, pipes, redirection, brace expansion, background/ampersand, process substitution, newline/null, quoted metachars, mixed quoted+unquoted, clean commands, and empty input.
+`PARITY_INPUTS` enumerates every metacharacter class (command substitution, chaining, pipes, redirection, brace expansion, background, process substitution, null bytes) plus quoting edge cases and clean commands. Both the detection result (`Option` presence) and the reason string are asserted equal.
 
-### `instrument_span_fields.rs`
+### instrument_span_fields.rs
 
-Validates that `agent.id` and `session.id` set as `#[instrument]` fields on `run_agent_loop` propagate to emitted events. Does not call `run_agent_loop` directly; instead constructs equivalent spans by hand.
+Verifies that `agent.id` and `session.id` set as `#[instrument]` fields on `run_agent_loop` propagate to log events emitted inside the loop. Three tests:
 
-Uses a `CaptureWriter` (thread-safe `Vec<u8>` behind `Arc<Mutex<>>`) as a `tracing_subscriber` writer, then asserts on the captured output string.
+| Test | What it locks in |
+|------|-----------------|
+| `warn_inside_agent_span_includes_agent_and_session_ids` | Fields appear in captured output when emitted inside an `info_span!` |
+| `info_span_is_dropped_under_warn_target_filter` | INFO-level spans are discarded by the production `librefang_runtime=warn` filter |
+| `warn_span_survives_warn_target_filter_and_carries_fields` | WARN-level spans survive the same filter — justifies `#[instrument(level = "warn")]` on `run_agent_loop` |
 
-| Test function | What it asserts |
-|---|---|
-| `warn_inside_agent_span_includes_agent_and_session_ids` | Both fields appear in the formatted output when a `warn!` event fires inside an `info_span!`. |
-| `info_span_is_dropped_under_warn_target_filter` | An INFO-level span is filtered out by `EnvFilter::new("warn")`, confirming why `run_agent_loop` must use `level = "warn"`. |
-| `warn_span_survives_warn_target_filter_and_carries_fields` | A WARN-level span (matching the production `#[instrument(level = "warn", ...)]`) survives the same filter and propagates both fields. |
+Uses a custom `CaptureWriter` that buffers all tracing output into a `Mutex<Vec<u8>>` for string assertions.
 
-### `mcp_oauth_integration.rs`
+### mcp_oauth_integration.rs
 
-Tests for MCP OAuth discovery, token lifecycle, and auth state machine serialization.
+Tests the MCP OAuth discovery and token lifecycle:
 
-**Mock providers:**
-- `TrackingOAuthProvider` — records whether `load_token` and `store_oauth_metadata` were called (AtomicBool flags).
-- `InMemoryOAuthProvider` — stores `OAuthTokens` in a `HashMap<String, OAuthTokens>` behind `tokio::sync::Mutex`.
+- **Discovery fallback**: `discover_oauth_metadata` falls back to config-provided endpoints when the server's well-known URL is unreachable
+- **Provider wiring regression**: `test_http_connect_calls_oauth_provider_load_token` catches the bug where `oauth_provider: None` was passed in `connect_mcp_servers`, silently disabling OAuth. Uses `TrackingOAuthProvider` with `AtomicBool` flags.
+- **Token lifecycle via `InMemoryOAuthProvider`**: store → load → clear → reauthorize, plus isolation (clearing server A doesn't affect server B)
+- **Auth state machine**: `McpAuthState` transitions `NeedsAuth → PendingAuth → Authorized → NeedsAuth` serialize to distinct `state` values, preventing the dashboard from showing "Authorizing..." before the user clicks Authorize
 
-| Test function | What it asserts |
-|---|---|
-| `test_discover_fallback_to_config` | When well-known discovery fails, falls back to `McpOAuthConfig` values. |
-| `test_discover_fails_without_any_source` | Errors when no discovery endpoint and no config provided. |
-| `test_http_connect_calls_oauth_provider_load_token` | Regression: `McpConnection::connect` invokes the OAuth provider on 401, catching the `oauth_provider: None` bug. |
-| `test_provider_store_then_load` | Store → load round-trip returns the stored access token. |
-| `test_provider_clear_removes_token` | `clear_tokens` removes the token for the target server. |
-| `test_provider_clear_is_isolated` | Clearing one server's token does not affect another server's token. |
-| `test_provider_reauthorize_after_clear` | Store → clear → store works (re-authorization after revocation). |
-| `test_auth_state_lifecycle` | `McpAuthState` transitions: `NeedsAuth` → `PendingAuth` → `Authorized` → `NeedsAuth` (after revoke). |
-| `test_needs_auth_serializes_differently_from_pending_auth` | `NeedsAuth` and `PendingAuth` produce distinct `"state"` values in JSON. |
+### proactive_memory_extraction_model_override.rs
 
-### `proactive_memory_extraction_model_override.rs`
+Tests per-agent `extraction_model` override (#5475). Strategy:
 
-Tests per-agent `extraction_model` override (#5475). Verifies `LlmMemoryExtractor::extract_memories_with_agent_id` consults `KernelHandle::proactive_memory_extraction_model_for` and routes the LLM call through the resolved model.
+1. A `SharedRecordingDriver` captures the `model` field from every `CompletionRequest`
+2. An `OverrideKernel` stub implements `CatalogQuery::proactive_memory_extraction_model_for` with a string-keyed override map
+3. `build_extractor_with_kernel` wires the extractor with `"global-extractor"` as the boot-time model, then installs the kernel via `install_kernel_handle`
 
-**Mock infrastructure:**
-- `OverrideKernel` — implements full `KernelHandle`, returning override model names from a `HashMap<String, String>`. Uses `std::mem::forget` to keep the kernel alive for the `Weak` reference inside the extractor.
-- `SharedRecordingDriver` — implements `LlmDriver`, captures every `CompletionRequest.model` into a shared `Mutex<Vec<String>>`.
+Tests assert:
 
-| Test function | What it asserts |
-|---|---|
-| `agent_override_wins_over_boot_time_model` | Per-agent override replaces the boot-time `"global-extractor"` model. |
-| `no_override_falls_back_to_boot_time_model` | Missing override falls back to `"global-extractor"`. |
-| `provider_qualified_override_strips_prefix_at_request_time` | `"anthropic/claude-haiku-4-5"` → `"claude-haiku-4-5"` on the wire request. |
-| `colon_form_override_strips_prefix_at_request_time` | `"openai:gpt-4o-mini"` → `"gpt-4o-mini"`. |
+| Test | Assertion |
+|------|-----------|
+| `agent_override_wins_over_boot_time_model` | Per-agent override replaces boot-time model |
+| `no_override_falls_back_to_boot_time_model` | Missing override falls back to `"global-extractor"` |
+| `provider_qualified_override_strips_prefix_at_request_time` | `"anthropic/claude-haiku-4-5"` → `"claude-haiku-4-5"` |
+| `colon_form_override_strips_prefix_at_request_time` | `"openai:gpt-4o-mini"` → `"gpt-4o-mini"` |
 
-### `streaming_cascade_leak.rs`
+### streaming_cascade_leak.rs
 
-Regression tests for the incremental cascade-leak detection guard in `stream_with_retry`. The production `forward_task` closure is private, so these tests replicate its exact accumulation + channel-forwarding pattern using public types (`is_cascade_leak`, `StreamEvent`).
+Tests the incremental cascade-leak detection guard in `stream_with_retry`. Because `forward_task` is a private closure inside a `tokio::spawn`, these tests **replicate the exact accumulation + channel-forwarding pattern** using public types (`is_cascade_leak`, `StreamEvent`).
 
-**Note:** The test facsimile omits the 128 KB rolling-window cap and UTF-8 boundary walk present in production. See the `run_forward_task` doc comment for limitations.
+`run_forward_task` is a simplified facsimile that omits the 128 KB rolling-window cap and UTF-8 boundary walk from production — noted explicitly in comments.
 
-| Test function | What it asserts |
-|---|---|
-| `text_delta_tokens_are_suppressed_after_leak_detection` | Only pre-leak `TextDelta` events are forwarded; the triggering and all subsequent deltas are swallowed. |
-| `non_text_events_forwarded_after_leak` | `ContentComplete` and other non-text events continue forwarding after the leak fires. |
-| `tool_use_stop_reason_still_sets_cascade_leak_aborted` | `cascade_leak_aborted = true` even when `stop_reason = ToolUse` — the caller must not execute tools. |
-| `silent_reason_prompt_regurgitated_serializes` | `SilentReason::PromptRegurgitated` serializes as `"prompt_regurgitated"`. |
-| `leak_fires_when_markers_split_across_deltas` | Structural markers split across multiple `TextDelta` events still trigger detection. |
-| `clean_stream_does_not_abort` | Streams with no structural markers forward all events unchanged. |
+Key behaviors verified:
 
-### `tool_exec_backend_selection.rs`
+- Post-leak `TextDelta` tokens never reach downstream
+- Non-text events (`ContentComplete`, etc.) are still forwarded after leak fires
+- `cascade_leak_aborted = true` even when `stop_reason = ToolUse` — the caller must treat the entire turn as silent
+- Structural markers split across deltas are still detected
+- Clean streams (no structural markers) never abort
 
-End-to-end tests for tool-exec backend dispatch (#3332). Exercises the resolution chain: `config.toml` → `KernelConfig.tool_exec` + `AgentManifest.tool_exec_backend` → `resolve_backend_kind` → `build_backend`.
+### tool_exec_backend_selection.rs
 
-| Test function | What it asserts |
-|---|---|
-| `default_kernel_config_resolves_to_local` | Default `KernelConfig` → `BackendKind::Local`. |
-| `config_toml_kind_local_loads` / `config_toml_kind_docker_loads` | TOML parsing for `[tool_exec] kind = "local"` / `"docker"`. |
-| `agent_manifest_override_wins_over_global` | Per-agent `Ssh` override beats global `Docker`. |
-| `agent_manifest_no_field_falls_back_to_global` | `None` manifest field falls back to global config. |
-| `build_backend_local_dispatches_to_local_impl` | `build_backend(Local, ...)` returns a backend with `kind() == Local`. |
-| `build_backend_docker_dispatches_to_docker_impl` | `build_backend(Docker, ...)` succeeds even without a Docker daemon. |
-| `build_backend_ssh_without_subtable_or_feature_errors` / `_daytona_...` | Missing config subtables produce errors. |
-| `end_to_end_local_dispatch_runs_command` | Full resolution → build → `run_command("echo ...")` → assert exit code and stdout. Unix-only. |
+End-to-end dispatch resolution tests mirroring the production path: `config.toml → KernelConfig.tool_exec → AgentManifest.tool_exec_backend → resolve_backend_kind → build_backend`.
 
-### `tool_runner_agent_event.rs`
+Covers:
 
-Tests `agent_send`, `agent_list`, and `event_publish` tool dispatch through `execute_tool_raw` (#3696). Uses `CapturingKernel` with `AgentControl` and `EventBus` recording calls.
+- Default resolves to `Local`
+- TOML parsing for `kind = "local"` and `kind = "docker"`
+- Agent manifest override wins over global config
+- `build_backend` dispatches to correct implementation (`Local`, `Docker`)
+- `Ssh` and `Daytona` error without feature/subtable
+- Full end-to-end: parse config → resolve → build → `run_command("echo ...")` → assert stdout (Unix-only)
 
-| Test function | What it asserts |
-|---|---|
-| `agent_send_forwards_target_agent_id_and_message` | `agent_id` and `message` reach `AgentControl::send_to_agent`. |
-| `agent_send_self_is_refused_to_avoid_deadlock` | Self-send errors before reaching the kernel (deadlock prevention). |
-| `agent_list_renders_kernel_provided_agents` | Output contains both agent IDs and names from `list_agents`. |
-| `agent_list_when_no_agents_running_returns_friendly_string` | Empty list produces a "no agents" message, not an error. |
-| `event_publish_forwards_event_type_and_payload` | `event_type` and `payload` reach `EventBus::publish_event`. |
-| `event_publish_missing_event_type_errors_without_invoking_kernel` | Validation short-circuits before kernel call. |
+### tool_runner_agent_event.rs
 
-### `tool_runner_forwarding.rs`
+Tests `agent_send`, `agent_list`, and `event_publish` tool dispatch through `execute_tool_raw`. Uses a `CapturingKernel` that records calls on `AgentControl` and `EventBus` traits.
 
-Tests that `memory_store`, `memory_recall`, and `memory_list` forward `ToolExecContext.sender_id` as the `peer_id` argument to `MemoryAccess` trait methods.
+Key invariants:
 
-| Test function | What it asserts |
-|---|---|
-| `test_memory_store_forwards_sender_id_as_peer_id` | `sender_id = Some("user-42")` → `peer_id = Some("user-42")`. |
-| `test_memory_store_forwards_none_when_no_sender` | `sender_id = None` → `peer_id = None`. |
-| `test_memory_recall_forwards_sender_id_as_peer_id` / `_none_...` | Same pattern for recall. |
-| `test_memory_list_forwards_sender_id_as_peer_id` / `_none_...` | Same pattern for list. |
-| `test_sender_id_not_leaked_between_calls` | Sequential calls with different sender IDs are correctly isolated. |
+- **`agent_send`**: forwards target agent_id and message body; refuses self-send (deadlock prevention) before reaching the kernel
+- **`agent_list`**: renders kernel-provided agents with both id and name; empty list returns a friendly "no agents" string (not an error)
+- **`event_publish`**: forwards event_type and payload; validation short-circuits before `EventBus::publish_event` when `event_type` is missing
 
-### `tool_runner_forwarding_task_cron.rs`
+### tool_runner_forwarding.rs
 
-Tests `task_post`, `cron_create`, `cron_list`, `cron_cancel`, `schedule_delete`, and `task_status` dispatch. `CapturingKernel` records calls and supports configurable return values for `task_get` and `cron_list`.
+Tests that `memory_store`, `memory_recall`, and `memory_list` forward `sender_id` as `peer_id` to the kernel. Uses a `CapturingKernel` that records the `peer_id` argument on each `MemoryAccess` call.
 
-| Test function | What it asserts |
-|---|---|
-| `test_task_post_forwards_caller_as_created_by` | `caller_agent_id` reaches `TaskQueue::task_post` as `created_by`. |
-| `test_cron_create_injects_sender_peer_id` | `sender_id` injected as `peer_id` in the cron job JSON. |
-| `test_cron_create_overrides_explicit_peer_id_with_sender` | Tool-layer `sender_id` overrides any `peer_id` in the input. |
-| `test_cron_create_forwards_caller_as_agent_id` | `caller_agent_id` becomes the first argument to `cron_create`. |
-| `test_task_status_projects_six_canonical_fields` | Output contains exactly `status`, `result`, `title`, `assigned_to`, `created_at`, `completed_at`. |
-| `test_task_status_not_found_returns_message` | Missing task returns a "not found" message, not an error. |
-| `test_cron_list_returns_serialized_jobs` | Kernel-provided jobs serialize as JSON array. |
-| `test_cron_cancel_succeeds_when_caller_owns_the_job` | Ownership check passes when job ID is in the agent's cron list. |
-| `test_cron_cancel_unowned_job_renders_as_not_found` | Unowned job errors without reaching `KernelHandle::cron_cancel`. |
-| `test_cron_cancel_missing_job_id_renders_as_missing_parameter` | Missing parameter produces a descriptive error string. |
-| `test_schedule_delete_succeeds_when_caller_owns_the_job` | Same ownership guard as `cron_cancel`. |
-| `test_schedule_delete_unowned_job_renders_as_not_found` | Regression for the pre-#3576 bypass where `schedule_delete` skipped ownership checks. |
-| `test_schedule_delete_missing_id_renders_as_missing_parameter` | Missing `id` field produces descriptive error. |
+Asserts:
 
-### `tool_runner_memory_acl.rs`
+- `sender_id: Some("user-42")` → `peer_id: Some("user-42")`
+- `sender_id: None` → `peer_id: None`
+- Sequential calls with different sender_ids are isolated (no cross-contamination)
 
-Regression tests for #5139: `memory_*` and `wiki_*` tools enforce `UserMemoryAccess` ACL at the dispatch boundary. Uses `AclKernel` with a configurable ACL and probes for substrate calls.
+### tool_runner_forwarding_task_cron.rs
 
-**ACL factory functions:**
-- `viewer_acl()` — read `proactive` + `wiki`; no writes.
-- `user_acl()` — read/write `kv:*` + `wiki`.
+Tests task and cron tool dispatch, including ownership enforcement:
 
-| Test function | What it asserts |
-|---|---|
-| `restricted_user_memory_store_is_denied_and_does_not_land` | Viewer ACL → error + zero substrate writes. |
-| `allowed_user_memory_store_succeeds_and_lands` | User ACL → success + one substrate write with correct `peer_id`. |
-| `no_acl_means_no_restriction_store_still_lands` | `None` ACL preserves pre-RBAC behavior. |
-| `restricted_user_memory_recall_is_denied_and_does_not_read` | Append-only ACL without `kv` read → error + zero substrate reads. |
-| `restricted_user_memory_list_is_denied_and_does_not_enumerate` | No `kv` read access → error + zero list calls. |
-| `allowed_user_memory_recall_runs` | User ACL → success + one read. |
-| `restricted_user_wiki_write_is_denied_and_does_not_land` | Viewer (wiki read-only) → error + zero wiki writes. |
-| Wiki read tests (truncated) | Wiki search/get respect the readable namespaces ACL. |
+- **`task_post`**: forwards `caller_agent_id` as `created_by`
+- **`task_status`**: projects exactly six canonical fields (`status`, `result`, `title`, `assigned_to`, `created_at`, `completed_at`) from the full substrate row; returns "not found" message for missing tasks
+- **`cron_create`**: injects `sender_id` as `peer_id` (overriding any explicit value), forwards `caller_agent_id` as `agent_id`
+- **`cron_list`**: returns serialized jobs for the calling agent
+- **`cron_cancel`**: succeeds when caller owns the job (present in `cron_list` response); renders `NotFound` for unowned jobs without reaching the kernel
+- **`schedule_delete`**: same ownership guard as `cron_cancel` — regression test for the bypass where `schedule_delete` called `cron_cancel` directly with no ownership check
 
-## Mock Kernel Pattern
+### tool_runner_memory_acl.rs
 
-All tool-dispatch test files share the same mock kernel structure:
+Regression tests for #5139: the shared-KV and wiki tools must enforce `UserMemoryAccess` ACL at the tool dispatch boundary. The ACL itself is the real `librefang_types::user_policy::UserMemoryAccess` — only the substrate and ACL resolution are stubbed.
 
-```rust
-struct CapturingKernel {
-    // Arc<Mutex<Vec<...>>> probes for each trait method under test
-}
+Tests assert **side effects** (not just error strings): denied writes must never reach the substrate (`store_calls` stays empty), denied reads must never reach the substrate.
 
-// Implement the full KernelHandle composition:
-impl AgentControl for CapturingKernel { /* record or stub */ }
-impl MemoryAccess for CapturingKernel { /* record or stub */ }
-impl TaskQueue for CapturingKernel { /* record or stub */ }
-impl EventBus for CapturingKernel { /* record or stub */ }
-impl CronControl for CapturingKernel { /* record or stub */ }
-// ... remaining role traits get empty/default impls
-impl CatalogQuery for CapturingKernel { /* optional: return overrides */ }
-```
+ACL roles tested:
 
-Each test file creates a `(CapturingKernel, CapturedCalls)` pair, wraps the kernel in `Arc<dyn KernelHandle>`, constructs a `ToolExecContext`, and asserts on the captured call log after invoking `execute_tool_raw`.
+| Role | `readable_namespaces` | `writable_namespaces` |
+|------|----------------------|----------------------|
+| `viewer_acl()` | `proactive`, `wiki` | (none) |
+| `user_acl()` | `proactive`, `kv:*`, `wiki` | `kv:*`, `wiki` |
+| `None` (RBAC disabled) | — | — |
 
-## Running the Tests
+Coverage spans `memory_store`, `memory_recall`, `memory_list`, `wiki_write`, `wiki_get`, and `wiki_search` — each tested for deny, allow, and no-ACL paths.
 
-```bash
-# All runtime integration tests
-cargo test -p librefang-runtime --test '*'
+## Shared Patterns
 
-# Docker sandbox parity (requires docker-sandbox feature)
-cargo test -p librefang-runtime --features docker-sandbox --test docker_sandbox_helpers_parity
+### KernelHandle Mocking
 
-# Single test file
-cargo test -p librefang-runtime --test tool_runner_memory_acl
+Most tool dispatch tests build a `CapturingKernel` (or variant) that implements the full `KernelHandle` trait composition. Unused role traits get empty/stub implementations. This pattern is repeated across files because each test file needs different recording behavior (some capture `peer_id`, others capture event payloads, etc.), and the trait object (`Arc<dyn KernelHandle>`) requires all traits.
 
-# Specific test function
-cargo test -p librefang-runtime --test streaming_cascade_leak -- text_delta_tokens_are_suppressed
-```
+### ToolExecContext Construction
 
-## When to Add Tests Here
+Every tool dispatch test constructs a `ToolExecContext` via a local `make_ctx` helper. The context carries:
+- `kernel`: the mock `Arc<dyn KernelHandle>`
+- `caller_agent_id`: the agent invoking the tool
+- `sender_id`: the external user/peer (for ACL and peer_id forwarding)
+- `channel`: the communication channel (for ACL resolution)
 
-Add a new integration test file to this directory when:
+### Regression Lock Pattern
 
-- The code under test lives in `librefang-runtime` (not behind an API boundary).
-- You need a `KernelHandle` mock to verify dispatch, forwarding, or ACL behavior.
-- You're locking in a regression fix (reference the issue number in the file doc-comment and test names).
-- The test exercises a **contract** between `librefang-runtime` and `librefang-types` / `librefang-kernel-handle`.
-
-Do **not** add tests here for:
-
-- API-layer HTTP handling (those go in `librefang-api/tests/`).
-- Pure unit tests of internal functions (those go in `#[cfg(test)] mod tests` within the source file).
-- Tests requiring a live LLM provider or database.
+Several tests explicitly document the bug they prevent:
+- `docker_sandbox_helpers_parity` — CVE fix silently skipped in Docker path
+- `test_http_connect_calls_oauth_provider_load_token` — `oauth_provider: None` silently disabling OAuth
+- `test_agent_send_self_is_refused_to_avoid_deadlock` — self-send deadlock
+- `tool_use_stop_reason_still_sets_cascade_leak_aborted` — ToolUse stop_reason bypassing silent drop
+- `test_schedule_delete_unowned_job_renders_as_not_found` — ownership bypass via `schedule_delete`
+- `restricted_user_*` tests — cross-user data leakage through agent tools

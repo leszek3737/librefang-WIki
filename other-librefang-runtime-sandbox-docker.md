@@ -2,72 +2,68 @@
 
 # librefang-runtime-sandbox-docker
 
-Docker-based OS-level sandbox for executing agent tool commands within LibreFang. Provides container isolation with strict resource limits, network policies, and capability dropping to prevent untrusted code from escaping its execution environment.
+Docker container sandbox for LibreFang tool execution. Provides OS-level isolation by spawning agent commands inside Docker containers with strict resource limits, network isolation, and capability dropping.
 
 ## Purpose
 
-When LibreFang agents execute tool commands, those commands run inside Docker containers rather than directly on the host. This crate manages the full lifecycle of that isolation:
+This crate implements the sandboxed execution layer for LibreFang's tool-running pipeline. When an agent needs to execute code or run a command, this module ensures that execution happens inside a Docker container rather than on the host, preventing untrusted code from accessing host resources.
 
-- **Container provisioning** — spawning containers with constrained resources
-- **Shell metacharacter inspection** — rejecting commands that contain dangerous shell characters before they reach a container
-- **Resource enforcement** — CPU, memory, and wall-clock limits per execution
-- **Network isolation** — preventing containers from accessing the host network or other containers
-- **Capability dropping** — stripping Linux capabilities to minimize the attack surface
+Extracted from `librefang-runtime` as part of the **#3710 god-crate split**, this crate is a focused, single-responsibility module handling only Docker-based sandboxing.
 
 ## Architecture
-
-This crate was extracted from `librefang-runtime` during the #3710 god-crate decomposition. The parent crate re-exports it at the historical path `runtime::docker_sandbox`, so existing call sites require no import changes.
 
 ```mermaid
 graph TD
     A[librefang-runtime] -->|"re-exports as runtime::docker_sandbox"| B[librefang-runtime-sandbox-docker]
-    B --> C[Docker Engine API]
-    B --> D[librefang-types]
-    B --> E["Shell metacharacter helpers"]
+    B --> C[librefang-types]
+    B --> D[Docker Daemon]
+    B --> E["helpers module<br/>(shell metachar inspection)"]
+    A -.->|feature: docker-sandbox| B
 ```
+
+## How It Works
+
+1. A command arrives from the agent execution pipeline
+2. Shell metacharacters in user-supplied commands are inspected via the helpers module, using a denylist parity-tested against the parent crate (see `crates/librefang-runtime/tests/docker_sandbox_helpers_parity.rs`)
+3. The command is dispatched to a Docker container configured with:
+   - **Resource limits** — CPU and memory constraints
+   - **Network isolation** — no host network access
+   - **Capability dropping** — minimal Linux capabilities
 
 ## Dependencies
 
-| Crate | Role |
-|-------|------|
-| `librefang-types` | Shared type definitions for sandbox configuration and results |
-| `tokio` | Async runtime for container lifecycle management |
-| `tracing` | Structured logging of sandbox events |
-| `dashmap` | Concurrent map for tracking active containers |
-| `chrono` | Timestamp handling for execution records |
-| `sha2` | Hashing for container image or configuration verification |
+| Dependency | Purpose |
+|---|---|
+| `librefang-types` | Shared type definitions used across the workspace |
+| `tokio` | Async runtime for non-blocking container operations |
+| `tracing` | Structured logging and instrumentation |
+| `dashmap` | Concurrent hashmap, likely for tracking active containers |
+| `chrono` | Timestamp handling for container lifecycle events |
+| `sha2` | SHA-2 hashing, likely for container image or layer identification |
 
 ## Integration with librefang-runtime
 
-The crate is gated behind the `docker-sandbox` feature flag on `librefang-runtime`, which is **enabled by default**. Downstream code continues to use the re-exported path:
+Downstream code does **not** import this crate directly. `librefang-runtime` re-exports it at the historical path `runtime::docker_sandbox`, preserving backward compatibility:
 
 ```rust
-// No import change required — this resolves through librefang-runtime
+// Downstream code (unchanged after extraction)
 use librefang_runtime::docker_sandbox::DockerSandbox;
 ```
 
-To disable Docker sandboxing entirely, disable the feature:
+The re-export is gated behind the **`docker-sandbox` feature**, which is **enabled by default** in `librefang-runtime`. Disabling this feature removes Docker sandboxing from the build.
+
+## Feature Flag
+
+Controlled by the parent crate's `docker-sandbox` feature (default: on). To disable:
 
 ```toml
 [dependencies]
 librefang-runtime = { version = "x.y.z", default-features = false }
 ```
 
-## Shell Metacharacter Inspection
+## Testing
 
-User-supplied commands are inspected for dangerous shell metacharacters before container execution. The helpers module maintains a denylist that is **parity-tested** against the parent crate's own denylist to ensure consistency:
+Shell metacharacter inspection parity is validated by the parent crate at:
+- `crates/librefang-runtime/tests/docker_sandbox_helpers_parity.rs`
 
-- Test suite: `crates/librefang-runtime/tests/docker_sandbox_helpers_parity.rs`
-- Any change to either denylist must be reflected in the other, enforced at CI time
-
-This prevents injection attacks where agent-generated commands might attempt command substitution, piping, or shell expansion inside the container.
-
-## Feature Flag
-
-| Flag | Default | Effect |
-|------|---------|--------|
-| `docker-sandbox` (on `librefang-runtime`) | **on** | Compiles this crate and re-exports it |
-
-## Background
-
-Extracted as part of **#3710 Phase 1** — the decomposition of the monolithic `librefang-runtime` crate into focused, independently testable modules. See the [workspace README](../../README.md) and `crates/librefang-runtime/README.md` for broader context.
+This ensures the denylist for dangerous shell characters remains consistent between this crate and the parent crate after the extraction.

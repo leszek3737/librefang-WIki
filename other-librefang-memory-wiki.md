@@ -2,68 +2,47 @@
 
 # librefang-memory-wiki
 
-A durable markdown knowledge vault for the LibreFang Agent OS. Persists agent knowledge as markdown files with provenance-tracking YAML frontmatter and exports in an Obsidian-friendly format.
+Durable markdown knowledge vault for the LibreFang Agent OS. Persists agent knowledge as Markdown files with provenance-tracking YAML frontmatter, exportable to Obsidian-compatible vaults.
 
 ## Purpose
 
-Agents in LibreFang accumulate knowledge during execution — facts, observations, decisions, and learned patterns. This module provides a structured, human-readable persistence layer for that knowledge. Each entry is stored as a markdown file with rich YAML frontmatter capturing provenance metadata (who created it, when, from what source, content hash). The output format is deliberately compatible with Obsidian, allowing operators to browse, search, and link agent knowledge alongside their own notes.
-
-This module corresponds to issue #3329.
-
-## Architecture
-
-```mermaid
-graph TD
-    A[Agent Knowledge] --> B[Wiki Vault]
-    B --> C[Markdown Files<br/>+ YAML Frontmatter]
-    C --> D[Obsidian Vault<br/>Filesystem]
-    E[librefang-types] --> B
-    B --> F[sha2<br/>Content Hashing]
-    B --> G[serde_yaml<br/>Frontmatter]
-```
-
-## Key Concepts
-
-### Provenance Frontmatter
-
-Every wiki entry carries a YAML frontmatter block that records where the knowledge came from. This is critical for trusting and auditing agent-generated content. The frontmatter typically includes:
-
-- **Timestamps** — creation and modification times via `chrono`
-- **Source attribution** — which agent, session, or subsystem produced the entry
-- **Content hash** — a SHA-256 digest of the entry body, enabling integrity checks and deduplication via `sha2`
-
-### Obsidian-Friendly Export
-
-The vault writes standard markdown files with YAML frontmatter, using conventions that Obsidian understands natively:
-
-- Wikilink-style cross-references between entries
-- Tag support in frontmatter for categorization
-- Flat or hierarchically organized `.md` files that Obsidian can index as a vault
-
-### Durable Storage
-
-The vault is designed for filesystem-backed durability. Unlike in-memory caches, entries survive across sessions and process restarts. This makes the wiki suitable for long-lived agent knowledge that accumulates over time.
+This module provides a file-backed knowledge store that agents can read from and write to across sessions. Each knowledge entry is a Markdown document with structured YAML frontmatter capturing provenance metadata—who created it, when, from what source, and with what content hash. The output format targets Obsidian, enabling human operators to browse, search, and link agent-generated knowledge alongside their own notes.
 
 ## Dependencies
 
 | Dependency | Role |
 |---|---|
-| `librefang-types` | Shared type definitions used across the LibreFang ecosystem |
-| `serde` / `serde_json` / `serde_yaml` | Serialization of frontmatter metadata and structured content |
-| `chrono` | Timestamp generation for provenance records |
-| `thiserror` | Ergonomic error types for vault operations |
-| `sha2` | SHA-256 content hashing for integrity and deduplication |
+| `librefang-types` | Shared type definitions across the LibreFang ecosystem |
+| `serde`, `serde_json`, `serde_yaml` | Serialization of frontmatter and document structures |
+| `chrono` | Timestamp generation for provenance metadata |
+| `sha2` | Content hashing for integrity verification and deduplication |
+| `thiserror` | Typed error definitions |
 | `tracing` | Structured logging of vault operations |
 
-### Dev Dependencies
+**Dev dependencies:** `tempfile` for isolated filesystem tests, `librefang-kernel-handle` for integration scenarios.
 
-| Dependency | Role |
-|---|---|
-| `tempfile` | Temporary directories for isolated vault tests |
-| `librefang-kernel-handle` | Kernel handle mocking for integration tests |
+## Architecture
 
-## Integration
+The module is a self-contained library with no outgoing call edges to other LibreFang modules at runtime. It depends on `librefang-types` for shared data structures but operates independently on the filesystem.
 
-This module sits in the `librefang` workspace and depends on `librefang-types` for shared domain types. It does not directly call into other workspace crates at runtime (no incoming or outgoing call edges), making it a leaf-level utility module. Other components that need to persist or retrieve knowledge instantiate the vault and read/write entries through its API.
+```mermaid
+graph TD
+    A[librefang-memory-wiki] -->|reads/writes| FS[Filesystem Vault]
+    A -->|uses types from| LT[librefang-types]
+    A -->|produces| OBS[Obsidian-compatible Markdown]
+```
 
-The `librefang-kernel-handle` dev dependency suggests that vault operations may be tested in contexts where a kernel handle is present, but the vault itself is kernel-agnostic — it deals in files and markdown, not in kernel primitives.
+## Knowledge Document Format
+
+Each document consists of two parts:
+
+1. **YAML frontmatter** — provenance and metadata enclosed in `---` delimiters. This includes creation timestamp, authorship, content hash (SHA-256), and any source references.
+2. **Markdown body** — the actual knowledge content, written in standard Markdown with Obsidian-compatible wikilink syntax where applicable.
+
+## Error Handling
+
+Errors are defined via `thiserror` and cover likely failure modes: file I/O errors, YAML parsing failures, hash mismatches, and vault integrity violations. Consumers should expect structured error variants rather than raw I/O errors.
+
+## Testing
+
+Tests use `tempfile` to create isolated directory trees, ensuring vault operations (creation, reading, listing, integrity checks) are verified without touching the real filesystem. Integration tests may pull in `librefang-kernel-handle` to validate end-to-end scenarios where the kernel interacts with the wiki store.

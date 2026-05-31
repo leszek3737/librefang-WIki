@@ -2,69 +2,64 @@
 
 # librefang-rl-export
 
-Long-horizon reinforcement learning rollout trajectory exporter. Provides the integration surface for exporting RL rollout data to external tracking and evaluation systems — W&B (Weights & Biases), Tinker, and Atropos.
+Long-horizon reinforcement learning rollout trajectory exporter, providing integration surfaces for Weights & Biases (W&B), Tinker, and Atropos.
 
 ## Purpose
 
-This module handles the export pipeline for trajectory data generated during long-horizon RL rollouts. It sits at the boundary between the core RL engine and external services, responsible for serializing, encoding, and transmitting rollout trajectories over HTTP.
+This module is responsible for serializing and transmitting RL rollout trajectory data to external observability and analysis platforms. In a long-horizon RL training loop, rollouts generate sequences of states, actions, and rewards that need to be exported for visualization, experiment tracking, or downstream consumption. `librefang-rl-export` serves as that export layer.
 
-## Architecture
-
-The module depends on `librefang-http` as its internal HTTP transport layer and builds export-specific logic on top of it. It does not consume trajectory data directly from the RL engine — it exposes an integration surface that other modules push data into for export.
+## Position in the Codebase
 
 ```
-┌─────────────────┐      ┌──────────────────────┐      ┌───────────────────┐
-│  RL Engine      │─────▶│  librefang-rl-export │─────▶│  External Services│
-│  (rollout data) │      │  (serialize + send)  │      │  W&B / Tinker /   │
-└─────────────────┘      └──────────────────────┘      │  Atropos          │
-                                │                      └───────────────────┘
-                                ▼
-                         ┌──────────────┐
-                         │ librefang-   │
-                         │ http         │
-                         └──────────────┘
+┌─────────────────────────────┐
+│   RL Training Pipeline      │
+│  (rollout generation)       │
+└─────────────┬───────────────┘
+              │ trajectory data
+              ▼
+┌─────────────────────────────┐
+│   librefang-rl-export       │
+│  (serialize + transmit)     │
+└─────────────┬───────────────┘
+              │
+              ▼
+┌─────────────────────────────┐
+│   librefang-http            │
+│  (shared HTTP client)       │
+└─────────────────────────────┘
 ```
+
+The module depends on `librefang-http` for outbound HTTP communication rather than managing its own HTTP client, ensuring consistent connection pooling, retry logic, and authentication handling across the crate.
+
+## Integration Surfaces
+
+The module targets three external systems:
+
+| Surface | Purpose |
+|---------|---------|
+| **W&B (Weights & Biases)** | Experiment tracking: metric logging, artifact storage, run visualization |
+| **Tinker** | Interactive trajectory inspection and debugging |
+| **Atropos** | Rollout data pipeline for distributed RL workloads |
 
 ## Key Dependencies and Their Roles
 
-| Dependency | Role |
-|---|---|
-| `librefang-http` | Internal HTTP client abstraction; handles request construction and response handling |
-| `reqwest` | Underlying HTTP client used for outbound requests to external services |
-| `serde` / `serde_json` | Serialization of trajectory data structures to JSON |
-| `base64` | Encoding binary or large trajectory payloads for transport |
-| `urlencoding` | Encoding parameters embedded in URL query strings |
-| `url` | Constructing and manipulating export endpoint URLs |
-| `regex` | Pattern matching for payload validation or URL template expansion |
-| `chrono` | Timestamp generation for exported trajectory records |
-| `thiserror` | Typed error definitions for export failures |
-| `tracing` | Structured logging of export operations and failures |
+The dependency selections reveal the module's operational concerns:
 
-## Integration Surface
-
-The module targets three categories of external systems:
-
-- **W&B (Weights & Biases)**: Experiment tracking. Trajectory metrics and summaries are logged as W&B runs or artifacts.
-- **Tinker**: Visualization or analysis tooling. Rollout trajectories are exported in a format Tinker can consume.
-- **Atropos**: RL infrastructure component. Trajectory data is shipped for further evaluation or distributed processing.
-
-Each integration may require different payload formats, authentication schemes, and endpoint configurations. The `url`, `urlencoding`, and `base64` dependencies suggest that endpoint construction and payload encoding vary per target.
-
-## Error Handling
-
-Export failures (network errors, serialization failures, rejected payloads) use `thiserror`-derived error types, allowing callers to distinguish between transient transport errors and permanent data errors. All export operations should be instrumented with `tracing` spans for observability.
+- **`serde` / `serde_json`** — Trajectory data is serialized to JSON before transmission. Rollout records (states, actions, rewards, metadata) are represented as serializable types.
+- **`reqwest`** — Direct HTTP client usage alongside `librefang-http`, likely for endpoints that require specific client configuration separate from the shared client.
+- **`base64`** — Encoding binary or structured state data into a text-safe representation for inclusion in JSON payloads or URL parameters.
+- **`urlencoding` / `url`** — Constructing and sanitizing URLs for API endpoints, including query parameters for filtering or pagination.
+- **`regex`** — Pattern matching on trajectory data or response validation.
+- **`chrono`** — Timestamping rollouts and handling time-based queries or windowed exports.
+- **`thiserror`** — Typed error definitions for export failures (network errors, serialization issues, API rejections).
+- **`tracing`** — Structured logging of export operations, useful for diagnosing transmission failures in long-running training jobs.
 
 ## Testing
 
-Tests use `wiremock` to mock external HTTP endpoints, allowing verification of request shape, headers, authentication, and payload structure without hitting real services. Test configuration requires the `tokio` multi-thread runtime with macro support (specified in `[dev-dependencies]`).
+Dev-dependencies include `wiremock` for HTTP mocking, indicating that tests mock external API endpoints to verify:
 
-When adding tests for a new integration target:
+- Correct request construction (headers, body format, URL structure)
+- Retry behavior on transient failures
+- Error propagation when APIs return non-success status codes
 
-1. Set up a `wiremock::MockServer` in your test.
-2. Define the expected request matcher (method, path, headers, body pattern).
-3. Call the export function against the mock server's URI.
-4. Assert the mock received the expected request.
-
-## Relationship to the Wider Codebase
-
-This module is a leaf dependency — it depends on `librefang-http` but nothing else in the workspace depends on it. Modules producing rollout data import `librefang-rl-export` directly when they need to ship trajectories externally. The module has no incoming calls detected at the static analysis level, meaning it is called at runtime by consumer modules rather than being wired through a central dependency graph.
+Tests use `tokio` with the `macros` and `rt-multi-thread` features, confirming all export operations are fully asynchronous.

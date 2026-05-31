@@ -1,73 +1,59 @@
 # crates — Wiki
 
-# LibreFang
+# LibreFang Agent OS
 
-LibreFang is an open-source **Agent Operating System** — a self-hosted platform for running, managing, and extending autonomous AI agents. It provides the complete stack: a kernel that orchestrates agent identity and lifecycle, a runtime that executes the agent loop, pluggable LLM provider support, durable memory and knowledge storage, and multiple frontends (CLI, desktop app, web dashboard, chat platforms) for interacting with agents.
+LibreFang is a self-hosted agent platform that gives you durable, auditable, multi-channel AI agents you can interact with through a terminal, a desktop app, a web dashboard, chat platforms, or your editor. A single long-lived daemon holds a `LibreFangKernel` that orchestrates identity, execution, memory, cost control, and tool access for every agent.
 
 ## Architecture
 
-The system is organized in layers. [Core Types & Configuration](core-types-and-configuration.md) defines the shared vocabulary every other crate depends on. The [Kernel (Core Engine)](kernel-core-engine.md) sits at the center, managing agent identity, authentication, approval gating, and configuration. The [Agent Runtime](agent-runtime.md) drives the core agent loop — assembling prompts, calling LLMs, executing tools, and finalizing responses. All LLM communication flows through the [LLM Driver Layer](llm-driver-layer.md), which normalizes 19+ providers behind a single trait. Agents persist knowledge via the [Memory & Knowledge Base](memory-and-knowledge-base.md) module, which combines structured key-value storage, semantic vector search, and a knowledge graph backed by SQLite.
-
-External access is multiplexed through the [API Server & Routes](api-server-and-routes.md), a daemon-attached service layer that bridges Unix domain sockets, named pipes, and messaging channels to the kernel. Operators interact through three client surfaces: the [Command Line Interface](command-line-interface.md) (interactive launcher, ACP/MCP protocol servers, diagnostics), the [Desktop Application](desktop-application.md) (Tauri 2.0 native wrapper with system tray, auto-update, and WebView dashboard), and the [Dashboard Frontend](dashboard-frontend.md) (React SPA for managing agents, sessions, budgets, and kernel subsystems).
-
-Chat platform integrations — Telegram, Discord, Slack, WhatsApp — are handled by the [Channel System](channel-system.md), which provides a unified adapter interface with sanitization, rate-limiting, and crash-recoverable message journaling. Agent capabilities are extended through the [Skills System](skills-system.md) (marketplace discovery, installation, security scanning, runtime loading) and the [Hands System](hands-system.md) (pre-built autonomous agent packages that run independently). The [Extensions & Credential Vault](extensions-and-credential-vault.md) manages MCP server lifecycle and secure credential storage.
-
-Cross-cutting infrastructure includes [HTTP Infrastructure](http-infrastructure.md) (centralized TLS roots and proxy configuration for all outbound requests), [Telemetry & Metrics](telemetry-and-metrics.md) (OpenTelemetry + Prometheus instrumentation), [Wire Protocol & Networking](wire-protocol-and-networking.md) (inter-node TCP federation with mutual authentication and forward secrecy), [Reinforcement Learning Export](reinforcement-learning-export.md) (RL rollout trajectory shipping), [Import & Migration](import-and-migration.md) (workspace migration from other frameworks), and the [Testing Framework](testing-framework.md) (mock infrastructure for integration tests). The [Agent Communication Protocol](agent-communication-protocol.md) adapter bridges the runtime to editors like Zed, VS Code, and JetBrains via the ACP standard.
-
 ```mermaid
-graph TB
-    subgraph Clients
-        CLI["CLI"]
-        DESK["Desktop App"]
-        DASH["Dashboard"]
-        EDITORS["Editors (ACP)"]
-    end
+graph TD
+    Clients["CLI / Desktop / Dashboard"]
+    Editors["Editor Integrations (ACP)"]
+    Chats["Chat Platforms"]
 
-    subgraph Transports
-        API["API Server"]
-        CH["Channels"]
-        WIRE["Wire Protocol"]
-    end
+    API["API Server"]
+    Kernel["Kernel Core"]
+    Runtime["Agent Runtime"]
+    LLM["LLM Drivers"]
+    Memory["Memory System"]
 
-    subgraph Core
-        KERNEL["Kernel"]
-        RUNTIME["Agent Runtime"]
-        LLM["LLM Drivers"]
-        MEM["Memory &amp; Knowledge"]
-    end
+    Clients -->|HTTP| API
+    Editors -->|JSON-RPC stdio| API
+    Chats -->|webhook / long-poll| API
 
-    subgraph Extensions
-        SKILLS["Skills"]
-        HANDS["Hands"]
-    end
-
-    CLI --> API
-    DESK --> API
-    DASH --> API
-    EDITORS --> RUNTIME
-
-    API --> KERNEL
-    CH --> KERNEL
-    WIRE --> KERNEL
-
-    KERNEL --> RUNTIME
-    RUNTIME --> LLM
-    RUNTIME --> MEM
-    KERNEL --> SKILLS
-    KERNEL --> HANDS
-    KERNEL --> MEM
+    API --> Kernel
+    API --> Runtime
+    Kernel --> Runtime
+    Runtime --> LLM
+    Runtime --> Memory
+    Kernel --> Memory
 ```
 
-## Key End-to-End Flows
+## How it fits together
 
-**Provider health check** — An API route handler calls into the agent runtime's provider health module, which probes LLM endpoints. The probe constructs an HTTP client through the centralized HTTP infrastructure module, ensuring TLS roots and proxy settings are applied consistently.
+Everything starts at the **Kernel Core**, which owns agent identity (deterministic UUID v5), approval gating, authentication, config loading, and the workflow engine. It exposes its surface through a set of role traits defined in the kernel handle module.
 
-**Agent loop execution** — The runtime assembles a prompt from message history, sends it through the LLM driver layer, processes the completion (including tool calls), and compresses context when token limits approach. Context compression flows through the compactor and gateway compression modules before the next iteration.
+The **API Server** sits inside the daemon process and multiplexes external consumers onto a shared kernel. It serves the HTTP API (consumed by the dashboard and CLI), hosts the ACP adapter for editor integrations, and bridges to the **Channels** module for Telegram, Slack, Discord, and WhatsApp.
 
-**Chat platform message flow** — An incoming message from Telegram or Discord arrives via the channel system's adapter. It passes through sanitization and rate-limiting, then the channel bridge dispatches it to the kernel, which routes it to the appropriate agent runtime instance. The response flows back through the channel adapter to the platform.
+When an agent needs to run, the kernel hands off to the **Agent Runtime** — the agent loop, context loading, message history, tool execution, MCP client, media handling, sandboxed code execution, and a Merkle-hash-chain audit trail. The runtime calls into **LLM Drivers** for provider communication (with retry, fallback, and credential management) and into the **Memory System** for structured key-value storage, semantic vector search, and a human-readable wiki vault backed by SQLite.
 
-**Skill installation and evolution** — The API exposes skill management endpoints that invoke the skills system for marketplace discovery, download, and security scanning. Skills can also be created or mutated by agents at runtime, with supporting files managed through the evolution module.
+Users interact through the **CLI & Desktop** clients (terminal or Tauri 2.0 native app), the React-based **Dashboard UI**, or directly via chat channels. The **Agent Control Protocol** adapter lets editors like Zed, VS Code, and JetBrains embed a LibreFang agent natively.
 
-## Getting Started
+On the capability side, **Skills** manage installable agent behaviours from the ClawHub marketplace — including agent-driven self-evolution — while **Hands** are fully autonomous, domain-complete agent configurations that users activate and monitor rather than chat with. **Extensions & Vault** handles MCP server discovery, OAuth flows, credential storage, and server health monitoring.
 
-New developers should start with [Core Types & Configuration](core-types-and-configuration.md) to understand the shared data model, then explore the [Kernel (Core Engine)](kernel-core-engine.md) for the central orchestration logic. The [Agent Runtime](agent-runtime.md) is where the core agent loop lives and is the most important codepath to understand. For setting up a development environment, see the [Testing Framework](testing-framework.md) page, which documents how to run integration tests against a fully-wired mock kernel.
+For multi-machine deployments, the **Wire Protocol** provides agent-to-agent federation over TCP with HMAC + Ed25519 authentication. Every crate depends on **Shared Types** for identity, manifest, and wire-format definitions, and on **Support Libraries** for HTTP client construction, subprocess bridging, observability, and testing utilities.
+
+## Key end-to-end flows
+
+**Listing providers** — the dashboard calls `list_providers` on the API server, which delegates to the runtime's provider health checker, which probes endpoints using an HTTP client built by the support layer (with proxy and TLS configuration).
+
+**Running an agent** — the CLI sends a request to the API server, which acquires a kernel handle and invokes the runtime's streaming agent loop. The runtime loads context and memory, calls the LLM driver for completions, applies gateway compression and token estimation when needed, and streams the response back through the API to the client.
+
+**Installing a skill** — the dashboard triggers the skill evolution route on the API server, which calls into the skills crate to walk files, apply patches, and persist changes. The CLI's init wizard uses the extensions module to write environment files for new credentials.
+
+**Receiving a chat message** — a platform adapter in the channels module receives an inbound message, routes it to the correct agent through the kernel, and the kernel dispatches to the agent runtime. Approval requests and scheduled messages flow back out through the same channel adapter.
+
+## Getting started
+
+The workspace builds with standard Cargo commands. The daemon binary is the main entry point — it boots the kernel, starts the API server, and begins accepting connections from CLI, desktop, dashboard, and channel adapters. Configuration lives in `~/.librefang/config.toml`.

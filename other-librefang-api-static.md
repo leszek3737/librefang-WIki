@@ -1,168 +1,159 @@
 # Other — librefang-api-static
 
-# Static Locale Files — `librefang-api/static/locales/`
+# librefang-api/static — Frontend Static Assets
 
-## Purpose
+## Overview
 
-This directory holds the internationalization (i18n) translation catalogs for the LibreFang dashboard. Each JSON file provides a complete set of user-facing strings for one language, organized by page and feature area. The React frontend loads the appropriate catalog at runtime based on the user's locale preference and interpolates values into template strings.
-
-## Supported Languages
-
-| File | Language |
-|------|----------|
-| `en.json` | English (default) |
-| `ja.json` | Japanese |
-
-Adding a new language requires creating a new `<locale>.json` file with the same key structure. A parity-check script (`dashboard/scripts/i18n-parity.mjs`) validates that all locale files share the same key set.
-
-## How It Connects to the Codebase
+The `librefang-api/static/` directory holds static assets served by the LibreFang API's HTTP server. Currently it contains the **internationalization (i18n) locale files** that power all user-facing text in the LibreFang web dashboard.
 
 ```
-locales/en.json ──► i18n-4qyNqnlA.js ──► React components (all pages)
-                   (i18next runtime)
+static/
+└── locales/
+    ├── en.json    ← English (primary)
+    └── ja.json    ← Japanese
 ```
 
-The dashboard's i18n layer (powered by i18next) loads these JSON files as translation bundles. Every page component calls the `t()` function with a dotted key path (e.g., `t('agentsPage.spawnAgent')`) to resolve the localized string. This means every user-visible label, toast message, placeholder, and error string flows through these files.
+These JSON files are consumed by the React frontend's i18n layer (`react/assets/i18n-4qyNqnlA.js`), which exposes a `getFixedT` function and `t()` / `off()` bindings that every page component uses to resolve translated strings at render time.
 
-## Key Structure
-
-Translation keys are organized into top-level namespaces that correspond to dashboard pages, shared UI elements, and cross-cutting concerns:
+## Locale File Architecture
 
 ```mermaid
-graph TD
-    Root[locales/*.json] --> Nav[nav - sidebar & tabs]
-    Root --> Shared[btn, label, status, time, theme, confirm]
-    Root --> Auth[auth - API key gate]
-    Root --> Pages[Page namespaces]
-    Root --> Features[Feature namespaces]
-    
-    Pages --> Overview[overview]
-    Pages --> Agents[agentsPage, agentChat]
-    Pages --> Sessions[sessionsPage]
-    Pages --> Approvals[approvals]
-    Pages --> Logs[logsPage]
-    Pages --> Runtime[runtimePage]
-    Pages --> Settings[settingsPage]
-    Pages --> Workflows[workflowsPage, workflowBuilder]
-    Pages --> Scheduler[schedulerPage]
-    Pages --> Channels[channelsPage]
-    Pages --> Skills[skillsPage]
-    Pages --> Hands[handsPage]
-    Pages --> Plugins[pluginsPage]
-    Pages --> Comms[commsPage]
-    Pages --> Analytics[analyticsPage]
-    Pages --> Memory[memoryPage]
-    Pages --> Goals[goalsPage]
-    
-    Features --> Onboarding[onboarding, setupWizard]
-    Features --> Security[security]
-    Features --> Provider[provider]
-    Features --> Config[detail, mode, profile, template, category]
+graph LR
+    A["en.json / ja.json"] -->|loaded by| B[i18n init]
+    B -->|getFixedT| C[React Pages]
+    C -->|"t('key.path')"| D[Rendered UI text]
+    E[config.toml] -->|language setting| B
 ```
 
-### Namespace Reference
+Each locale file is a flat JSON object where top-level keys serve as **namespaces** that map 1:1 to dashboard pages or shared UI domains. The i18n library resolves keys via dot-path lookup (e.g. `t('agentChat.cmd.help')`).
 
-| Namespace | Scope | Key count (approx.) | Description |
-|-----------|-------|---------------------|-------------|
-| `nav` | Global | 22 | Sidebar navigation labels |
-| `btn` | Global | 17 | Shared button labels (save, delete, cancel, etc.) |
-| `label` | Global | 10 | Generic field labels |
-| `status` | Global | 6 | Connection/state indicator strings |
-| `time` | Global | 5 | Relative time formats |
-| `theme` | Global | 3 | Theme selector labels |
-| `confirm` | Global | 2 | Confirmation dialog buttons |
-| `auth` | Login gate | 4 | API key authentication screen |
-| `onboarding` | First-run | 4 | Welcome banner actions |
-| `setupWizard` | Setup flow | 80+ | Multi-step wizard (provider → agent → test → channel → done) |
-| `overview` | Dashboard | 45+ | Overview cards, quick actions, recent activity |
-| `provider` | LLM config | 10 | Provider setup banners and status |
-| `agentsPage` | Agent management | 55+ | Agent creation, spawning, stopping, configuration |
-| `agentChat` | Chat interface | 90+ | Messages, sessions, commands, tool status, toasts |
-| `detail` | Agent detail panel | 25+ | Info/files/config tabs, tool filters |
-| `mode` | Agent mode | 3 | Observe / Assist / Full |
-| `category` | Agent category | 6 | General, Development, Research, etc. |
-| `profile` | Tool profiles | 9 | Minimal through Full, each with label + description |
-| `template` | Agent templates | 10 | Pre-built agent definitions (name + description) |
-| `sessionsPage` | Session browser | 30+ | Session listing, memory key-value editing |
-| `approvals` | Approval queue | 15+ | Pending/approved/rejected filters and actions |
-| `logsPage` | Log viewer | 25+ | Live stream, audit trail, chain verification |
-| `runtimePage` | Runtime info | 15+ | System stats, providers, models |
-| `settingsPage` | Settings | 180+ | Providers, models, tools, security, network, budget, proactive memory, migration |
-| `workflowsPage` | Workflows | 20+ | Workflow CRUD and execution |
-| `workflowBuilder` | Visual builder | 35+ | Node palette, canvas controls, TOML export |
-| `schedulerPage` | Scheduler | 80+ | Cron jobs, event triggers, run history, presets |
-| `channelsPage` | Channel config | 45+ | Messaging channel setup (WhatsApp, Telegram, etc.) |
-| `skillsPage` | Skills browser | 55+ | Installed skills, ClawHub search, MCP servers |
-| `handsPage` | Hands packages | 45+ | Autonomous capability packages, activation flow |
-| `pluginsPage` | Plugin manager | 20+ | Plugin install, registry, scaffolding |
-| `commsPage` | Agent comms | 25+ | Inter-agent messaging, tasks, event feed |
-| `analyticsPage` | Usage analytics | 30+ | Token counts, cost breakdown, daily charts |
-| `memoryPage` | Proactive memory | 20+ | Memory CRUD, search, version history |
-| `goalsPage` | Goal tracking | 20+ | Hierarchical goals with status and progress |
-| `security` | Security summary | 9 | Security feature display names |
+## Namespace Reference
 
-## String Interpolation
+The following table lists every top-level key in the locale files, what it covers, and which pages consume it.
 
-Many strings contain `{variable}` placeholders that the i18n runtime replaces with dynamic values. Examples:
+| Namespace | Scope | Primary Consumers |
+|---|---|---|
+| `nav` | Sidebar navigation labels | App shell, sidebar component |
+| `status` | Connection/state indicators | Header, overview, any page with status badges |
+| `btn` | Shared button labels (Refresh, Save, Delete, etc.) | Every page |
+| `label` | Generic field labels (Status, Name, Key, etc.) | Forms, detail panels |
+| `auth` | API key authentication screen | Login gate component |
+| `page` | Page-level titles (subset) | Page headers |
+| `health` | Health check labels | Overview, runtime |
+| `stat` | Dashboard statistic card labels | Overview page |
+| `card` | Dashboard card titles | Overview page |
+| `agents` | Agent list/sidebar labels | Agents page, sidebar |
+| `detail` | Agent detail panel (Info/Files/Config tabs) | Agent detail view |
+| `mode` | Agent mode labels (Observe/Assist/Full) | Agent config |
+| `category` | Filter categories | Agent templates |
+| `profile` | Tool profile names and descriptions | Agent creation, settings |
+| `template` | Built-in agent template names/descriptions | Agent creation wizard |
+| `time` | Relative time formatting (e.g. `{count}m ago`) | Activity feeds, logs |
+| `onboarding` | First-run onboarding banner | Overview page |
+| `provider` | LLM provider setup strings | Provider configuration, overview |
+| `overview` | Overview dashboard page | OverviewPage |
+| `security` | Security feature short names | Overview, settings |
+| `agentChat` | Chat interface (messages, commands, toasts) | ChatPage |
+| `sessionsPage` | Session list and agent memory browser | SessionsPage |
+| `agentsPage` | Agent creation and management | AgentsPage |
+| `approvals` | Execution approval queue | ApprovalsPage |
+| `logsPage` | Live logs and audit trail | LogsPage |
+| `runtimePage` | Runtime info display | RuntimePage |
+| `settingsPage` | Settings (providers, models, tools, security, network, budget, memory, migration) | SettingsPage |
+| `workflowsPage` | Workflow list and execution | WorkflowsPage |
+| `workflowBuilder` | Visual workflow builder canvas | WorkflowBuilderPage |
+| `schedulerPage` | Cron jobs and event triggers | SchedulerPage |
+| `channelsPage` | Messaging channel configuration | ChannelsPage |
+| `skillsPage` | Skills and MCP server management | SkillsPage |
+| `handsPage` | Hands (autonomous capability packages) | HandsPage |
+| `pluginsPage` | Plugin management | PluginsPage |
+| `commsPage` | Inter-agent communication | CommsPage |
+| `setupWizard` | First-run setup wizard (5 steps) | SetupWizardPage |
+| `goalsPage` | Goals and sub-goals | GoalsPage |
+| `analyticsPage` | Usage analytics and cost tracking | AnalyticsPage |
+| `memoryPage` | Proactive memory browser | MemoryPage |
+| `theme` | Theme switcher labels (Light/Dark/System) | Theme toggle |
+| `sidebar` | Sidebar keyboard shortcut hints | Sidebar |
+| `agentChat2` | Additional chat UI labels (focus mode, vision) | ChatPage extended controls |
+| `settingsPage2` | Supplementary settings labels | SettingsPage extended |
+| `agentsPage2` | Supplementary agent labels | AgentsPage extended |
+| `schedulerPage2` | Supplementary scheduler labels | SchedulerPage extended |
+| `analyticsPage2` | Supplementary analytics labels | AnalyticsPage extended |
+| `memoryPage2` | Supplementary memory labels | MemoryPage extended |
+| `confirm` | Generic confirm dialog buttons | Shared confirm modal |
+| `setupWizard2` | Supplementary wizard labels | SetupWizardPage extended |
+
+## Interpolation Syntax
+
+Strings use `{variable}` placeholders for dynamic values. The i18n layer substitutes these at runtime. Examples:
 
 ```json
-"stepsCompleted": "{count} of 5 steps completed"
-"providerCoolingDown": "{provider} - cooling down (rate limited)"
-"agentsStopped": "{count} agent(s) stopped"
+"overview.providersConfigured": "{configured}/{total} configured"
+"agentChat.queueCount": "+{count} queued"
+"sessionsPage.keysCount": "{count} key(s)"
 "time.minutesAgo": "{count}m ago"
 ```
 
-These are consumed via i18next's interpolation:
+Usage in React components follows the pattern `t('key.path', { count: 5 })`.
 
-```typescript
-t('overview.stepsCompleted', { count: 3 })
-// → "3 of 5 steps completed"
+### Nested Interpolation
+
+Some strings nest other translation keys or combine multiple interpolations:
+
+```json
+"settingsPage.auditTrailValue": "{state} | {algorithm} | {count} entries logged"
+"agentChat.memoryConflict": "Memory updated: Previously '{old}', now '{new}'"
+"agentsPage.providerSuffix": " (provider: {provider})"
 ```
 
-## Adding or Modifying Translations
+## Key Design Patterns
 
-### Adding a new string
+### Page-Scoped Namespaces
 
-1. Add the key to `en.json` in the appropriate namespace.
-2. Add the same key to every other locale file (`ja.json`, etc.).
-3. Run the i18n parity script to verify no keys are missing:
+Each dashboard page has its own namespace (e.g. `agentsPage`, `logsPage`, `channelsPage`). This prevents key collisions and makes it straightforward to identify which page a string belongs to. Shared UI elements use generic namespaces (`btn`, `label`, `status`).
 
-```bash
-node dashboard/scripts/i18n-parity.mjs
-```
+### Sub-Namespaces for Complex Features
 
-4. Reference the key in the React component using `t('namespace.key')`.
+Complex features use nested objects to group related strings:
 
-### Adding a new locale
+- `agentChat.cmd` — Slash command descriptions (help, model, think, budget, etc.)
+- `agentChat.toast` — Toast notification messages
+- `agentChat.sys` — System messages rendered in chat
+- `settingsPage.coreFeatures` — Security feature descriptions
+- `settingsPage.configurableFeatures` — Tunable security controls
+- `settingsPage.monitoringFeatures` — Monitoring subsystem descriptions
+- `schedulerPage.triggerType` — Event trigger type labels
+- `schedulerPage.cron` — Cron preset human-readable labels
+- `skillsPage.category` — Skill category names
+- `channelsPage.category` — Channel category names
+- `channelsPage.status` — Channel connection statuses
 
-1. Copy `en.json` to `<locale>.json` (e.g., `fr.json`).
-2. Translate all string values while preserving the key structure exactly.
-3. Register the new locale in the i18n configuration (typically in `src/i18n.ts` or equivalent).
-4. Run the parity script to confirm key alignment.
+### Numbered Suffix Namespaces
 
-### Adding a new page namespace
+Namespaces ending in `2` (`agentChat2`, `settingsPage2`, etc.) contain supplementary labels that were added incrementally. These are functionally identical to their base namespaces — the split exists because the locale files evolved alongside the UI without refactoring existing keys.
 
-When a new dashboard page is created, its strings should live under a new top-level key matching the page name (e.g., `newPageName`). Follow the existing convention:
+## Adding a New Language
 
-- **Loading states**: `loading`, `loadError`
-- **CRUD toasts**: `created`, `createFailed`, `deleted`, `deleteFailed`
-- **Filter/tab labels**: nested `filter.*` or `tab.*` objects
-- **Status values**: nested `status.*` object
-- **Confirmation dialogs**: `deleteXxxTitle`, `deleteXxxConfirm`
+1. Copy `en.json` to `locales/<locale>.json` (e.g. `fr.json` for French).
+2. Translate all string values while preserving:
+   - Key names (left side of each `:`)
+   - `{variable}` interpolation placeholders
+   - Markdown formatting (e.g. `**bold**` in `agentChat.welcomeTips`)
+3. Register the new locale in the frontend's i18n initialization code.
 
-## Naming Conventions
+## Adding New Strings
 
-- **camelCase** for all keys and sub-keys.
-- **PascalCase** for template IDs that reference agent archetypes (e.g., `GeneralAssistant`, `CodeHelper`).
-- **Toast messages** follow the pattern `<action><Result>`: `agentStopped`, `saveFailed`, `keyDeleted`.
-- **Error keys** end with `Failed` or use `errorMessage` / `loadError` / `unknownError`.
-- **Confirmation dialogs** use paired `xxxTitle` + `xxxConfirm` keys.
-- **Pluralizable counts** accept a `{count}` interpolation parameter.
+When adding UI features:
 
-## Notes for Developers
+1. **Identify the correct namespace.** If it's page-specific, use that page's namespace. If shared, use `btn`, `label`, or `status`.
+2. **Add the key to `en.json` first**, then `ja.json` (and any other locales).
+3. **Use `{placeholder}` syntax** for any dynamic values — do not concatenate strings in code.
+4. **Keep keys flat within a namespace.** Nesting beyond 2–3 levels makes lookups harder to trace.
 
-- The `*Page2` namespaces (`agentsPage2`, `settingsPage2`, `schedulerPage2`, `analyticsPage2`, `memoryPage2`, `setupWizard2`) contain supplementary keys for UI revisions. These are not duplicate pages — they hold additional strings needed by updated component variants.
-- The `agentChat.cmd` sub-object contains descriptions for all slash commands (`/help`, `/model`, `/think`, etc.). These are displayed in the command palette and help output.
-- Security-related strings in `settingsPage.coreFeatures`, `configurableFeatures`, and `monitoringFeatures` include both a human-readable `description` and a `threat` or `hint` field used in the security dashboard.
-- Cron preset labels in `schedulerPage.cron` cover common schedules from "every minute" to "first of month" and are displayed in the quick-pick UI.
-- The `profile` namespace defines nine tool profiles (Minimal through Full), each with a `label` and `desc`. These are referenced when creating or configuring agents.
+## Connection to the Rest of the Codebase
+
+The locale files are the **sole source of user-visible text** for the web dashboard. The React build pipeline bundles them into hashed assets (e.g. `react/assets/i18n-4qyNqnlA.js`), and the i18n library initializes from these JSON structures at application boot.
+
+The Rust API server (`librefang-api`) serves these files as static assets. The integration test suite verifies the i18n setup by calling `nest()` on the i18n module during test boot sequences (visible in `boot()` calls across integration tests like `workflows_routes_integration.rs`, `terminal_routes_test.rs`, `users_test.rs`, etc.).
+
+Frontend pages reference these translations via `t()` calls. For example, the Agents page uses `t('agentsPage.createAgent')` for the create button label, and the Logs page uses `t('logsPage.auditTitle')` for the audit trail heading. When a test or runtime component needs to invalidate data after a mutation, it calls `invalidateQueries` which triggers a re-fetch and re-render with fresh translations applied.

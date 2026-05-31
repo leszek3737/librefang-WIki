@@ -2,99 +2,89 @@
 
 # librefang-skills
 
-Skill system for LibreFang — provides the registry, filesystem loader, marketplace client, and OpenClaw compatibility layer for discovering, loading, and managing skills.
+Skill system for LibreFang — provides the registry, loader, marketplace client, and OpenClaw compatibility layer.
 
-## Purpose
+## Overview
 
-This crate is the central skill management layer in LibreFang. A *skill* is a self-contained unit of functionality that can be loaded at runtime, traded on a marketplace, and executed within the game. This module handles everything between a skill sitting on disk (or a remote server) and it being available for use:
-
-- **Discovery** — scanning filesystem directories for installed skills.
-- **Loading** — reading and validating skill manifests, verifying integrity, and deserializing skill definitions.
-- **Registry** — maintaining an in-memory index of loaded skills and querying by name, keyword, or capability.
-- **Marketplace** — downloading skills from a remote marketplace, verifying hashes, and installing them locally.
-- **OpenClaw compatibility** — reading skills authored for the OpenClaw format so existing content works without modification.
+This crate implements the complete lifecycle for LibreFang skills: discovery on disk, loading into memory, version management, integrity verification, marketplace interaction, and compatibility with the OpenClaw skill format. It is a library crate consumed by higher-level LibreFang components (server, CLI tools) rather than an executable target.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[Skill on Disk] -->|walkdir scan| B[Loader]
-    C[Skill Package .zip] -->|extract + parse| B
-    D[Remote Marketplace] -->|reqwest download| E[Marketplace Client]
-    E -->|install| C
-    B -->|register| F[Skill Registry]
-    F -->|query| G[Game Systems]
-    H[OpenClaw Skill] -->|compat layer| B
+    A[Skill Registry] --> B[Skill Loader]
+    B --> C[Disk Storage]
+    A --> D[Marketplace Client]
+    D --> E[Remote Repository]
+    B --> F[OpenClaw Adapter]
+    F --> G[OpenClaw Skill Format]
+    A --> H[Version Resolver]
+    H --> I[semver constraints]
 ```
 
-### Subsystem Breakdown
+## Key Components
 
-#### Loader
+### Skill Registry
 
-The loader is responsible for reading skill data from the filesystem. It uses `walkdir` to recursively scan skill directories, locates manifest files (TOML, JSON, or YAML), parses them with the corresponding `serde` frontend, and validates the resulting structures against expected schemas.
+Maintains the catalog of known skills and their metadata. Likely backed by on-disk TOML or JSON manifests discovered via `walkdir` traversal of skill directories. The registry tracks:
 
-Key responsibilities:
+- Skill identifiers and versions
+- Dependencies between skills
+- Installation status and filesystem locations
 
-- Traversing one or more skill root directories.
-- Parsing manifests (`serde` + `toml` / `serde_json` / `serde_yaml`).
-- Computing SHA-256 digests (`sha2` + `hex`) of skill payloads for integrity verification.
-- Extracting `.zip` packages (`zip` crate) when a skill is distributed as a compressed archive.
+### Skill Loader
 
-File locking (`fs2`) is used during extraction and installation to prevent corruption when multiple processes access the same skill directory concurrently.
+Reades skill definitions from the filesystem and deserializes them into types from `librefang-types`. Supports:
 
-#### Registry
+- **Directories**: Skills stored as unpacked directory trees
+- **Archives**: `.zip`-packed skills extracted on load via the `zip` crate
+- **Multiple formats**: TOML, JSON, and YAML manifests (`serde_json`, `toml`, `serde_yaml`)
 
-The registry is the in-memory store of loaded skills. It supports:
+### Marketplace Client
 
-- Insertion and removal of skills at runtime.
-- Lookup by skill name (exact match).
-- Keyword-based search using an Aho-Corasick automaton (`aho-corasick` crate) for efficient multi-pattern matching across skill metadata.
-- Semantic version queries (`semver`) — filtering or matching skills by version constraints.
+HTTP client built on `reqwest` with `rustls` for TLS. Responsible for:
 
-#### Marketplace Client
+- Fetching skill listings from remote repositories
+- Downloading skill packages
+- Verifying download integrity using SHA-256 (`sha2` + `hex`)
 
-An async HTTP client (`reqwest` with `rustls` for TLS) that communicates with a LibreFang skill marketplace. It handles:
+TLS certificate validation uses both `webpki-roots` (Mozilla's CA bundle) and `rustls-native-certs` (system certificate store) to maximize compatibility across platforms.
 
-- Listing available skills and their metadata.
-- Downloading skill packages.
-- Verifying downloaded content against published hashes before writing to disk.
+### OpenClaw Compatibility
 
-Certificate roots are provided by both `webpki-roots` (bundled Mozilla roots) and `rustls-native-certs` (system certificate store) for maximum compatibility across platforms.
+The `aho-corasick` dependency indicates fast multi-pattern matching, used here to parse or translate skills authored in the OpenClaw format. This adapter layer converts OpenClaw skill definitions into LibreFang's internal representation.
 
-#### OpenClaw Compatibility
+### Version Resolution
 
-A translation layer that reads skill definitions authored for the OpenClaw format and converts them into LibreFang's native representation (`librefang-types`). This allows existing OpenClaw content to work without manual conversion.
+Uses `semver` for semantic version parsing and constraint solving. Skills declare compatible version ranges, and the resolver ensures a consistent, installable set.
 
-## Dependencies
+### Concurrency Safety
 
-| Dependency | Role in this crate |
+`fs2` provides file locking for concurrent access to the skill store — preventing corruption when multiple processes or async tasks attempt to install, update, or remove skills simultaneously.
+
+## Dependencies on Other LibreFang Crates
+
+| Crate | Usage |
 |---|---|
-| `librefang-types` | Shared type definitions — skill structs, enums, error types |
-| `serde` / `serde_json` / `serde_yaml` / `toml` | Deserialization of skill manifests in multiple formats |
-| `thiserror` | Derived error types for loader, registry, and marketplace errors |
-| `tracing` | Structured logging throughout all subsystems |
-| `tokio` | Async runtime for marketplace HTTP calls and concurrent file operations |
+| `librefang-types` | Shared type definitions for skill structures, metadata, and errors |
+
+## External Dependency Rationale
+
+| Dependency | Purpose |
+|---|---|
 | `walkdir` | Recursive directory traversal for skill discovery |
-| `chrono` | Timestamp handling (install dates, manifest timestamps) |
-| `reqwest` + `rustls` | HTTPS client for marketplace communication |
-| `sha2` + `hex` | SHA-256 digest computation for integrity checks |
-| `zip` | Extraction of `.zip`-packaged skills |
-| `aho-corasick` | Fast multi-pattern keyword search across skill metadata |
-| `semver` | Parsing and comparing semantic version strings in skill manifests |
-| `fs2` | Filesystem locking to prevent concurrent write conflicts |
-
-## Error Handling
-
-Errors are defined using `thiserror` and typically fall into these categories:
-
-- **IO errors** — file not found, permission denied, corrupt archive.
-- **Parse errors** — malformed manifest, unknown format, schema validation failure.
-- **Integrity errors** — hash mismatch after download or extraction.
-- **Network errors** — marketplace unreachable, TLS failure, HTTP error responses.
-- **Registry errors** — duplicate skill registration, skill not found.
-
-All errors implement `std::error::Error` and integrate with `tracing` for structured diagnostic output.
+| `zip` | Reading `.zip`-archived skill packages |
+| `serde` + formats | Serialization of skill manifests (TOML, JSON, YAML) |
+| `reqwest` + `rustls` | Secure HTTP for marketplace communication |
+| `sha2` + `hex` | SHA-256 integrity hashes for downloaded skills |
+| `aho-corasick` | Efficient multi-pattern matching for OpenClaw parsing |
+| `semver` | Semantic version parsing and comparison |
+| `fs2` | Filesystem-level locking for concurrent safety |
+| `thiserror` | Derived error types |
+| `tracing` | Structured logging throughout skill operations |
 
 ## Testing
 
-Tests use `tempfile` for isolated filesystem operations and `serial_test` to serialize tests that touch shared state on disk. When adding tests that involve file I/O or the registry, wrap them with `#[serial_test::serial]` to avoid races.
+The dev-dependencies include `tempfile` (for isolated filesystem tests) and `serial_test` (to serialize tests that share filesystem state), indicating that the test suite exercises real disk I/O for loading and registry operations.
+
+Tests requiring file locks or shared temporary directories are annotated with `#[serial]` to avoid races.

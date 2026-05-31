@@ -1,110 +1,152 @@
 # Other — librefang-desktop-gen
 
-# librefang-desktop/gen
+# librefang-desktop/gen — Tauri Generated Artifacts
 
-Auto-generated Tauri build configuration directory. This directory is populated by the Tauri CLI and governs the IPC security model, mobile scaffolding, and capability schemas for the LibreFang desktop application.
+## Overview
 
-**Do not hand-edit generated files.** Changes will be overwritten on the next `tauri build` or `tauri dev` invocation.
+The `gen/` directory holds **auto-generated Tauri build artifacts** that define the security model and platform scaffolding for the LibreFang desktop application. These files are produced by Tauri's CLI during initialization and build processes. **They should not be manually edited** — they are regenerated from the project's Tauri configuration and capability files.
 
-## Directory Layout
+## Directory Structure
 
 ```
 gen/
-├── android/                # Android project scaffold (via cargo tauri android init)
-│   └── README.md
-├── apple/                  # iOS/macOS project scaffold (via cargo tauri ios init)
-│   └── README.md
+├── android/
+│   └── README.md          # Placeholder — populated by `cargo tauri android init`
+├── apple/
+│   └── README.md          # Placeholder — populated by `cargo tauri ios init`
 └── schemas/
-    ├── acl-manifests.json  # Permission manifests for every Tauri plugin
-    ├── capabilities.json   # Active capability sets for this application
-    └── desktop-schema.json # JSON Schema validating capability files
+    ├── acl-manifests.json  # Full ACL manifest for all Tauri plugins
+    ├── capabilities.json   # Active capability definitions (desktop + mobile)
+    └── desktop-schema.json # JSON Schema for capability file validation
 ```
 
-## Mobile Scaffolding
+## Platform Scaffolding
 
-The `android/` and `apple/` directories are placeholders. They are populated by running:
+### Android
+
+The `android/` directory is a placeholder for the Android Studio project scaffold. Populate it by running from `crates/librefang-desktop/`:
 
 ```bash
-# From crates/librefang-desktop/
-cargo tauri android init   # Android (all platforms)
-cargo tauri ios init       # iOS/macOS (macOS host only)
+cargo tauri android init
 ```
 
-These directories hold the native wrapper projects that Tauri uses to build mobile bundles. Until the init commands are run, each directory only contains a README stub.
+### Apple (iOS / macOS)
 
-## Capabilities Configuration
-
-The active security policy is defined in `schemas/capabilities.json`. Two capability sets exist, scoped by target platform.
-
-### Desktop Capability (`default`)
-
-Applies to the `main` window on **macOS, Windows, and Linux**.
-
-| Permission | Scope |
-|---|---|
-| `core:default` | All core plugins (path, event, window, webview, app, image, resources, menu, tray) |
-| `notification:default` | Full notification workflow (request permission, show, batch, channels, etc.) |
-| `shell:default` | `open` for `http(s)://`, `tel:`, `mailto:` URLs |
-| `dialog:default` | Message, save, and open dialogs |
-| `global-shortcut:allow-register` | Register keyboard shortcuts |
-| `global-shortcut:allow-unregister` | Unregister keyboard shortcuts |
-| `global-shortcut:allow-is-registered` | Check if a shortcut is registered |
-| `autostart:default` | Enable, disable, and query auto-start on boot |
-| `updater:default` | Check, download, and install application updates |
-
-### Mobile Capability (`mobile`)
-
-Applies to the `main` window on **iOS and Android**. Desktop-only plugins (shell, global-shortcut, autostart, updater) are excluded.
-
-| Permission | Scope |
-|---|---|
-| `core:default` | All core plugins |
-| `notification:default` | Full notification workflow |
-| `dialog:default` | Message, save, and open dialogs |
-
-## ACL Manifests
-
-`schemas/acl-manifests.json` declares every permission available from each bundled Tauri plugin. Each entry contains:
-
-- **`default_permission`** — the permission set applied when referencing `<plugin>:default`
-- **`permissions`** — individual `allow-*` and `deny-*` entries mapping to specific IPC commands
-- **`global_scope_schema`** — optional JSON Schema constraining scope data (e.g., `shell` defines allowed commands and arguments)
-
-### Plugins in Use
-
-| Plugin | Default Commands Enabled |
-|---|---|
-| `autostart` | `enable`, `disable`, `is_enabled` |
-| `core:app` | `version`, `name`, `tauri_version`, `identifier`, `bundle_type`, `register_listener`, `remove_listener`, `supports_multiple_windows` |
-| `core:event` | `listen`, `unlisten`, `emit`, `emit_to` |
-| `core:image` | `new`, `from_bytes`, `from_path`, `rgba`, `size` |
-| `core:menu` | Full menu CRUD (`new`, `append`, `prepend`, `insert`, `remove`, `popup`, `set_as_app_menu`, `set_text`, `set_enabled`, `set_checked`, etc.) |
-| `core:path` | `resolve`, `resolve_directory`, `normalize`, `join`, `dirname`, `extname`, `basename`, `is_absolute` |
-| `core:resources` | `close` |
-| `core:tray` | `new`, `get_by_id`, `remove_by_id`, `set_icon`, `set_menu`, `set_tooltip`, `set_title`, `set_visible`, etc. |
-| `core:webview` | `get_all_webviews`, `webview_position`, `webview_size`, `internal_toggle_devtools` |
-| `core:window` | Extensive — all read-only window queries (`is_fullscreen`, `is_minimized`, `inner_size`, `theme`, etc.) plus `internal_toggle_maximize` |
-| `dialog` | `message`, `save`, `open` |
-| `global-shortcut` | None by default; explicitly granted per-command |
-| `notification` | Full workflow: permission checks, show, batch, channels, cancel, listeners |
-| `shell` | `open` only (with URL scope validation) |
-| `updater` | `check`, `download`, `install`, `download_and_install` |
-
-## Desktop Schema
-
-`schemas/desktop-schema.json` is a JSON Schema (draft-07) defining the structure of `CapabilityFile` documents. It validates:
-
-- **`Capability`** objects with fields: `identifier`, `permissions`, `windows`, `webviews`, `platforms`, `local`, `remote`
-- **`PermissionEntry`** — either a plain identifier string or an object with `identifier` + scoped `allow`/`deny` arrays
-- **Shell scope entries** with support for `cmd` paths (using `$HOME`, `$APPDATA`, etc. variables), sidecar commands, and argument validators (regex-based)
-
-This schema is used by `tauri build` to validate capability files before code generation.
-
-## Regenerating
-
-After modifying permissions in the Tauri configuration or adding/removing plugins, regenerate from the crate root:
+The `apple/` directory is a placeholder for the Xcode project scaffold. Populate it on macOS by running from `crates/librefang-desktop/`:
 
 ```bash
-cd crates/librefang-desktop
-cargo tauri dev      # regenerates schemas and rebuilds
+cargo tauri ios init
 ```
+
+## Security Schemas
+
+The `schemas/` directory defines the entire IPC permission model that gates frontend-to-backend communication.
+
+### acl-manifests.json
+
+The **ACL manifest** enumerates every plugin, its default permission set, and individual allow/deny permission identifiers. This is the authoritative reference for what Tauri commands exist and what each permission controls.
+
+**Plugins covered:**
+
+| Plugin | Default Permission Scope |
+|---|---|
+| `autostart` | Enable, disable, and query auto-start on boot |
+| `core` | Aggregates all core plugin defaults |
+| `core:app` | App metadata queries, listener registration |
+| `core:event` | Event listen, unlisten, emit, emit-to |
+| `core:image` | Image creation from bytes/path, RGBA data, size |
+| `core:menu` | Full menu CRUD, popup, accelerators, app/window menu assignment |
+| `core:path` | Path resolution, join, normalize, dirname, basename, extname |
+| `core:resources` | Resource close |
+| `core:tray` | System tray CRUD, icon, tooltip, title, visibility |
+| `core:webview` | Webview CRUD, size, position, zoom, devtools toggle, browsing data |
+| `core:window` | Full window management (position, size, state queries, cursor, monitors, decorations) |
+| `dialog` | Message, open, and save dialogs |
+| `global-shortcut` | No default — requires explicit allow permissions |
+| `notification` | Full notification lifecycle including channels |
+| `shell` | `open` only (http/https, tel:, mailto:) — execute/spawn are denied by default |
+| `updater` | Check, download, install, and download-and-install |
+
+Each permission entry contains:
+- `identifier` — the string used in capability files (e.g., `"core:window:allow-set-title"`)
+- `description` — human-readable description
+- `commands.allow` / `commands.deny` — the Tauri command names affected
+
+### capabilities.json
+
+Defines the **active capabilities** applied to application windows at runtime. LibreFang declares two capabilities:
+
+#### `default` — Desktop
+
+```json
+{
+  "identifier": "default",
+  "windows": ["main"],
+  "platforms": ["macOS", "windows", "linux"],
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "shell:default",
+    "dialog:default",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "global-shortcut:allow-is-registered",
+    "autostart:default",
+    "updater:default"
+  ]
+}
+```
+
+Applied to the `main` window on all desktop platforms. Grants core Tauri access plus notification, shell link-opening, dialog, global shortcut registration, autostart control, and auto-update functionality.
+
+#### `mobile` — iOS / Android
+
+```json
+{
+  "identifier": "mobile",
+  "windows": ["main"],
+  "platforms": ["iOS", "android"],
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "dialog:default"
+  ]
+}
+```
+
+A reduced set that omits desktop-only plugins (`shell`, `global-shortcut`, `autostart`, `updater`) which are not bundled on mobile.
+
+### desktop-schema.json
+
+A **JSON Schema (draft-07)** for validating capability files. It defines the `CapabilityFile` type and all supporting types (`Capability`, `CapabilityRemote`, `PermissionEntry`, `Identifier`). Used by Tauri's build tooling to validate capability configurations at compile time.
+
+Key schema structures:
+- **`Capability`** — groups permissions to specific windows/webviews on specific platforms
+- **`PermissionEntry`** — either a plain identifier string or an object with `identifier` + `allow`/`deny` scopes (used by shell for argument whitelisting)
+- **`ShellScopeEntry`** — defines allowed commands with optional argument validators using regex patterns
+
+## How It Connects to the Codebase
+
+```mermaid
+flowchart LR
+    A["tauri.conf.json<br/>(project root)"] --> B["Tauri CLI<br/>build/init"]
+    B --> C["gen/schemas/"]
+    C --> D["ACL validation<br/>at compile time"]
+    E["src-tauri/capabilities/*.json"] --> B
+    B --> F["gen/android/<br/>gen/apple/"]
+```
+
+1. The Tauri CLI reads plugin configurations and source capability files from `src-tauri/capabilities/`
+2. During `cargo tauri build` or `cargo tauri dev`, it generates the `gen/schemas/` files
+3. `acl-manifests.json` is produced from the merged plugin ACL declarations
+4. `capabilities.json` is the resolved set of active capabilities
+5. `desktop-schema.json` provides validation metadata
+6. Platform directories are populated separately via `android init` / `ios init`
+
+## Working With This Module
+
+- **Do not manually edit** files in `gen/`. They are overwritten on each build.
+- To change permissions, edit capability files in the Tauri source configuration (typically under `src-tauri/capabilities/`), then rebuild.
+- To add Android/iOS support, run the appropriate `init` command from `crates/librefang-desktop/`.
+- The `global-shortcut` plugin intentionally has no default permissions — individual commands (`allow-register`, `allow-unregister`, `allow-is-registered`) are explicitly listed in the `default` capability.
+- Shell `execute` and `spawn` are **not** included in any capability. If needed, they must be explicitly added with scoped `allow` entries to prevent arbitrary command execution from the frontend.

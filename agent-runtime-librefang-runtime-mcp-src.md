@@ -1,296 +1,199 @@
 # Agent Runtime — librefang-runtime-mcp-src
 
-# Agent Runtime — `librefang-runtime-mcp`
+# MCP Client Runtime — `librefang-runtime-mcp`
 
-MCP (Model Context Protocol) client for connecting LibreFang agents to external tool servers. The module handles connection establishment, tool discovery, tool execution, and a set of security guardrails that sit between the LLM's tool-call output and the remote server.
+The MCP client runtime connects the LibreFang agent to external tool servers implementing the Model Context Protocol. It manages the full lifecycle — transport establishment, tool discovery, argument validation, taint scanning, caller-context injection, and tool dispatch — across four transport variants.
 
-## Architecture Overview
+## Architecture
 
 ```mermaid
 graph TD
-    dispatch["tool_runner::dispatch"] -->|MCP tool?| conn["McpConnection"]
-    conn -->|Stdio| rmcp["rmcp SDK (subprocess)"]
-    conn -->|SSE| http_post["HTTP POST JSON-RPC"]
-    conn -->|Http| rmcp_http["rmcp SDK (streamable HTTP)"]
-    conn -->|HttpCompat| compat["reqwest (plain HTTP)"]
-
-    conn -->|before call| taint["Taint Scanner"]
-    conn -->|before call| validate["Argument Validator"]
-    conn -->|before call| caller["CallerContext Injection"]
-
-    taint --> policy["McpTaintPolicy (per-tool/path)"]
-    taint --> rules["NamedTaintRuleSet (hot-reload)"]
+    dispatch["tool_runner::dispatch"] -->|"is_mcp_tool()"| namespacing["Tool Namespacing"]
+    dispatch -->|"call_tool_with_caller()"| conn["McpConnection"]
+    conn --> taint["Taint Scanner"]
+    conn -->|"strip-then-set"| ctx["CallerContext Injection"]
+    conn --> stdio["Stdio (rmcp)"]
+    conn --> sse["SSE (JSON-RPC)"]
+    conn --> http["Streamable HTTP (rmcp)"]
+    conn --> compat["HttpCompat"]
+    stdio --> subprocess["Child Process"]
+    sse -->|"POST JSON-RPC"| remote["Remote MCP Server"]
+    http -->|"rmcp SDK"| remote
+    compat -->|"HTTP/JSON"| backend["Plain HTTP Backend"]
 ```
+
+## Transports
+
+The module supports four transport modes, selected via the `McpTransport` enum:
+
+| Transport | Description | Tool Discovery |
+|-----------|-------------|----------------|
+| `Stdio` | Subprocess with MCP over stdin/stdout via the `rmcp` SDK | Automatic via `tools/list` |
+| `Sse` | HTTP POST with JSON-RPC (legacy SSE protocol) | Manual `initialize` + `tools/list` |
+| `Http` | Streamable HTTP transport (MCP 2025-03-26+) with session management | Automatic via `rmcp` SDK |
+| `HttpCompat` | Built-in adapter for plain HTTP/JSON backends that don't speak MCP | Statically declared in config |
+
+### Stdio Subprocess Sandboxing
+
+Stdio-launched MCP servers run as isolated child processes:
+
+- **Environment is not inherited.** Only `SAFE_ENV_VARS` (system essentials like `PATH`, `HOME`, language/runtime paths) and explicitly declared `env` entries are passed through. This prevents accidental leakage of daemon secrets like `ANTHROPIC_API_KEY`.
+- **Shell interpreters are blocked.** The command must be a specific runtime (`npx`, `node`, `python`, etc.) — never `bash`, `sh`, `cmd`, or `powershell`. This prevents command-injection vectors in arguments.
+- **Path traversal is rejected.** Commands containing `..` are refused.
+- **`kill_on_drop(true)`** ensures orphaned processes are cleaned up when the connection drops.
+- **Stderr is drained** in a background task (capped at 100 lines × 256 bytes) to prevent pipe-buffer stalls that would hang the child process.
+
+Environment variable references (`$VAR`, `${VAR}`) in `args` are expanded only for variables in the allowlist (safe system vars + declared `env` entries). Tilde expansion (`~/...`) is also supported.
+
+### SSE Transport
+
+SSE uses a simple JSON-RPC-over-HTTP-POST protocol. It does **not** declare the `roots` capability because SSE is unidirectional — the server cannot send `roots/list` back.
+
+The handshake sequence is: `initialize` → `notifications/initialized` → `tools/list`.
+
+### Streamable HTTP Transport
+
+Uses the `rmcp` SDK's `StreamableHttpClientTransport`, which handles Accept headers, `Mcp-Session-Id` tracking, and SSE stream parsing automatically. Supports OAuth authentication flow — when a server returns a 401 with `WWW-Authenticate`, the module extracts the header and defers to the API layer for PKCE-based OAuth.
+
+Only local filesystem `roots` are advertised to local servers (loopback/RFC1918). Remote servers receive no roots since they don't operate on the local filesystem.
+
+### HttpCompat Transport
+
+A built-in adapter for backends that expose plain HTTP/JSON APIs rather than speaking MCP. Tools are statically declared in config with:
+
+- Path templates with `{parameter}` substitution (URL-encoded automatically)
+- Configurable HTTP method (GET, POST, PUT, PATCH, DELETE)
+- Request modes: `JsonBody`, `Query`, or `None`
+- Response modes: `Text` or `Json` (pretty-printed)
+- Per-tool headers with static values or `value_env` references
 
 ## Connection Lifecycle
 
-### 1. Configuration (`McpServerConfig`)
+`McpConnection::connect(config)` performs:
 
-Each MCP server is declared in configuration and deserialized into `McpServerConfig`:
+1. **Transport establishment** — spawns subprocess, creates HTTP client, or initializes rmcp service
+2. **SSRF guard** — all HTTP-based transports validate URLs against cloud-metadata pivots (`169.254/16`, `100.64/0.0/10`, metadata hostnames)
+3. **Tool discovery** — via rmcp `tools/list` (Stdio/HTTP) or manual JSON-RPC (SSE) or static config (HttpCompat)
+4. **Tool registration** — each tool is namespaced and stored as a `ToolDefinition`
 
-| Field | Purpose |
-|---|---|
-| `name` | Display name, used in tool namespacing (`mcp_{name}_{tool}`) |
-| `transport` | One of four transport variants (see below) |
-| `timeout_secs` | Per-call timeout (default: 60) |
-| `env` | Environment variables passed to stdio subprocesses |
-| `headers` | Extra HTTP headers for SSE/Streamable HTTP |
-| `oauth_provider` / `oauth_config` | OAuth support for remote servers |
-| `taint_scanning` | Enable outbound credential/PII scanning (default: true) |
-| `taint_policy` | Fine-grained per-tool, per-path taint exemptions |
-| `taint_rule_sets` | Hot-reloadable handle to named rule sets from `[[taint_rules]]` |
-| `roots` | Filesystem root directories advertised via MCP Roots capability |
-
-### 2. Connecting (`McpConnection::connect`)
-
-`connect(config)` performs the full handshake and returns a ready-to-use `McpConnection`:
-
-1. Validates and establishes the transport
-2. Performs MCP `initialize` handshake (Stdio/Http transports via rmcp; SSE manually)
-3. Discovers tools via `tools/list`
-4. Registers all tools under namespaced names
-
-### 3. Tool Execution (`call_tool_with_caller`)
-
-Production dispatch in `tool_runner::dispatch` calls `call_tool_with_caller`, which:
-
-1. Resolves the raw (un-namespaced) tool name
-2. Validates arguments against the tool's JSON Schema (`validate_args_against_schema`)
-3. Runs the taint scanner on the original agent-supplied arguments
-4. Injects the kernel-attested `CallerContext` into a cloned copy of arguments
-5. Dispatches to the appropriate transport
-
-### 4. Teardown (`close` / `Drop`)
-
-Call `close()` explicitly during hot-reload to await subprocess termination. `Drop` spawns a best-effort async close with a 10-second timeout as a safety net.
-
----
-
-## Transport Types (`McpTransport`)
-
-### `Stdio` — Subprocess via rmcp SDK
-
-Spawns a child process and communicates over stdin/stdout using the rmcp SDK for proper MCP protocol handling.
-
-Security measures:
-- **Shell interpreter blocking**: `bash`, `sh`, `cmd`, `powershell`, etc. are rejected — operators must specify a concrete runtime (`npx`, `node`, `python`)
-- **Path traversal rejection**: Commands containing `..` are rejected
-- **Environment sandboxing**: The subprocess receives only safe system variables (`PATH`, `HOME`, etc.) plus variables explicitly declared in `env` — the daemon's own secrets (`ANTHROPIC_API_KEY`, etc.) are never leaked
-- **`kill_on_drop(true)`**: The child is terminated when the connection closes
-- **Stderr drainage**: Child stderr is read in a background task (capped at 100 lines × 256 bytes) to prevent pipe-buffer stalls
-
-Environment variable expansion in args (`$HOME`, `${MY_VAR}`) is restricted to an allowlist built from `SAFE_ENV_VARS` + the server's declared `env` entries. Tilde expansion (`~/...`) resolves to the user's home directory.
-
-### `Sse` — HTTP POST with JSON-RPC
-
-Legacy Server-Sent Events transport using direct HTTP POST requests. The module manually constructs JSON-RPC 2.0 envelopes and manages request IDs.
-
-- Performs `initialize` / `notifications/initialized` / `tools/list` manually
-- Validates response `Content-Type` (must be `application/json` or `text/event-stream`)
-- Verifies JSON-RPC response IDs match request IDs
-
-### `Http` — Streamable HTTP (MCP 2025-03-26+)
-
-Uses rmcp's `StreamableHttpClientTransport` for the modern Streamable HTTP protocol. Handles `Accept` header negotiation, `Mcp-Session-Id` tracking, and SSE stream parsing.
-
-On 401 responses:
-1. Extracts `WWW-Authenticate` header from the rmcp error chain
-2. Discovers OAuth metadata via three-tier resolution (WWW-Authenticate → `/.well-known/oauth-authorization-server` → config fallback)
-3. Returns `"OAUTH_NEEDS_AUTH"` error to signal the API layer to drive the PKCE flow
-
-Filesystem roots are only advertised to local servers (determined by `is_local_url`).
-
-### `HttpCompat` — Plain HTTP/JSON Adapter
-
-A built-in compatibility layer for non-MCP HTTP backends. Tools are statically declared in configuration rather than discovered via `tools/list`.
-
-Features:
-- Path templates with `{param}` placeholders (percent-encoded)
-- Configurable HTTP method (GET, POST, PUT, PATCH, DELETE)
-- Request modes: JSON body, query string, or none
-- Response modes: raw text or pretty-printed JSON
-- Static or environment-derived headers
-
----
+`McpConnection::close()` explicitly shuts down the connection with a 10-second timeout. The `Drop` impl provides a best-effort fallback that spawns an async close on the current tokio runtime.
 
 ## Tool Namespacing
 
-All MCP tools are prefixed to prevent collisions across servers:
-
-```
-mcp_{server}_{tool}
-```
-
-Where `server` and `tool` are normalized (lowercased, hyphens → underscores). For example, a server named `"GitHub"` exposing tool `"create_issue"` becomes `mcp_github_create_issue`.
+All MCP tools are namespaced as `mcp_{server}_{tool}` to prevent collisions across servers. Server and tool names are normalized to lowercase with hyphens replaced by underscores.
 
 Key functions:
-- `format_mcp_tool_name(server, tool)` — builds the namespaced name
-- `is_mcp_tool(name)` — checks the `mcp_` prefix
-- `resolve_mcp_server_from_known(tool_name, server_names)` — robust reverse lookup using longest-prefix matching (handles server names containing underscores)
-- `extract_mcp_server(tool_name)` — simple heuristic split (only reliable for single-word server names)
+- **`format_mcp_tool_name(server, tool)`** — produces the namespaced name
+- **`is_mcp_tool(name)`** — checks the `mcp_` prefix
+- **`resolve_mcp_server_from_known(tool_name, server_names)`** — robust reverse lookup using longest-prefix match against known server names (handles multi-word server names)
+- **`extract_mcp_tool(tool_name)`** — lightweight heuristic that splits on the first `_` after `mcp_`; only reliable for single-word server names
 
----
+The dispatch layer in `tool_runner::dispatch` uses `is_mcp_tool` to route tool calls and `resolve_mcp_server_from_known` to find the correct `McpConnection`.
 
-## Caller Context (#5699)
+## Caller Context
 
-`CallerContext` carries kernel-attested identity of the entity that drove the current agent turn:
+`CallerContext` carries the kernel-attested identity of whoever drove the current agent turn (the human on a channel, a cron trigger, etc.). It contains:
 
-| Field | Source |
-|---|---|
-| `peer_id` | Channel peer (Telegram user ID, WhatsApp JID, etc.) |
+| Field | Description |
+|-------|-------------|
+| `peer_id` | Channel peer (Telegram user ID, WhatsApp JID) |
 | `channel` | Channel name (`"telegram"`, `"slack"`, etc.) |
-| `chat_id` | Platform conversation ID |
-| `session_id` | LibreFang `SessionId` string |
+| `chat_id` | Conversation ID (distinct from `peer_id` in group chats) |
+| `session_id` | LibreFang `SessionId` |
 
-Built via `CallerContext::from_parts()` from `ToolExecContext` fields. Returns `None` when all signals are absent, preserving byte-for-byte payload parity for prompt-cache compatibility.
+### Security: Strip-Then-Set Injection
 
-### Injection (Strip-then-Set)
+When `call_tool_with_caller` is invoked, the kernel-attested caller context is injected into the outgoing tool call using a **strip-then-set** pattern:
 
-The security boundary is a **strip-then-set** pattern:
+1. The agent's `arguments` object is cloned
+2. Any agent-supplied `_librefang_caller` key is **removed** (even if no caller context is being injected)
+3. The kernel-attested value is inserted under `_librefang_caller`
 
-1. The agent-supplied `_librefang_caller` key is **always removed** from arguments (even when no caller is present), preventing spoofing
-2. The kernel-attested value is then inserted under the same key
+This ordering is the security boundary — an agent that learns the key name cannot spoof a caller identity because its value is always overwritten.
 
-Transport-specific injection:
-- **Rmcp / SSE**: injected into the `arguments` object under `CALLER_CONTEXT_ARG_KEY` (`"_librefang_caller"`)
-- **HttpCompat**: shipped as `CALLER_CONTEXT_HEADER` (`"X-Librefang-Caller"`) HTTP header, since the body is template-rendered
+For **Rmcp/SSE** transports, the context travels in the `arguments` envelope. For **HttpCompat**, it's sent as the `X-Librefang-Caller` HTTP header since the body is template-rendered against a native API.
 
-The taint scanner runs on the **original** agent-supplied arguments before injection, so a malicious agent cannot hide credential-shaped data behind the `_librefang_caller` key.
+`CallerContext::from_parts` returns `None` when all fields are absent, preserving byte-for-byte payload parity with the pre-caller-context wire format (relevant for prompt-cache equivalence).
 
----
+## Taint Scanning
 
-## Outbound Taint Scanning
+Before any tool call reaches the MCP server, the outbound argument tree is scanned for credential-shaped data. This prevents an LLM from exfiltrating secrets through MCP tool-call arguments.
 
-Before any tool call reaches an MCP server, the arguments are scanned for credentials and PII using `scan_mcp_arguments_for_taint_with_policy`. This is a best-effort pattern-matching defense against LLM-driven credential exfiltration.
+### Scan Pipeline
 
-### Scanner Design
+1. **Tool-level kill switch** — if the tool's policy has `default = Skip`, scanning is bypassed entirely
+2. **Tree walk** — every string leaf is checked against `TaintSink::mcp_tool_call()` and the set of sensitive object keys
+3. **Sensitive key detection** — object keys matching known credential names (`authorization`, `api_key`, `secret`, `password`, etc.) with non-empty string values are blocked regardless of content shape
+4. **Per-path exemptions** — `McpTaintPolicy` allows skipping specific taint rules for specific JSONPaths
+5. **Rule-set downgrades** — named rule sets can downgrade `Block` to `Warn` or `Log`
 
-`walk_taint` recursively traverses the JSON argument tree (capped at `MCP_TAINT_SCAN_MAX_DEPTH` = 64 levels):
+The scanner walks recursively up to `MCP_TAINT_SCAN_MAX_DEPTH` (64 levels). Error messages contain only the JSON path of the offending leaf — never the payload itself.
 
-- **String leaves**: checked via `detect_outbound_text_violation_rules_with_skip` against `TaintSink::mcp_tool_call()`
-- **Object keys**: keys matching `MCP_SENSITIVE_KEY_NAMES` (e.g., `authorization`, `api_key`, `password`) with non-empty string values are flagged as credential-shaped regardless of value content
-- **Non-string leaves** (numbers, bools, null): skipped
+### Per-Path Exemptions
 
-Violation reports contain **only** the JSON path of the offending leaf — never the payload itself, since the error flows back to the LLM.
+`McpTaintPolicy` supports JSONPath-based skip rules:
 
-### Policy Configuration (`McpTaintPolicy`)
+```
+$.headers.authorization     → exact match
+$.headers.*                 → any direct child
+$.items[*]                  → any array element
+```
 
-Three levels of control:
+Limitation: object keys containing `.` or `[` cannot be precisely addressed. Use broader patterns (`$.*`) as a workaround.
 
-1. **Server-level kill switch**: `taint_scanning = false` disables scanning entirely (key-name blocking also disabled)
-2. **Tool-level bypass**: `taint_policy.tools.{tool}.default = "skip"` bypasses all scanning for a specific tool
-3. **Per-path exemptions**: `taint_policy.tools.{tool}.paths.{jsonpath}.skip_rules` disables specific rules at specific argument paths
+### Rule-Set Actions
 
-JSONPath matching supports:
-- Exact paths: `$.headers.authorization`
-- Wildcards: `$.items.*`, `$.items[*]`
-- Array index: `$.items[0]`
-
-Limitation: object keys containing `.` or `[` cannot be precisely targeted.
-
-### Rule Set Actions (`NamedTaintRuleSet`)
-
-Named rule sets referenced from a tool's `rule_sets` field can downgrade the default `Block` action:
+When a tool's policy references named `[[taint_rules]]` sets, rules covered by those sets can be downgraded:
 
 | Action | Behavior |
-|---|---|
+|--------|----------|
 | `Block` | Call is rejected (default) |
-| `Warn` | Call proceeds; `WARN`-level trace emitted |
-| `Log` | Call proceeds; `INFO`-level trace emitted |
+| `Warn` | Logged at WARN, call proceeds |
+| `Log` | Logged at INFO, call proceeds |
 
-When multiple rule sets cover the same fired rule, the **most permissive** action wins (`Log` > `Warn` > `Block`). Unknown rule-set names trigger a once-per-process warning via `UNKNOWN_RULE_SET_WARNED`.
+When multiple rule sets cover the same rule, the most permissive action wins (`Log` > `Warn` > `Block`).
 
-Rule sets are accessed through `TaintRuleSetsHandle` (`Arc<ArcSwap<Vec<NamedTaintRuleSet>>>`), enabling hot-reload: the kernel calls `.store()` on config reload; the scanner takes a `.load()` snapshot at scan time that remains stable for the entire walk.
+Unknown rule-set names trigger a once-per-process WARN to surface config typos without flooding logs.
 
----
+### Hot-Reload
 
-## Argument Validation (`validate_args_against_schema`)
+Taint rule sets use `ArcSwap<Vec<NamedTaintRuleSet>>` — a single handle is cloned into every connected server. The kernel calls `.store()` on config reload; the next tool call picks up new rules without restarting. A `.load()` snapshot taken at scan start stays stable for the entire walk.
 
-A lightweight pre-flight check before forwarding arguments to the MCP server:
+## Argument Validation
+
+A lightweight guard runs before the taint scanner:
 
 1. If the schema declares `type: "object"`, rejects non-object arguments (arrays, scalars)
-2. Checks the schema's `required` array against the provided argument keys
+2. Checks that all `required` fields are present
 
-This is intentionally not a full JSON Schema validator — type correctness of individual fields, patterns, enums, `additionalProperties`, and nested validation remain delegated to the MCP server.
+This is intentionally cheap — not a full JSON Schema validator. Nested validation, enums, patterns, and `additionalProperties` remain delegated to MCP servers.
 
----
+## Response Size Limiting
 
-## Security Guardrails Summary
+All HTTP-based transports cap response bodies at 16 MiB (`MAX_RESPONSE_BYTES`). The check uses a two-phase approach:
 
-| Guardrail | Threat Mitigated |
-|---|---|
-| Taint scanning | LLM-driven credential/PII exfiltration to MCP servers |
-| Caller context strip-then-set | Agent spoofing of kernel-attested identity |
-| Environment sandboxing | Subprocess reading daemon secrets |
-| SSRF protection (`check_ssrf`) | Pivot to cloud metadata / internal services |
-| Response size cap (16 MiB) | OOM from malicious server responses |
-| Shell interpreter blocking | Command injection via stdio transport |
-| JSON-RPC ID verification | Response confusion from concurrent requests |
-| Content-Type validation | Decoding proxy error pages as JSON-RPC |
-| Argument validation | Server crashes from malformed input |
+1. **Fast path:** reject via `Content-Length` header before reading any bytes
+2. **Streaming path:** consume chunks incrementally and abort mid-read if the cap is breached
 
-### SSRF Protection
-
-`check_ssrf` delegates to `mcp_oauth::is_ssrf_blocked_url_for_connect`, which:
-- Parses URLs with the `url` crate (no substring matching)
-- Rejects non-`http(s)` schemes and userinfo in URLs
-- Blocks cloud-metadata pivots: `0.0.0.0`, `169.254/16`, `100.64.0.0/10`, `192.0.0.192`, `metadata.google.internal`, etc.
-- Unwraps IPv4-mapped IPv6 and NAT64 well-known prefixes before re-checking
-
-Local addresses (`127.0.0.1`, `localhost`, `::1`) are allowed for MCP backend URLs (operator-configured), but blocked on the OAuth token-exchange path where hosts come from remote server responses.
-
-### Response Size Capping
-
-`read_response_bytes_capped` streams the response body chunk-by-chunk, aborting once the running total exceeds `MAX_RESPONSE_BYTES` (16 MiB). The `Content-Length` header is checked first as a fast path.
-
----
-
-## MCP Protocol Versioning
-
-`SUPPORTED_MCP_VERSIONS` lists `["2024-11-05", "2025-03-26"]`. The first entry is advertised in `initialize`; an unknown version from the server triggers a warning but does not abort the connection.
-
----
-
-## Roots Capability
-
-`RootsClientHandler` implements rmcp's `ClientHandler` trait to advertise filesystem root directories during the MCP handshake. Roots are converted to `file://` URIs (with proper percent-encoding and Windows drive-letter handling) and declared in client capabilities.
-
-Roots are only advertised to:
-- Stdio transports (local subprocesses)
-- Streamable HTTP transports where `is_local_url` returns true
-
----
+This prevents malicious servers from causing OOM through oversized responses.
 
 ## Submodule: `mcp_oauth`
 
-OAuth support for MCP servers requiring authentication. Provides:
+The `mcp_oauth` submodule handles OAuth 2.0 + PKCE authentication for remote MCP servers:
 
-- `discover_oauth_metadata` — three-tier resolution (WWW-Authenticate → well-known → config fallback)
-- `McpOAuthProvider` trait — load/save tokens with vault integration
-- `McpAuthState` — tracks authentication status per connection
-- SSRF validation for OAuth endpoints (stricter than backend URL validation — blocks loopback and RFC1918)
+- **`discover_oauth_metadata`** — three-tier resolution: `WWW-Authenticate` header → `.well-known/oauth-authorization-server` → config fallback
+- **`McpOAuthProvider`** trait — abstracts token storage (load/save) so the daemon doesn't handle browser redirects directly
+- **SSRF protection** — stricter on the OAuth path (blocks loopback, RFC1918, ULA, link-local, cloud-metadata addresses) since OAuth URLs come from remote server responses
+- **PKCE helpers** — `generate_pkce_verifier`, `generate_pkce_challenge` (S256), `generate_state`, `generate_flow_id`
 
-The OAuth flow is API-driven: the daemon never opens a browser. On 401, it returns `"OAUTH_NEEDS_AUTH"` and the API layer drives the PKCE authorization code flow via the dashboard.
-
----
+The auth flow is: daemon detects 401 → discovers metadata → signals `OAUTH_NEEDS_AUTH` → API layer drives browser-based PKCE → callback stores tokens → next connect uses cached token.
 
 ## Integration Points
 
-### Upstream Callers
+**Primary entry point:** `tool_runner::dispatch::execute_tool_raw` calls `is_mcp_tool` to identify MCP tool calls, `resolve_mcp_server_from_known` to find the server, `CallerContext::from_parts` to build caller identity, and `call_tool_with_caller` to dispatch.
 
-| Caller | Module | Function Used |
-|---|---|---|
-| Tool dispatch | `tool_runner::dispatch` | `call_tool_with_caller`, `CallerContext::from_parts`, `is_mcp_tool`, `resolve_mcp_server_from_known` |
-| Agent routes | `routes::agents` | `resolve_mcp_server_from_known` |
-| TUI events | `tui::event` | `resolve_mcp_server_from_known` |
-| MCP summary | `kernel::mcp_summary` | `normalize_name`, `resolve_mcp_server_from_known` |
-| OAuth routes | `routes::mcp_auth` | `discover_oauth_metadata`, `generate_state`, `is_ssrf_blocked_url` |
+**API routes:** `mcp_auth::auth_start` and `auth_callback` drive the OAuth PKCE flow using `discover_oauth_metadata`, `generate_state`, and `McpOAuthProvider`.
 
-### Key Dependencies
+**Tool listing:** `routes::tools_sessions` uses `resolve_mcp_server_from_known` to attribute tools to servers. `kernel::mcp_summary::render_mcp_summary` uses `normalize_name` for display formatting.
 
-- `rmcp` — MCP protocol SDK (Stdio and Streamable HTTP transports)
-- `reqwest` — HTTP client (SSE and HttpCompat transports)
-- `arc_swap` — Lock-free hot-reload of taint rule sets
-- `librefang-types` — `TaintSink`, `ToolDefinition`, config types
-- `librefang-http` — Proxied HTTP client builder
-- `url` — URL parsing for SSRF checks and root URI construction
+**TUI:** `tui::event::spawn_fetch_agent_mcp_servers` resolves MCP servers for agent configuration views.
