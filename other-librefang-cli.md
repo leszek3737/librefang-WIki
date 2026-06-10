@@ -2,119 +2,130 @@
 
 # librefang-cli
 
-The `librefang-cli` crate produces the `librefang` binary — the primary command-line interface for the LibreFang Agent OS. It serves dual roles:
+CLI front-end for the LibreFang Agent OS. Produces the `librefang` binary.
 
-- **Daemon mode** (`librefang start`): launches a long-running process exposing an HTTP API on `http://127.0.0.1:4545` and serving a dashboard.
-- **Single-shot mode**: when no daemon is running, most commands boot an in-process kernel, execute the requested operation, and exit.
+## Overview
+
+`librefang-cli` is the primary user-facing entry point for LibreFang. It provides a `clap`-based command tree (`librefang start`, `librefang agent …`, `librefang doctor`, etc.) and operates in one of two modes:
+
+- **Daemon mode** — `librefang start` launches a long-running HTTP API server (default `http://127.0.0.1:4545`) plus a dashboard. Subsequent CLI invocations communicate with the running daemon over HTTP.
+- **Single-shot mode** — when no daemon is detected, commands boot an in-process kernel via `librefang-kernel` for one-off execution and then exit.
+
+The crate is intentionally thin: argument parsing, I/O formatting, and orchestration live here, while all substantive logic is delegated to the library crates listed below.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    CLI["librefang binary"] -->|"subcommand dispatch"| Kernel["librefang-kernel"]
-    CLI -->|"daemon running?"| HTTP["HTTP client (reqwest)"]
-    HTTP -->|"http://127.0.0.1:4545"| Daemon["running daemon"]
-    CLI --> Types["librefang-types"]
-    CLI --> API["librefang-api"]
-    CLI --> Channels["librefang-channels"]
-    CLI --> Skills["librefang-skills"]
-    CLI --> Import["librefang-import"]
-    CLI --> Extensions["librefang-extensions"]
-    CLI --> Memory["librefang-memory"]
-    CLI --> Runtime["librefang-runtime"]
-    CLI --> ACP["librefang-acp"]
+    CLI["librefang (binary)"]
+    CLI -->|args| CLAP["clap"]
+    CLI -->|daemon| API["librefang-api"]
+    CLI -->|in-process| KERNEL["librefang-kernel"]
+    CLI -->|agent ops| CHANNELS["librefang-channels"]
+    CLI -->|imports| IMPORT["librefang-import"]
+    CLI -->|skills| SKILLS["librefang-skills"]
+    CLI -->|extensions| EXT["librefang-extensions"]
+    CLI -->|memory| MEMORY["librefang-memory"]
+    CLI -->|ACP| ACP["librefang-acp"]
+    CLI -->|runtime| RT["librefang-runtime"]
+    API -->|HTTP| REMOTE["Daemon (127.0.0.1:4545)"]
 ```
 
-When a daemon is already running, the CLI acts as a thin HTTP client, forwarding commands to the daemon's API. When no daemon is present, the CLI creates an in-process kernel instance to handle the request directly.
+### Crate dependencies
 
-## Commands
+| Crate | Role in the CLI |
+|---|---|
+| `librefang-kernel` | Boots the in-process agent kernel for single-shot commands. |
+| `librefang-api` | HTTP client surface when talking to a running daemon. |
+| `librefang-channels` | Channel adapter registry (now lightweight — adapters run as sidecars). |
+| `librefang-import` | Bulk-import workflows. |
+| `librefang-skills` | Skill registry and execution. |
+| `librefang-extensions` | Extension loading and lifecycle. |
+| `librefang-memory` | Persistent memory / context store. |
+| `librefang-runtime` | Shared runtime primitives. |
+| `librefang-acp` | Agent Communication Protocol — kernel adapter feature enabled. |
+| `librefang-types` | Shared domain types. |
 
-| Command | Description |
-|---------|-------------|
-| `librefang start` | Start the daemon (HTTP API + dashboard) |
-| `librefang init` | Write a starter `~/.librefang/config.toml` |
-| `librefang agent <subcommand>` | Spawn, list, or message agents |
-| `librefang doctor` | Diagnose the local environment |
-| `librefang help` | Print full command catalog |
+## Feature flags
 
-Any subcommand accepts `--help` for detailed usage.
-
-## Feature Flags
-
-Defined in `Cargo.toml`:
+Defined in `Cargo.toml`.
 
 ### `telemetry` *(default)*
 
-Enables OpenTelemetry tracing integration. Propagates the feature to `librefang-api` and pulls in the `opentelemetry` and `tracing-opentelemetry` crates.
+Enables OpenTelemetry tracing via `opentelemetry` and `tracing-opentelemetry`, and propagates the same feature into `librefang-api`. This is the recommended production build.
 
 ### `mini`
 
-An **empty alias** retained purely for backward compatibility with existing CI release jobs (`cli_linux_mini`, `cli_mac_mini`, `cli_windows_mini`). These jobs produce `librefang-${target}-mini.tar.gz` artifacts. Since per-channel cargo features were removed (all channel adapters now run as out-of-process sidecars), the `mini` build is byte-identical to the default-features build. This alias should be retired in a follow-up along with the associated CI jobs.
+An **empty** alias. Historically `mini` excluded heavy channel adapters from the binary, but since all channel adapters now run as out-of-process sidecars (`librefang.sidecar.adapters.*` in the SDK package), the `mini` artifact is byte-identical to the default-features build. It exists solely so that existing CI release jobs (`cli_linux_mini`, `cli_mac_mini`, `cli_windows_mini`) continue to produce `librefang-${target}-mini.tar.gz` without modification. Those jobs and this alias should be retired in a follow-up.
 
 ### Removed features
 
-- `core-channels`, `all-channels`, `android`: Previously gated in-process channel adapters (IMAP, SMTP, etc.). These code paths no longer exist; channel adapters run as sidecar processes (`librefang.sidecar.adapters.*` in the SDK package).
+`android`, `all-channels`, `core-channels`, and individual `channel-*` features no longer exist. The Android-specific `rustls-connector` workaround that motivated them was tied to in-process IMAP/SMTP code paths that have been removed. Release CI now builds with `--features telemetry` unconditionally.
 
-## Build Script (`build.rs`)
+## Build-time metadata (`build.rs`)
 
-The build script injects three compile-time environment variables that the binary reads (likely in a `version()` or `--version` handler):
+The build script stamps three environment variables into the compiled binary at build time. These are accessible via `env!()` in `src/main.rs` (e.g., for `librefang --version` output or diagnostic logging).
 
 | Variable | Source | Purpose |
-|----------|--------|---------|
-| `GIT_SHA` | CI env var or `git rev-parse --short HEAD` | Short (7-char) commit hash |
-| `BUILD_DATE` | `chrono::Utc::now()` formatted as `%Y-%m-%d` | UTC build date |
-| `RUSTC_VERSION` | `rustc --version` output | Compiler version |
+|---|---|---|
+| `GIT_SHA` | CI env or `git rev-parse` | Short (7-char) commit hash. |
+| `BUILD_DATE` | `chrono::Utc::now()` | UTC date in `YYYY-MM-DD`. |
+| `RUSTC_VERSION` | `rustc --version` output | Full rustc version string. |
 
 ### Git SHA resolution order
 
-The `resolve_git_sha()` function tries sources in priority order:
+```
+1. GITHUB_SHA env var     → truncate to 7 chars
+2. CI_COMMIT_SHA env var  → truncate to 7 chars
+3. `which("git")` → `git rev-parse --short HEAD`
+4. "unknown" fallback
+```
 
-1. **`GITHUB_SHA`** — set by GitHub Actions (full 40-char SHA, truncated to 7).
-2. **`CI_COMMIT_SHA`** — set by GitLab CI and generic CI systems (full SHA, truncated to 7).
-3. **`git rev-parse --short HEAD`** — resolved by locating `git` via the `which` crate rather than relying on shell PATH lookup.
-4. **`"unknown"`** — fallback if none of the above succeed.
+CI environment variables are preferred because they are authoritative on hosted runners and avoid spawning a subprocess. When falling back to `git`, the binary is resolved via `which::which("git")` rather than relying on shell PATH lookup semantics (see issue #5667).
 
-The `short_sha()` helper truncates a full SHA to 7 characters, matching `git rev-parse --short HEAD`'s default behavior.
+The build date is captured via `chrono::Utc::now()` instead of shelling out to `date -u +%Y-%m-%d`, eliminating a platform-specific process spawn (BSD and GNU `date` accept different flags) and keeping the build script reproducible across hosts.
 
-### Reproducibility notes
+### Rebuild triggers
 
-- Build date uses `chrono::Utc::now()` instead of shelling out to the platform `date` command, avoiding BSD/GNU flag incompatibilities.
-- The `git` binary is resolved via `which::which("git")` rather than bare-name invocation, making PATH resolution explicit and portable.
-- `cargo:rerun-if-env-changed` directives ensure the build script re-runs when CI environment variables change.
+The build script emits `cargo:rerun-if-env-changed` for `GITHUB_SHA`, `CI_COMMIT_SHA`, and `SOURCE_DATE_EPOCH` so cargo invalidates the script when these inputs change.
 
-## Dependencies
+## Global allocator
 
-### Workspace crates
+On non-MSVC targets (`cfg(not(target_env = "msvc"))`), the binary uses `tikv-jemallocator` with `disable_initial_exec_tls` as the global allocator. This is configured in `src/main.rs` via the standard `#[global_allocator]` attribute.
 
-| Crate | Role |
-|-------|------|
-| `librefang-types` | Shared type definitions |
-| `librefang-kernel` | Core agent kernel |
-| `librefang-api` | HTTP API layer (default features disabled) |
-| `librefang-channels` | Channel adapter traits (default features disabled) |
-| `librefang-import` | Data import functionality |
-| `librefang-skills` | Agent skill system |
-| `librefang-extensions` | Extension loading |
-| `librefang-memory` | Agent memory management |
-| `librefang-runtime` | Runtime execution support |
-| `librefang-acp` | Agent communication protocol (with `kernel-adapter` feature) |
+## Notable dependencies
 
-### Notable external dependencies
-
-- **clap** / **clap_complete**: CLI argument parsing and shell completion generation
-- **tokio**: Async runtime
-- **reqwest** (with `blocking`): HTTP client for daemon communication
-- **ratatui**: Terminal UI framework (for TUI-based commands or dashboard views)
-- **tracing** / **tracing-subscriber**: Structured logging
-- **serde_json** / **toml** / **toml_edit**: Configuration file handling
-- **rusqlite**: SQLite for local storage
-- **zeroize**: Secure memory zeroing for sensitive data
-- **fluent** / **unic-langid**: Internationalization support
-
-### Platform-specific
-
-On non-MSVC targets, **tikv-jemallocator** is used as the global memory allocator (with `disable_initial_exec_tls` feature) for improved performance. This is configured via `#[global_allocator]` in `src/main.rs`.
+| Dependency | Usage |
+|---|---|
+| `clap` / `clap_complete` | CLI argument parsing and shell completion generation. |
+| `ratatui` | Terminal UI for interactive/dashboard mode. |
+| `colored` | Colored terminal output. |
+| `reqwest` (blocking) | HTTP client for daemon communication. |
+| `fluent` / `unic-langid` | Internationalization (i18n) of CLI strings. |
+| `toml` / `toml_edit` | Reading and modifying `~/.librefang/config.toml`. |
+| `rusqlite` | Local SQLite for single-shot / offline operation. |
+| `zeroize` | Secure clearing of sensitive in-memory data. |
+| `open` | Cross-platform "open URL/file" for dashboard links. |
+| `rustls` | TLS without OpenSSL dependency. |
 
 ## Configuration
 
-The CLI expects configuration at `~/.librefang/config.toml`, created by `librefang init`. The `toml_edit` dependency suggests the CLI both reads and programmatically modifies this file (e.g., during `init` or agent configuration commands).
+`librefang init` writes a starter configuration to `~/.librefang/config.toml`. The `dirs` crate resolves the platform-appropriate config directory. Configuration is read at startup and can reference channel adapter endpoints, telemetry exporters, and runtime parameters.
+
+## Development
+
+```bash
+# Default build (telemetry enabled)
+cargo build -p librefang-cli
+
+# Build for release
+cargo build -p librefang-cli --release
+
+# Run with version output (verifies build metadata)
+cargo run -p librefang-cli -- --version
+
+# Run tests
+cargo test -p librefang-cli
+```
+
+Tests use `tempfile` for isolated filesystem fixtures.

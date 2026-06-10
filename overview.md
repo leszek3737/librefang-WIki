@@ -1,65 +1,79 @@
 # crates — Wiki
 
-# LibreFang Agent OS
+# LibreFang
 
-LibreFang is an autonomous agent operating system — a platform for running, managing, and interacting with AI agents that can use tools, maintain persistent memory, communicate across platforms, and operate both interactively and in the background.
-
-At its core is a long-lived agent kernel that persists agent identity across sessions, gates dangerous operations through approval flows, manages LLM provider failover, and routes messages between agents and the outside world through a variety of transports.
+LibreFang is an **agent operating system** — a platform for building, running, and managing AI agents that reason, use tools, persist memories across sessions, and interact with humans through multiple interfaces. Operators control agents via a web dashboard, native desktop app, command-line interface, or connected messaging platforms like Telegram, Discord, Slack, and WhatsApp. Editors like VS Code and Zed integrate natively through the ACP adapter.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    Clients["CLI & Desktop"]
-    Editors["ACP Adapter"]
-    Channels["Channel Bridge"]
+    UI["CLI / Desktop / Dashboard"]
+    CH["Channels"]
+    ACP["ACP Adapter"]
 
-    API["API Server"]
+    UI --> API
+    CH --> API
+    ACP --> API
 
-    Kernel["Kernel Core"]
-    Runtime["Agent Runtime"]
-    LLM["LLM Drivers"]
-    Memory["Memory & Knowledge"]
-
-    Clients --> API
-    Editors --> Kernel
-    Channels --> Kernel
-    API --> Kernel
-    Kernel --> Runtime
-    Kernel --> LLM
-    Runtime --> Memory
-    Runtime --> LLM
-    Kernel --> Memory
+    API["API Server"] --> K["Kernel"]
+    K --> RT["Agent Runtime"]
+    RT --> LLM["LLM Drivers"]
+    RT --> TOOLS["Tools / Skills"]
+    RT --> MEM["Memory System"]
 ```
 
-## How the pieces fit together
+The system is organized in four layers:
 
-### Clients and transports
+**User-facing interfaces** — where operators and external systems reach agents. The [Command-Line Interface](command-line-interface.md) is the primary entry point, parsing arguments and either talking to a running daemon over HTTP or booting an in-process kernel. The [Desktop Application](desktop-application.md) wraps everything in a Tauri 2.0 native window with system tray, auto-updates, and notifications. The [Dashboard](dashboard.md) is a React SPA that communicates with the kernel's REST API and real-time SSE/WebSocket streams. The [Agent Control Protocol](agent-control-protocol.md) adapter bridges editors like Zed, VS Code, and JetBrains into the agent runtime over JSON-RPC 2.0 on stdio. The [Channels](channels.md) module normalizes inbound messages from heterogeneous chat APIs into a uniform type and routes them to the correct agent.
 
-Users interact with LibreFang through several surfaces. The [CLI & Terminal UI](librefang-cli.md) is the primary entry point — it manages the daemon, provides an interactive chat interface, and ships a full Ratatui-based terminal dashboard. The [Desktop Application](librefang-desktop.md) wraps the same functionality in a Tauri 2.0 native app with system tray integration, auto-update, and support for connecting to remote instances. Editors like VS Code and Zed connect through the [ACP adapter](librefang-acp.md), which bridges the Agent Client Protocol (JSON-RPC 2.0) directly to the kernel so approval modals and file access live natively in the editor. For chat platforms, the [Channel Bridge & Messaging](librefang-channels.md) module normalizes inbound messages from Telegram, Discord, Slack, and others, routing them to the correct agent and dispatching responses back through the originating adapter.
+**API surface** — the [API Server & Routes](api-server-routes.md) crate hosts REST endpoints, SSE streams, WebSocket sessions, ACP listeners, and the channel bridge that lets external editors and messaging platforms share a single kernel instance.
 
-### API layer
+**Kernel** — the [Kernel](kernel.md) is the central coordination layer. It owns agent identity, approval gating, workflow orchestration, skill management, the agent spawn loop, configuration reload, heartbeat, pairing, and all the state machines every subsystem depends on.
 
-All of these clients converge on the [API Server](librefang-api.md), the transport boundary between the outside world and the kernel. It exposes HTTP/SSE endpoints, hosts the [Dashboard Frontend](librefang-dashboard.md) (a React SPA for monitoring and configuration), and delegates all agent logic to the kernel. The API server doesn't implement agent behavior itself — it translates between client protocols and the kernel's internal APIs.
+**Runtime and execution** — the [Agent Runtime](agent-runtime.md) manages a single agent turn end-to-end: loading context, recalling memories, building the prompt, calling the LLM in a tool-use loop, executing tools, and persisting session state. It's supported by:
 
-### Kernel and runtime
+- [LLM Drivers](llm-drivers.md) — provider abstraction with streaming, retry/backoff, and fallback chains across concrete implementations
+- [Tool Execution](tool-execution.md) — dispatcher routing tool invocations from the agent loop to individual handlers
+- [Memory System](memory-system.md) — SQLite-backed semantic memory, knowledge graph, session state, and usage tracking, plus an optional Markdown knowledge vault for human-auditable documentation
+- [Skills System](skills-system.md) — marketplace discovery, security-scanned installation, agent-driven creation, and version-tracked evolution with rollback
+- [MCP, Media & Sandbox Runtimes](mcp-media-sandbox-runtimes.md) — external MCP tool servers, media providers, Docker sandboxes, and Merkle-audited event trails
+- [Extensions](extensions.md) — lifecycle management for discovering, installing, securing, and monitoring MCP server integrations
 
-The [Kernel Core](librefang-kernel-src.md) is the central orchestrator. It handles agent identity persistence across respawns, approval gating for dangerous tool operations, message routing, cost metering, and peer-to-peer networking via the [Wire Protocol & P2P](librefang-wire.md) layer (TCP, JSON-RPC framed, with HMAC + Ed25519 authentication). The kernel dispatches work to the [Agent Runtime](librefang-runtime-src.md), which manages the core agent loop, external tool connectivity through MCP, multi-modal media processing, audit logging, and sandboxed code execution.
+Everything builds on [Shared Types](shared-types.md), which centralizes identifiers, manifests, lifecycle states, and wire-format contracts that every crate depends on, and [Infrastructure Libraries](infrastructure-libraries.md), which provides the HTTP client builder, wire protocol, process management, telemetry, and testing utilities.
 
-### Supporting subsystems
+## End-to-End Flow
 
-Agents think and remember through the [LLM Drivers](librefang-llm-driver-src.md) layer, which abstracts multiple providers behind a uniform interface with automatic fallback chains, credential rotation, and retry logic. Persistent knowledge lives in [Memory & Knowledge](librefang-memory-src.md), providing two complementary paradigms: structured semantic search backed by SQLite + vectors, and a human-readable wiki vault for navigation and auditability.
+A typical agent interaction follows this path:
 
-Agents can be extended through the [Skills System](librefang-skills.md) — discovery, installation, and agent-driven mutation of skill packages from the ClawHub marketplace — and [Hands](librefang-hands.md), which are pre-built, domain-complete autonomous agent packages that run in the background. The [Extensions & Credentials](librefang-extensions.md) module manages OAuth2 flows, credential vaults, MCP server catalogs, and health monitoring.
+1. A message arrives through one of the interfaces — a user types in the dashboard, a message comes in on Telegram, or an editor sends an ACP request.
+2. The [API Server & Routes](api-server-routes.md) receives it and forwards it to the [Kernel](kernel.md), which resolves which agent should handle the message.
+3. The Kernel dispatches to the [Agent Runtime](agent-runtime.md), which loads agent context, recalls relevant memories from the [Memory System](memory-system.md), and assembles the full prompt.
+4. The runtime calls out to an LLM provider through [LLM Drivers](llm-drivers.md), streaming the response back.
+5. If the LLM requests a tool call, [Tool Execution](tool-execution.md) dispatches it — potentially invoking a skill from the [Skills System](skills-system.md), an external MCP server via [MCP, Media & Sandbox Runtimes](mcp-media-sandbox-runtimes.md), or an [Extensions](extensions.md)-managed integration.
+6. Results flow back through the runtime loop (which may trigger additional LLM turns), and the final response streams to the originating interface through the API server.
 
-Everything rests on [Shared Types](librefang-types.md) for common data structures and [Infrastructure Libraries](librefang-infra.md) for cross-cutting concerns like HTTP transport, telemetry, subprocess bridging, data migration, and test harnessing.
+## Getting Started
 
-## Key end-to-end flows
+LibreFang is a Cargo workspace. Clone and build:
 
-**Starting a session**: A user runs `librefang start` from the CLI, which boots the kernel as a long-lived daemon. The kernel loads credentials via the extensions layer, initializes LLM driver pools, opens the API server, and begins accepting connections.
+```bash
+git clone <repo-url>
+cd crates
+cargo build
+```
 
-**Chatting with an agent**: A message arrives through a channel (e.g., Telegram), gets normalized by the Channel Bridge, and is routed to the kernel. The kernel resolves the target agent, the agent loop in the Runtime processes the message — calling LLM Drivers for completions, consulting Memory for context, compressing conversation history when token limits approach, and invoking tools as needed — then routes the response back through the originating channel.
+The fastest way to explore is through the CLI:
 
-**Running a background Hand**: A user activates a Hand. The kernel creates a managed instance, the Runtime executes it independently, and progress surfaces through the Dashboard or CLI. Hands can evolve their own skills and write findings to the knowledge wiki.
+```bash
+cargo run --bin librefang-cli -- --help
+```
 
-**Connecting from an editor**: An ACP-speaking editor discovers the kernel, authenticates via the handshake protocol, and streams prompts directly. Approval modals for dangerous operations appear in the editor's own UI — no separate dashboard required.
+To run the full stack with the web dashboard, launch the desktop app or start the API server and open the dashboard in your browser.
+
+## Where to Go Next
+
+- **New to the codebase?** Start with the [Kernel](kernel.md) to understand state management, then walk through the [Agent Runtime](agent-runtime.md) to see how a turn executes.
+- **Building an integration?** See [Channels](channels.md) for messaging platforms or [Agent Control Protocol](agent-control-protocol.md) for editor integrations.
+- **Adding a tool?** Read [Tool Execution](tool-execution.md) and [Skills System](skills-system.md).
+- **Adding an LLM provider?** See [LLM Drivers](llm-drivers.md).

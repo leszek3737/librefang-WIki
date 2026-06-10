@@ -4,153 +4,95 @@
 
 ## Purpose
 
-This file contains example integration tests that exercise the `librefang-testing` infrastructure against the application's HTTP API and mock drivers. It serves two roles:
+This file contains example tests that demonstrate how to use the `librefang-testing` test infrastructure. It serves as both a living reference for developers writing new tests and a smoke-test suite verifying that the core API endpoints and mock drivers behave correctly.
 
-1. **Validation** — confirms that core API routes, mock kernel/driver wiring, and response contracts behave as expected.
-2. **Reference** — demonstrates idiomatic use of `TestAppState`, `MockKernelBuilder`, `MockLlmDriver`, `FailingLlmDriver`, and the `assert_json_ok`/`assert_json_error` helpers so contributors can write new tests without guesswork.
+## Test Categories
 
----
+### HTTP Endpoint Tests
 
-## Architecture
+These tests instantiate a full `TestAppState`, obtain its Axum router, and fire one-shot HTTP requests through `tower::ServiceExt::oneshot`. They validate status codes and JSON response shapes.
 
-Every test follows the same lifecycle:
+| Test Function | Method & Path | Asserted Behavior |
+|---|---|---|
+| `test_health_endpoint` | `GET /api/health` | 200, JSON contains `"status": "ok"` or `"degraded"` |
+| `test_version_endpoint` | `GET /api/version` | 200, JSON contains a `version` field |
+| `test_list_agents` | `GET /api/agents` | 200, JSON contains `items` (array) and `total` (u64) |
+| `test_get_agent_invalid_id` | `GET /api/agents/not-a-valid-uuid` | 400, JSON contains `error` field |
+| `test_get_agent_not_found` | `GET /api/agents/{random-uuid}` | 404, JSON contains `error` field |
+| `test_spawn_agent_post` | `POST /api/agents` | 200 or 201, body has `manifest_toml` |
+| `test_delete_nonexistent_agent_is_idempotent` | `DELETE /api/agents/{random-uuid}` | 200, JSON has `"status": "already-deleted"` |
+| `test_set_model_not_found` | `PUT /api/agents/{random-uuid}/model` | 4xx/5xx |
+| `test_send_message_agent_not_found` | `POST /api/agents/{random-uuid}/message` | 404 or 400 |
+| `test_patch_agent_not_found` | `PATCH /api/agents/{random-uuid}` | 404 or 400 |
+
+All endpoint tests follow the same pattern:
+
+```
+TestAppState::new() → .router() → test_request() → oneshot → assert_json_ok / assert_json_error
+```
+
+### Mock Driver Tests
+
+These tests exercise the mock LLM drivers without touching the HTTP layer, validating driver-level contracts directly.
+
+| Test Function | Driver | What It Validates |
+|---|---|---|
+| `test_mock_llm_driver_recording` | `MockLlmDriver` | Returns pre-configured responses in sequence, records calls (model, system prompt), and tracks `call_count` |
+| `test_mock_llm_driver_custom_tokens_and_stop_reason` | `MockLlmDriver` | Builder methods `with_tokens` and `with_stop_reason` correctly customize `usage` and `stop_reason` in the response |
+| `test_failing_llm_driver` | `FailingLlmDriver` | Always returns an error with the configured message; `is_configured()` returns `false` |
+
+### Custom Configuration Test
+
+`test_custom_config_kernel` demonstrates how to build a `TestAppState` with a customized kernel via `MockKernelBuilder::new().with_config()`, then verifies the config was applied by reading `app.state.kernel.config_ref()`.
+
+## Key Helpers Used
+
+All helpers are re-exported from the `librefang-testing` crate root:
+
+- **`TestAppState::new()`** — Creates a test application with default (empty-mock) configuration.
+- **`TestAppState::with_builder(builder)`** — Creates a test application from a custom `MockKernelBuilder`.
+- **`app.router()`** — Returns a fully-wired Axum `Router` ready for `oneshot`.
+- **`test_request(method, path, body)`** — Builds an `axum::http::Request<String>` with the given method, path, and optional JSON body.
+- **`assert_json_ok(response)`** — Asserts status 200, deserializes the body into `serde_json::Value`, and returns it.
+- **`assert_json_error(response, expected_status)`** — Asserts the given status code, deserializes the error body into `serde_json::Value`, and returns it.
+- **`MockLlmDriver`** — A stub `LlmDriver` that returns canned responses, records all calls, and exposes `call_count()` and `recorded_calls()`.
+- **`FailingLlmDriver`** — A stub `LlmDriver` that always fails, used for testing error-handling paths.
+
+## Request Flow
 
 ```mermaid
 flowchart LR
-    A[TestAppState::new] --> B["router()"]
-    B --> C["test_request(method, path, body)"]
-    C --> D["oneshot(req)"]
-    D --> E{"assert_json_ok<br/>or<br/>assert_json_error"}
+    A[test_request] --> B[router.oneshot]
+    B --> C{Status Code}
+    C -- 200 --> D[assert_json_ok]
+    C -- 4xx_5xx["4xx/5xx"] --> E[assert_json_error]
+    D --> F[assert on JSON fields]
+    E --> F
 ```
 
-1. **Bootstrap** — `TestAppState::new()` (or `::with_builder(...)`) creates a fully-wired application with mock kernel, drivers, and in-memory state.
-2. **Build router** — `.router()` returns an Axum `Router` ready for `oneshot` dispatch.
-3. **Construct request** — `test_request(method, path, Some(body))` wraps `axum::http::Request` construction.
-4. **Dispatch** — `router.oneshot(req).await` drives the request through middleware, handlers, and mock layers without a live network.
-5. **Assert** — helpers deserialize the response body into `serde_json::Value` and verify status codes, letting tests assert on JSON fields directly.
+## Conventions
 
----
+1. **Tokio flavor**: Most endpoint tests use `#[tokio::test(flavor = "multi_thread")]` because the Axum router requires a multi-threaded runtime. Unit-level mock driver tests use the default single-thread flavor.
+2. **No external services**: Everything runs in-process. `MockKernelBuilder` injects mock implementations so no real LLM backend, database, or network is needed.
+3. **Idempotency contracts**: The DELETE test explicitly verifies that deleting a nonexistent agent returns `200 OK` with `{"status": "already-deleted"}` rather than `404`. This matches the API's idempotent deletion contract — retries after network blips must not surface phantom errors.
 
-## Test Catalog
+## Adding a New Test
 
-### Health & Meta Endpoints
-
-| Test | Method | Path | Asserts |
-|---|---|---|---|
-| `test_health_endpoint` | GET | `/api/health` | 200; `status` field is `"ok"` or `"degraded"` |
-| `test_version_endpoint` | GET | `/api/version` | 200; `version` field exists |
-
-### Agent CRUD Routes
-
-| Test | Method | Path | Asserts |
-|---|---|---|---|
-| `test_list_agents` | GET | `/api/agents` | 200; `items` array and `total` u64 |
-| `test_get_agent_invalid_id` | GET | `/api/agents/not-a-valid-uuid` | 400; `error` field present |
-| `test_get_agent_not_found` | GET | `/api/agents/{fake_uuid}` | 404; `error` field present |
-| `test_spawn_agent_post` | POST | `/api/agents` | 200 or 201; body contains `manifest_toml` |
-| `test_delete_nonexistent_agent_is_idempotent` | DELETE | `/api/agents/{fake_uuid}` | 200; `status == "already-deleted"` |
-| `test_set_model_not_found` | PUT | `/api/agents/{fake_uuid}/model` | 4xx/5xx for missing agent |
-| `test_send_message_agent_not_found` | POST | `/api/agents/{fake_uuid}/message` | 400 or 404 |
-| `test_patch_agent_not_found` | PATCH | `/api/agents/{fake_uuid}` | 400 or 404 |
-
-**Design note on delete idempotency:** `test_delete_nonexistent_agent_is_idempotent` verifies that DELETE with a valid but non-existent UUID returns `200 OK` with `{ "status": "already-deleted" }` rather than `404`. This prevents retried deletes (network blips, dashboard double-clicks) from surfacing phantom errors. The 404 status is reserved strictly for malformed UUIDs.
-
-### Kernel Configuration
-
-| Test | What it validates |
-|---|---|
-| `test_custom_config_kernel` | `MockKernelBuilder::new().with_config(|cfg| { cfg.language = "zh" })` propagates into the running kernel, verifiable via `app.state.kernel.config_ref().language` |
-
-### Mock Driver Behavior
-
-| Test | Driver | Asserts |
-|---|---|---|
-| `test_mock_llm_driver_recording` | `MockLlmDriver` | Returns queued responses in order (`"回复1"`, `"回复2"`); `call_count() == 2`; `recorded_calls()[0].model` and `.system` are captured |
-| `test_mock_llm_driver_custom_tokens_and_stop_reason` | `MockLlmDriver` | `with_tokens(200, 100)` sets `usage.input_tokens`/`output_tokens`; `with_stop_reason(StopReason::MaxTokens)` propagates to response |
-| `test_failing_llm_driver` | `FailingLlmDriver` | `complete()` always errors with the configured message (`"模拟的 API 错误"`); `is_configured()` returns `false` |
-
----
-
-## Key Helpers & How to Use Them
-
-### `TestAppState`
+To add a test for a new endpoint:
 
 ```rust
-// Default (all mocks, zero external deps)
-let app = TestAppState::new();
+#[tokio::test(flavor = "multi_thread")]
+async fn test_my_new_endpoint() {
+    let app = TestAppState::new();
+    let router = app.router();
 
-// Custom kernel configuration
-let app = TestAppState::with_builder(
-    MockKernelBuilder::new().with_config(|cfg| {
-        cfg.language = "zh".into();
-    })
-);
+    let body = serde_json::json!({ "key": "value" }).to_string();
+    let req = test_request(Method::POST, "/api/my-endpoint", Some(&body));
+    let resp = router.oneshot(req).await.expect("request failed");
+    let json = assert_json_ok(resp).await;
+
+    assert!(json.get("expected_field").is_some());
+}
 ```
 
-Call `app.router()` to get a ready-to-use Axum `Router`.
-
-### `test_request`
-
-```rust
-// No body
-let req = test_request(Method::GET, "/api/agents", None);
-
-// With JSON body (pass &str)
-let body = serde_json::json!({ "key": "value" }).to_string();
-let req = test_request(Method::POST, "/api/agents", Some(&body));
-```
-
-### `assert_json_ok` / `assert_json_error`
-
-```rust
-// Asserts status == 200, returns serde_json::Value
-let json = assert_json_ok(resp).await;
-
-// Asserts status matches expected error code, returns serde_json::Value
-let json = assert_json_error(resp, StatusCode::BAD_REQUEST).await;
-```
-
-### `MockLlmDriver`
-
-```rust
-// Queue multiple responses
-let driver = MockLlmDriver::new(vec!["first".into(), "second".into()]);
-
-// Single response with custom metadata
-let driver = MockLlmDriver::with_response("text")
-    .with_tokens(200, 100)
-    .with_stop_reason(StopReason::MaxTokens);
-
-// Inspect after calls
-assert_eq!(driver.call_count(), 2);
-let calls = driver.recorded_calls();
-```
-
-### `FailingLlmDriver`
-
-```rust
-let driver = FailingLlmDriver::new("simulated API error");
-let result = driver.complete(request).await;
-assert!(result.is_err());
-assert!(!driver.is_configured());
-```
-
----
-
-## Runtime Configuration
-
-Tests requiring the full Axum stack use `#[tokio::test(flavor = "multi_thread")]` because the router spawns tasks internally. Pure driver unit tests (no router) use the default `#[tokio::test]`.
-
----
-
-## Adding New Tests
-
-To add a new integration test:
-
-1. Create `TestAppState` (default or with a custom builder).
-2. Call `app.router()` to obtain the router.
-3. Build a request with `test_request`.
-4. Dispatch with `router.oneshot(req).await`.
-5. Assert with `assert_json_ok` (for 2xx) or `assert_json_error` (for errors), then inspect the returned `serde_json::Value`.
-
-For tests that only exercise a mock driver in isolation, construct `MockLlmDriver` or `FailingLlmDriver` directly—no router or `TestAppState` needed.
+For mock driver tests that don't need the HTTP layer, skip `TestAppState` and construct the driver directly.

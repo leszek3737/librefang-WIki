@@ -2,47 +2,61 @@
 
 # librefang-runtime-audit
 
-Tamper-evident audit log for the LibreFang runtime. Every auditable event is appended to a SHA-256 hash chain, making retroactive tampering detectable. Entries can be held in memory or persisted to SQLite for survival across daemon restarts.
+Tamper-evident audit log for the LibreFang runtime. Every auditable event is appended to a Merkle hash chain — each entry stores the SHA-256 digest of its own payload concatenated with the previous entry's hash. Any retroactive modification to a logged entry invalidates every subsequent hash, making tampering detectable.
 
-Extracted from `librefang-runtime` during the #3710 god-crate split. Downstream consumers access it through the re-export at `runtime::audit` — no import changes required.
+## Background
 
-## Architecture
+This crate was extracted from `librefang-runtime` during the #3710 god-crate split (Phase 1). The parent crate re-exports it at the historical path `runtime::audit`, so existing call sites require no import changes.
 
-The core idea is a sequential hash chain. Each entry stores a SHA-256 digest computed over its own serialised content concatenated with the hash of the preceding entry. The first entry is seeded with a fixed sentinel value. Any modification to a past entry invalidates every subsequent hash, making tampering trivially detectable by walking the chain.
+## How the Hash Chain Works
 
-```mermaid
-flowchart LR
-    E1[Entry 1] -->|hash| E2[Entry 2]
-    E2 -->|hash| E3[Entry 3]
-    E3 -->|hash| EN[Entry N]
-    E1 -.->|seeded| S[Genesis sentinel]
+```
+Entry 0                         Entry 1                         Entry 2
+┌──────────────────────┐       ┌──────────────────────┐       ┌──────────────────────┐
+│ payload_0            │       │ payload_1            │       │ payload_2            │
+│ prev_hash = NULL     │       │ prev_hash = hash_0   │       │ prev_hash = hash_1   │
+│ hash_0               │       │ hash_1               │       │ hash_2               │
+│     = SHA256(        │       │     = SHA256(        │       │     = SHA256(        │
+│       payload_0      │       │       payload_1      │       │       payload_2      │
+│     )                │       │       || hash_0       │       │       || hash_1       │
+│                      │       │     )                │       │     )                │
+└──────────────────────┘       └──────────────────────┘       └──────────────────────┘
 ```
 
-## Key Dependencies
-
-| Crate | Role |
-|---|---|
-| `sha2` | SHA-256 digest computation for the hash chain |
-| `rusqlite` | SQLite storage backend for persistent mode |
-| `r2d2` / `r2d2_sqlite` | Connection pooling for concurrent audit writes |
-| `librefang-types` | Shared domain types referenced by audit entries |
-| `chrono` | Timestamps on audit entries |
-| `serde` / `serde_json` | Serialisation of entry payloads prior to hashing |
-| `tracing` | Diagnostic logging within audit operations |
-| `metrics` | Operational metrics (e.g. entry count, chain validation failures) |
+The first entry is the chain root — its hash covers only its own payload (there is no predecessor). Every subsequent entry's digest incorporates the prior entry's hash, forming a linked cryptographic chain. To verify integrity, walk the chain from head to root and recompute each digest; any mismatch proves tampering.
 
 ## Persistence
 
-When the auditor is constructed `with_db`, entries are written to the `audit_entries` table in SQLite (schema V8). This table holds each entry's content alongside its chain hash and metadata, allowing full reconstruction and verification of the chain after a daemon restart.
+When constructed via `with_db`, entries are written to the `audit_entries` table in SQLite (schema V8) using a connection pool (`r2d2` + `r2d2_sqlite`). This means audit records survive daemon restarts and are queryable through standard SQL.
 
-The `r2d2` connection pool ensures that concurrent audit writes from multiple runtime tasks do not contend on a single connection.
+The in-memory path (without `with_db`) chains entries in process but does not persist them — suitable for testing or short-lived contexts.
 
-In-memory mode (without a database) is available for testing or ephemeral deployments where persistence is not required.
+## Dependencies
+
+| Dependency | Role |
+|---|---|
+| `librefang-types` | Shared domain types used across the workspace |
+| `sha2` | SHA-256 hashing for the Merkle chain |
+| `hex` | Digest encoding |
+| `chrono` | Timestamps on audit entries |
+| `serde` / `serde_json` | Payload serialization |
+| `rusqlite` | SQLite bindings for persistent storage |
+| `r2d2` / `r2d2_sqlite` | Connection pooling for concurrent database access |
+| `tracing` | Structured logging of audit operations |
+| `metrics` | Operational metrics (chain length, append latency, etc.) |
+
+## Integration with the Workspace
+
+```mermaid
+graph TD
+    A[librefang-runtime] -->|"re-exports as runtime::audit"| B[librefang-runtime-audit]
+    B --> C[librefang-types]
+    B --> D[(SQLite audit_entries)]
+    E[Downstream crates] -->|"runtime::audit::*"| A
+```
+
+`librefang-runtime` re-exports this crate at the `runtime::audit` path. Downstream consumers continue importing from the historical location — no migration required. The crate is self-contained and can also be used directly if independence from the runtime god-crate is desired.
 
 ## Verification
 
-To detect tampering, a verifier walks the chain from the genesis entry forward, recomputing each hash and comparing it against the stored value. A mismatch at any position proves that the chain has been altered from that point onward.
-
-## Testing
-
-The `tempfile` dev-dependency is used in tests to create ephemeral SQLite databases, allowing full integration tests of the persistent audit path without touching production state.
+To verify chain integrity at any point, iterate entries in insertion order and confirm each `hash` equals `SHA256(payload || prev_hash)`. The root entry has a null `prev_hash` and its digest covers only the payload. A mismatch at any position indicates that entry or an earlier one was altered after insertion.

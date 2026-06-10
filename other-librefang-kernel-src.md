@@ -1,18 +1,55 @@
 # Other — librefang-kernel-src
 
-# `librefang-kernel` — Kernel Test Suite
+# librefang-kernel — Test Suite
 
-## Purpose
+## Overview
 
-The test suite in `src/kernel/tests.rs` is the integration-level validation layer for `LibreFangKernel`. It exercises the kernel's public and internal APIs against real (in-memory) subsystems — SQLite via temp directories, the agent registry, skill/hand registries, the memory substrate, and the governance/approval pipeline — without requiring a live LLM provider.
+`librefang-kernel/src/kernel/tests.rs` is the integration and unit test module for the LibreFang kernel. It validates the central runtime's core invariants — agent lifecycle, capability enforcement, hand activation/restoration, skill gating, approval routing, model switching, session isolation, and atomic persistence — by exercising the public kernel API against ephemeral temporary directories.
 
-Every test boots a fresh kernel against an isolated `tempfile::tempdir()` home directory and tears it down at the end, so tests are hermetic and safe to run in parallel.
+The kernel is the orchestrator that ties together agent registration, LLM dispatch, channel mesh, memory substrate, governance (approvals, task boards, cron), skills, and hands. This test file is the primary safety net ensuring those subsystems compose correctly.
 
 ## Test Infrastructure
 
-### `RecordingChannelAdapter`
+### Kernel Boot Pattern
 
-A stub `ChannelAdapter` that captures every `send()` call into an `Arc<Mutex<Vec<String>>>`. Used by the approval-notification tests to assert exactly which recipients received a message, without a real chat backend.
+Nearly every test follows the same template: create a temp directory, boot a kernel with a default `KernelConfig`, exercise the API, then call `kernel.shutdown()`.
+
+```rust
+let tmp = tempfile::tempdir().unwrap();
+let home_dir = tmp.path().join("librefang-kernel-<test-name>");
+std::fs::create_dir_all(&home_dir).unwrap();
+
+let config = KernelConfig {
+    home_dir: home_dir.clone(),
+    data_dir: home_dir.join("data"),
+    ..KernelConfig::default()
+};
+
+let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+// ... exercise kernel API ...
+kernel.shutdown();
+```
+
+`boot_with_config` initializes all subsystems against the provided `home_dir` without reading real user config, giving each test a hermetic environment.
+
+### Environment Variable Safety
+
+Tests that mutate process-global environment variables (e.g. for API key rotation) use the `serial_test::serial(librefang_vault_key)` attribute and the `set_test_env` helper. The `EnvVarGuard` RAII guard removes the variable on drop:
+
+```rust
+#[test]
+#[serial_test::serial(librefang_vault_key)]
+fn test_rotation_logic() {
+    let _guard = set_test_env("LIBREFANG_TEST_KEY", "value");
+    // _guard removed the env var when it goes out of scope
+}
+```
+
+The serial attribute ensures no two env-mutating tests run concurrently, since `cargo test` uses multiple threads within a single process.
+
+### Recording Channel Adapter
+
+`RecordingChannelAdapter` is a stub `ChannelAdapter` that captures sent messages into a `Mutex<Vec<String>>`. Tests insert it into `kernel.mesh.channel_adapters` to verify notification routing without a real channel backend:
 
 ```rust
 let adapter = Arc::new(RecordingChannelAdapter::new("test"));
@@ -20,241 +57,207 @@ let sent = adapter.sent.clone();
 kernel.mesh.channel_adapters.insert("test".to_string(), adapter);
 // ... trigger notification ...
 let messages = sent.lock().unwrap().clone();
+assert!(messages[0].contains("expected-recipient"));
 ```
 
-### `EnvVarGuard` / `set_test_env`
+### Skill Installation Helper
 
-A RAII guard that sets an environment variable on creation and removes it on drop. Used for API key rotation tests where `AuthProfile.api_key_env` points at real env vars.
+`install_test_skill` writes a minimal valid `skill.toml` + `prompt_context.md` into a given directory, enabling tests to exercise the skill registry without external dependencies.
 
-**Safety contract**: each test function uses a unique env-var name, and the default single-threaded test runner serializes them, preventing races.
+## Behavioral Invariants Under Test
 
-### `install_test_skill`
+### Agent Capability Enforcement
 
-Writes a minimal valid `skill.toml` + `prompt_context.md` into a given directory so the `SkillRegistry` can load it during boot. Accepts a name and tags for filtering tests.
-
-### `cascade_test_kernel`
-
-Boots a kernel into an `Arc<LibreFangKernel>` against a leaked tempdir (intentionally kept alive until process exit) for the parent/stop cascade tests. Avoids per-test boilerplate.
-
-### `boot_kernel_for_display_tests`
-
-Shared helper for the display/UI-related tests (approval formatting, session listing). Appears in the call graph for several display-oriented tests.
-
-## Coverage Areas
-
-### 1. API Key Rotation — `collect_rotation_key_specs`
-
-| Test | What it validates |
-|------|-------------------|
-| `test_collect_rotation_key_specs_dedupes_primary_profile_key` | When a profile's `api_key_env` resolves to the same key as the primary driver, it is merged into the primary spec (`use_primary_driver: true`) rather than appearing twice. |
-| `test_collect_rotation_key_specs_prepends_distinct_primary_and_skips_missing_profiles` | Profiles whose env vars are unset are silently skipped; a distinct primary key is prepended when no profile claims it. |
-
-### 2. Approval Routing — `notify_escalated_approval`
-
-`test_notify_escalated_approval_prefers_request_route_to` validates the priority chain for escalated approval notifications:
-
-1. **Per-request `route_to`** (highest priority — wins even over policy rules)
-2. Approval routing rules (tool-pattern-based)
-3. Agent notification rules (agent-pattern-based)
-4. Global `approval_channels` (fallback)
-
-The test seeds all four layers and confirms only the explicit per-request target receives the message.
-
-### 3. Agent Capabilities — `manifest_to_capabilities`
-
-| Test | Scenario |
-|------|----------|
-| `test_manifest_to_capabilities` | Explicit `capabilities.tools` + `agent_spawn = true` produce the correct `Capability` set. |
-| `test_manifest_to_capabilities_with_profile` | A `ToolProfile::Coding` expands into file/shell/web tools. |
-| `test_manifest_to_capabilities_profile_overridden_by_explicit_tools` | When explicit `tools` are set alongside a profile, the profile is **not** expanded — explicit declarations take precedence. |
-
-### 4. Agent Registry — `AgentRegistry`
-
-- **Name resolution**: `find_by_name("coder")` returns the correct entry; UUID lookup via `get(agent_id)` also works.
-- **Tag-based search**: Filtering `registry.list()` by tags and name substrings returns only matching agents.
-
-### 5. Agent Spawning and Lineage
-
-```mermaid
-graph TD
-    A[spawn_agent_inner] --> B{Parent provided?}
-    B -->|No| C[Register as top-level agent]
-    B -->|Yes| D[Look up parent in registry]
-    D -->|Not found| E[Fail closed: "not registered"]
-    D -->|Found| F{Child capabilities ⊆ Parent?}
-    F -->|No| G[Reject: "Privilege escalation denied"]
-    F -->|Yes| H[Register child with parent link]
-```
-
-Key invariants tested:
-
-- **Privilege escalation is blocked**: a parent with only `file_read` cannot spawn a child requesting `*`, `shell`, or `network` capabilities. The child is never registered.
-- **Subset inheritance is allowed**: a parent with `file_read` + `file_write` can spawn a read-only child.
-- **Unknown parents fail closed**: a stale `AgentId` that's not in the registry produces an error, not a silent top-level spawn.
-- **Local model override**: `spawn_agent_inner` stores `"default"/"default"` when the model config delegates to the global default, deferring concrete resolution to `execute_llm_agent`.
-
-### 6. Provider Switching — `set_agent_model`
-
-`test_set_agent_model_clears_overrides_when_provider_changes` is a regression test for issue #2380. When switching an agent from one provider to another:
-
-- `api_key_env` and `base_url` from the old provider are **cleared** so `resolve_driver` falls back to the new provider's credentials.
-- A **same-provider** model swap preserves existing per-agent overrides (legitimate custom keys/URLs).
-
-### 7. Hand Activation / Deactivation
-
-Hands are multi-agent configurations defined in `HAND.toml` files. The test suite covers:
+The kernel enforces a strict capability subset rule: a child agent's declared capabilities must not exceed its parent's. This prevents privilege escalation through agent spawning.
 
 | Test | Invariant |
 |------|-----------|
-| `test_hand_activation_does_not_seed_runtime_tool_filters` | Activation leaves `tool_allowlist` and `tool_blocklist` empty so skill/MCP tools remain visible. |
-| `test_hand_reactivation_rebuilds_same_runtime_profile` | Deactivate → reactivate rebuilds from the hand definition, discarding any runtime overrides (model, provider, max_tokens, temperature, web_search_augmentation). |
-| `reactivate_builds_from_hand_toml_not_override` | Full field-by-field assertion that every runtime override is cleared on fresh activation. |
-| `test_hand_skills_propagate_to_derived_agent_manifest` | Hand-level `skills = [...]` allowlist propagates into each per-role agent's `AgentManifest.skills`. |
-| `test_hand_skills_intersect_per_role_overrides` | When both hand-level and per-role `skills` are set, the effective list is the **intersection**. |
-| `deactivate_hand_removes_hand_agent_rows_from_sqlite` | After deactivation, the SQLite `agents` rows for all instance agents are removed — even when agents are no longer in the in-memory registry (post-restart scenario). |
-| `boot_gc_removes_orphaned_hand_agent_rows` | Orphaned SQLite rows from a crashed deactivation are cleaned up on the next boot. |
+| `test_spawn_child_exceeding_parent_is_rejected` | Child requesting `tools=["*"]` + shell + network is denied |
+| `test_spawn_child_with_subset_capabilities_is_allowed` | Child with a strict subset of parent tools spawns successfully |
+| `test_spawn_with_unknown_parent_fails_closed` | Stale `AgentId` as parent fails, never silently de-escalates |
 
-### 8. Hand Persistence Across Restarts
+The `manifest_to_capabilities` function maps agent manifests into `Capability` sets. Tool profiles (e.g. `ToolProfile::Coding`) expand into predefined tool lists, but explicit `capabilities.tools` entries override the profile entirely.
 
-The suite includes two complementary approaches to testing restart semantics:
+### Model and Provider Switching
 
-**Deterministic path** (`hand_runtime_override_survives_restart_via_activate_hand_with_id`):
-1. Boot → activate hand → apply override → persist → shutdown.
-2. Boot fresh kernel → manually load `hand_state.json` → call `activate_hand_with_id`.
-3. Assert all overrides (model, provider, max_tokens, temperature, web_search_augmentation) are re-applied.
+`set_agent_model` must clear per-agent `api_key_env` and `base_url` overrides when the provider changes, preventing stale credentials from leaking across providers. Same-provider model swaps preserve existing overrides.
 
-**Full async path** (`hand_runtime_override_survives_restart_via_start_background_agents`, `#[ignore]` by default):
-Same lifecycle but drives `start_background_agents`, exercising the registry sync and context-engine bootstrap. Kept for manual regression.
+**Regression context:** Before the fix, switching from a custom provider ("cloudverse") to "openrouter" would retain the old API key and base URL, causing 401 errors from the new endpoint (issue #2380).
 
-**Settings/tail persistence** (`boot_drift_preserves_hand_settings_tail`, `boot_drift_preserves_skill_and_team_tails`):
-After a simulated restart via `activate_hand_with_id`, the restored agent's `system_prompt` must contain all three rendered tails:
-- `## User Configuration` — from hand `[[settings]]`
-- `## Reference Knowledge` — from `SKILL.md`
-- `## Your Team` — peer roster for multi-agent hands
+### Hand Activation and Runtime Overrides
 
-### 9. Tool Availability
+Hands are multi-agent constructs defined by `HAND.toml` files. The kernel supports:
 
-| Test | Behavior |
-|------|----------|
-| `test_available_tools_returns_empty_when_tools_disabled` | `tools_disabled: true` suppresses all builtin, skill, and MCP tools. |
-| `test_available_tools_glob_pattern_matches_mcp_tools` | Declared tools like `"file_*"` use glob matching, not exact equality. Matches `file_read`, `file_write`, `file_list` but not `web_fetch`. |
-| `test_shell_exec_available_when_declared_in_tools_without_explicit_exec_policy` | When `shell_exec` is in `capabilities.tools` but no `exec_policy` is set, the kernel auto-promotes `ExecSecurityMode` to `Full` instead of silently stripping the tool. |
-| `test_skill_evolve_tools_default_available_to_restricted_agent` | The `skill_evolve_*` surface is always available regardless of the agent's declared `capabilities.tools`, enabling self-evolution. |
+- **Activation** — `activate_hand` creates agents from the hand definition
+- **Runtime overrides** — `update_hand_agent_runtime_override` applies per-agent model/provider/temperature overrides without modifying the hand definition
+- **Deactivation** — `deactivate_hand` tears down the hand's agents
+- **Reactivation** — A fresh `activate_hand` rebuilds from the `HAND.tomL`, discarding any runtime overrides from prior activations
 
-### 10. Session Management
+Key invariants:
 
-- **Ephemeral messages** (`send_message_ephemeral`): Targeting an unknown agent returns an error; targeting a known agent does not modify the real session's message history.
-- **Assistant route key** (`assistant_route_key`): Scoped by channel, user_id, and thread_id so different senders get different routing contexts.
-- **Brief follow-up detection** (`should_reuse_cached_route`): Short inputs like "fix that" or "继续" reuse the cached route; "thanks" or long prompts do not.
-- **Default assistant**: A fresh boot auto-spawns an `assistant` agent.
+- Runtime overrides (model, provider, max_tokens, temperature, web_search_augmentation) do **not** survive deactivation + reactivation
+- The tool allowlist and blocklist remain empty after hand activation so skill/MCP tools remain visible
+- Hand-level `skills` allowlists propagate to derived per-role agents, with intersection semantics when the role also declares its own list (issue #3135)
 
-### 11. Background Task Idempotency
+### Hand State Persistence Across Restarts
 
-Both `spawn_approval_sweep_task` and `spawn_task_board_sweep_task` use atomic flags to ensure only one loop runs at a time. Calling them twice is a no-op; after `shutdown()`, the flag resets.
+Hand agents are **not** rehydrated from SQLite rows. Instead, `start_background_agents` reads `hand_state.json` and calls `activate_hand_with_id` to rebuild each hand from its `HAND.toml` definition plus any persisted `agent_runtime_overrides`.
 
-### 12. Task Board Sweeper
+The rendered system prompt tails must survive this rebuild:
 
-`test_task_board_sweep_resets_stuck_in_progress_task` verifies the end-to-end flow: post a task → claim it → wait past the TTL → `task_reset_stuck` flips it back to `pending` with `assigned_to = ""` so another worker can reclaim it.
+| Tail | Source |
+|------|--------|
+| `## User Configuration` | `[[settings]]` from `HAND.toml`, rendered by `apply_settings_block_to_manifest` |
+| `## Reference Knowledge` | `SKILL.md`, rendered by `apply_skill_reference_block_to_manifest` |
+| `## Your Team` | Peer roster for multi-agent hands, rendered by `apply_team_block_to_manifest` |
 
-### 13. Condition Evaluation — `evaluate_condition`
+### Skill Registry Management
 
-| Input | Result |
-|-------|--------|
-| `None` or empty string | `true` (no constraint) |
-| `"agent.tags contains 'chat'"` with matching tag | `true` |
-| `"agent.tags contains 'chat'"` without matching tag | `false` |
-| Unknown format | `false` (strict — prevents accidental injection) |
+The skills subsystem supports operator-controlled filtering and overlay:
 
-### 14. Peer-Scoped Keys — `peer_scoped_key`
+- **`skills.disabled`** — Named skills excluded from the registry at boot
+- **`skills.extra_dirs`** — External directories loaded as overlay; local skills win name collisions
+- **`reload_skills`** — Hot-reload preserves both disabled list and extra_dirs overlay (regression: pre-fix reload instantiated a fresh registry without policy)
+- **Stable mode** — Freezes the registry (`is_frozen() == true`), preventing mutations and skipping the background review gate
 
-Security-critical validation (issues #5119, #5120):
+### Skill Evolution Gating
 
-- Valid: `peer_scoped_key("car", Some("user-123"))` → `"peer:user-123:car"`
-- No peer: `peer_scoped_key("car", None)` → `"car"`
-- **Rejected**: peer_id containing `:` (namespace collision), empty peer_id (ambiguous with `None`), key starting with `peer:` (reserved prefix injection)
+Evolution tools (`skill_evolve_*`) are gated by the boolean expression:
 
-### 15. Thinking Override — `apply_thinking_override`
-
-| Override value | Effect |
-|----------------|--------|
-| `None` | Preserves existing `ThinkingConfig` |
-| `Some(false)` | Clears `thinking` to `None` |
-| `Some(true)` with no existing config | Inserts default `ThinkingConfig` |
-| `Some(true)` with existing config | Preserves existing `budget_tokens` |
-
-### 16. JSON Extraction — `extract_json_from_llm_response`
-
-Parses structured JSON from LLM free-text responses. Handles:
-
-- `` ```json ... ``` `` code blocks (first block wins if multiple exist)
-- Bare `{...}` objects surrounded by prose
-- Nested braces inside string values (won't trip on `{placeholder}`)
-- Invalid JSON → `None`
-- No JSON at all → `None`
-
-### 17. Background Skill Review
-
-- **Transient errors** (timeouts, 429s, network failures) are identified by `is_transient_review_error` as retryable.
-- **Permanent errors** (missing JSON fields, validation failures, security blocks) are not retried.
-- **Trace summarization** (`summarize_traces_for_review`): Shows the first N and last N traces with an "omitted" marker in between, keeping the summary bounded regardless of trace count.
-
-### 18. Sanitization — `sanitize_reviewer_block` / `sanitize_reviewer_line`
-
-Prevents a compromised prior LLM response from injecting fake instructions into the reviewer:
-
-- Strips triple backticks (prevents forged JSON blocks)
-- Strips `</data>` / `<data>` envelope tags
-- Removes control characters (`\x00`, `\x07`, etc.) while preserving structure (`\n`, `\t`)
-- Truncates by character count (not bytes) to avoid UTF-8 panics, appending `…[truncated]`
-- Collapses newlines in single-line mode, replaces `[`/`]` with parentheses
-
-### 19. Skills Configuration
-
-| Test | Behavior |
-|------|----------|
-| `test_skills_config_disabled_list_filters_at_boot` | `skills.disabled = ["blocked-skill"]` excludes the skill from the registry even though its directory exists on disk. |
-| `test_skills_config_extra_dirs_loaded_as_overlay` | Skills from `extra_dirs` are visible; local installs win over external overlays with the same name. |
-| `test_reload_skills_preserves_disabled_and_extra_dirs` | Hot-reload re-applies the disabled list and extra_dirs overlay — previously these were silently dropped after the first `reload_skills()` call. |
-| `test_stable_mode_freezes_registry_and_skips_review_gate` | `KernelMode::Stable` freezes the registry (`is_frozen() == true`) and the pre-claim review gate refuses to spawn new reviews. |
-
-### 20. Cron — Peer ID Preservation
-
-`test_cron_create_preserves_peer_id` is a regression test ensuring `cron_create` reads `peer_id` from `job_json` and persists it, rather than always defaulting to `None`. Jobs created without a `peer_id` correctly have `peer_id = null`.
-
-### 21. Parent / Stop Cascade — Session Interrupts
-
-```mermaid
-graph LR
-    P[Parent SessionInterrupt] -->|new_with_upstream| C[Child SessionInterrupt]
-    P -->|cancel| C
-    C -.-x P
+```
+evolve_enabled = auto_evolve || skill_workshop.enabled
 ```
 
-Tests validate the cascade primitives:
+The test matrix covers all four flag combinations. Explicit declaration in `capabilities.tools` overrides the gate — an operator listing `skill_evolve_create` in tools gets it regardless of the flags.
 
-- **Parent cancel propagates to child**: When a parent's `SessionInterrupt` is cancelled, any child created via `new_with_upstream` is also cancelled.
-- **Child cancel does NOT propagate upward**: Cancelling a child leaves the parent running.
-- **No upstream when idle**: If the parent has no active turn (not in `session_interrupts`), the lookup returns `None` and the call proceeds without cascade.
-- **Unregistered parent UUIDs are tolerated**: `send_to_agent_as` with a valid but unregistered parent UUID falls through gracefully rather than erroring on the parent.
-- **Garbage parent IDs are rejected**: Non-UUID strings produce a clear error, not a panic.
+### Approval Notification Routing
 
-### 22. Atomic TOML Writes — `atomic_write_toml`
+`notify_escalated_approval` resolves targets in priority order:
 
-Validates crash-safety for manifest persistence:
+1. Per-request `route_to` on the `ApprovalRequest` (highest priority)
+2. Routing rules matching `tool_pattern`
+3. Agent notification rules matching `agent_pattern`
+4. Global `approval_channels`
 
-- **Replaces existing content**: Old bytes are fully replaced.
-- **No temp file residue**: The `.tmp` staging file is cleaned up on success.
-- **Concurrency safety**: Two threads racing to write the same file never produce a partial/corrupt mix — readers always see either the old content or one complete new payload.
+Escalated approvals prefer the explicit request target over policy or global defaults.
 
-### 23. Cron Management
+### Shell Exec Policy Auto-Promotion
 
-| Test | Behavior |
-|------|----------|
-| `test_cron_create_preserves_peer_id` | `peer_id` from `job_json` is persisted; absent peer_id yields `null`. |
+When `shell_exec` is declared in `capabilities.tools` with `shell: ["*"]` but no explicit `exec_policy`, the kernel auto-promotes the policy to `ExecSecurityMode::Full`. Without this, the default global policy (Deny) would strip `shell_exec` from `available_tools` despite the explicit declaration.
 
-## Conventions for Adding Tests
+### Peer-Scoped Key Namespace
 
-1. **Isolation**: Always boot against a `tempfile::tempdir()`. Never share state between tests.
-2. **Graceful skips**: Tests that depend on optional features (e.g., specific hands like `apitester`) should catch `"unsatisfied requirements"` errors, print a diagnostic, and return early rather than panic.
-3. **Deterministic over async**: When possible, exercise the restore path manually (load state → call `activate_hand_with_id`) rather than driving the full async `start_background_agents`. Reserve the async path for `#[ignore]`'d regression tests.
-4. **Regression references**: Every regression test includes a comment citing the issue number (e.g., `#2380`, `#2923`, `#3135`, `#5119`) so future readers can trace back to the original bug.
+`peer_scoped_key` provides isolated key namespaces for per-user state:
+
+```
+peer_scoped_key("car", Some("user-123")) → "peer:user-123:car"
+peer_scoped_key("car", None)             → "car"
+```
+
+Security constraints (issues #5119, #5120):
+- `peer_id` containing `:` is rejected (breaks injective framing)
+- Empty `peer_id` is rejected (ambiguous with unscoped keys)
+- Key starting with `peer:` is rejected (prevents namespace collision)
+
+### Session Interrupt Cascade
+
+When a parent agent is stopped mid-turn (`/stop`), the cancellation propagates to child agents via `SessionInterrupt::new_with_upstream`. The cascade is one-directional: cancelling a child does not affect the parent. The kernel stores interrupts in `session_interrupts`, a DashMap keyed by `(AgentId, SessionId)`.
+
+### Atomic TOML Persistence
+
+`atomic_write_toml` stages content to a `.tmp` file and renames it into place, preventing partial writes under crash or concurrency. Tests verify no `.tmp` artifacts remain and concurrent writers never produce corrupt mixes.
+
+### Task Board Sweep
+
+The background sweeper resets stuck `in_progress` tasks back to `pending` after a configurable TTL. Both `spawn_approval_sweep_task` and `spawn_task_board_sweep_task` are idempotent — guarded by atomic flags that prevent duplicate loops.
+
+### JSON Extraction from LLM Responses
+
+`extract_json_from_llm_response` parses structured JSON from LLM freeform text, handling:
+- `` ```json ... ``` `` code blocks
+- Bare JSON objects surrounded by prose
+- Nested braces inside string values
+- Multiple code blocks (returns the first valid one)
+- Malformed JSON (returns `None`)
+
+### Background Review Sanitization
+
+`sanitize_reviewer_block` and `sanitize_reviewer_line` strip control characters, neutralize code fences (preventing a compromised prior response from injecting JSON the reviewer mistakes for its own answer), remove `</data>` / `<data>` envelope markers, and truncate by character count (not byte count) to avoid panicking on UTF-8 boundaries.
+
+### Trace Summarization
+
+`summarize_traces_for_review` produces bounded summaries of tool decision traces using head-and-tail elision: the first and last traces are kept, intermediate traces are replaced with an "omitted" count. This keeps the LLM review prompt within budget.
+
+### Ephemeral Messaging
+
+`send_message_ephemeral` sends a `/btw` message without persisting it to the agent's session history. The session message count must remain unchanged after the call.
+
+### Cron Peer ID Preservation
+
+`cron_create` preserves the `peer_id` field from `job_json` so OFP-triggered cron jobs retain their peer context across the scheduling boundary (regression: pre-fix always set `peer_id: None`).
+
+### Assistant Routing
+
+- `assistant_route_key` scopes cache keys by sender identity (channel, user_id, thread_id), preventing cross-conversation cache collisions
+- `should_reuse_cached_route` identifies brief follow-up messages (< 4 words, not "thanks") to reuse the previous routing decision
+
+## Test Organization Summary
+
+```mermaid
+graph TD
+    A[tests.rs] --> B[Agent Lifecycle]
+    A --> C[Hands & Skills]
+    A --> D[Model & Provider]
+    A --> E[Approval & Governance]
+    A --> F[Persistence & IO]
+    A --> G[Routing & Sessions]
+
+    B --> B1[Capability subset enforcement]
+    B --> B2[Registry name/tag lookup]
+    B --> B3[Tool availability & glob patterns]
+    B --> B4[Shell exec auto-promotion]
+
+    C --> C1[Activation / deactivation]
+    C --> C2[Runtime overrides]
+    C --> C3[Skills allowlist propagation]
+    C --> C4[Registry disabled/extra_dirs/stable mode]
+    C --> C5[Evolution gate matrix]
+
+    D --> D1[Provider switch clears overrides]
+    D --> D2[Default model override at spawn]
+    D --> D3[Thinking budget override]
+
+    E --> E1[Escalated approval routing]
+    E --> E2[Background sweep idempotency]
+    E --> E3[Task board stuck reset]
+    E --> E4[Cron peer_id preservation]
+    E --> E5[Condition evaluation]
+
+    F --> F1[Atomic TOML writes]
+    F --> F2[Hand state restart persistence]
+    F --> F3[Boot drift tail rendering]
+
+    G --> G1[Assistant route key scoping]
+    G --> G2[Session interrupt cascade]
+    G --> G3[Ephemeral message isolation]
+    G --> G4[Peer-scoped key namespace]
+    G --> G5[JSON extraction from LLM output]
+```
+
+## Running the Tests
+
+```sh
+# All kernel tests
+cargo test -p librefang-kernel
+
+# Single test (recommended for iteration)
+cargo test -p librefang-kernel -- test_spawn_child_exceeding_parent_is_rejected --exact
+
+# Tests requiring a multi-threaded tokio runtime
+cargo test -p librefang-kernel -- test_notify_escalated_approval
+
+# Serial env-var tests (automatically serialized by serial_test)
+cargo test -p librefang-kernel -- test_collect_rotation_key_specs
+```
+
+Tests that exercise `activate_hand("apitester", ...)` gracefully skip if the hand definition has unsatisfied requirements (missing channels, etc.), printing a notice rather than failing.

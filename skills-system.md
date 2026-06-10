@@ -2,284 +2,281 @@
 
 # Skills System
 
-The Skills System (`librefang-skills`) manages the full lifecycle of skills: discovery and installation from the ClawHub marketplace, agent-driven creation and mutation, config variable injection into prompts, security scanning, and atomic filesystem operations.
+The Skills System manages the full lifecycle of skills — searchable units of capability that agents can invoke at runtime. It covers marketplace discovery, installation with security scanning, agent-driven creation and mutation, configuration injection, and version-tracked evolution with rollback.
 
-## Architecture
+## Architecture Overview
 
 ```mermaid
 graph TD
-    CLI["CLI commands<br/>(cmd_skill_*)"]
-    Routes["HTTP routes<br/>(/api/skills/*)"]
-    Runtime["Runtime<br/>(injection_guard)"]
+    subgraph "Marketplace"
+        CH[ClawHubClient]
+        CH -->|search/browse| API[clawhub.ai API]
+        CH -->|install| SEC[Security Pipeline]
+    end
 
-    ClawHub["ClawHubClient<br/>(clawhub.rs)"]
-    Evolution["Evolution<br/>(evolution.rs)"]
-    ConfigInj["Config Injection<br/>(config_injection.rs)"]
-    Verify["Security Scanner<br/>(verify.rs)"]
-    OpenClaw["OpenClaw Compat<br/>(openclaw_compat.rs)"]
-    Registry["Skill Registry<br/>(registry.rs)"]
+    subgraph "Evolution"
+        EV[evolution.rs]
+        EV -->|create/update/patch| SKILL[Skill Directory]
+        EV -->|atomic writes| LOCK[Per-skill flock]
+        EV -->|version snapshots| HIST[.evolution.json]
+    end
 
-    CLI --> ClawHub
-    CLI --> Evolution
-    CLI --> Registry
-    CLI --> OpenClaw
-    Routes --> Evolution
-    Runtime --> Verify
+    subgraph "Config"
+        CI[config_injection.rs]
+        CI -->|collect| VARS[config_vars declarations]
+        CI -->|resolve| CFG[~/.librefang/config.toml]
+        CI -->|format| PROMPT[System Prompt]
+    end
 
-    ClawHub --> OpenClaw
-    ClawHub --> Verify
-    Evolution --> Verify
+    SEC --> SKILL
+    API --> |"SKILL.md / package.json"| COMPAT[openclaw_compat]
+    COMPAT --> |"skill.toml"| SKILL
 ```
 
----
+## Skill Package Format
 
-## Skill Formats
+Every installed skill is a directory containing a `skill.toml` manifest. Prompt-only skills also have a `prompt_context.md` file.
 
-The system recognizes three skill formats, auto-detected during installation:
-
-| Format | Detection | Description |
-|--------|-----------|-------------|
-| **SKILL.md** | Content starts with `---` (YAML frontmatter) | Prompt-only skill; no code execution |
-| **package.json** | JSON file with skill metadata | Node.js skill with tool implementations |
-| **skill.toml** | LibreFang native manifest | The internal canonical format; all other formats are converted to this on install |
-
-Each installed skill lives in its own directory under the skills root, containing at minimum a `skill.toml` manifest and optionally a `prompt_context.md` file.
-
----
-
-## ClawHub Marketplace Client
-
-**File:** `clawhub.rs`
-
-`ClawHubClient` handles all interaction with the ClawHub marketplace at `clawhub.ai/api/v1`. It downloads, converts, security-scans, and installs community skills.
-
-### Construction
-
-```rust
-let client = ClawHubClient::new(cache_dir_path);
-// Or with a custom base URL (for testing):
-let client = ClawHubClient::with_url("http://localhost:8080/api/v1", cache_dir);
+```
+skills/
+└── my-skill/
+    ├── skill.toml              # Manifest (always present)
+    ├── prompt_context.md       # Prompt content (PromptOnly runtime)
+    ├── .evolution.json         # Version history + counters
+    ├── .rollback/              # Named snapshots for rollback
+    ├── references/             # Supporting files
+    ├── templates/
+    ├── scripts/
+    └── assets/
 ```
 
-TLS verification is skipped when the environment variable `LIBREFANG_DANGEROUSLY_SKIP_TLS_VERIFICATION` is set to `true` or `1` — intended exclusively for local testing.
-
-### API Methods
-
-| Method | Endpoint | Returns |
-|--------|----------|---------|
-| `search(query, limit)` | `GET /api/v1/search?q=...&limit=N` | `ClawHubSearchResponse` — note the root key is `results`, not `items` |
-| `browse(sort, limit, cursor)` | `GET /api/v1/skills?sort=...&limit=N&cursor=...` | `ClawHubBrowseResponse` with paginated `items` |
-| `get_skill(slug)` | `GET /api/v1/skills/{slug}` | `ClawHubSkillDetail` with nested `skill`, `owner`, `latestVersion` |
-| `get_file(slug, path)` | `GET /api/v1/skills/{slug}/file?path=SKILL.md` | Raw file content as `String` |
-| `install(slug, target_dir)` | `GET /api/v1/download?slug=...` | `ClawHubInstallResult` after full security pipeline |
-| `install_from_bytes(slug, target_dir, bytes)` | (no network call) | Same pipeline on raw bytes from an external source |
-| `is_installed(slug, skills_dir)` | (no network call) | `bool` |
-
-Browse sort orders: `ClawHubSort::Trending`, `Updated`, `Downloads`, `Stars`, `Rating`.
-
-### Rate Limiting and Retry
-
-All HTTP calls go through `get_with_retry`, which handles:
-
-- **429 Too Many Requests** — respects the `Retry-After` header (capped at 30 s); otherwise uses exponential backoff with jitter
-- **5xx server errors** — same retry strategy
-- Up to **5 attempts** total, with base delay 1.5 s doubling each round
-
-On final failure, returns either `SkillError::RateLimited` (for 429) or `SkillError::Network`.
-
-### Install Security Pipeline
-
-`install()` runs a multi-stage pipeline before writing anything to disk:
-
-1. **Fetch detail** to obtain `expected_sha256` from the registry (best-effort; installation proceeds without it if the endpoint fails)
-2. **Download** the skill archive
-3. **SHA256 checksum** — if the registry provided an expected hash, a mismatch returns `SkillError::SecurityBlocked` immediately (no files written)
-4. **Detect format** (SKILL.md frontmatter vs ZIP magic bytes `PK` vs package.json)
-5. **Extract** into a staging directory (`.staging-{slug}-{pid}-{counter}`) on a blocking thread to avoid stalling the tokio runtime
-6. **Convert** to LibreFang `skill.toml` via the OpenClaw compatibility layer
-7. **Prompt injection scan** — blocks installation on critical-severity findings; the staging directory is cleaned up
-8. **Manifest security scan** via `SkillVerifier::security_scan`
-9. **Binary dependency check** — warns (does not block) if declared binaries are missing from `PATH`
-10. **Atomic promotion** — `rename()` the staging directory to the final skill directory, replacing any previous version
-
-### Slug Validation
-
-`validate_slug` rejects empty slugs and any slug containing characters other than `[a-zA-Z0-9_-]`. This prevents path traversal during directory construction.
-
-### Path Safety
-
-`resolve_skill_child_path` rejects absolute paths and any path component that is not `Component::Normal` — blocking `..`, prefix, and root components inside zip archives.
-
----
-
-## Skill Evolution
-
-**File:** `evolution.rs`
-
-The evolution module enables agents to create, update, patch, and delete PromptOnly skills autonomously. Every mutation is versioned, security-scanned, and serialized through file locks.
-
-### Core Operations
-
-| Function | Purpose | Version Bump |
-|----------|---------|-------------|
-| `create_skill(skills_dir, name, description, prompt_context, tags, author)` | Create a new PromptOnly skill | Sets `0.1.0` |
-| `update_skill(skill, new_prompt_context, changelog, author)` | Full rewrite of prompt_context | Patch bump (`0.1.0` → `0.1.1`) |
-| `patch_skill(skill, old_str, new_str, changelog, replace_all, author)` | Fuzzy find-and-replace on prompt_context | Patch bump |
-| `rollback_skill(skill, author)` | Revert to previous version | Patch bump |
-| `delete_skill(skills_dir, name)` | Agent-facing delete; refuses non-local skills | — |
-| `uninstall_skill(skills_dir, name)` | User-facing delete; removes any skill | — |
-| `write_supporting_file(skill, rel_path, content)` | Write to `references/`, `templates/`, `scripts/`, or `assets/` | No version change |
-| `remove_supporting_file(skill, rel_path)` | Remove a supporting file; cleans empty parent dirs | No version change |
-
-### Fuzzy Matching (6 Strategies)
-
-`patch_skill` delegates to `fuzzy_find_and_replace`, which tries six strategies in order from strict to loose:
-
-1. **Exact** — literal substring match
-2. **LineTrimmed** — trim leading/trailing whitespace on each line, then substring match
-3. **WhitespaceNormalized** — collapse whitespace runs to single space per line
-4. **IndentFlexible** — strip all leading whitespace
-5. **BlockAnchor** — match first + last lines exactly, require ≥60% middle-line similarity
-6. **WhitespaceStripped** — remove all whitespace from both sides, then substring match. Includes a 3-character minimum needle guard to prevent English false positives (designed for CJK content where inter-character spaces carry no semantic meaning)
-
-If all strategies fail, the error includes the closest-matching lines from the content (Jaccard character-set similarity > 0.3) to help the agent self-correct.
-
-Empty `old_str` is rejected unconditionally — `str.replace("", new_str)` would insert at every character boundary.
-
-### Concurrency Control
-
-Every mutation acquires an exclusive file lock via `fs2::FileExt::lock_exclusive` (flock on Unix, LockFileEx on Windows):
-
-- Lock files live in `.evolution-locks/` **adjacent to** the skill directory, not inside it — this allows `delete_skill` to hold the lock across `remove_dir_all` (Windows cannot delete a directory containing an open file handle)
-- Under the lock, operations re-read `skill.toml` and `prompt_context.md` from disk to get the current version, preventing lost updates from concurrent writers
-- The lock is held until the function returns (RAII via the `_lock` variable)
-
-### Atomic Writes
-
-`atomic_write` writes to a temp file named `.tmp.{filename}.{pid}.{tid}.{counter}.{nanos}`, then `rename()`s it into place. The monotonic `ATOMIC_WRITE_COUNTER` prevents same-process collisions even when two threads target the same path through different call paths.
-
-### Version History
-
-Each skill tracks evolution metadata in `.evolution.json` alongside `skill.toml`:
-
-```rust
-pub struct SkillEvolutionMeta {
-    pub versions: Vec<SkillVersionEntry>,  // newest last, capped at 10
-    pub use_count: u64,
-    pub evolution_count: u64,  // total entries ever written (pre-truncation)
-    pub mutation_count: u64,   // changes after initial create
-}
-```
-
-- `evolution_count` bumps on every `record_version` call (including the initial create)
-- `mutation_count` bumps only on post-create edits (update, patch, rollback)
-- `use_count` is bumped by `record_skill_usage` after successful tool invocations (separate from the evolve operations themselves)
-- Version history is capped at `MAX_VERSION_HISTORY` (10); oldest entries are trimmed
-- Rollback snapshots are stored in `.rollback/prompt_context_{timestamp}_{nanos}_{pid}.md`
-
-### Delete vs. Uninstall
-
-- `delete_skill` — the **agent-facing** path. Validates the skill name, checks the manifest `source` field, and refuses to delete anything not marked `Local` or `Native`. Skills with no `source` field are also rejected (prevents deleting unclassified legacy installs).
-- `uninstall_skill` — the **user-facing** path (dashboard "Uninstall" button, CLI `librefang skill remove`). Removes any installed skill regardless of source. Only validates against path-traversal characters.
-
-Both acquire the per-skill lock and re-check existence under it.
-
-### Supporting Files
-
-Supporting files must live under one of four allowed subdirectories: `references`, `templates`, `scripts`, `assets`. Files are size-limited to 1 MiB and undergo prompt injection scanning before write. Path traversal and absolute paths are rejected; canonical-path containment is verified to prevent symlink escape. Directory walking for listing is depth-limited to 16 levels.
-
-### EvolutionResult
-
-All operations return `EvolutionResult`, which carries:
-
-- `success`, `message`, `skill_name`, `version`
-- `match_strategy` and `match_count` (patch operations only)
-- `evolution_count`, `mutation_count`, `use_count` — post-operation counters read from `.evolution.json`, so callers don't need a separate query
-
----
-
-## Config Injection
-
-**File:** `config_injection.rs`
-
-Skills declare global configuration values via `[[config_vars]]` in their `skill.toml`. This module collects, resolves, and formats them for injection into the system prompt.
-
-### Declaration Format (in `skill.toml`)
+The `skill.toml` follows this structure:
 
 ```toml
+[skill]
+name = "my-skill"
+version = "0.1.0"
+description = "What this skill does"
+author = "agent-evolved"
+tags = ["automation"]
+
+[runtime]
+runtime_type = "PromptOnly"
+entry = ""
+
 [[config_vars]]
 key = "wiki.base_url"
 description = "Base URL of the internal wiki"
 default = "https://wiki.example.com"
 
-[[config_vars]]
-key = "wiki.api_key"
-description = "API key for wiki access"
+[env_passthrough]
+# ...
 ```
 
-### Resolution Pipeline
+## ClawHub Marketplace Client
 
-1. **`collect_config_vars(skills)`** — gathers declarations from all enabled skills, deduplicating by key (first declaration wins; duplicate keys from different skills keep the first skill's description). Skips entries with empty key or description.
+**Source:** `clawhub.rs`
 
-2. **`resolve_config_vars(vars, config_toml)`** — walks each logical key as `skills.config.<key>` in the parsed TOML tree (e.g., `wiki.base_url` resolves against `[skills.config.wiki] base_url = "..."`). Falls back to the declared `default`. Omits variables with neither a config value nor a default (avoids injecting empty noise). Empty-string values are treated as absent.
+`ClawHubClient` connects to the ClawHub marketplace API (`https://clawhub.ai/api/v1`) to search, browse, and install community skills. Skills arrive in two formats — SKILL.md (prompt-only) or package.json (Node.js) — and are converted to the LibreFang `skill.toml` manifest before installation.
 
-3. **`format_config_section(resolved)`** — produces the prompt section:
+### Construction
+
+```rust
+let client = ClawHubClient::new(PathBuf::from("/path/to/cache"));
+// Or with a custom URL (e.g. staging):
+let client = ClawHubClient::with_url("https://staging.clawhub.ai/api/v1", cache_dir);
+```
+
+TLS verification can be disabled by setting `LIBREFANG_DANGEROUSLY_SKIP_TLS_VERIFICATION=true` or `1` — intended only for testing against servers with expired certificates.
+
+### API Methods
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `search(query, limit)` | `GET /search?q=...&limit=...` | Semantic/vector search. Returns `ClawHubSearchResponse` with `results` key. |
+| `browse(sort, limit, cursor)` | `GET /skills?sort=...&limit=...&cursor=...` | Paginated browsing by `Trending`, `Updated`, `Downloads`, `Stars`, or `Rating`. |
+| `get_skill(slug)` | `GET /skills/{slug}` | Full detail including owner, stats, and `expected_sha256`. |
+| `get_file(slug, path)` | `GET /skills/{slug}/file?path=...` | Fetch a specific file (e.g. `SKILL.md`, `README`). |
+| `install(slug, target_dir)` | `GET /download?slug=...` | Full install pipeline (download → scan → extract → write). |
+| `is_installed(slug, skills_dir)` | — | Check if `skill.toml` exists locally. |
+
+### Rate Limit Handling
+
+All API calls go through `get_with_retry`, which implements exponential backoff with jitter on HTTP 429 and 5xx responses. Up to 5 attempts (`MAX_RETRIES`). The `Retry-After` header is respected when present. Final failure returns either `SkillError::RateLimited` (for 429) or `SkillError::Network`.
+
+### Installation Security Pipeline
+
+`install()` and the shared `install_with_expected_sha256()` run this sequence:
+
+1. **Fetch detail** — retrieve `expected_sha256` from the registry (best-effort; proceeds without it on failure).
+2. **SHA256 verification** — computed digest is compared against the registry-supplied hash. Mismatch returns `SkillError::SecurityBlocked` immediately, before any files are created.
+3. **Format detection & extraction** — content is classified as SKILL.md (starts with `---`), zip archive (magic bytes `PK`), or raw package.json. Extraction runs on a blocking thread to avoid stalling the tokio runtime.
+4. **Conversion** — SKILL.md and OpenClaw formats are converted to LibreFang manifests via `openclaw_compat`, including tool name translation.
+5. **Prompt injection scan** — `SkillVerifier::scan_prompt_content()` checks for critical injection patterns. Critical-severity findings block installation and clean up the staging directory.
+6. **Manifest security scan** — `SkillVerifier::security_scan()` validates the manifest itself.
+7. **Supply-chain audit** — `supply_chain::scan()` rejects bundles containing dangerous files (e.g. `.pth`, `.pyc`). Blocked bundles are deleted before reaching the live directory.
+8. **Atomic promotion** — extraction happens in a `.staging-{slug}-{pid}-{counter}` directory, then `rename()` swaps it into the final location. Previous versions are replaced atomically.
+
+### Slug Validation
+
+All public methods validate slugs via `validate_slug`: non-empty, ASCII alphanumeric plus `-` and `_` only. This prevents path traversal through the slug parameter.
+
+### Path Safety
+
+`resolve_skill_child_path` rejects absolute paths and any path component that isn't `Component::Normal` — this blocks `..` traversal in zip entries and file paths.
+
+## Skill Evolution
+
+**Source:** `evolution.rs`
+
+The evolution module enables agents to autonomously create, update, patch, and delete PromptOnly skills. All mutations are serialized with per-skill file locks, versioned with rollback snapshots, and scanned for security threats.
+
+### Core Operations
+
+#### `create_skill(skills_dir, name, description, prompt_context, tags, author)`
+
+Creates a new PromptOnly skill from scratch. Validates the name (`[a-z0-9_-]`, max 64 chars), prompt content size (max 160,000 chars), and runs prompt injection scanning. Writes `skill.toml` and `prompt_context.md` atomically. Records the initial version in `.evolution.json` with `mutation_count = 0`.
+
+#### `update_skill(skill, new_prompt_context, changelog, author)`
+
+Full replacement of a skill's prompt content. Re-reads the manifest from disk under the lock to get the current version (preventing duplicate versions under concurrent writes), saves a rollback snapshot, bumps the patch version, and writes both files atomically.
+
+#### `patch_skill(skill, old_str, new_str, changelog, replace_all, author)`
+
+Incremental fuzzy find-and-replace on the prompt content. Reads current content from disk under the lock, applies fuzzy matching (see below), validates the result, bumps version, and records the change. Returns the `MatchStrategy` that succeeded and the match count in `EvolutionResult`.
+
+#### `delete_skill(skills_dir, name)`
+
+Agent-facing deletion. Only allows removing skills with `source = "local"` or `source = "native"` in their manifest. Refuses to delete marketplace or bundled skills. Requires the same `validate_name` constraints as creation.
+
+#### `uninstall_skill(skills_dir, name)`
+
+User-facing deletion (dashboard, CLI). Removes any installed skill regardless of source. Less restrictive name validation (allows any existing name) but still blocks path traversal.
+
+### Fuzzy Matching Strategies
+
+LLM-generated patches often don't match source content exactly. `fuzzy_find_and_replace` tries six strategies in order, from strictest to most lenient:
+
+| # | Strategy | Description |
+|---|----------|-------------|
+| 1 | **Exact** | Literal substring match |
+| 2 | **LineTrimmed** | Trim leading/trailing whitespace per line |
+| 3 | **WhitespaceNormalized** | Collapse whitespace runs to single space |
+| 4 | **IndentFlexible** | Strip all leading whitespace per line |
+| 5 | **BlockAnchor** | Match first + last line, verify middle ≥60% similar |
+| 6 | **WhitespaceStripped** | Remove ALL whitespace from both sides (CJK-friendly) |
+
+When all strategies fail, the error message includes the closest matching lines from the content (Jaccard character-set similarity, top 3, threshold >0.3) so the agent can self-correct on the next attempt.
+
+The WhitespaceStripped strategy requires a minimum needle length of 3 characters to avoid false positives (e.g., stripped `"a"` matching inside `"banana"`). Match positions are mapped back to original byte offsets to preserve surrounding content.
+
+### Version Management
+
+Each skill stores a `.evolution.json` file alongside its manifest:
+
+```json
+{
+  "versions": [
+    {
+      "version": "0.1.2",
+      "timestamp": "2026-03-15T10:30:00+00:00",
+      "changelog": "Fixed output format [strategy: Exact, matches: 1]",
+      "content_hash": "sha256hex...",
+      "author": "agent:abc-123"
+    }
+  ],
+  "use_count": 42,
+  "evolution_count": 5,
+  "mutation_count": 3
+}
+```
+
+- **`evolution_count`** — total version entries written, including the initial creation.
+- **`mutation_count`** — post-creation edits only. A freshly created skill reports `0`.
+- **`use_count`** — bumped by `record_skill_usage` after successful tool invocation.
+- Version history is capped at 10 entries (`MAX_VERSION_HISTORY`); oldest entries are trimmed.
+- `bump_patch_version` uses the `semver` crate, clearing pre-release tags and build metadata on bump.
+
+### Concurrency and Atomicity
+
+**File locking:** Every mutation acquires an exclusive flock (`fs2::FileExt::lock_exclusive`) on `{skills_dir}/.evolution-locks/{name}.lock` — a file *outside* the skill directory so it survives `remove_dir_all` (important on Windows where open handles block deletion). The lock is held for the entire operation, including the final rename or delete.
+
+**Atomic writes:** All file mutations use `atomic_write`, which writes to a temp file (named with pid, thread id, monotonic counter, and nanosecond timestamp) then renames into place. A per-process `AtomicU64` counter prevents same-nanosecond collisions.
+
+**Lock-first, read-after-lock:** `update_skill` and `patch_skill` re-read `skill.toml` from disk *after* acquiring the lock to compute the correct next version. Without this, concurrent updates would all compute the same bump (e.g., 10 writers all computing `0.1.0 → 0.1.1`).
+
+### Supporting Files
+
+Skills can store reference material in four allowed subdirectories: `references/`, `templates/`, `scripts/`, `assets/`.
+
+- `write_supporting_file(skill, rel_path, content)` — validates path containment (canonicalizes both paths to detect symlink escapes), enforces a 1 MiB size limit, scans content for prompt injection, writes atomically.
+- `remove_supporting_file(skill, rel_path)` — same containment check, removes the file, cleans up empty parent directories upward. On missing files, lists available files in the subdirectory as a hint.
+
+### Security Checks in the Evolution Pipeline
+
+Every mutation flows through `validate_prompt_content`, which:
+
+1. Enforces the 160,000 character limit (~55k tokens).
+2. Calls `SkillVerifier::scan_prompt_content` which runs the global scanner with compiled threat patterns.
+3. Blocks on `WarningSeverity::Critical` findings, returning `SkillError::SecurityBlocked` with the specific violations.
+
+The call graph shows this security scan is invoked consistently across all mutation paths — `update_skill`, `patch_skill`, `rollback_skill`, and `write_supporting_file` — ensuring no content bypasses threat detection.
+
+## Config Variable Injection
+
+**Source:** `config_injection.rs`
+
+Skills declare configuration dependencies via `[[config_vars]]` in their manifest. The config injection pipeline resolves these against the user's `~/.librefang/config.toml` and formats them as a system-prompt section.
+
+### Three-Phase Pipeline
+
+```rust
+// 1. Collect declarations from enabled skills (dedup by key, first wins)
+let vars = collect_config_vars(&installed_skills);
+
+// 2. Resolve against config TOML
+let resolved = resolve_config_vars(&vars, &config_toml);
+
+// 3. Format as prompt section (returns "" when empty)
+let section = format_config_section(&resolved);
+```
+
+### Resolution Logic
+
+For a declared key `wiki.base_url`, the resolver walks the TOML path `skills.config.wiki.base_url`. If the path is missing or its value is an empty string, the declared `default` is used. Variables with neither a config value nor a default are omitted entirely (empty strings add noise without information).
+
+The `format_config_section` output:
 
 ```
 ## Skill Config Variables
-wiki.base_url = https://wiki.example.com
+wiki.base_url = https://wiki.corp.example.com
 db.host = localhost
 ```
 
-Returns an empty string when there are no resolved variables, so callers can cheaply skip injection with `is_empty()`.
+### Deduplication
 
-### Storage Convention
-
-Declared keys use a logical dotted path. In `~/.librefang/config.toml`:
-
-```toml
-[skills.config.wiki]
-base_url = "https://wiki.corp.example.com"
-```
-
-This resolves the key `wiki.base_url` to `"https://wiki.corp.example.com"`. TOML scalars (strings, integers, booleans, datetimes) render directly; tables and arrays render as compact TOML (unlikely in practice but handled gracefully).
-
----
-
-## Integration Points
-
-### CLI
-
-The CLI (`librefang-cli`) drives most skill operations:
-- `cmd_skill_install` → `ClawHubClient::install`, `detect_openclaw_skill`, `convert_openclaw_skill`
-- `cmd_skill_search` → `ClawHubClient::search`
-- `cmd_skill_list` → `SkillRegistry::load_all`
-- `cmd_skill_evolve` → `create_skill`, `patch_skill`, `update_skill`, `delete_skill`, `rollback_skill`, `write_supporting_file`, `remove_supporting_file`
-- `cmd_skill_publish` → `prepare_local_skill`, `package_prepared_skill`, `publish_bundle`
-- `cmd_doctor` → `SkillRegistry::load_all`, `SkillVerifier::scan_prompt_content`
-
-### HTTP API
-
-The web routes (`src/routes/skills.rs`) expose evolution operations to the frontend and agents:
-- `evolve_patch_skill` → `patch_skill` → `fuzzy_find_and_replace`
-- `evolve_update_skill` → `update_skill`
-- `evolve_remove_file` → `remove_supporting_file`
-- `approve_pending_candidate` → `create_skill` (via the skill workshop)
-
-### Runtime
-
-The runtime's injection guard calls `SkillVerifier::scan_prompt_content` to scan tool results for prompt injection, reusing the same scanner that the evolution pipeline uses for skill content.
-
----
+When multiple skills declare the same config key, the first declaration encountered wins. This preserves deterministic behavior based on skill ordering. Disabled skills are excluded by the caller before calling `collect_config_vars`.
 
 ## Error Handling
 
-Operations return `Result<_, SkillError>` with variants including:
+The module uses `SkillError` variants throughout:
 
-- `SkillError::NotFound` — skill or file doesn't exist
-- `SkillError::AlreadyInstalled` — create on an existing name
-- `SkillError::SecurityBlocked` — prompt injection, checksum mismatch, unauthorized delete, path escape
-- `SkillError::InvalidManifest` — validation failures (name, size, empty old_str, unrecognized format)
-- `SkillError::Network` — HTTP failures after all retries exhausted
-- `SkillError::RateLimited` — 429 after 5 attempts
-- `SkillError::Io` — filesystem errors, lock acquisition failures
+| Variant | When |
+|---------|------|
+| `Network` | HTTP failures, parse errors, retries exhausted |
+| `RateLimited` | HTTP 429 after all retries |
+| `InvalidManifest` | Bad slug, empty content, oversized content, unrecognized format |
+| `SecurityBlocked` | SHA256 mismatch, prompt injection, supply-chain audit failure, unauthorized delete |
+| `AlreadyInstalled` | `create_skill` on an existing name |
+| `NotFound` | Operation on a non-existent skill or file |
+| `Io` | Filesystem errors, lock acquisition failures |
+
+## Testing Conventions
+
+Tests across the module follow these patterns:
+
+- **Serde round-trips** — API response types are tested against real ClawHub JSON payloads (verified Feb 2026).
+- **Concurrent mutation** — `test_concurrent_updates_produce_unique_versions` spawns multiple tasks calling `update_skill` simultaneously and verifies no duplicate versions.
+- **Lock contention** — `test_lock_prevents_concurrent_access` verifies that a held lock blocks a second writer.
+- **Security rejection** — `install_rejects_bundle_with_pth_via_supply_chain_audit` crafts a zip with a `.pth` file and verifies it's rejected before reaching the live directory.
+- **Fuzzy matching** — strategies are tested with CJK content, indented blocks, and whitespace variations.

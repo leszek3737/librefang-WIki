@@ -2,13 +2,7 @@
 
 # librefang-llm-driver
 
-Trait definition and shared error types for the LLM driver interface. This crate contains **no concrete provider implementations** — it exists purely to define the contract that providers fulfill.
-
-Concrete drivers (Anthropic, OpenAI, Gemini, Groq, etc.) live in the sibling crate `librefang-llm-drivers` (note the plural **s**).
-
-## Why a Separate Trait Crate
-
-Splitting the trait from its implementations lets downstream crates — especially test crates — depend on the interface alone. No transitive `reqwest`, TLS, or vendored SDKs leak into unit-test builds. Do not merge the two crates.
+The LLM driver abstraction layer for LibreFang. This crate owns the trait definition, error types, and shared driver-side types that all LLM provider implementations consume. **No concrete provider implementations live here.**
 
 ## Architecture
 
@@ -16,70 +10,88 @@ Splitting the trait from its implementations lets downstream crates — especial
 graph TD
     A[librefang-llm-driver] -->|depends on| B[librefang-types]
     C[librefang-llm-drivers] -->|implements trait from| A
-    D[librefang-testing] -->|mock drivers via| A
-    E[application crates] -->|calls through| A
-    C -->|depends on| A
+    D[librefang-testing] -->|mock impls| A
+    E[consumer crates] -->|calls through| A
+    C -->|HTTP wiring, retries| F[reqwest / provider SDKs]
 ```
+
+The crate exists as a standalone dependency island. It imports no networking crates, no runtime crates, and no provider SDKs. Anything that needs to *call* an LLM depends on this crate for the trait; anything that *implements* a provider depends on it for the contract.
+
+## Why Two Crates
+
+`librefang-llm-driver` (trait) is split from `librefang-llm-drivers` (implementations) to keep dependency graphs narrow:
+
+- Test crates and consumer crates depend on the trait alone — no transitive `reqwest`, TLS, or vendored SDKs pulled into unit test builds.
+- Provider implementations can add heavy HTTP dependencies without infecting the rest of the workspace.
+
+**Do not merge these two crates.** The split is intentional and permanent.
 
 ## Key Components
 
-### `LlmDriver` Trait (`lib.rs`)
+### `LlmDriver` Trait
 
-The async trait that every LLM provider must implement. Defines the canonical interface for sending prompts, receiving completions, and streaming responses.
+The canonical async trait that every LLM provider must implement. Defined in `lib.rs`. All consumer code programs against this trait; concrete types are injected at wiring time.
 
-Implementations live exclusively in `librefang-llm-drivers`. Adding a new provider does not require changes to this crate unless the trait itself needs a new method (rare — open an issue to discuss first).
+### `LlmError` Enum
 
-### `LlmError` Enum (`llm_errors.rs`)
+Defined in `llm_errors.rs`. The single error type surfaced through the `LlmDriver` trait. Each variant is a structured, typed field — not a `String` catch-all.
 
-The LLM-specific error type surfaced through the `LlmDriver` trait. Designed to answer three questions at the call site:
+The enum answers operational questions through inherent methods:
 
-| Question | Method |
+| Method | Purpose |
 |---|---|
-| Can I retry this? | `is_retryable()` |
-| Is this a quota or auth problem? | Variant inspection |
-| Did the model produce garbage? | Variant inspection |
+| `is_retryable()` | Can the caller safely retry this request? |
+| Quota/auth helpers | Is this a rate-limit or authentication failure? |
+| Model-output helpers | Did the model produce invalid or unusable output? |
 
-**Structured variants only.** Do not add a `String` catch-all variant (see #3541 / #3711). Each variant carries typed fields, not free-form strings. Preserve the `source()` chain so error context is not lost (#3745).
+The `Partial` variant preserves bytes received so far when a streaming error occurs. Callers use this to settle metering and partial-response accounting (#3552).
 
-#### Streaming Partial Responses
+Error chaining is preserved through `thiserror`'s `#[source]` attribute. Don't break the `source()` chain (#3745).
 
-The `Partial` variant exists for streaming failures. It carries the bytes received so far, allowing callers to settle metering and account for partial output. Do not discard this data (#3552 lineage).
+### Shared Driver-Side Types
+
+Any type that multiple provider implementations need in common lives here. Keep this surface minimal — if only one provider uses a type, it belongs in `librefang-llm-drivers` instead.
 
 ## Dependencies
 
-Intentionally minimal:
+The crate is deliberately dep-light:
 
-| Dependency | Reason |
-|---|---|
-| `librefang-types` | Shared domain types used in driver signatures |
-| `async-trait` | Trait definition |
-| `thiserror` | `LlmError` derive |
-| `serde` / `serde_json` | Serialization of shared driver-side types |
-| `dashmap` | Concurrent map for driver-side state |
-| `tokio` | Async runtime primitives |
-| `tracing` | Instrumentation |
+- `librefang-types` — shared domain types
+- `async-trait` — trait definition
+- `dashmap` — concurrent maps for driver-side bookkeeping
+- `serde` / `serde_json` — serialization
+- `thiserror` — error derives
+- `tokio` — async runtime primitives
+- `tracing` — instrumentation
 
-Adding `reqwest`, a TLS library, a vendored client SDK, or any heavy dependency is prohibited. This crate must remain compile-light.
+**Forbidden dependencies:** `reqwest`, any TLS crate, any vendored provider SDK, `librefang-llm-drivers` (circular), `librefang-runtime`, `librefang-kernel`.
 
-## When to Modify This Crate
+## Adding a New Error Variant
 
-Most changes belong in `librefang-llm-drivers`. You should only open a PR against `librefang-llm-driver` when:
+1. Add a new struct variant to `LlmError` with a descriptive name and typed fields.
+2. Attach `#[error(...)]` and `#[source]` as appropriate.
+3. Ensure `is_retryable()` (and any other match-based helpers) handle the new variant.
+4. Do **not** add a `String`-typed or `Box<dyn Error>` catch-all variant.
 
-1. **A new trait method is genuinely needed.** This is rare. Discuss in an issue first.
-2. **A new `LlmError` variant is needed.** Add a structured variant with typed fields. Implement the relevant query methods (`is_retryable()`, etc.) and preserve `source()` chains.
-3. **A new shared driver-side type is needed.** If multiple providers would use the same struct or enum, it belongs here.
+## Adding a New Driver
+
+New drivers go in `librefang-llm-drivers`, **not** here. You should not need to touch this crate unless:
+
+- A genuinely new method is required on the `LlmDriver` trait. This is rare — raise an issue first.
+- A new `LlmError` variant is needed (see above).
+- A new shared type is needed by multiple providers.
 
 ## Testing
 
-Trait conformance is verified through mock drivers in `librefang-testing` (see `MockKernelBuilder`). Do not add HTTP fixture tests or provider-specific tests here — those belong next to the implementation in `librefang-llm-drivers`.
+- **Trait conformance** is tested via mock drivers in `librefang-testing` (see `MockKernelBuilder`).
+- **No HTTP fixture tests belong here.** Those live in `librefang-llm-drivers` alongside the implementation under test.
 
-## Prohibited Patterns
+## Constraints
 
-| Prohibition | Reason |
+| Rule | Reason |
 |---|---|
-| `reqwest` or TLS deps | Violates the dep-light contract; belongs in `librefang-llm-drivers` |
-| `use librefang_llm_drivers` | Circular dependency |
-| `use librefang_runtime` / `librefang_kernel` | Driver trait must stand alone |
-| `String` catch-all error variants | Use structured enum fields (see #3541) |
-| `Box<dyn Error>` in trait signatures | Use `LlmError` |
-| Vendored client SDKs | Belongs in `librefang-llm-drivers` |
+| No `reqwest` / TLS / SDK deps | Keeps the crate lightweight; no network code in a trait crate |
+| No `librefang-llm-drivers` import | Would create a circular dependency |
+| No `librefang-runtime` / `librefang-kernel` imports | Driver trait must stand alone |
+| No `String` error variants | Structured errors only; preserves programmatic handling |
+| No `Box<dyn Error>` in trait returns | Use `LlmError` |

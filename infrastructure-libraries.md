@@ -2,70 +2,56 @@
 
 # Infrastructure Libraries
 
-Shared foundations that every other LibreFang crate depends on — HTTP transport, telemetry, subprocess bridging, data migration, RL trajectory export, and test harnessing.
+Shared foundations that every other LibreFang crate builds on — networking, process management, telemetry, testing, and data exchange. Nothing in this module knows about agents or LLMs directly; instead, it provides the plumbing that higher crates consume.
 
-## Purpose
+## What's Here
 
-This module group collects the cross-cutting concerns that would otherwise be duplicated across the workspace. Each sub-module solves a single infrastructure problem and exposes a small, focused API surface. Higher-level crates (the kernel, API, runtime, channels) compose these building blocks rather than re-implementing them.
+| Sub-module | One-line role |
+|---|---|
+| [HTTP Client](librefang-http-src.md) | Single `reqwest::Client` builder with bundled CA roots, system cert fallback, and unified proxy configuration |
+| [Wire Protocol](librefang-wire-src.md) | TCP peer-to-peer messaging with HMAC + Ed25519 handshake |
+| [Subprocess](librefang-subprocess-src.md) | JSON-over-stdio transport for long-lived sidecar bridges |
+| [Telemetry](librefang-telemetry-src.md) | `metrics`-facade helpers for HTTP request recording and path normalization |
+| [RL Export](librefang-rl-export-src.md) | Egress surface that ships finished RL rollout trajectories to external trackers |
+| [Testing](librefang-testing-src.md) | `MockKernelBuilder`, `MockLlmDriver`, and request helpers for route-level tests |
+| [Import](librefang-import-src.md) | Migration engine converting OpenClaw / OpenFang workspaces into LibreFang format |
+| [Hands](librefang-hands-src.md) | Discovery, installation, and lifecycle management of pre-built autonomous agent packages |
 
-## Sub-module Overview
+## Dependency Flow
 
-| Sub-module | Role | Depends on other `librefang-*`? |
-|---|---|---|
-| [librefang-http](librefang-http-src.md) | HTTP client factory with bundled TLS roots and centralised proxy state | No |
-| [librefang-subprocess](librefang-subprocess-src.md) | JSON-over-stdio transport for long-lived sidecar processes | No |
-| [librefang-telemetry](librefang-telemetry-src.md) | OpenTelemetry metrics + tracing, Prometheus `/metrics` export | No |
-| [librefang-import](librefang-import-src.md) | Migrates configs, memory, and sessions from OpenClaw/OpenFang | Uses `librefang-http` |
-| [librefang-rl-export](librefang-rl-export-src.md) | Uploads RL rollout trajectories to W&B, Tinker, or Atropos | Uses `librefang-http` |
-| [librefang-testing](librefang-testing-src.md) | Mock kernel, fake HTTP clients, test app state — dev-dependency only | No |
+```mermaid
+graph TD
+    HTTP["librefang-http"]
+    WIRE["librefang-wire"]
+    SUB["librefang-subprocess"]
+    TELEM["librefang-telemetry"]
+    RLE["librefang-rl-export"]
+    TEST["librefang-testing"]
+    IMP["librefang-import"]
+    HANDS["librefang-hands"]
 
-## How They Fit Together
-
+    SUB --> HTTP
+    WIRE --> HTTP
+    HANDS --> HTTP
+    RLE --> HTTP
+    IMP --> HTTP
+    HANDS --> SUB
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Consumers (kernel, api, cli, runtime, channels, desktop)       │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  librefang-import ──┐                        librefang-testing  │
-│                     ▼                           (dev-dep only)   │
-│              librefang-http ◄──── librefang-rl-export           │
-│                                                                  │
-│  librefang-subprocess    librefang-telemetry                    │
-│      (leaf)                  (leaf)                              │
-└─────────────────────────────────────────────────────────────────┘
-```
 
-`librefang-http` and `librefang-subprocess` are the two "wire" crates — every outbound network call or sidecar pipe flows through one of them. `librefang-telemetry` is initialised once at startup and then used implicitly through the `metrics` and `tracing` macros. `librefang-import` and `librefang-rl-export` are higher-level: they encode domain-specific workflows (migration, RL upload) but still delegate their HTTP work to `librefang-http`. `librefang-testing` sits outside the normal dependency graph; it is a `dev-dependency` consumed by test suites across the workspace.
+`librefang-http` sits at the bottom of the graph — every crate that makes outbound HTTP calls (`librefang-wire` for discovery, `librefang-hands` for marketplace fetches, `librefang-rl-export` for uploads, `librefang-import` for remote sources) depends on it for consistent TLS and proxy behaviour.
 
-## Key Cross-cutting Workflows
+`librefang-subprocess` is similarly foundational: both `librefang-channels` and `librefang-runtime` use it to spawn and communicate with sidecar bridges. The kernel's background agent startup and agent spawn paths both flow through `subprocess::spawn` → `new` → `with_cooldown`.
 
-### Authenticated outbound requests
+`librefang-telemetry` instruments the HTTP layer from the outside — `librefang-api` middleware calls `record_http_request` per request, and the Prometheus endpoint exposes the results.
 
-MCP OAuth discovery, CLI self-update, and RL trajectory upload all follow the same path through `librefang-http`:
+## Key Cross-Module Workflows
 
-1. Caller obtains a **proxied client builder** (`proxied_client_builder`) — this reads the global proxy state (`active_proxy`).
-2. Builder calls **`build_http_client`**, which seeds `rustls` with Mozilla CA roots (`webpki-roots`) plus any system certs via `tls_config`.
-3. The resulting `reqwest::Client` is used for the specific request.
+**Starting a background agent.** The kernel calls through `background_lifecycle` → `artifact_store::run_startup_gc_once` → `subprocess::spawn` → `subprocess::new` → `with_cooldown`. This same subprocess path is also traversed when spawning an interactive agent (`spawn_agent_inner` → `hooks::fire` → `subprocess::spawn`).
 
-This ensures proxy settings and TLS trust anchors are applied uniformly regardless of which crate initiates the request.
+**Fetching a Hand from the marketplace.** `HandsHubClient` (in `librefang-hands`) builds an HTTP client via `librefang-http`, calls `fetch_index`, and falls back through `get_with_retry`. The downloaded definition is parsed by `parse_hand_definition` and installed locally by `HandRegistry`.
 
-### Migration pipeline
+**Migrating from another framework.** CLI, TUI, or API all converge on `run_migration()` in `librefang-import`, which calls framework-specific migrators (`openclaw::migrate`, `openfang::migrate`). If the source workspace is remote, the HTTP client handles the connection.
 
-`librefang-import`'s `run_migration()` entry point dispatches to source-specific migrators (OpenClaw, OpenFang). The migrators read legacy config files, convert agents and memory sections, and write results with backup support. A `MigrateOptions` struct controls dry-run mode, idempotency, and user-edit preservation. The migration engine is wired into the `librefang migrate` CLI command, the `/api/config/migrate` HTTP endpoint, and the TUI init wizard.
+**Exporting an RL rollout.** The producer hands an opaque `Vec<u8>` trajectory to `librefang-rl-export`, which delivers it over HTTP to the configured upstream service. The crate intentionally never inspects the payload.
 
-### RL trajectory egress
-
-`librefang-rl-export` receives an opaque `RlTrajectoryExport` (bytes + metadata) and delivers it to W&B, Tinker, or Atropos. Uploads go through `librefang-http` for consistent proxy/TLS handling and include retry logic for transient 5xx failures.
-
-### Test isolation
-
-`librefang-testing` provides `MockKernelBuilder` and `TestAppState` so that route handlers, kernel subsystems, and agent logic can be tested without a live daemon or network. Every crate listed above uses it in `#[cfg(test)]`.
-
-## When to Reach for Which Crate
-
-- **Making any HTTP request?** → [librefang-http](librefang-http-src.md)
-- **Talking to a sidecar process over stdio?** → [librefang-subprocess](librefang-subprocess-src.md)
-- **Recording a metric or span?** → [librefang-telemetry](librefang-telemetry-src.md)
-- **Importing from another agent framework?** → [librefang-import](librefang-import-src.md)
-- **Uploading RL rollouts?** → [librefang-rl-export](librefang-rl-export-src.md)
-- **Writing a test?** → [librefang-testing](librefang-testing-src.md)
+**Testing an API route.** `MockKernelBuilder` assembles a `LibreFangKernel` with vault keys, state secrets, and optional model catalog. `TestAppState` wraps it into an `AppState` + `Router`. Tests call helpers like `test_request` and `assert_json_ok` against the router — no daemon or network required.

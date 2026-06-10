@@ -1,82 +1,168 @@
 # Other — librefang-llm-drivers-tests
 
-# librefang-llm-drivers Integration Tests
+# librefang-llm-drivers-tests
+
+Integration test suite for the LibreFang LLM driver layer. Every test spins up a `wiremock` HTTP server, constructs a driver pointed at it, and asserts on the exact HTTP request/response contract — no live API keys or network access required.
 
 ## Purpose
 
-This test suite validates the **wire contracts** and **cross-cutting behaviors** of every LLM provider driver in `librefang-llm-drivers`. Each test fires real HTTP requests at a `wiremock` mock server, then inspects the recorded request/response to lock in the provider-specific contract so silent regressions are caught immediately.
-
-The tests do **not** hit real provider endpoints. They exercise the full driver stack — serialization, HTTP dispatch, response parsing, retry logic, and stream aggregation — against a local mock server.
+These tests lock in the **wire contract** between each LLM driver and its upstream provider. They protect against silent regressions where a driver refactoring changes the shape of an HTTP request, mishandles a response field, or breaks retry/streaming logic — all without ever hitting a real provider endpoint.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    subgraph "Test Harness"
-        CE[common/mod.rs]
+    subgraph "Test Files (by concern)"
+        RS["*_request_shape.rs"]
+        RT["*_retry.rs / *_retry_*.rs"]
+        TH["*_trace_headers.rs"]
+        SA["anthropic_stream_alignment.rs"]
+        OD["ollama_driver.rs"]
     end
-    CE --> TD[Test Drivers]
-    CE --> TH[Trace Header Tests]
-    CE --> RY[Retry Tests]
-    CE --> SA[Stream Alignment]
 
-    TD --> OAI[openai_request_shape]
-    TD --> ANT[anthropic_request_shape]
-    TD --> GEM[gemini_request_shape]
-    TD --> OLL[ollama_driver]
+    subgraph "Common Infrastructure"
+        CM["common/mod.rs"]
+        IE["isolated_env()"]
+        MS["mock_*_driver()"]
+        CS["collect_stream()"]
+        FB["Factory helpers<br/>(response bodies, SSE)"]
+    end
 
-    TH --> AT[anthropic_trace_headers]
-    TH --> GT[gemini_trace_headers]
-    TH --> BT[bedrock_trace_headers]
-    TH --> CT[copilot_trace_headers]
-    TH --> CGT[chatgpt_trace_headers]
-    TH --> OT[openai_trace_headers]
+    subgraph "Drivers Under Test"
+        OA["OpenAIDriver"]
+        AN["AnthropicDriver"]
+        GE["GeminiDriver"]
+        OL["OllamaDriver"]
+        BE["BedrockDriver"]
+        CG["ChatGptDriver"]
+        CO["CopilotDriver"]
+    end
 
-    RY --> AR[anthropic_retry]
-    RY --> GR[gemini_retry]
-    RY --> ORC[openai_retry_complete]
-    RY --> ORS[openai_retry_stream]
+    RS --> CM
+    RT --> CM
+    TH --> CM
+    SA --> CM
+    OD --> CM
 
-    SA --> AS[anthropic_stream_alignment]
+    CM --> IE
+    CM --> MS
+    CM --> CS
+    CM --> FB
+
+    MS --> OA
+    MS --> AN
+    MS --> GE
+    MS --> OL
 ```
 
-## Shared Test Infrastructure — `tests/common/mod.rs`
+## File Organization
 
-Every test file imports from this module. It provides the building blocks needed to stand up a driver pointed at a mock server without touching real provider credentials or network endpoints.
+Tests are split by **provider** and **concern**. Each provider has its own set of files; each file exercises one orthogonal aspect of the driver.
 
-### Environment Isolation
+### Request shape tests (`*_request_shape.rs`)
+
+Validate the outbound HTTP request: URL path, headers, and JSON body structure.
+
+| File | Driver | What it locks in |
+|------|--------|-----------------|
+| `openai_request_shape.rs` | OpenAI | `POST /chat/completions`, `Authorization: Bearer`, `model`, `messages`, `tools[]` envelope |
+| `anthropic_request_shape.rs` | Anthropic | `POST /v1/messages`, `x-api-key`, `anthropic-version: 2023-06-01`, `system`, `tools[].input_schema` |
+| `gemini_request_shape.rs` | Gemini | `POST /v1beta/models/<model>:generateContent`, `x-goog-api-key` header (never query string), `contents`, `tools[].functionDeclarations` |
+
+All three also verify:
+- **Tool-call response parsing**: non-streaming responses with tool invocations parse into `CompletionResponse.tool_calls` with `StopReason::ToolUse`
+- **Streaming SSE aggregation**: `TextDelta` events concatenate to match `CompletionResponse.text()`, and the stream terminates with `ContentComplete`
+
+### Retry tests (`*_retry.rs`)
+
+Exercise retry logic for rate-limit and overload responses.
+
+| File | Driver | Scenarios |
+|------|--------|-----------|
+| `anthropic_retry.rs` | Anthropic | 429 → retry → success (lockout file created); 429 exhaustion → `LlmError::RateLimited`; 529 retry → success (no lockout); 529 exhaustion → `LlmError::Overloaded`; streaming 429 retry |
+| `gemini_retry.rs` | Gemini | 429 retry then success; 429 exhaustion; 503 retry no lockout; 403 auth failure → `AuthenticationFailed`; streaming 429 retry |
+| `openai_retry_complete.rs` | OpenAI | 429 retry, lockout mechanics, pre-existing lockout blocking, max_tokens auto-cap, temperature stripping for o-series |
+| `openai_retry_stream.rs` | OpenAI | Streaming 429 retry, stream_options stripping, temperature stripping in stream path |
+
+Key pattern: tests use `serial_test::serial` because they share environment variables and the filesystem-based lockout directory.
+
+### Trace header tests (`*_trace_headers.rs`)
+
+Every driver emits optional `x-librefang-agent-id`, `x-librefang-session-id`, and `x-librefang-step-id` headers when the `CompletionRequest` carries caller identity. Each driver file tests:
+
+1. **Headers emitted when set** — all three appear on the wire
+2. **Headers omitted when absent** — no `x-librefang-*` headers
+3. **Operator opt-out** — `with_emit_caller_trace_headers(false)` suppresses even when IDs are populated
+
+Covered drivers: `openai_trace_headers.rs`, `anthropic_trace_headers.rs`, `gemini_trace_headers.rs`, `bedrock_trace_headers.rs`, `chatgpt_trace_headers.rs`, `copilot_trace_headers.rs`, `vertex_ai_trace_headers.rs`
+
+### Stream alignment tests
+
+**`anthropic_stream_alignment.rs`** — regression test for a specific bug: when Anthropic's SSE stream contains an unrecognized `content_block_start` type (e.g. `server_tool_use`), the parser must still occupy that index slot with a placeholder. The test sends index 0 as unknown, then verifies text at index 1 and `tool_use` at index 2 reassemble correctly.
+
+### Driver-specific tests
+
+**`ollama_driver.rs`** — the most extensive single-driver test file. Covers the native Ollama `/api/chat` wire format:
+
+- **Request shape**: native body (`options.{num_predict, temperature}`, `think`, `images[]`) — never the OpenAI-compatible `/v1/chat/completions`
+- **Auth**: `Authorization` header only when API key is non-empty
+- **Thinking**: `ThinkingConfig` sets native `think: true`; `message.thinking` routes to `ContentBlock::Thinking`
+- **Tool calls**: synthesised IDs, streaming start/end pairs, stringified argument coercion via `coerce_tool_args`
+- **Error mapping**: 404 → `ModelNotFound`, 401 → `AuthenticationFailed`, 502 → `Api`
+- **Multi-modal**: `ContentBlock::Image` → native `images: [...]` (not OpenAI `image_url`)
+- **Tool results**: `ContentBlock::ToolResult` → `role: "tool"` with `tool_name` (not `tool_call_id`)
+- **URL migration**: legacy `/v1` suffix stripped; custom reverse-proxy paths preserved
+- **Truncated streams**: missing `done: true` returns partial response with zero usage
+
+## Common Infrastructure (`common/mod.rs`)
+
+### `isolated_env()`
+
+Sets up a hermetic test environment:
 
 ```rust
 pub fn isolated_env() -> TestEnv
 ```
 
-Creates a temporary directory, sets `LIBREFANG_HOME` to point at it, configures `NO_PROXY` to prevent real HTTP calls, and activates `backoff::enable_test_zero_backoff()` so retry delays collapse to zero during tests. The `TestEnv` guard drops (and cleans up) when the test ends.
+- Creates a temporary directory and sets `LIBREFANG_HOME` to it (isolates lockout files)
+- Sets `NO_PROXY` to prevent proxy interference with `127.0.0.1`
+- Enables zero-backoff mode via `backoff::enable_test_zero_backoff()` so retry tests don't actually sleep
 
-### Driver Constructors
+Returns a `TestEnv` whose `Drop` cleans up the temp dir and restores backoff.
 
-Each provider has a factory that builds a driver wired to a specific `MockServer`:
+### Driver constructors
 
-| Function | Driver | Auth |
-|---|---|---|
-| `mock_openai_driver(server)` | `OpenAIDriver` | `Bearer sk-test-<uuid>` |
-| `mock_anthropic_driver(server)` | `AnthropicDriver` | `x-api-key: sk-ant-test-<uuid>` |
-| `mock_gemini_driver(server)` | `GeminiDriver` | `x-goog-api-key: test-key-<uuid>` |
-| `mock_ollama_driver(server)` | `OllamaDriver` | No auth (empty key) |
+Each returns a driver pointed at the mock server with a unique API key:
 
-All use `with_proxy_and_timeout(_, server.uri(), None, Some(5))` — 5-second timeout.
+```rust
+pub fn mock_openai_driver(server: &MockServer) -> OpenAIDriver
+pub fn mock_anthropic_driver(server: &MockServer) -> AnthropicDriver
+pub fn mock_gemini_driver(server: &MockServer) -> GeminiDriver
+pub fn mock_ollama_driver(server: &MockServer) -> OllamaDriver
+```
 
-### Request Builders
+### Request builders
 
-- **`simple_request(model)`** — minimal `CompletionRequest` with one user message, no tools, `max_tokens: 16`.
-- **`request_with_tools(model)`** — includes a single `get_weather` tool definition, `max_tokens: 256`.
-- **`request_with_temperature(model, temp)`** — sets a specific temperature.
-- **`o_series_request()`** — tailored for OpenAI o3-mini with `temperature: 1.0` and `max_tokens: 1000`.
+Factory functions that construct `CompletionRequest` structs with sensible defaults:
 
-### Response Fixtures
+| Function | Purpose |
+|----------|---------|
+| `simple_request(model)` | Minimal request, no tools |
+| `request_with_tools(model)` | Includes a `get_weather` tool definition, `max_tokens: 256` |
+| `request_with_temperature(model, temp)` | Sets a specific temperature |
+| `o_series_request()` | `o3-mini` model, `max_tokens: 1000`, `temperature: 1.0` |
 
-Provider-specific 200-body helpers (`openai_200_body`, `anthropic_200_body`, `gemini_200_body`) and SSE builders (`openai_sse_body`, `anthropic_sse_body`, `gemini_sse_body`) produce syntactically correct wire-format responses. Error fixtures (`openai_429_response`, `anthropic_429_response`, etc.) are provided for retry tests.
+### Response factories
 
-### Stream Collection
+Pre-built JSON responses and SSE streams for each provider:
+
+- `openai_200_body(text)`, `openai_sse_body(chunks)`, `openai_429_response(secs)`
+- `anthropic_200_body(text)`, `anthropic_sse_body(text)`, `anthropic_429_response()`, `anthropic_529_response()`
+- `gemini_200_body(text)`, `gemini_sse_body(text)`, `gemini_429_response()`, `gemini_503_response()`
+
+### `collect_stream()`
+
+Drives the streaming API and collects all events:
 
 ```rust
 pub async fn collect_stream(
@@ -85,158 +171,31 @@ pub async fn collect_stream(
 ) -> (Result<CompletionResponse, LlmError>, Vec<StreamEvent>)
 ```
 
-Drives `driver.stream()` with an `mpsc` channel, collects all `StreamEvent` values, and returns both the final result and the event list. Every streaming test uses this.
+Returns both the final result and the ordered list of `StreamEvent`s emitted during the stream.
 
-### Rate-Limit Lockout Helpers
-
-- `lockout_file_exists(provider, api_key)` — checks whether a rate-limit lockout file was written to `$LIBREFANG_HOME/rate_limits/`.
-- `create_lockout_file(provider, api_key, until)` — pre-creates a lockout file.
-
-### Request Inspection
+### Lockout file helpers
 
 ```rust
-pub fn request_json(request: &Request) -> serde_json::Value
+pub fn lockout_file_exists(provider: &str, api_key: &str) -> bool
+pub fn create_lockout_file(provider: &str, api_key: &str, until: SystemTime)
 ```
 
-Deserializes the raw HTTP request body as JSON for field-level assertions.
+Inspect the filesystem-based rate-limit guard to assert that 429 lockouts are recorded and 529/503 overload errors are not.
 
-## Test Categories
+## Running the Tests
 
-### 1. Request Shape Tests
+All tests use `#[serial_test::serial]` because they mutate shared environment variables and use a shared filesystem path for rate-limit lockout files.
 
-These files lock in what the driver actually sends on the wire:
+```bash
+# Run all driver integration tests
+cargo test -p librefang-llm-drivers --test '*'
 
-| File | Endpoint | Validates |
-|---|---|---|
-| `openai_request_shape.rs` | `POST /chat/completions` | Bearer auth, model, messages, tools envelope (`[{type: "function", function: {…}}]`) |
-| `anthropic_request_shape.rs` | `POST /v1/messages` | `x-api-key`, `anthropic-version: 2023-06-01`, model, `system`, `max_tokens`, tools |
-| `gemini_request_shape.rs` | `POST /v1beta/models/<model>:generateContent` | `x-goog-api-key` header (never in URL), `contents`, `tools[0].functionDeclarations[]` |
+# Run a specific concern across all providers
+cargo test -p librefang-llm-drivers --test anthropic_retry
+cargo test -p librefang-llm-drivers --test openai_request_shape
 
-Each test also validates:
-- **Tool-call response parsing** — the provider's tool-use response shape maps to `CompletionResponse.tool_calls` with `StopReason::ToolUse`, correct id/name/input, and usage propagation.
-- **Streaming text aggregation** — `TextDelta` events concatenate to match the final `CompletionResponse.text()`, and a `ContentComplete` event terminates the stream.
-
-### 2. Retry Behavior Tests
-
-| File | HTTP Statuses | Error Variants |
-|---|---|---|
-| `openai_retry_complete.rs` | 429, 400 (param stripping) | `RateLimited` |
-| `openai_retry_stream.rs` | 429 (streaming path) | `RateLimited` |
-| `anthropic_retry.rs` | 429, 529 | `RateLimited`, `Overloaded` |
-| `gemini_retry.rs` | 429, 503, 403 | `RateLimited`, `AuthenticationFailed` |
-
-Key behavioral contracts tested:
-
-- **429 retry-then-success**: Two 429 responses followed by 200 → driver succeeds after 3 total requests.
-- **429 exhaustion**: All retries consumed → `LlmError::RateLimited` returned.
-- **529/503 retry-then-success**: Overloaded errors retry but do **not** create lockout files (overloaded is not an account-level rate limit).
-- **403 maps to `AuthenticationFailed`**: No retry.
-- **Lockout file creation**: 429 writes a lockout file keyed by provider + hashed API key; 529/503 does not.
-- **Streaming retry**: The `stream()` path retries 429s just like `complete()`.
-
-Anthropic retry tests use `anthropic_429_fast_retry()` with `retry-after: 1` and `anthropic_529_overloaded()` helpers. Gemini uses a `SequencedResponder` that serves responses in order via `AtomicUsize` counter.
-
-### 3. Trace Header Tests
-
-Every driver has a `*_trace_headers.rs` file that validates the same three-concern contract:
-
-```
-x-librefang-agent-id:   <agent_id>
-x-librefang-session-id: <session_id>
-x-librefang-step-id:    <step_id>
+# Run a single test case
+cargo test -p librefang-llm-drivers --test ollama_driver -- streaming_ndjson_aggregates_text_and_reports_usage
 ```
 
-| File | Driver | Notes |
-|---|---|---|
-| `openai_trace_headers.rs` | `OpenAIDriver` | Canonical implementation |
-| `anthropic_trace_headers.rs` | `AnthropicDriver` | Headers alongside `x-api-key` |
-| `gemini_trace_headers.rs` | `GeminiDriver` | Headers alongside `x-goog-api-key` |
-| `bedrock_trace_headers.rs` | `BedrockDriver` | Bearer auth; notes SigV4 migration concern |
-| `copilot_trace_headers.rs` | `CopilotDriver` | Delegates to inner `OpenAIDriver` |
-| `chatgpt_trace_headers.rs` | `ChatGptDriver` | Responses API at `/codex/responses` |
-| `vertex_ai_trace_headers.rs` | `VertexAIDriver` | Google Cloud endpoint |
-
-Each file tests three scenarios:
-
-1. **Headers present when IDs are set** — `agent_id`, `session_id`, `step_id` map to corresponding `x-librefang-*` headers.
-2. **Headers absent when IDs are `None`** — no header emitted at all.
-3. **Operator opt-out via `with_emit_caller_trace_headers(false)`** — suppresses headers even when IDs are populated.
-
-Streaming variants (`stream_emits_trace_headers_when_set`) confirm the same headers appear on streaming requests.
-
-The `CompletionRequest` fields `agent_id`, `session_id`, and `step_id` drive this behavior. All drivers share a common `build_trace_header_map` helper.
-
-### 4. Stream Alignment Regression — `anthropic_stream_alignment.rs`
-
-This is a targeted regression test for a specific SSE parsing bug. Anthropic's streaming `index` field is the **absolute position** in the response `content` array. The original code used a `_ => {}` catch-all for unrecognized `content_block_start` types (like `server_tool_use`), which pushed nothing — shifting all later blocks left by one slot.
-
-The test constructs a stream with:
-- Index 0: unknown `server_tool_use` block
-- Index 1: text block with deltas `"Hello"` + `" world"`
-- Index 2: `tool_use` block with `input_json_delta` pieces
-
-It asserts:
-- Text reassembles to `"Hello world"` (pre-fix: empty due to misaligned accumulator)
-- Tool call input reassembles to `{"q": "rust"}` (pre-fix: garbled)
-- Unknown block is dropped from final `response.content` (length == 2)
-- `ToolUseEnd` event carries the correct id/name/input
-
-### 5. Ollama Native Driver — `tests/ollama_driver.rs`
-
-The most comprehensive single-driver test file, covering the native Ollama API (`/api/chat`, not the OpenAI compat shim):
-
-**Request shape:**
-- POSTs to `/api/chat` (never `/v1/chat/completions`)
-- `max_tokens` maps to `options.num_predict` (not top-level)
-- Sampler params live under `options` envelope
-- `thinking` request sets native `think: true` boolean
-
-**Auth:**
-- Empty API key → no `Authorization` header (localhost default)
-- Non-empty key → `Bearer <token>` (tunnelled/hosted Ollama)
-
-**Non-streaming parsing:**
-- Tool calls parse with synthesised IDs (`ollama-call-*`) since native API lacks IDs
-- `done_reason: "stop"` + tool calls → `StopReason::ToolUse`
-- `message.thinking` routes to `ContentBlock::Thinking` (not `<![CDATA[<think]]>` tags)
-
-**Streaming (NDJSON):**
-- `content` deltas aggregate into final text
-- `thinking` deltas surface as `StreamEvent::ThinkingDelta` without leaking into `TextDelta`
-- Tool calls in final `done: true` chunk emit `ToolUseStart`/`ToolUseEnd` pair
-- Stringified JSON arguments (`"arguments": "{\"city\":\"Berlin\"}"`) are coerced to objects
-- Malformed tool call chunks keep the prior valid snapshot (no hard error)
-- Truncated response (no `done: true`) returns partial text with zero usage instead of erroring
-
-**Error mapping:**
-- 404 → `LlmError::ModelNotFound`
-- 401 → `LlmError::AuthenticationFailed`
-- 502 → `LlmError::Api { status: 502, message: "Bad Gateway" }`
-
-**Multi-modal:**
-- `ContentBlock::Image` serializes as native `images: ["<base64>"]` (not OpenAI `image_url`)
-
-**Tool result round-trip:**
-- `ContentBlock::ToolResult` → `role: "tool"` with `tool_name` field (not `tool_call_id`)
-
-**URL migration:**
-- Legacy `base_url` ending in `/v1` is silently stripped so `/api/chat` composes correctly
-- Non-legacy `/v1` embedded in a custom path (e.g. `/openai/v1`) is preserved
-
-## Conventions
-
-### Serial Execution
-
-All tests are annotated `#[serial_test::serial]` because they mutate process-global state (environment variables via `std::env::set_var`, rate-limit files in `LIBREFANG_HOME`). The serial attribute prevents concurrent test interference.
-
-### Naming Scheme
-
-Retry tests follow a prefix convention for predictable execution order:
-- `aa1_`, `aa2_`, … for Anthropic retry
-- `ag1_`, `ag2_`, … for Gemini retry
-- `oc1_`, `oc2_`, … for OpenAI complete retry
-- `os1_`, `os2_`, … for OpenAI stream retry
-
-### Assertions as Contract Locks
-
-Tests use `expect(1)` on mock mounts and explicit `assert_eq!` on recorded request fields (headers, body JSON) to lock the wire contract. Comments like `"the daemon will not work without these"` and `"regression: #4810"` annotate why each assertion matters.
+No environment configuration is needed — `isolated_env()` handles everything. No network access occurs — all HTTP traffic goes to `wiremock::MockServer` on localhost.

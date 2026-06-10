@@ -2,171 +2,158 @@
 
 # librefang-rl-export
 
-Long-horizon RL rollout trajectory exporter — the workspace's egress surface that uploads finished agent rollouts to upstream RL-tracking services.
+Long-horizon RL rollout trajectory exporter — the LibreFang egress surface that uploads finished agent rollouts to external RL-tracking services.
 
-## Overview
+## Purpose
 
-This crate takes a completed RL trajectory (opaque bytes + metadata) and delivers it to one of three upstream targets:
-
-| Target | Type | Auth | Local/Cloud |
-|--------|------|------|-------------|
-| **Weights & Biases** | Cloud experiment tracker | API key via HTTP Basic | Cloud |
-| **Tinker** | Thinking Machines post-training API | `X-API-Key` header | Cloud |
-| **Atropos** | NousResearch RL environments bus | None | Local FastAPI process |
-
-The crate is **wire-format agnostic** — `RlTrajectoryExport.trajectory_bytes` is an opaque `Vec<u8>` that is forwarded verbatim. The serialization format is owned by the producer (locked separately by RFC #3330), so this crate can be integration-tested independently.
+When a long-horizon RL rollout completes, the producer holds a trajectory (token sequences, masks, scores) plus metadata describing the agent and environment that produced it. This crate takes that finished trajectory and delivers it to an operator-chosen upstream service. It is intentionally **wire-format agnostic**: the trajectory travels as opaque `Vec<u8>` bytes, and the crate never inspects, validates, or transcodes the payload. The wire format is owned by the producer and locked separately (RFC #3330).
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    Caller -->|ExportTarget + RlTrajectoryExport| export["export()"]
-    export -->|SSRF check| ssrf["ssrf::validate_egress_url"]
-    export -->|Resolve *_env| resolve["resolve_env_secret"]
-    export --> WandB["wandb::export_to_wandb"]
-    export --> Tinker["tinker::export_to_tinker"]
-    export --> Atropos["atropos::export_to_atropos"]
-    WandB -->|POST /api/runs| WB1["Step 1: create run"]
-    WandB -->|POST /files/.../run_id| WB2["Step 2: upload bytes"]
-    Tinker -->|POST /api/v1/create_session| TK1["Step 1: create session"]
-    Tinker -->|POST /api/v1/telemetry| TK2["Step 2: submit event"]
-    Atropos -->|POST /register-env| AT1["Step 1: register env"]
-    Atropos -->|POST /scored_data| AT2["Step 2: submit scored data"]
-    WB1 & WB2 & TK1 & TK2 & AT1 & AT2 --> retry["retry::retry_upload"]
-    retry -->|transient?| retry
-    WandB & Tinker -->|metadata| redact["redact::redact_metadata"]
-    WB1 & WB2 & TK1 & TK2 & AT1 & AT2 --> http["librefang_http::proxied_client"]
+    Caller["Caller<br/>(maybe_export_on_turn_end)"]
+    Caller -->|"export(target, payload)"| PubDisp["public export()"]
+    PubDisp --> SSRF["SSRF validate"]
+    PubDisp --> Secret["resolve_env_secret"]
+    SSRF --> WBD["wandb.rs"]
+    SSRF --> TNK["tinker.rs"]
+    SSRF --> ATR["atropos.rs"]
+    Secret --> WBD
+    Secret --> TNK
+    WBD --> Retry["retry_upload"]
+    TNK --> Retry
+    ATR --> Retry
+    Retry -->|"proxied_client()"| HTTP["librefang_http"]
+    WBD --> Redact["redact_metadata"]
+    TNK --> Redact
 ```
 
 ## Public API
 
-### `export(target, payload) -> Result<ExportReceipt, ExportError>`
+The crate exposes a single async entry point and three supporting types:
 
-The single public entry point. Dispatches on the `ExportTarget` variant, performs SSRF validation and secret resolution, then delegates to the appropriate private module.
+**`export(target: ExportTarget, payload: RlTrajectoryExport) -> Result<ExportReceipt, ExportError>`**
 
-### `ExportTarget`
-
-`#[non_exhaustive]` enum with three variants. Each secret-bearing variant stores the **name** of an environment variable (not the secret itself):
-
-- **`WandB`** — requires `project`, `entity`, optional `run_id` hint, and `api_key_env`.
-- **`Tinker`** — requires `project`, `api_key_env`, optional `base_url` override.
-- **`Atropos`** — requires `project`, `base_url` (mandatory — no implicit localhost default), optional tuning knobs (`max_token_length`, `group_size`, `weight`).
-
-Secret values are read at upload time via `std::env::var`. Missing or empty variables fail with `ExportError::InvalidConfig`.
+Dispatches to the appropriate backend based on the `ExportTarget` variant. All I/O flows through `librefang_http::proxied_client()`, the workspace's shared reqwest client (proxy config, TLS roots, `User-Agent: librefang/<version>`).
 
 ### `RlTrajectoryExport`
 
-Carries a finished rollout:
+The payload describing a finished rollout:
 
-| Field | Purpose |
-|-------|---------|
-| `run_id` | Caller-side identifier; used as a hint where the upstream accepts one |
-| `trajectory_bytes` | Opaque payload — not inspected, validated, or transcoded |
-| `toolset_metadata` | Optional `serde_json::Value`; scrubbed for credentials before egress |
-| `started_at` / `finished_at` | Wall-clock rollout window |
+| Field | Type | Purpose |
+|---|---|---|
+| `run_id` | `String` | Caller-side run identifier; forwarded as a hint when the upstream accepts one |
+| `trajectory_bytes` | `Vec<u8>` | Opaque trajectory payload — never inspected by this crate |
+| `toolset_metadata` | `Option<serde_json::Value>` | Structured metadata about the agent/environment; scrubbed for credentials before egress |
+| `started_at` | `DateTime<Utc>` | Wall-clock start of the rollout window |
+| `finished_at` | `DateTime<Utc>` | Wall-clock end of the rollout window |
 
 ### `ExportReceipt`
 
-Returned on success:
-
-| Field | Purpose |
-|-------|---------|
-| `target_run_url` | Browser-loadable URL on the upstream (or closest equivalent) |
-| `bytes_uploaded` | Byte count confirmed delivered |
-| `uploaded_at` | Local timestamp of upload completion |
+Returned on successful upload. Contains the upstream's public run URL (`target_run_url`), the number of bytes uploaded, and the local wall-clock completion time.
 
 ### `ExportError`
 
-`#[non_exhaustive]` error enum:
+Non-exhaustive error enum. Key variants:
 
-| Variant | Meaning | Retryable? |
-|---------|---------|------------|
-| `NetworkError(String)` | Transport failure (DNS, TLS, timeout) | Yes |
-| `AuthError` | 401/403 from upstream | No |
-| `UpstreamRejected { status, body }` | Non-auth 4xx/5xx; body truncated to 4 KiB | Only 429 and 5xx |
-| `MalformedResponse(String)` | 2xx body didn't match expected shape | No |
-| `InvalidConfig(String)` | Bad config caught before any I/O | No |
-| `TrainerNotReady { status_label }` | Atropos trainer hasn't booted yet | Caller should poll |
+- **`InvalidConfig`** — rejected before any network I/O (empty project, missing env var, SSRF violation). Retrying won't help.
+- **`AuthError`** — HTTP 401/403. The operator needs to refresh credentials.
+- **`UpstreamRejected { status, body }`** — non-auth 4xx/5xx. Body is forwarded verbatim (truncated to 4 KiB).
+- **`NetworkError`** — transport failure (DNS, TCP, TLS, timeout). Retried automatically.
+- **`MalformedResponse`** — 2xx body didn't match the expected shape. Indicates upstream contract drift; hard failure.
+- **`TrainerNotReady { status_label }`** — Atropos-specific: the trainer hasn't booted yet. Caller should poll with backoff.
 
-## Per-Target Details
+## Export Targets
 
-### Weights & Biances (`wandb`)
+Each target follows a two-step "register, then submit" pattern. The `ExportTarget` enum is `#[non_exhaustive]`; additional targets can be added without breaking callers.
 
-Two-step flow:
+### Weights & Biances (`ExportTarget::WandB`)
 
-1. **`POST {base}/api/runs`** — Create the run. Sends `project`, `entity`, `run_id` hint, time window, and (scrubbed) metadata. Receives server-assigned `run_id` and browser URL.
-2. **`POST {base}/files/{entity}/{project}/{run_id}`** — Upload the raw trajectory bytes as `application/octet-stream`. Path segments are percent-encoded.
+**Wire flow:**
 
-Authentication: HTTP Basic with literal user `api` and the API key as password (`Authorization: Basic base64("api:<key>")`).
+1. `POST {base}/api/runs` — create the run with project, entity, run ID hint, and window timestamps.
+2. `POST {base}/files/{entity}/{project}/{run_id}` — upload the opaque trajectory bytes as an octet-stream artefact.
 
-SSRF mode: `Public` — loopback, private, and link-local destinations are rejected.
+**Authentication:** HTTP Basic with the literal user `api` and the API key as the password. The key is read from the environment variable named by `api_key_env` at upload time.
 
-### Tinker (`tinker`)
+**Constraints:** `project` and `entity` are both required — the previous `"default"` entity fallback silently landed runs in wrong buckets. Path segments in the upload URL are percent-encoded because entity/project/run_id are caller-controlled strings.
 
-Two-step flow mapped onto Tinker's session + telemetry surface (Tinker has no dedicated opaque-upload endpoint):
+### Tinker (`ExportTarget::Tinker`)
 
-1. **`POST {base}/api/v1/create_session`** — Register a session with sorted tags (`["librefang-rollout", project]`), optional `user_metadata`, and `project_id`. Receives `session_id`.
-2. **`POST {base}/api/v1/telemetry`** — Submit a single `GenericEvent` containing the trajectory bytes as standard base64 in `event_data.trajectory_bytes_b64`, plus timestamps and run ID.
+**Wire flow:**
 
-Authentication: `X-API-Key` header. Tinker's SDK requires the `tml-` prefix; this crate forwards the key as-is and lets the upstream enforce it.
+1. `POST {base}/api/v1/create_session` — register a session with tags and metadata.
+2. `POST {base}/api/v1/telemetry` — submit a single `GenericEvent` under that session with the trajectory bytes base64-encoded in `event_data`.
 
-SSRF mode: `Public`.
+**Authentication:** `X-API-Key` header, resolved from the environment variable named by `api_key_env`. The upstream enforces the `tml-` prefix; this crate forwards the key verbatim.
 
-Default base: `https://tinker.thinkingmachines.dev/services/tinker-prod`.
+**Assumption:** Tinker has no dedicated opaque-trajectory upload endpoint. The `create_session` + `telemetry` pair is the closest stable match against the current SDK source. If Tinker ships a dedicated trajectory endpoint, this module should switch.
 
-### Atropos (`atropos`)
+**Default base URL:** `https://tinker.thinkingmachines.dev/services/tinker-prod`. Overridable via `base_url` for self-hosted control planes.
 
-Two-step flow against a local FastAPI microservice:
+### Atropos (`ExportTarget::Atropos`)
 
-1. **`POST {base}/register-env`** — Register this producer with the running trainer. Sends `desired_name` (= project), `max_token_length`, `group_size`, `weight`. Receives `env_id` and `wandb_name`.
-2. **`POST {base}/scored_data`** — Submit the trajectory bytes verbatim as `application/json`. The bytes **must already be valid `ScoredData` JSON** (`tokens`, `masks`, `scores`, …); if not, Atropos returns 422 surfaced as `UpstreamRejected`.
+**Wire flow:**
 
-**Trainer-not-ready handling**: If the trainer hasn't booted, `/register-env` returns HTTP 200 with `{"status": "wait for trainer to start"}` and no `env_id`. The exporter converts this to `ExportError::TrainerNotReady` so callers can poll with backoff.
+1. `POST {base}/register-env` — register this producer with the running trainer, recover `env_id` and `wandb_name`.
+2. `POST {base}/scored_data` — forward the trajectory bytes verbatim as `Content-Type: application/json`. The bytes **must already be valid `ScoredData` JSON** (`tokens`, `masks`, `scores`, …); Atropos validates server-side and returns 422 on malformed payloads.
 
-SSRF mode: `LoopbackOrPrivate` — only `127.0.0.0/8`, `::1`, and RFC-1918 (`10/8`, `172.16/12`, `192.168/16`) are accepted. No implicit default URL.
+**Authentication:** None. Atropos is a local FastAPI microservice, not a cloud-hosted service.
 
-Default tuning: `max_token_length = 32768`, `group_size = 1`, `weight = 1.0`.
+**SSRF policy:** This is the only target that **allows** loopback and RFC-1918 destinations — the trainer is a local process by design. Public IPs, link-local (including IMDS at 169.254.169.254), and non-loopback hostnames are rejected. There is no implicit `localhost:8000` default; operators must set `base_url` explicitly.
 
-## Cross-Cutting Concerns
+**Trainer-not-ready handling:** If the trainer hasn't called `/register` yet, Atropos returns HTTP 200 with `{"status": "wait for trainer to start"}` and no `env_id`. The exporter detects the missing `env_id` and returns `ExportError::TrainerNotReady` so callers can poll with backoff.
 
-### SSRF Protection (`ssrf`)
+**Tuning knobs:** `max_token_length`, `group_size`, and `weight` are forwarded to `RegisterEnv`. Defaults are conservative: `32768`, `1`, `1.0`.
 
-All outbound base URLs are validated before any network I/O. Two modes:
+## Cross-cutting Concerns
 
-- **`Public`** (W&B, Tinker): Rejects loopback, private, link-local, IMDS (`169.254.169.254`), known metadata hostnames (`metadata.google.internal`), non-HTTP schemes, and userinfo in URLs.
-- **`LoopbackOrPrivate`** (Atropos): Accepts only loopback and RFC-1918; rejects everything else including public IPs and link-local/IMDS.
+### Secret Handling
 
-The guard handles IPv4-mapped IPv6 (`::ffff:127.0.0.1`) and NAT64 (`64:ff9b::`-prefixed) addresses. No DNS resolution is performed — blocked literal hostnames are checked string-wise.
+API keys are **never** inlined into `ExportTarget`. Each secret-bearing variant carries an `api_key_env: String` field holding the **name** of the environment variable. `resolve_env_secret()` reads the env var at upload time and fails closed with `InvalidConfig` if unset or empty. The `Debug` impl on `ExportTarget` is safe because it renders env-var names, not values.
 
-### Credential Redaction (`redact`)
+### SSRF Protection (`ssrf.rs`)
 
-`toolset_metadata` is scrubbed before it leaves the process (W&B and Tinker both expose it in external UIs). Three regex patterns run on all string values at any nesting depth (keys are left intact):
+Two egress modes enforced before any I/O:
 
-| Pattern | Replaces with | Catches |
-|---------|---------------|---------|
-| JWT (`eyJ...`) | `<REDACTED:JWT>` | Three-segment base64url tokens |
-| API key (`sk_...`, `token=...`) | `<REDACTED:CREDENTIAL>` | Key-shaped strings (16+ chars) |
-| Long base64 (40+ chars) | `<REDACTED:BLOB>` | Opaque blobs |
+| Mode | Used by | Accepts | Rejects |
+|---|---|---|---|
+| `Public` | W&B, Tinker | Public IPs/hostnames | Loopback, RFC-1918, link-local, IMDS hostnames, userinfo in URLs, non-HTTP schemes |
+| `LoopbackOrPrivate` | Atropos | Loopback, RFC-1918, `localhost` | Public IPs, link-local (incl. 169.254.169.254), IMDS hostnames, CGNAT, Azure IMDS IP |
 
-The patterns are duplicated from `librefang_kernel::trajectory::RedactionPolicy` (rather than imported) to avoid pulling the kernel's ~50 transitive deps into a leaf crate. A snapshot test against `tests/fixtures/kernel_redaction_patterns.txt` catches drift.
+The block list mirrors `librefang_runtime_mcp::mcp_oauth::is_ssrf_blocked_host` — both must change together. Includes IPv4-mapped IPv6 and NAT64 embedded addresses. No DNS resolution is performed; the check is on the URL string itself.
 
-### Retry Logic (`retry`)
+### Credential Redaction (`redact.rs`)
 
-Transient failures are retried with exponential backoff:
+`toolset_metadata` is scrubbed before it leaves the process. Three regex patterns run on every string value (keys are left intact):
 
-- **3 attempts** total (diverges from the workspace LLM retry loop's 4 attempts — see module docs for rationale).
-- **200ms base delay**, doubling per attempt (200ms, 400ms).
-- **Transient**: `NetworkError`, HTTP 429, HTTP 5xx.
-- **Permanent** (returned immediately): `AuthError`, non-429 4xx, `MalformedResponse`, `InvalidConfig`, `TrainerNotReady`.
+1. **JWT tokens** → `<REDACTED:JWT>`
+2. **API-key-shaped strings** (`sk_…`, `token=…`, `bearer …`) → `<REDACTED:CREDENTIAL>`
+3. **Long base64 blobs** (≥40 chars) → `<REDACTED:BLOB>`
 
-### HTTP Client
+The patterns are duplicated from `librefang_kernel::trajectory::RedactionPolicy` rather than imported (importing would pull ~50 transitive crates into a leaf egress crate). A snapshot test (`regex_set_matches_kernel_snapshot`) verifies parity against a checked-in fixture — CI fails if either side drifts.
 
-All outbound requests flow through `librefang_http::proxied_client()`, the workspace's shared reqwest client. This is mandatory — it carries the configured proxy, TLS fallback roots, and `User-Agent: librefang/<version>`.
+### Retry Logic (`retry.rs`)
 
-## Contributing Notes
+Transient errors are retried with exponential backoff: 3 attempts, 200ms base delay (200ms → 400ms). This is intentionally shorter than the workspace's LLM retry loop (4 attempts, 1000ms) because:
 
-- **Adding a new target**: Add a variant to `ExportTarget`, create a new private module with `export_to_*` and `export_to_*_with_base` (the latter for wiremock tests), add the dispatch arm in `export()`, and wire the appropriate `EgressMode`.
-- **Tuning retry timing**: Update `MAX_ATTEMPTS` / `BASE_DELAY_MS` in `retry.rs` **and** the module-level docstring explaining the divergence from the agent loop. Do not "fix" them to match `librefang_runtime` values.
-- **Updating redaction patterns**: Edit the `*_PATTERN` consts in `redact.rs` **and** the fixture at `tests/fixtures/kernel_redaction_patterns.txt`. The snapshot test will fail on drift.
-- **SSRF policy changes**: Must be mirrored in `librefang_runtime_mcp::mcp_oauth::is_ssrf_blocked_host`. The two are intentionally duplicated but must stay in sync.
-- **Wire format changes**: This crate does not own the trajectory serialization format. Changes to `ScoredData`, W&B file artefacts, or Tinker telemetry shapes belong in the respective upstream SDKs or the RFC #3330 workstream.
+- Trajectory uploads happen post-rollout — no user is blocking on the retry budget.
+- Sub-second retry gives fast feedback when an upstream is genuinely down.
+- Rate-limit windows for W&B/Tinker/Atropos are seconds, not minutes.
+
+**Transient** (retried): `NetworkError`, HTTP 429, HTTP 5xx.
+**Permanent** (immediate return): `AuthError`, other 4xx, `MalformedResponse`, `InvalidConfig`, `TrainerNotReady`.
+
+### Error Body Truncation
+
+Upstream error response bodies are truncated to 4 KiB (`MAX_ERROR_BODY_BYTES`) before being stored in `UpstreamRejected`. This prevents pathological upstream payloads from bloating the error value. Decoding is lossy UTF-8 so non-text responses still surface something useful.
+
+## Integration with the Codebase
+
+The crate is called from the kernel's RL export orchestration layer:
+
+- `build_payload()` (in `src/rl_export/mod.rs`) constructs `RlTrajectoryExport` instances.
+- `maybe_export_on_turn_end()` calls `export()` with the configured `ExportTarget`.
+
+All outbound HTTP uses `librefang_http::proxied_client()`, which carries the operator's proxy configuration and TLS fallback roots. The crate has no direct dependency on `librefang-kernel` or `librefang-runtime` — it is a leaf crate with a minimal dependency tree.

@@ -2,204 +2,148 @@
 
 # librefang-cli-templates
 
-TOML configuration templates used by the LibreFang CLI during project initialization. These files are **static resources** — not executed directly — and are rendered by the CLI's `init` and `init-wizard` commands to produce a working `librefang.toml`.
+Configuration templates used by the LibreFang CLI (`librefang init`) to generate an initial `librefang.toml` file. This module contains no executable code — it ships two TOML template files that the CLI reads, interpolates, and writes to disk.
 
-## Templates
+## Files
 
-### `init_default_config.toml`
-
-The full reference configuration. It contains every supported top-level key, section, and sidecar channel adapter, heavily commented with:
-
-- Default values for required fields
-- Valid option ranges (e.g. `mode = "stable" | "default" | "dev"`)
-- Inline security guidance (loopback binding, auth requirements, SSRF protection)
-- Migration notes for channel adapters moved to the sidecar architecture
-
-The CLI copies this file verbatim when a user runs a bare `librefang init` without the interactive wizard. Users are expected to uncomment and edit sections as needed.
-
-### `init_wizard_config.toml`
-
-A minimal skeleton produced by the interactive `librefang init-wizard` flow. Only the sections the user actually configured are emitted. This keeps the resulting file short and legible.
+| File | Purpose |
+|---|---|
+| `init_default_config.toml` | Full reference configuration with every section commented out and documented. Used by `librefang init` in non-interactive mode. |
+| `init_wizard_config.toml` | Minimal configuration emitted by the interactive setup wizard (`librefang init --wizard`). Only includes sections the user explicitly configured. |
 
 ## Template Placeholders
 
-Both files contain Mustache-style `{{…}}` tokens substituted at generation time:
+Both files contain Mustache-style `{{placeholder}}` tokens that the CLI replaces at generation time.
 
-| Placeholder | Used in | Replaced with |
+### `init_default_config.toml`
+
+Used in `[default_model]`:
+
+| Placeholder | Example value | Description |
 |---|---|---|
-| `{{provider}}` | Both | LLM provider name (e.g. `openai`, `anthropic`, `ollama`) |
-| `{{model}}` | Both | Default model identifier (e.g. `gpt-4o`, `claude-sonnet-4-20250514`) |
-| `{{api_key_env}}` | `init_default_config.toml` | Environment variable name for the API key |
-| `{{api_key_line}}` | `init_wizard_config.toml` | Fully rendered `api_key_env = "…"` line (or empty if using a local provider) |
-| `{{routing_section}}` | `init_wizard_config.toml` | Agent routing block if the user defined custom agent-to-model mappings |
+| `{{provider}}` | `openai`, `anthropic` | LLM provider identifier |
+| `{{model}}` | `gpt-4o`, `claude-sonnet-4-20250514` | Default model name |
+| `{{api_key_env}}` | `OPENAI_API_KEY` | Environment variable holding the API key |
+
+### `init_wizard_config.toml`
+
+| Placeholder | Description |
+|---|---|
+| `{{provider}}` | LLM provider identifier |
+| `{{model}}` | Default model name |
+| `{{api_key_line}}` | Complete `api_key_env = "..."` line, or empty if the user chose not to configure a key |
+| `{{routing_section}}` | Optional agent routing block generated from wizard responses, or empty string |
+
+The wizard template uses coarser placeholders (`{{api_key_line}}`, `{{routing_section}}`) because the wizard may produce multi-line or optional blocks that don't map cleanly to a single value.
 
 ## Configuration Sections Reference
 
-The full template organizes settings into the following groups:
+The full template covers every configurable subsystem. Active defaults vs. opt-in sections are noted below.
 
-### Server
+### Always active (written uncommented)
 
-```toml
-api_listen = "127.0.0.1:4545"
-log_level = "info"
-mode = "default"
-update_channel = "stable"
+- **Server** — `api_listen`, `log_level`, `mode`, `update_channel`. Default bind is loopback-only (`127.0.0.1:4545`). Binding to a non-loopback address requires authentication to be configured; the daemon will refuse to start otherwise unless `LIBREFANG_ALLOW_NO_AUTH=1` is set.
+- **Dashboard Login** — `dashboard_user` / `dashboard_pass`. Defaults to `librefang`/`librefang`; must be changed after first login. Supports vault references (`"vault:dashboard_password"`) and environment variable injection (`LIBREFANG_DASHBOARD_PASS`).
+- **Performance** — `prompt_caching`, `stable_prefix_mode`, `usage_footer`.
+- **Default Model** — `[default_model]` with provider, model name, and API key env var.
+- **Memory** — `[memory]` with `decay_rate`.
+- **Proactive Memory** — `[proactive_memory]` with `auto_memorize`, `auto_retrieve`, `max_retrieve` enabled by default.
+- **Web Tools** — `[web]` with `search_provider = "auto"` (auto-detects among Tavily, Brave, Jina, Perplexity, DuckDuckGo).
+- **Task Queue** — `[queue.concurrency]` with lane limits for main, cron, subagent, and trigger dispatches.
+- **Shell Execution Policy** — `[exec_policy]` defaulting to `mode = "deny"`.
+- **Config Hot-Reload** — `[reload]` with `mode = "hybrid"` and 500ms debounce.
+
+### Opt-in (shipped commented out)
+
+Each section below is present in the template but prefixed with `#`. Users uncomment to activate.
+
+| Section | Key | Purpose |
+|---|---|---|
+| Terminal Access Control | `[terminal]` | Remote shell access, proxy header trust |
+| Provider Regions | `[provider_regions]` | Region-specific endpoints (e.g., Qwen intl, MiniMax China) |
+| Provider URL Overrides | `[provider_urls]` | Custom endpoints for self-hosted providers (Ollama, vLLM) |
+| Fallback Providers | `[[fallback_providers]]` | LLM failover chain |
+| Rate Limiting | `[rate_limit]` | GCRA-based API rate limits, WebSocket throttling |
+| Registry Sync | `[registry]` | Agent registry cache TTL |
+| Session Compaction | `[compaction]` | LLM-based history summarization thresholds |
+| Event Triggers | `[triggers]` | Cooldown, recursion depth, workflow timeout |
+| Budget & Cost Control | `[budget]` | Hourly/daily/monthly caps, per-provider limits |
+| Extended Thinking | `[thinking]` | Claude extended thinking budget and streaming |
+| Browser Automation | `[browser]` | Headless browser sessions |
+| Docker Sandbox | `[docker]` | Containerized code execution |
+| File Inbox | `[inbox]` | Directory-based async message ingestion |
+| Network (P2P) | `[network]` | Federation shared secret |
+| MCP Servers | `[[mcp_servers]]` | External tool integration via Model Context Protocol |
+
+## Sidecar Channel Adapters
+
+All messaging channel integrations run as out-of-process Python sidecars communicating over newline-delimited JSON-RPC via stdio. The template ships commented-out `[[sidecar_channels]]` blocks for each supported adapter.
+
+### Prerequisites
+
+Sidecars require the LibreFang Python SDK:
+
+```bash
+pip install librefang-sdk
+# Or from source:
+pip install -e sdk/python/
 ```
 
-The daemon **refuses to start** if `api_listen` is set to a non-loopback address and no authentication is configured (`api_key`, `dashboard_user`/`dashboard_pass`, or `[[users]]`). Override with `LIBREFANG_ALLOW_NO_AUTH=1` at your own risk.
-
-### Dashboard Authentication
-
-```toml
-dashboard_user = "librefang"
-dashboard_pass = "librefang"
-```
-
-Default credentials must be changed after first login. Production deployments should use one of:
-- **Vault**: `librefang vault set dashboard_password` then `dashboard_pass = "vault:dashboard_password"`
-- **Environment variable**: `LIBREFANG_DASHBOARD_PASS`
-
-### Default LLM
-
-```toml
-[default_model]
-provider = "{{provider}}"
-model = "{{model}}"
-api_key_env = "{{api_key_env}}"
-```
-
-`base_url` can be overridden for local proxies or alternative endpoints.
-
-### Memory and Proactive Memory
-
-```toml
-[memory]
-decay_rate = 0.05
-
-[proactive_memory]
-enabled = true
-auto_memorize = true
-auto_retrieve = true
-max_retrieve = 10
-```
-
-Controls fact extraction from conversations and automatic recall of relevant memories. Fine-tuning knobs include `extraction_threshold`, `session_ttl_hours`, `duplicate_threshold`, and `max_memories_per_agent`.
-
-### Web Tools
-
-```toml
-[web]
-search_provider = "auto"  # auto-detects: Tavily → Brave → Jina → Perplexity → DuckDuckGo
-
-[web.fetch]
-max_chars = 50000
-timeout_secs = 30
-readability = true
-```
-
-`ssrf_allowed_hosts` is available for self-hosted/K8s deployments that need internal network access. Cloud metadata addresses (`169.254.x.x`, `100.64.x.x`) are always blocked.
-
-### Task Queue Concurrency
-
-```toml
-[queue.concurrency]
-main_lane = 3
-cron_lane = 2
-subagent_lane = 3
-trigger_lane = 8
-default_per_agent = 1
-```
-
-Lanes control how many tasks of each type run in parallel. `default_per_agent` can be overridden per-agent via `max_concurrent_invocations` in agent manifests.
-
-### Shell Execution Policy
-
-```toml
-[exec_policy]
-mode = "deny"  # deny | allowlist | full
-timeout_secs = 30
-max_output_bytes = 102400
-```
-
-`deny` is the safest default — no shell commands execute. Move to `allowlist` or `full` only when explicitly needed.
-
-### Hot-Reload
-
-```toml
-[reload]
-mode = "hybrid"  # off | restart | hot | hybrid
-debounce_ms = 500
-```
-
-`hybrid` applies hot-reload to safe settings and requires a restart for structural changes.
-
-### Sidecar Channel Adapters
-
-All messaging platform integrations run as out-of-process Python sidecars communicating via newline-delimited JSON-RPC over stdio. Each adapter follows the same pattern:
-
-```toml
-[[sidecar_channels]]
-name = "slack"
-command = "python3"
-args = ["-m", "librefang.sidecar.adapters.slack"]
-channel_type = "slack"
-[sidecar_channels.env]
-SLACK_APP_TOKEN = "xapp-..."
-SLACK_BOT_TOKEN = "xoxb-..."
-```
-
-**Prerequisite**: `pip install librefang-sdk` into the same Python interpreter that `command = "python3"` resolves to. Verify with:
+Verify the SDK is importable from the same `python3` the daemon will use:
 
 ```bash
 python3 -c 'import librefang.sidecar; print(librefang.__file__)'
 ```
 
-Available adapters: Bluesky, DingTalk, Discord, Email (IMAP+SMTP), Feishu/Lark, Google Chat, Gotify, LINE, Mastodon, Matrix, Mattermost, Nextcloud Talk, ntfy, QQ Bot, Reddit, Rocket.Chat, Signal, Slack, Microsoft Teams, Telegram, Twitch, Webex, Webhook, WeChat, WeCom, WhatsApp, Zulip.
+### Adapter inventory
 
-Secrets **must not** be committed in this file. Use `~/.librefang/secrets.env` or a vault.
+Each adapter block follows the same structure:
 
-To inspect an adapter's full environment variable inventory:
+```toml
+[[sidecar_channels]]
+name = "<adapter>"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.<adapter>"]
+channel_type = "<adapter>"
+[sidecar_channels.env]
+# Adapter-specific env vars — secrets come from ~/.librefang/secrets.env, not here
+```
+
+Available adapters (each annotated with its migration PR in the template):
+
+Bluesky, DingTalk, Discord, Email (IMAP+SMTP), Feishu/Lark, Google Chat, Gotify, LINE, Mastodon, Matrix, Mattermost, Nextcloud Talk, ntfy, QQ Bot, Reddit, Rocket.Chat, Signal, Slack, Microsoft Teams, Telegram, Twitch, Webex, Webhook (generic HMAC), WeChat, WeCom, WhatsApp (Cloud API or Baileys), Zulip.
+
+### Adapter schema discovery
+
+Each adapter publishes a SCHEMA describing its environment variables:
 
 ```bash
 python3 -m librefang.sidecar.adapters.<name> --describe
 ```
 
-### MCP Servers
+### Regenerating adapter listings
 
-```toml
-[[mcp_servers]]
-name = "filesystem"
-timeout_secs = 30
-[mcp_servers.transport]
-type = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+LibreFang maintainers can regenerate the adapter blocks from source:
+
+```bash
+cd sdk/python && python3 ../../scripts/gen_sidecar_samples.py
 ```
 
-### Optional Sections (commented out by default)
+## Security Notes
 
-| Section | Purpose |
-|---|---|
-| `[budget]` | Per-hour/day/month cost caps, per-provider throttling |
-| `[thinking]` | Extended thinking budget for Claude models |
-| `[browser]` | Headless browser automation settings |
-| `[docker]` | Docker sandbox for isolated code execution |
-| `[inbox]` | File-based message ingestion from a watched directory |
-| `[network]` | P2P federation via shared secret |
-| `[compaction]` | LLM-based history summarization thresholds |
-| `[triggers]` | Event trigger cooldowns and recursion limits |
-| `[rate_limit]` | GCRA token budget, WebSocket throttling |
-| `[registry]` | Agent registry cache TTL |
-| `[terminal]` | Remote terminal access and proxy header settings |
-| `[[fallback_providers]]` | LLM failover chain |
+The template embeds several safety mechanisms:
+
+1. **Loopback-only default** — `api_listen = "127.0.0.1:4545"`. The daemon refuses non-loopback binds without authentication configured.
+2. **Shell deny-by-default** — `[exec_policy] mode = "deny"`.
+3. **SSRF protection** — Cloud metadata addresses (`169.254.x.x`, `100.64.x.x`) are always blocked in web fetch; internal hosts require explicit `ssrf_allowed_hosts` entries.
+4. **Terminal guard** — `allow_unauthenticated_remote` is a separate hard guard that must be explicitly enabled even when `allow_remote = true`.
+5. **Secrets not in config** — Sidecar adapter secrets belong in `~/.librefang/secrets.env`, never inline in `librefang.toml`.
 
 ## Integration with the CLI
 
-These templates have no code or imports — they are pure resource files embedded in the `librefang-cli` crate (or installed alongside it). The initialization commands locate and render them:
+The CLI's init command loads these templates at compile time (or runtime from the crate's template directory) and performs string substitution on the `{{...}}` tokens. The flow is:
 
-```
-librefang init          → copies init_default_config.toml → librefang.toml
-librefang init-wizard   → processes init_wizard_config.toml → librefang.toml
-```
+1. **Non-interactive** (`librefang init`): Reads `init_default_config.toml`, substitutes provider/model/key from CLI flags or defaults, writes the result.
+2. **Interactive** (`librefang init --wizard`): Guides the user through provider selection, model choice, and optional agent routing, then renders `init_wizard_config.toml` with the collected answers.
 
-During rendering, the CLI replaces `{{…}}` tokens with values gathered from the user or auto-detected from the environment. The resulting `librefang.toml` is consumed by the LibreFang daemon at startup.
+The generated file is written to the project's working directory (or a path specified via `--config`). The daemon (`librefang start`) then reads this file at startup, applying `[reload]` settings for hot-reload behavior.

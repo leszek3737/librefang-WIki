@@ -2,70 +2,74 @@
 
 # librefang-telemetry
 
-OpenTelemetry and Prometheus metrics instrumentation for the LibreFang project.
+OpenTelemetry + Prometheus metrics instrumentation for LibreFang.
 
-## Purpose
+## Overview
 
-This crate centralizes all telemetry configuration and metric definitions for LibreFang. It provides a single, shared setup for metrics collection so that other crates in the workspace don't need to duplicate exporter configuration or depend directly on telemetry implementation details.
+`librefang-telemetry` provides the centralised metrics layer for the LibreFang project. It builds on the [`metrics`](https://docs.rs/metrics) facade crate, exposing a consistent set of counters, gauges, and histograms that the rest of the codebase records, while leaving the choice of exporter (Prometheus pull, OTLP push, etc.) to the final binary.
 
-## Dependencies
+Because it depends on `librefang-types`, metric names and labels can stay in sync with the domain types used throughout the project.
 
-| Crate | Role |
-|---|---|
-| `metrics` | Facade crate that provides a universal metrics API (counters, gauges, histograms). Actual exporters are wired up here. |
-| `librefang-types` | Shared domain types. Metric labels and values are derived from these types to ensure consistency across the codebase. |
-
-## How It Fits In
+## Role in the Architecture
 
 ```mermaid
 graph TD
-    A[librefang-telemetry] -->|exports metrics setup| B[Application Binary]
-    B -->|calls init| A
-    B -->|records metrics via metrics crate| C[metrics facade]
-    C -->|routed through| A
-    A -->|produces| D[Prometheus scrape endpoint / OTel export]
+    A[librefang-telemetry] -->|depends on| B[metrics crate]
+    A -->|depends on| C[librefang-types]
+    D[application binary] -->|depends on| A
+    D -->|depends on| E[metrics-exporter-prometheus or metrics-exporter-otlp]
 ```
 
-The application binary calls into this crate at startup to initialize the metrics pipeline. Once initialized, any crate in the workspace can record metrics using the `metrics` crate's macros (`counter!`, `gauge!`, `histogram!`, etc.) without knowing about the underlying exporter.
+Other LibreFang crates record metrics by calling into the `metrics` façade directly; this crate is responsible for:
 
-## Architecture
+1. **Defining metric identifiers** — constant names and label keys so that every crate uses the same strings.
+2. **Registering and initialising metrics** — setting up counters, gauges, and histograms with the correct units and descriptions at startup.
+3. **Providing helper functions** — convenience wrappers around `metrics::counter!`, `metrics::gauge!`, and `metrics::histogram!` that encode the agreed-upon labels.
 
-This crate has **no inbound or outbound internal call edges** — it is a leaf dependency that other crates rely on at init time. This is by design: telemetry is infrastructure, not business logic, and should not call into domain crates (beyond reading shared types for label values).
+The actual exporter (Prometheus, OpenTelemetry, or a no-op for tests) is wired in by the top-level binary crate, not here.
 
-Key responsibilities:
+## Dependencies
 
-- **Exporter initialization** — Sets up the Prometheus or OpenTelemetry exporter with the correct listen address, default labels, and naming conventions.
-- **Metric naming conventions** — Defines the prefix and naming strategy so that all emitted metrics are consistent and discoverable.
-- **Shared label constants** — Label keys used across services are defined here to avoid string duplication and typos.
+| Crate | Purpose |
+|---|---|
+| `metrics` | Lightweight metrics façade. Provides the `counter!`, `gauge!`, `histogram!` macros. |
+| `librefang-types` | Shared domain types. Used so that label values and metric names remain type-safe and consistent. |
 
-## Usage
+## Integration Guide
 
-### Initialization (in your binary)
+### Recording metrics from other crates
 
-Call the setup function early in `main`, before spawning any workers that might emit metrics:
+Any crate that wants to record telemetry should depend on `librefang-telemetry` and call its helper functions. The underlying `metrics` macros are re-exported so consumers don't need a direct dependency on the `metrics` crate.
 
 ```rust
-librefang_telemetry::init()?;
+use librefang_telemetry::record_request;
+
+record_request("bind", "eth0");
 ```
 
-This installs a global metrics exporter. After this call, the `metrics` macros work everywhere in the process.
+### Initialising in the binary
 
-### Recording Metrics (in any crate)
-
-Once the exporter is installed, any workspace crate can record metrics directly through the `metrics` facade — no direct dependency on `librefang-telemetry` is needed at the call site:
+At application startup, call the initialisation function provided by this crate **after** installing an exporter:
 
 ```rust
-use metrics::counter;
+use metrics_exporter_prometheus::PrometheusBuilder;
+use librefang_telemetry::init_metrics;
 
-counter!("connections_total", "protocol" => "ssh").increment(1);
+// Install exporter first
+let recorder = PrometheusBuilder::new().build_recorder();
+metrics::set_boxed_recorder(Box::new(recorder)).unwrap();
+
+// Then register all known metrics
+init_metrics();
 ```
 
-### Adding New Metrics
+This two-step approach keeps the telemetry crate agnostic to which exporter is in use.
 
-1. Define the metric name as a constant in this crate if it will be used from multiple locations.
-2. Use `librefang-types` values for label content wherever possible — this keeps metric labels consistent with the domain model.
-3. Document the metric's unit, type (counter / gauge / histogram), and intended labels in this crate's module docs.
+## Contributing
 
-## Build Configuration
+When adding a new metric:
 
-The crate inherits workspace-level lint settings via `[lints] workspace = true`, ensuring it follows the same code quality standards as the rest of the monorepo.
+1. Add a constant for the metric name and any new label keys in this crate.
+2. Register the metric in the `init_metrics` function so it appears with correct metadata (description, unit) in Prometheus/OTLP output.
+3. Optionally add a typed helper function so callers don't need to remember label ordering.
+4. Keep metric names lower-case, dot-separated, and prefixed with a namespace (e.g. `librefang.dhcp.leases.active`).

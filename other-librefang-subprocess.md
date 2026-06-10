@@ -2,105 +2,135 @@
 
 # librefang-subprocess
 
-Persistent JSON-over-stdio subprocess transport shared by LibreFang's sidecar bridges.
+Persistent JSON-over-stdio subprocess transport, shared by LibreFang's sidecar bridges.
 
-## Overview
+## Purpose
 
-Every sidecar bridge in LibreFang needs to do the same thing: spawn a long-lived child process, send it JSON requests over stdin, read JSON replies from stdout, match each reply to the caller that's waiting for it, and keep stderr draining to the log. `librefang-subprocess` extracts that shared logic into a reusable transport layer so each bridge only needs to concern itself with its domain-specific message types.
+Every sidecar bridge in LibreFang was reimplementing the same boilerplate: spawn a long-lived child process, write JSON requests to its stdin, read JSON replies from its stdout, match replies back to callers by ID, drain stderr to the log, and reap the child on shutdown. This crate extracts that shared logic into a single, reusable transport layer.
 
-The transport is responsible for:
+The caller supplies a JSON request object. The transport injects an `id` field, writes `{"id": N, …}\n` to the child's stdin, and resolves the pending call when a matching reply (`{"id": N, "ok": …}` or `{"id": N, "error": …}`) arrives on stdout.
 
-- **Spawning** a child process and holding its stdio handles
-- **Injecting** a unique `id` into every outgoing JSON request
-- **Writing** newline-delimited JSON to the child's stdin, with a configurable size bound
-- **Reading** newline-delimited JSON replies on a background tokio task, matching each `{"id": N, ...}` to the pending caller
-- **Draining** stderr lines to `tracing` so the child's diagnostic output isn't lost
-- **Reaping** the child process on drop
-
-The caller supplies an arbitrary JSON value. The transport wraps it as `{"id": N, ...}`, writes it, and resolves the future with the matching reply (`{"id": N, "ok": ...}` or `{"id": N, "error": ...}`).
+This crate lives below `librefang-channels` and `librefang-runtime` in the dependency graph. It depends on **no** `librefang-*` crate. In-tree consumers include the context engine (`docs/architecture/sidecar-context-engine.md`) and the proactive-memory extractor.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    Caller["Bridge / Consumer"] -->|JSON request| ST["SubprocessTransport"]
-    ST -->|inject id, write to stdin| Child["Child Process (sidecar)"]
-    Child -->|newline-delimited JSON on stdout| BG["Background Reader Task"]
-    BG -->|match by id, resolve future| Waiter["Pending Waiter"]
-    Child -->|stderr lines| Log["tracing logger"]
-    ST2["SupervisedTransport"] -->|wraps, re-spawns on crash| ST
+    Caller["Caller (e.g. context engine)"]
+    ST["SupervisedTransport"]
+    RT["SubprocessTransport"]
+    Child["Child process (sidecar)"]
+
+    Caller -->|"send(request)"| ST
+    ST -->|"delegate or respawn"| RT
+    RT -->|"write JSON to stdin"| Child
+    Child -->|"reply line on stdout"| RT
+    RT -->|"match id → resolve"| Caller
+
+    style ST fill:#e8f4e8
+    style RT fill:#e8e8f4
 ```
 
-## Two Layers
+Two layers are exposed, one building on the other:
 
-### `SubprocessTransport`
-
-The raw, single-lifetime transport. One child process, one connection. Once the child exits—whether cleanly or by crashing—the transport is dead and all pending waiters receive an error.
-
-Use this when you want full control over the child lifecycle or when the sidecar is expected to run for the entire duration of the parent.
-
-### `SupervisedTransport`
-
-A resilience wrapper around `SubprocessTransport`. It:
-
-1. **Spawns lazily** — the child is not started until the first request.
-2. **Re-spawns on failure** — if the child crashes, the next request triggers a fresh spawn (after a configurable cooldown period to avoid tight restart loops).
-3. **Degrades gracefully** — a transient sidecar crash fails the in-flight request but does not permanently disable the transport.
-
-Use this for sidecars that may crash or need to be restarted without taking down the parent daemon.
+- **`SubprocessTransport`** — the raw, id-matched transport. Owns exactly one child process. If the child exits, the transport is dead and must be replaced.
+- **`SupervisedTransport`** — wraps `SubprocessTransport` for callers that want resilience. Spawns the child lazily on first use and re-spawns after a crash, rate-limited by a respawn cooldown so a transient sidecar failure degrades a single call rather than the daemon's whole lifetime.
 
 ## Protocol
 
-Communication uses newline-delimited JSON over stdio:
+All communication uses newline-delimited JSON over the child's stdin/stdout.
 
-**Request** (parent → child):
+### Request
+
+The caller provides an arbitrary JSON object. The transport injects a numeric `id` before writing:
+
 ```json
-{"id": 1, ...caller_fields...}
+{"id": 42, "method": "evaluate", "params": {...}}
 ```
 
-**Reply** (child → parent):
+### Reply
+
+The child must respond with a JSON line containing the same `id` and either an `ok` or `error` field:
+
 ```json
-{"id": 1, "ok": ...}
+{"id": 42, "ok": {"result": true}}
 ```
-or
+
 ```json
-{"id": 1, "error": "..."}
+{"id": 42, "error": "something went wrong"}
 ```
 
-The `id` field is injected by the transport. Callers never set it.
+The background reader task matches on `id` to resolve the corresponding pending future.
 
-## Size Bounds
+## Key Responsibilities
 
-Both the outbound write size and the inbound reply-line size are bounded. Any line exceeding the configured maximum is treated as an error, preventing a misbehaving child from consuming unbounded memory.
+The transport handles several concerns that every bridge would otherwise need to duplicate:
 
-## Position in the Dependency Graph
-
-`librefang-subprocess` lives below `librefang-channels` and `librefang-runtime` — those higher-level crates depend on this transport, not the other way around. This crate has **no** `librefang-*` dependencies; it only relies on:
-
-| Dependency | Purpose |
+| Concern | Detail |
 |---|---|
-| `tokio` | Async runtime, child process management, background tasks |
-| `serde_json` | JSON serialization/deserialization |
-| `tracing` | Structured logging (stderr drain, lifecycle events) |
-| `thiserror` | Error type definitions |
-| `metrics` | Instrumentation counters/histograms |
-
-## In-Tree Consumers
-
-- **Context engine** (`docs/architecture/sidecar-context-engine.md`)
-- **Proactive-memory extractor**
-
-Both use `SupervisedTransport` to communicate with their respective sidecar processes, benefiting from automatic respawn on transient failures.
+| **Process lifecycle** | Spawns the child, reaps it on drop. |
+| **ID matching** | Assigns a monotonic ID to each request, maintains a wait map, resolves the correct future when the reply arrives. |
+| **Write bounding** | Enforces a maximum size on the serialized request written to stdin. |
+| **Reply-line bounding** | Enforces a maximum size on each line read from stdout to prevent unbounded memory growth from a misbehaving child. |
+| **Background reading** | A tokio task continuously reads stdout lines and dispatches them to waiters. |
+| **Stderr draining** | Forwards child stderr output to the `tracing` log so sidecar diagnostics are visible. |
+| **Supervision** (`SupervisedTransport` only) | Detects child exit, rate-limits respawns via a cooldown, and retries on the next call. |
 
 ## Error Handling
 
-Errors are expressed via `thiserror`-derived types covering:
+Errors are reported through the `thiserror`-derived error type. Broad categories:
 
-- Child process spawn failures
-- Stdin write errors (broken pipe, size exceeded)
-- Stdout read errors (EOF, malformed JSON, size exceeded)
-- Child exit during an active request (all pending waiters are resolved with an error)
+- **Spawn failures** — the child binary could not be started.
+- **Write failures** — the request exceeded the write bound or the child's stdin was closed.
+- **Read failures** — a reply line exceeded the line bound or stdout closed unexpectedly.
+- **Child exit** — the child process terminated before replying.
+- **Respawn cooldown** (`SupervisedTransport`) — the child crashed too recently; the call fails immediately rather than hammering the system.
+
+All errors are instrumented with `tracing` spans so they appear in structured logs with context.
+
+## Observability
+
+The crate integrates with the `metrics` facade. Key metrics you can expect (names are defined in the source):
+
+- Request/response counts
+- In-flight request gauges
+- Respawn counts (supervised transport)
+- Child exit reasons
+
+Stderr output from the child is forwarded to `tracing` at an appropriate level, preserving the sidecar's diagnostic output in the host process's log stream.
+
+## Usage Patterns
+
+### Basic: `SubprocessTransport`
+
+For scenarios where the child is expected to outlive the transport (or where the caller manages restarts itself):
+
+1. Construct a `SubprocessTransport` with the child binary path and any arguments.
+2. Call a method that sends a JSON request and await the response future.
+3. The transport assigns an `id`, writes to stdin, and resolves the future when the matching reply arrives.
+4. On drop, the child is reaped.
+
+### Resilient: `SupervisedTransport`
+
+For long-running daemons where a crashed sidecar should not be fatal:
+
+1. Construct a `SupervisedTransport` with the binary path and a respawn cooldown duration.
+2. Send requests as normal. The first call lazily spawns the child.
+3. If the child crashes mid-flight, that call fails — but the next call triggers a respawn (subject to the cooldown).
+4. The transport remains usable across multiple child lifetimes.
+
+## Dependencies
+
+| Crate | Role |
+|---|---|
+| `tokio` | Async runtime, child process management, background tasks |
+| `serde_json` | JSON serialization and deserialization |
+| `tracing` | Structured logging and diagnostic spans |
+| `thiserror` | Ergonomic error type derivation |
+| `metrics` | Request/response and lifecycle counters |
+
+No `librefang-*` crates appear as dependencies, keeping the transport fully self-contained and reusable.
 
 ## Testing
 
-Dev-dependencies include `tempfile` for tests that need to exercise the transport against a real (if trivial) child process.
+The dev-dependency on `tempfile` supports integration tests that spawn a real child process (often a small helper script or the test binary itself in a special mode) to exercise the full stdin/stdout round-trip path.

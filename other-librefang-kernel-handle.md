@@ -2,77 +2,78 @@
 
 # librefang-kernel-handle
 
-A thin abstraction layer defining the `KernelHandle` trait — the primary interface for in-process callers to interact with the LibreFang kernel.
+A trait definition module providing the `KernelHandle` abstraction for in-process callers that need to interact with the LibreFang kernel.
 
 ## Purpose
 
-This crate provides a stable, trait-based contract that decouples consumers of the LibreFang kernel from its concrete implementation. Any component running in the same process (services, plugins, middleware) that needs to invoke kernel operations does so through `KernelHandle`, rather than depending on the kernel directly.
+This crate defines the interface contract between in-process callers and the LibreFang kernel. Rather than performing IPC (inter-process communication) or network calls, components running within the same process as the kernel use a `KernelHandle` trait implementation to communicate directly. This enables:
 
-## Role in the Architecture
+- **Zero-copy in-process communication** between kernel services and their callers.
+- **Testability** — callers depend on the trait, allowing mock or stub implementations in tests.
+- **Decoupling** — the kernel's concrete implementation is separated from the interface consumers rely on.
+
+## Architecture
 
 ```mermaid
 graph TD
-    A[In-process Caller] -->|depends on trait| B[KernelHandle]
-    B -->|implemented by| C[LibreFang Kernel]
-    D[Other Services] -->|depends on trait| B
-    E[Test Harnesses] -->|mocks| B
+    A[In-Process Caller] -->|depends on trait| B[KernelHandle Trait]
+    B -->|implemented by| C[Kernel Runtime]
+    D[Test / Mock] -->|implements| B
+    B -->|uses types from| E[librefang-types]
 ```
 
-`librefang-kernel-handle` sits between the kernel implementation and its consumers. Callers only need to depend on this lightweight crate — not the full kernel — keeping dependency graphs clean and compilation fast.
+The trait is the sole public export of this crate. Concrete implementations live elsewhere in the LibreFang workspace, while consumers depend only on this trait definition.
 
-## Dependencies and Their Roles
+## Dependencies
 
-| Dependency | Purpose |
+| Dependency | Role |
 |---|---|
-| `librefang-types` | Shared domain types (messages, errors, identifiers) exchanged across the trait boundary |
-| `async-trait` | Enables `#[async_trait]` on the `KernelHandle` trait, since kernel operations are asynchronous |
-| `bytes` | Efficient byte buffer handling for raw data passing (e.g., network payloads, serialized messages) |
-| `serde_json` | JSON serialization/deserialization for structured data exchanged through the handle |
-| `tracing` | Instrumentation spans and diagnostic logging within trait operations |
-| `uuid` | Unique identifier generation for requests, sessions, or entity correlation |
+| `librefang-types` | Shared domain types used in trait method signatures (requests, responses, errors). |
+| `async-trait` | Enables `async` methods in the trait definition, since Rust natively does not support async fns in traits (prior to stable RPITIT). |
+| `bytes` | Efficient byte buffer handling for binary message payloads. |
+| `serde_json` | JSON (de)serialization for structured message content. |
+| `tracing` | Instrumentation and diagnostic logging within trait default methods or implementations. |
+| `uuid` | Identifier types for correlating requests, sessions, or kernel resources. |
 
-## Usage Patterns
+## Usage
 
 ### Depending on the Trait
 
-Add this crate to your `Cargo.toml`:
+Add `librefang-kernel-handle` to your crate's `Cargo.toml`:
 
 ```toml
 [dependencies]
 librefang-kernel-handle = { path = "../librefang-kernel-handle" }
 ```
 
-Accept a `KernelHandle` as a parameter rather than constructing one:
+Then accept a `KernelHandle` as a generic bound or `dyn` reference:
 
 ```rust
 use librefang_kernel_handle::KernelHandle;
 
-async fn process_request(kernel: &dyn KernelHandle) {
-    // invoke kernel operations through the trait
+async fn do_work(handle: &dyn KernelHandle) {
+    // Call trait methods on handle
 }
 ```
 
 ### Implementing the Trait
 
-The kernel crate itself provides the concrete implementation. If you are extending or replacing the kernel, implement `KernelHandle` for your type:
+The kernel runtime provides the concrete implementation. If you need a mock for testing, implement the trait directly:
 
 ```rust
 use librefang_kernel_handle::KernelHandle;
 
-struct MyKernel { /* ... */ }
+struct MockHandle;
 
-#[async_trait]
-impl KernelHandle for MyKernel {
-    // trait method implementations
+impl KernelHandle for MockHandle {
+    // implement required methods
 }
 ```
 
-### Testing with Mocks
+## Relationship to the Rest of the Workspace
 
-In dev/test contexts, `KernelHandle` can be mocked or stubbed since it is a trait. The crate's `dev-dependencies` include `tokio` with `macros` and `rt` features specifically to support writing async test harnesses.
+This is a **leaf-interface crate** — it has no outgoing calls to other LibreFang crates (beyond `librefang-types` for shared data structures) and no internal module structure. Its value is architectural: it is the seam that allows kernel callers and kernel implementors to evolve independently.
 
-## Design Notes
-
-- **Trait-only crate.** This module intentionally contains no business logic or runtime state. It exists solely to define the `KernelHandle` interface and any supporting types that should be visible to callers.
-- **No outgoing calls.** The crate has no internal execution flow — it is a pure type definition module. All behavior lives in the implementing crate.
-- **Stability surface.** Because in-process callers depend on this trait, changes to the `KernelHandle` signature are the primary compatibility concern. Avoid breaking changes; prefer adding new methods with default implementations or introducing extension traits.
+- **Downstream consumers**: Any crate that needs to invoke kernel operations in-process.
+- **Upstream implementors**: The kernel runtime crate(s) that provide the live `KernelHandle` implementation.
+- **Test crates**: Use dev-dependencies on `tokio` (with `macros` and `rt` features) for writing async test cases against mock implementations.

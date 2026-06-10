@@ -2,93 +2,64 @@
 
 # librefang-wire
 
-Agent-to-agent networking layer for the LibreFang Protocol (OFP). This crate provides the cryptographic handshake, framed message transport, and session management that LibreFang agents use to communicate securely with one another.
+Agent-to-agent networking layer for the LibreFang Protocol (OFP). Handles secure channel establishment, message framing, cryptographic authentication, and concurrent session management.
 
-## Purpose
+## Role in the System
 
-`librefang-wire` sits between the high-level agent logic and the raw TCP stream. It is responsible for:
+`librefang-wire` sits between the application logic and the raw async I/O provided by tokio. Other modules use it to open authenticated, encrypted channels to peer agents and exchange structured messages. It depends on `librefang-types` for shared data structures and error types, but nothing depends on `librefang-wire` directly in the published call graph — higher-level modules consume it at integration time rather than through direct crate-level calls.
 
-- **Establishing encrypted sessions** between two agents using an authenticated key exchange.
-- **Framing and serializing** OFP messages over the wire.
-- **Authenticating messages** to detect tampering or replay.
-- **Managing active sessions** in a thread-safe registry.
+## Cryptographic Protocol
 
-Agents do not call into the OS networking stack directly for OFP traffic — they route through this crate.
+The module implements a modern cryptographic handshake and messaging scheme built from well-vetted primitives:
 
-## Architecture
+| Primitive | Crate | Purpose |
+|---|---|---|
+| X25519 | `x25519-dalek` | Ephemeral Diffie-Hellman key exchange |
+| Ed25519 | `ed25519-dalek` | Agent identity signing and verification |
+| HKDF | `hkdf` | Deriving session keys from the shared secret |
+| HMAC-SHA256 | `hmac` + `sha2` | Message authentication codes on each frame |
+| Constant-time compare | `subtle` | Tag verification resistant to timing side-channels |
+
+The handshake flow follows a standard pattern: two agents exchange X25519 public keys to compute a shared secret, authenticate each other's identities with Ed25519 signatures over the transcript, and then derive symmetric session keys via HKDF. Once the channel is established, every message carries an HMAC tag that is verified in constant time.
+
+## Key Components
+
+### Session Management
+
+Concurrent sessions are tracked in a `DashMap` — a lock-free concurrent hashmap — allowing multiple tokio tasks to look up, insert, or retire sessions without serializing on a single `Mutex`. Each session entry holds the derived symmetric keys, the peer's authenticated identity, and any protocol state.
+
+### Async Trait Interfaces
+
+The `async-trait` dependency indicates that the networking surface is defined as async traits. This allows the module to abstract over transports (TCP, Unix domain sockets, TLS tunnels) while keeping the protocol logic transport-agnostic. Downstream consumers can mock or replace the transport for testing.
+
+### Message Framing
+
+Messages are serialized with `serde_json` and framed with length prefixes and HMAC tags. The framing layer is responsible for:
+
+- Reading a length header to delimit messages on the byte stream
+- Computing and appending an HMAC-SHA256 tag per frame
+- Verifying the tag on receipt using `subtle::ConstantTimeEq` to reject forged or corrupted frames without leaking timing information
+
+### Error Handling
+
+All errors are enumerated through types derived with `thiserror`. This keeps the error surface explicit and ensures that callers can match on specific failure modes (handshake timeout, signature verification failure, MAC mismatch, etc.) without parsing strings.
+
+## Dependency Map
 
 ```mermaid
-flowchart TD
-    A[Agent Logic] -->|send/recv OFP messages| W[librefang-wire]
-    W -->|handshake + framing| T[tokio TCP stream]
-    W -->|shared types| TY[librefang-types]
-
-    subgraph Wire Internals
-        HS[Handshake x25519 + ed25519]
-        KD[Key Derivation HKDF-SHA256]
-        MA[Message Auth HMAC-SHA256]
-        SR[Session Registry DashMap]
-    end
-
-    W --- HS
-    W --- KD
-    W --- MA
-    W --- SR
+graph TD
+    A[librefang-types] --> B[librefang-wire]
+    B --> C[tokio async I/O]
+    B --> D[x25519-dalek key exchange]
+    B --> E[ed25519-dalek signatures]
+    B --> F[hkdf + hmac-sha256]
+    B --> G[dashmap sessions]
+    B --> H[serde_json framing]
 ```
 
-### Cryptographic Pipeline
+## Integration Notes
 
-Every agent-to-agent session follows this sequence:
-
-1. **Key Exchange** — Both sides generate ephemeral X25519 keypairs and exchange public keys over the plaintext channel.
-2. **Authentication** — Each side signs the shared secret (or a transcript of the handshake) with its long-term Ed25519 identity key. This binds the ephemeral session to a known agent identity.
-3. **Key Derivation** — The shared secret is fed through HKDF-SHA256 to produce symmetric encryption and MAC keys.
-4. **Framed Transport** — Once the handshake completes, every message on the wire carries an HMAC-SHA256 tag. The receiver verifies the tag using `subtle::ConstantTimeEq` to prevent timing side-channels.
-
-### Session Registry
-
-Active sessions are tracked in a `DashMap` keyed by session ID (`uuid::Uuid`). `DashMap` provides lock-free concurrent access, which is important because multiple tokio tasks may send or receive on different sessions simultaneously.
-
-## Key Dependencies
-
-| Dependency | Role in this crate |
-|---|---|
-| `x25519-dalek` | Ephemeral Diffie-Hellman key exchange during handshake |
-| `ed25519-dalek` | Signing and verifying handshake messages with agent identity keys |
-| `hkdf` + `sha2` | Deriving symmetric keys from the shared secret |
-| `hmac` + `sha2` | Per-message authentication codes |
-| `subtle` | Constant-time comparison of MAC tags |
-| `dashmap` | Concurrent session registry |
-| `serde` / `serde_json` | Serializing and deserializing OFP message frames |
-| `tokio` | Async I/O for reading from and writing to TCP streams |
-| `async-trait` | Async trait definitions for transport abstractions |
-| `librefang-types` | Shared OFP message types, agent identity types, and protocol constants |
-| `rand_core` | Cryptographically secure randomness for key generation |
-
-## Relationship to the Rest of the Codebase
-
-- **`librefang-types`** — defines the message enums, identity structs, and protocol constants that `librefang-wire` serializes and deserializes. This crate is the single source of truth for "what does an OFP message look like."
-- **Agent binaries** — depend on `librefang-wire` to open a listener, accept incoming handshakes, and send/receive framed messages. The agent logic never handles raw byte streams for OFP.
-- This crate is a pure library. It has no binary target and does not start its own tokio runtime.
-
-## Error Handling
-
-Errors are surfaced through types deriving `thiserror::Error`. The main error categories are:
-
-- **Handshake failures** — the remote side's signature did not verify, or the handshake timed out.
-- ** framing errors** — a received frame could not be deserialized into a known OFP message type.
-- **Authentication failures** — the HMAC tag on a received message did not match the computed tag.
-- **I/O errors** — the underlying TCP stream was closed or returned an OS-level error.
-
-All errors are propagated to the caller; this crate does not silently swallow them.
-
-## Logging
-
-The crate uses `tracing` spans and events at the following levels:
-
-- `DEBUG` — handshake progress (key exchange complete, keys derived, session established).
-- `TRACE` — individual frame send/receive with byte counts.
-- `WARN` — authentication failures, unexpected disconnects.
-- `ERROR` — fatal protocol violations.
-
-No sensitive key material is ever logged.
+- **Randomness**: The `rand_core` dependency with `getrandom` provides the entropy source for X25519 ephemeral key generation. Ensure the target platform's system RNG is available at runtime.
+- **Serialization format**: Messages use JSON (`serde_json`). This is intentional for debuggability and protocol evolution, though it means frame sizes are not minimal. If binary framing is needed in the future, the serde layer can be swapped without touching the crypto or session logic.
+- **No external callers detected**: The static analysis found no incoming calls, which reflects that this crate is typically consumed through dynamic dispatch or trait objects at the application boundary, not through direct function calls from other crates.
+- **Testing**: The `tempfile` dev-dependency suggests integration tests that create temporary sockets or files for simulating agent pairs.
