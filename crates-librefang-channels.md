@@ -2,23 +2,23 @@
 
 # librefang-channels
 
-Channel Bridge Layer for LibreFang. Connects messaging-platform adapters to the kernel, converts platform messages into unified `ChannelMessage` events, routes them to the correct agent, and delivers agent replies back out.
+Warstwa mostu kanałowego dla LibreFang. Łączy adaptery platform komunikacyjnych z jądrem, konwertuje wiadomości platform na ujednolicone zdarzenia `ChannelMessage`, kieruje je do właściwego agenta i dostarcza odpowiedzi agenta z powrotem.
 
-All channel adapters run out-of-process as Python sidecars (`librefang.sidecar.adapters.*` in `sdk/python/`). This crate owns the **trampoline** that connects the kernel to those sidecars (`sidecar.rs`), the shared bridge types every adapter speaks, and the supporting infrastructure (routing, formatting, rate limiting, sanitization, debouncing, attachment enrichment, crash-recovery journaling).
+Wszystkie adaptery kanałów działają poza procesem jako sidecary w Pythonie (`librefang.sidecar.adapters.*` w `sdk/python/`). Ten crate zarządza **trampoliną** łączącą jądro z tymi sidecarami (`sidecar.rs`), wspólnymi typami mostka, z których korzysta każdy adapter, oraz infrastrukturą wspomagającą (routing, formatowanie, limitowanie szybkości, sanityzację, debouncing, wzbogacanie załączników, logowanie awarii do dziennika odzyskiwania).
 
-## Architecture
+## Architektura
 
 ```mermaid
 graph TD
     SC[Python Sidecar Adapter<br/>Telegram / Slack / Discord / …]
-    TR[sidecar.rs<br/>Trampoline]
-    BM[BridgeManager<br/>Owns adapter streams]
-    DB[MessageDebouncer<br/>Coalesces bursts]
-    SAN[InputSanitizer<br/>Prompt-injection check]
-    RT[AgentRouter<br/>Binding resolution]
+    TR[sidecar.rs<br/>Trampolina]
+    BM[BridgeManager<br/>Zarządza strumieniami adapterów]
+    DB[MessageDebouncer<br/>Łączy wybuchy wiadomości]
+    SAN[InputSanitizer<br/>Sprawdzanie wstrzykiwania promptu]
+    RT[AgentRouter<br/>Rozwiązywanie powiązań]
     DL[dispatch_message / dispatch_with_blocks]
-    KH[ChannelBridgeHandle<br/>Implemented by kernel]
-    FMT[formatter<br/>Output format conversion]
+    KH[ChannelBridgeHandle<br/>Zaimplementowane przez jądro]
+    FMT[formatter<br/>Konwersja formatu wyjściowego]
     SC -->|ChannelMessage stream| TR
     TR --> BM
     BM --> DB
@@ -27,89 +27,89 @@ graph TD
     RT --> DL
     DL --> KH
     KH -->|ReplyEnvelope| FMT
-    FMT -->|formatted text| SC
+    FMT -->|sformatowany tekst| SC
 ```
 
-## Module map
+## Mapa modułów
 
-Every module compiles unconditionally — there are no `channel-*` / `all-channels` cargo feature gates.
+Każdy moduł kompiluje się bezwarunkowo — nie ma żadnych bramek funkcji cargo `channel-*` / `all-channels`.
 
-| Module | Responsibility |
+| Moduł | Odpowiedzialność |
 |---|---|
-| `bridge` | Core dispatch loop, `BridgeManager`, `ChannelBridgeHandle` trait, message debouncing, sanitization gating, group/DM policy enforcement |
-| `sidecar` | Trampoline connecting the kernel to out-of-process Python sidecar adapters |
-| `router` | `AgentRouter` — resolves which agent handles an inbound message via bindings, defaults, sticky holders, and metadata-based routing |
-| `types` | Shared types: `ChannelMessage`, `ChannelContent`, `ChannelAdapter` trait, `ChannelUser`, `SenderContext`, `AgentPhase`, message splitting helpers |
-| `formatter` | Converts markdown agent output to platform-specific formats (Telegram HTML, Slack mrkdwn, plain text) |
-| `sanitizer` | `InputSanitizer` — detects prompt-injection patterns in inbound messages (Warn / Block modes) |
-| `rate_limiter` | `ChannelRateLimiter` — per-user throttling |
-| `message_journal` | Crash-recovery journal: records in-flight messages so they survive daemon restart |
-| `message_truncator` | UTF-16-aware splitting for platform length limits (`split_to_utf16_chunks`, `DISCORD_MESSAGE_LIMIT`, etc.) |
-| `attachment_enrich` | Content-aware enrichment of downloaded attachments (PDF text extraction, inline text/code files) |
-| `group_history` | In-memory group conversation buffer with TTL eviction |
-| `roster` | Group member roster tracking |
-| `thread_ownership` | Suppresses duplicate replies when multiple agents share a group thread |
-| `commands` | Channel slash-command parsing and handling |
-| `http_client` | Shared HTTP client with rustls TLS |
-| `embedded_sdk` | Embeds `sdk/python/librefang/` into the daemon binary for zero-pip sidecar bootstrap |
+| `bridge` | Główna pętla dystrybucji, `BridgeManager`, cecha `ChannelBridgeHandle`, debouncing wiadomości, bramkowanie sanityzacji, wymuszanie polityki grup/DM |
+| `sidecar` | Trampolina łącząca jądro z zewnętrznoprocesowymi adapterami sidecar w Pythonie |
+| `router` | `AgentRouter` — rozwiązuje, który agent obsługuje wiadomość przychodzącą za pomocą powiązań, wartości domyślnych, przylepnych właścicieli i routingu opartego na metadanych |
+| `types` | Typy współdzielone: `ChannelMessage`, `ChannelContent`, cecha `ChannelAdapter`, `ChannelUser`, `SenderContext`, `AgentPhase`, funkcje pomocnicze dzielenia wiadomości |
+| `formatter` | Konwertuje wyjście markdown agenta na formaty specyficzne dla platformy (Telegram HTML, Slack mrkdwn, zwykły tekst) |
+| `sanitizer` | `InputSanitizer` — wykrywa wzorce wstrzykiwania promptu w wiadomościach przychodzących (tryby Warn / Block) |
+| `rate_limiter` | `ChannelRateLimiter` — ograniczanie szybkości per użytkownik |
+| `message_journal` | Dziennik odzyskiwania po awarii: zapisuje wiadomości w trakcie przetwarzania, aby przetrwały restart demona |
+| `message_truncator` | Dzielenie z uwzględnieniem UTF-16 dla limitów długości platformy (`split_to_utf16_chunks`, `DISCORD_MESSAGE_LIMIT` itd.) |
+| `attachment_enrich` | Wzbogacanie pobranych załączników z uwzględnieniem typu zawartości (ekstrakcja tekstu PDF, pliki tekstowe/kodowe inline) |
+| `group_history` | Bufor konwersacji grupowych w pamięci z ewikcją TTL |
+| `roster` | Śledzenie składu członków grupy |
+| `thread_ownership` | Tłumi zduplikowane odpowiedzi, gdy wielu agentów współdzieli wątek grupowy |
+| `commands` | Analizowanie i obsługa komend slash kanału |
+| `http_client` | Współdzielony klient HTTP z TLS rustls |
+| `embedded_sdk` | Osadza `sdk/python/librefang/` w binarium demona do bootstrapu sidecara bez pip |
 
-## Core abstractions
+## Główne abstrakcje
 
-### `ChannelBridgeHandle` trait
+### Cecha `ChannelBridgeHandle`
 
-Defined in `bridge.rs` to avoid a circular dependency on `librefang-kernel`. The kernel (via `librefang-api`) provides the concrete implementation. This trait is the entire contract between the channel layer and the kernel:
+Zdefiniowana w `bridge.rs`, aby uniknąć zależności cyklicznej z `librefang-kernel`. Jądro (przez `librefang-api`) dostarcza konkretną implementację. Ta cecha jest całym kontraktem między warstwą kanału a jądrem:
 
-- **Message delivery**: `send_message`, `send_message_with_blocks`, `send_message_streaming_with_sender` — plain, multimodal, and streaming variants. The `_status` variant additionally returns a oneshot that resolves to the terminal success/error, so the bridge can set accurate lifecycle reactions and delivery metrics.
-- **Agent lookup / spawning**: `find_agent_by_name`, `list_agents`, `spawn_agent_by_name`.
-- **Session scoping**: `reset_channel_session`, `reboot_channel_session`, `compact_channel_session` — these operate on the per-channel session derived from `(channel, chat_id)`, not the agent's global registry session. This is the contract for channel `/new`, `/reboot`, `/compact`.
-- **Routing consultation**: `resolve_conversation_override` (explicit `/agent` override, upper binding level), `resolve_instance_default` (instance-seeded default, lower binding level), `route_assistant_by_metadata_for_channel` (alias/trigger-pattern matching).
-- **Channel overrides**: `channel_overrides`, `agent_channel_overrides`, `agent_channel_allowlist` — per-channel-type and per-agent configuration (group policy, DM policy, output format, threading, debounce, command allow/deny lists).
-- **Media processing**: `transcribe_inbound_audio`, `describe_inbound_image` — delegate to the kernel's `MediaEngine`. Both default to `Ok(None)` (feature off) so mocks work without overrides.
-- **Automation surface**: workflow/triggers/schedules/approvals methods, plus `subscribe_events` for `ApprovalRequested` notifications.
-- **Delivery tracking**: `record_delivery` for outbound metrics.
-- **Consumer lag reporting**: `record_consumer_lag` — has no default impl on purpose, so future handles can't silently swallow broadcast lag drops.
+- **Dostarczanie wiadomości**: `send_message`, `send_message_with_blocks`, `send_message_streaming_with_sender` — warianty zwykły, multimodalny i strumieniowy. Wariant `_status` dodatkowo zwraca kanał oneshot, który rozwiązuje się do końcowego sukcesu/błędu, dzięki czemu mostek może ustawić dokładne reakcje cyklu życia i metryki dostarczenia.
+- **Wyszukiwanie / uruchamianie agentów**: `find_agent_by_name`, `list_agents`, `spawn_agent_by_name`.
+- **Zakres sesji**: `reset_channel_session`, `reboot_channel_session`, `compact_channel_session` — operują na sesji per kanał pochodzącej z `(channel, chat_id)`, a nie na globalnej sesji rejestru agenta. To jest kontrakt dla `/new`, `/reboot`, `/compact` kanału.
+- **Konsultacja routingu**: `resolve_conversation_override` (jawne nadpisanie `/agent`, wyższy poziom powiązania), `resolve_instance_default` (domyślny zainicjowany z instancji, niższy poziom powiązania), `route_assistant_by_metadata_for_channel` (dopasowanie aliasu/wzorca wyzwalacza).
+- **Nadpisania kanału**: `channel_overrides`, `agent_channel_overrides`, `agent_channel_allowlist` — konfiguracja per typ kanału i per agent (polityka grupowa, polityka DM, format wyjściowy, wątkowanie, debouncing, listy dozwolonych/zabronionych komend).
+- **Przetwarzanie multimediów**: `transcribe_inbound_audio`, `describe_inbound_image` — deleguje do `MediaEngine` jądra. Oba domyślnie zwracają `Ok(None)` (funkcja wyłączona), aby moki działały bez nadpisań.
+- **Powierzchnia automatyzacji**: metody workflow/triggerów/harmonogramów/approbacji oraz `subscribe_events` dla powiadomień `ApprovalRequested`.
+- **Śledzenie dostarczenia**: `record_delivery` dla metryk wychodzących.
+- **Raportowanie opóźnienia konsumenta**: `record_consumer_lag` — celowo nie ma domyślnej implementacji, aby przyszłe handle nie mogły po cichu połykać spadków opóźnienia broadcastu.
 
 ### `BridgeManager`
 
-Owns all running adapters and dispatches inbound messages. Construction:
+Zarządza wszystkimi działającymi adapterami i dystrybuuje wiadomości przychodzące. Konstrukcja:
 
 ```rust
 let manager = BridgeManager::with_sanitizer(handle, router, &sanitize_config)
     .with_journal(journal);
 ```
 
-`start_adapter` subscribes to the adapter's message stream and spawns a dispatch task per message. A semaphore (permits = 32) bounds concurrent dispatches to prevent memory growth under burst traffic. Per-agent serialization is handled by the kernel's `agent_msg_locks`, so multiple messages to the same agent queue safely.
+`start_adapter` subskrybuje strumień wiadomości adaptera i uruchamia zadanie dystrybucji per wiadomość. Semafor (pozwolenia = 32) ogranicza współbieżne dystrybucje, aby zapobiec wzrostowi pamięci przy nagłym ruchu. Serializacja per agent jest obsługiwana przez `agent_msg_locks` jądra, więc wiele wiadomości do tego samego agenta bezpiecznie trafia do kolejki.
 
-The manager tracks both `JoinHandle`s (for graceful `stop()`) and `AbortHandle`s (for hard-stop through shared `&self`) in lockstep via `track()`.
+Menedżer śledzi zarówno `JoinHandle` (dla łagodnego `stop()`), jak i `AbortHandle` (dla twardego stop przez współdzielone `&self`) równolegle za pomocą `track()`.
 
 ### `AgentRouter`
 
-Resolves which agent should handle an inbound message. Resolution chain (highest to lowest precedence):
+Rozwiązuje, który agent powinien obsłużyć wiadomość przychodzącą. Łańcuch rozwiązywania (od najwyższego do najniższego priorytetu):
 
-1. **Conversation override** (`/agent` command) — explicit user choice
-2. **Sticky conversation holder** (#5323) — agent that "owns" an in-flight multi-agent group conversation
-3. **Peer binding** — `AgentBinding` match rules (channel, peer_id, guild_id, roles)
-4. **Instance default** — seeded from `[[sidecar_channels]] agent`
-5. **Channel default** — bare `<channel_type>` or `<channel_type>:<account_id>`
-6. **Global default** — `set_default`
+1. **Nadpisanie konwersacji** (komenda `/agent`) — jawny wybór użytkownika
+2. **Przylepny właściciel konwersacji** (#5323) — agent, który „posiada" trwającą wieloagentową konwersację grupową
+3. **Powiązanie peer** — reguły dopasowania `AgentBinding` (kanał, peer_id, guild_id, role)
+4. **Domyślny instancji** — zainicjowany z `[[sidecar_channels]] agent`
+5. **Domyślny kanału** — goły `<channel_type>` lub `<channel_type>:<account_id>`
+6. **Domyślny globalny** — `set_default`
 
-`resolve_with_context` takes a `BindingContext` (channel, peer_id, guild_id, roles) for rich matching. `route_assistant_by_metadata_for_channel` scores agents by trigger-pattern (alias) matches when no explicit binding fires.
+`resolve_with_context` przyjmuje `BindingContext` (kanał, peer_id, guild_id, role) do bogatego dopasowywania. `route_assistant_by_metadata_for_channel` ocenia agentów na podstawie dopasowań wzorca wyzwalacza (aliasu), gdy nie uruchamia się żadne jawne powiązanie.
 
-### `ChannelAdapter` trait
+### Cecha `ChannelAdapter`
 
-The interface every sidecar implements (via the trampoline). Key methods:
+Interfejs, który implementuje każdy sidecar (przez trampolinę). Kluczowe metody:
 
-- `start` / `create_webhook_routes` — provides the inbound message stream
-- `send` — delivers a reply to a recipient
-- `send_interactive` — delivers inline-keyboard messages (with text fallback for non-interactive channels)
-- `channel_type` / `name` / `account_id` — identity
-- `channel_overrides` — per-instance config
-- `typing_events` — typing indicators for debounce flushing
-- `notification_recipients` — operator inbox for approval broadcasts
+- `start` / `create_webhook_routes` — dostarcza strumień wiadomości przychodzących
+- `send` — dostarcza odpowiedź do odbiorcy
+- `send_interactive` — dostarcza wiadomości z klawiaturą inline (z tekstem zastępczym dla kanałów nieinteraktywnych)
+- `channel_type` / `name` / `account_id` — tożsamość
+- `channel_overrides` — konfiguracja per instancja
+- `typing_events` — wskaźniki pisania do opróżniania debouncing'u
+- `notification_recipients` — skrzynka operatora dla broadcastów aprobacji
 
-### `ChannelMessage` and `ChannelContent`
+### `ChannelMessage` i `ChannelContent`
 
-`ChannelMessage` is the unified inbound representation:
+`ChannelMessage` to ujednolicona reprezentacja przychodząca:
 
 ```rust
 ChannelMessage {
@@ -125,102 +125,102 @@ ChannelMessage {
 }
 ```
 
-`ChannelContent` is an enum covering every inbound payload type: `Text`, `Command`, `Image`, `File`, `FileData`, `Voice`, `Audio`, `Video`, `Animation`, `Sticker`, `Location`, `Interactive`, `ButtonCallback`, `EditInteractive`, `DeleteMessage`, `MediaGroup`, `Poll`, `PollAnswer`. The `content_to_text` function renders any variant to a prompt-safe text placeholder; `sanitizer_text_to_check` extracts the attacker-controlled fields from each variant for injection scanning — the two are kept in lockstep by deliberate wildcard-free matching.
+`ChannelContent` to enum obejmujący każdy typ ładunku przychodzącego: `Text`, `Command`, `Image`, `File`, `FileData`, `Voice`, `Audio`, `Video`, `Animation`, `Sticker`, `Location`, `Interactive`, `ButtonCallback`, `EditInteractive`, `DeleteMessage`, `MediaGroup`, `Poll`, `PollAnswer`. Funkcja `content_to_text` renderuje dowolny wariant na bezpieczny tekst zastępczy promptu; `sanitizer_text_to_check` ekstrahuje kontrolowane przez atakującego pola z każdego wariantu do skanowania wstrzykiwania — oba są utrzymywane w równym kroku przez celowe dopasowywanie bez wieloznaczników.
 
-## Message dispatch flow
+## Przepływ dystrybucji wiadomości
 
-### Immediate path (debounce disabled)
+### Ścieżka natychmiastowa (debouncing wyłączony)
 
-Each message spawns a task that acquires a semaphore permit, then calls `dispatch_message`:
+Każda wiadomość uruchamia zadanie, które uzyskuje pozwolenie semafora, a następnie wywołuje `dispatch_message`:
 
-1. **Sanitization**: `InputSanitizer::check` inspects attacker-controlled text. `Block` mode rejects and sends a generic "could not be processed" reply. `Warn` mode logs but allows through.
-2. **Routing**: `resolve_or_fallback` consults the router chain (conversation override → sticky holder → binding → instance default → channel default → global default).
-3. **Policy gate**: group messages check `group_policy` (`mention_only`, `ignore`, `all`); DMs check `dm_policy`. Rate limiter applies per-user throttling.
-4. **Thread ownership**: in shared group threads, `ThreadOwnershipRegistry` suppresses duplicate replies when a different agent already claimed the thread (#3334).
-5. **Kernel send**: calls the appropriate `send_message*` variant on the bridge handle, with sender context propagated for peer-scoped memory.
-6. **Formatting**: the agent's reply is converted via `format_for_channel` to the channel's `OutputFormat` (Telegram HTML, Slack mrkdwn, plain text, or markdown passthrough).
-7. **Delivery**: adapter sends the formatted reply. `record_delivery` tracks the outcome.
+1. **Sanityzacja**: `InputSanitizer::check` sprawdza kontrolowany przez atakującego tekst. Tryb `Block` odrzuca i wysyła ogólną odpowiedź „nie można przetworzyć". Tryb `Warn` loguje, ale przepuszcza.
+2. **Routing**: `resolve_or_fallback` konsultuje łańcuch routera (nadpisanie konwersacji → przylepny właściciel → powiązanie → domyślne instancji → domyślne kanału → domyślne globalne).
+3. **Bramka polityki**: wiadomości grupowe sprawdzają `group_policy` (`mention_only`, `ignore`, `all`); DM sprawdzają `dm_policy`. Limit szybkości stosuje ograniczanie per użytkownik.
+4. **Własność wątku**: we współdzielonych wątkach grupowych, `ThreadOwnershipRegistry` tłumi zduplikowane odpowiedzi, gdy inny agent już przejął wątek (#3334).
+5. **Wysyłka do jądra**: wywołuje odpowiedni wariant `send_message*` na handle mostka, z propagowanym kontekstem nadawcy dla pamięci w zakresie peer'a.
+6. **Formatowanie**: odpowiedź agenta jest konwertowana przez `format_for_channel` na `OutputFormat` kanału (Telegram HTML, Slack mrkdwn, zwykły tekst lub bezpośrednie przekazanie markdown).
+7. **Dostarczenie**: adapter wysyła sformatowaną odpowiedź. `record_delivery` śledzi wynik.
 
-### Debounced path (debounce_ms > 0)
+### Ścieżka z debouncingiem (debounce_ms > 0)
 
-When channel overrides configure `message_debounce_ms`, the `MessageDebouncer` coalesces rapid messages from the same sender:
+Gdy nadpisania kanału konfigurują `message_debounce_ms`, `MessageDebouncer` łączy szybkie wiadomości od tego samego nadawcy:
 
-- Messages bucket by `(channel_type, chat_id, sender_id)`.
-- A debounce timer fires after `debounce_ms` of quiet.
-- A max timer hard-flushes at `debounce_max_ms` regardless of activity.
-- Typing-stop events trigger early flush.
-- Buffer count reaching `max_buffer` triggers immediate flush.
-- Media attachments are pre-downloaded at ingest time; LLM enrichment (image description, audio transcription, PDF extraction) is deferred to the flush task.
+- Wiadomości są kubłkowane według `(channel_type, chat_id, sender_id)`.
+- Timer debouncingu uruchamia się po `debounce_ms` ciszy.
+- Timer maksymalny wymusza opróżnienie po `debounce_max_ms` niezależnie od aktywności.
+- Zdarzenia zatrzymania pisania wyzwalają przedwczesne opróżnienie.
+- Osiągnięcie licznika bufora `max_buffer` wyzwala natychmiastowe opróżnienie.
+- Załączniki multimedialne są pobierane z góry w momencie przyjęcia; wzbogacanie LLM (opis obrazu, transkrypcja audio, ekstrakcja PDF) jest odroczone do zadania opróżniania.
 
-`drain` merges coalesced messages: same-type consecutive messages concatenate text; same-name consecutive commands merge args; mixed types produce a text block joining all `content_to_text` placeholders.
+`drain` łączy skumulowane wiadomości: kolejne wiadomości tego samego typu konkatenują tekst; kolejne komendy o tej samej nazwie łączą argumenty; typy mieszane tworzą blok tekstowy łączący wszystkie symbole zastępcze `content_to_text`.
 
-The flush channel is bounded at 1024 entries (`FLUSH_CHANNEL_CAP`) to prevent unbounded RSS growth when the dispatcher stalls (#3580).
+Kanał opróżniania jest ograniczony do 1024 wpisów (`FLUSH_CHANNEL_CAP`), aby zapobiec nieograniczonemu wzrostowi RSS, gdy dyspozytor się zatrzymuje (#3580).
 
-### Media path
+### Ścieżka multimediów
 
-When a message carries downloadable media:
+Gdy wiadomość niesie pobieralne multimedia:
 
-1. **Download**: `download_media_blocks` streams the attachment to disk under `effective_channels_download_dir()`.
-2. **Enrich**: `enrich_saved_file` inspects content type and produces `ContentBlock`s:
-   - `application/pdf` → extracts text via `pdf_extract` (panic-isolated, truncated at 200K chars)
-   - Text-like files (code, JSON, YAML, markdown, etc.) → inlined with a header
-   - Images → returned as `ContentBlock::ImageFile`; optionally described via `describe_inbound_image`
-   - Audio/voice → optionally transcribed via `transcribe_inbound_audio`
-   - Binary/unknown → empty vec (path block only)
-3. **Dispatch**: `dispatch_with_blocks` sends the structured blocks to the kernel. The media path runs the same group/DM policy and rate-limit gates as the text path (`media_dispatch_allowed`) to prevent bypassing restrictions by sending media instead of text.
+1. **Pobranie**: `download_media_blocks` strumieniuje załącznik na dysk w `effective_channels_download_dir()`.
+2. **Wzbogacenie**: `enrich_saved_file` sprawdza typ zawartości i tworzy `ContentBlock`:
+   - `application/pdf` → ekstrahuje tekst przez `pdf_extract` (izolowane przed panikiem, przycinane do 200K znaków)
+   - Pliki tekstopodobne (kod, JSON, YAML, markdown itd.) → wstawiane inline z nagłówkiem
+   - Obrazy → zwracane jako `ContentBlock::ImageFile`; opcjonalnie opisywane przez `describe_inbound_image`
+   - Audio/głos → opcjonalnie transkrybowane przez `transcribe_inbound_audio`
+   - Binaria/nieznane → pusty wektor (tylko blok ścieżki)
+3. **Dystrybucja**: `dispatch_with_blocks` wysyła ustrukturyzowane bloki do jądra. Ścieżka multimediów przechodzi przez te same bramki polityki grup/DM i limitu szybkości co ścieżka tekstowa (`media_dispatch_allowed`), aby zapobiec obejściu ograniczeń poprzez wysyłanie multimediów zamiast tekstu.
 
-## Attachment enrichment (`attachment_enrich.rs`)
+## Wzbogacanie załączników (`attachment_enrich.rs`)
 
-Content-aware extraction so the LLM sees file contents directly instead of just a path. The enrichment is **additive** — the `[File: …] saved to …` path block is still emitted so tools that need raw bytes still work.
+Ekstrakcja z uwzględnieniem typu zawartości, aby LLM widział zawartość pliku bezpośrednio zamiast samej ścieżki. Wzbogacenie jest **addytywne** — blok ścieżki `[File: …] saved to …` jest nadal emitowany, aby narzędzia potrzebujące surowych bajtów nadal działały.
 
-Key behaviors:
+Kluczowe zachowania:
 
-- **PDF detection**: trusts `application/pdf` MIME; for ambiguous MIMEs (`application/octet-stream`, empty), falls back to `.pdf` extension then `%PDF-` magic bytes.
-- **Text-like detection**: checks `text/*` MIME, known application MIMEs (`application/json`, `application/xml`, etc.), and a large extension list covering code files (`.rs`, `.py`, `.go`, `.ts`, …), config formats (`.yaml`, `.toml`, `.ini`, …), and markup (`.md`, `.rst`, `.html`, …).
-- **Truncation**: hard cap at `MAX_ENRICHED_TEXT_CHARS` (200,000) with a visible marker.
-- **Panic isolation**: `pdf_extract` / `lopdf` can panic on malformed PDFs; the call is wrapped in `catch_unwind` and surfaces a `[Could not extract text: …]` note instead of crashing the bridge.
+- **Wykrywanie PDF**: ufa MIME `application/pdf`; dla niejednoznacznych MIME (`application/octet-stream`, puste), cofa się do rozszerzenia `.pdf`, a następnie do magicznych bajtów `%PDF-`.
+- **Wykrywanie tekstopodobne**: sprawdza MIME `text/*`, znane MIME aplikacji (`application/json`, `application/xml` itd.) oraz dużą listę rozszerzeń obejmującą pliki kodu (`.rs`, `.py`, `.go`, `.ts`, …), formaty konfiguracji (`.yaml`, `.toml`, `.ini`, …) i znaczniki (`.md`, `.rst`, `.html`, …).
+- **Przycinanie**: twardy limit `MAX_ENRICHED_TEXT_CHARS` (200 000) z widocznym znacznikiem.
+- **Izolacja paniki**: `pdf_extract` / `lopdf` mogą panikować przy zniekształconych PDF-ach; wywołanie jest opakowane w `catch_unwind` i zwraca uwagę `[Nie można wydobyć tekstu: …]` zamiast awarii mostka.
 
-## Output formatting (`formatter.rs`)
+## Formatowanie wyjściowe (`formatter.rs`)
 
-`format_for_channel(text, OutputFormat)` converts agent markdown to platform-native markup:
+`format_for_channel(text, OutputFormat)` konwertuje markdown agenta na znaczniki natywne dla platformy:
 
-- `Markdown` — passthrough
-- `TelegramHtml` — `<b>`, `<i>`, `<code>`, `<a href="…">` 
+- `Markdown` — bezpośrednie przekazanie
+- `TelegramHtml` — `<b>`, `<i>`, `<code>`, `<a href="…">`
 - `SlackMrkdwn` — `*bold*`, `_italic_`, `` `code` ``
-- `PlainText` — strips all formatting
+- `PlainText` — usuwa całe formatowanie
 
-## Message truncation (`message_truncator.rs` / `types.rs`)
+## Przycinanie wiadomości (`message_truncator.rs` / `types.rs`)
 
-Platform-specific length limits with UTF-16 awareness:
+Limity długości specyficzne dla platformy z uwzględnieniem UTF-16:
 
-- `split_message(text, limit)` — splits at `limit` UTF-16 code units, preferring newline boundaries
-- Constants: `DISCORD_MESSAGE_LIMIT` (2000), `TELEGRAM_MESSAGE_LIMIT` (4096), `TELEGRAM_CAPTION_LIMIT` (1024)
-- Re-exported helpers: `split_to_utf16_chunks`, `truncate_to_utf16_limit`, `utf16_len`
+- `split_message(text, limit)` — dzieli przy `limit` jednostkach kodu UTF-16, preferując granice nowej linii
+- Stałe: `DISCORD_MESSAGE_LIMIT` (2000), `TELEGRAM_MESSAGE_LIMIT` (4096), `TELEGRAM_CAPTION_LIMIT` (1024)
+- Ponownie eksportowane pomocnicze: `split_to_utf16_chunks`, `truncate_to_utf16_limit`, `utf16_len`
 
-## Sidecar-only policy
+## Polityka wyłącznie sidecar
 
-No new in-process channel adapters. The pre-commit hook and `cargo xtask channel-policy` (CI) reject any `ChannelAdapter for` impl under `src/` whose basename isn't in `channels-allowlist.txt`. That allowlist contains only `sidecar` and is documented to only ever shrink.
+Brak nowych adapterów kanałów w procesie. Hook pre-commit i `cargo xtask channel-policy` (CI) odrzucają każdą implementację `ChannelAdapter for` w `src/`, której nazwa bazowa nie znajduje się w `channels-allowlist.txt`. Ta lista dozwolonych zawiera tylko `sidecar` i jest udokumentowana jako mogąca się tylko kurczyć.
 
-To add a new channel, create a Python sidecar adapter under `sdk/python/librefang/sidecar/adapters/`. See `docs/architecture/sidecar-channels.md` for the onboarding flow.
+Aby dodać nowy kanał, utwórz adapter sidecar w Pythonie w `sdk/python/librefang/sidecar/adapters/`. Zobacz `docs/architecture/sidecar-channels.md` dla procesu dołączania.
 
-## Embedded SDK (`embedded_sdk.rs`)
+## Osadzony SDK (`embedded_sdk.rs`)
 
-The Python SDK tree (`sdk/python/librefang/`) is embedded into the daemon binary via `include_dir`. At runtime it extracts to `<home>/sidecar-python/<content_hash>/` and injects the path into `PYTHONPATH` so a user with only `python3` on PATH can enable a sidecar channel without `pip install`. The content hash drives the directory name so a daemon upgrade extracts to a fresh subdirectory.
+Drzewo Python SDK (`sdk/python/librefang/`) jest osadzone w binarium demona przez `include_dir`. W czasie działania jest wypakowywane do `<home>/sidecar-python/<content_hash>/` i wstrzykiwane do `PYTHONPATH`, aby użytkownik mający tylko `python3` na PATH mógł włączyć kanał sidecar bez `pip install`. Hash zawartości wymusza nazwę katalogu, więc aktualizacja demona wypakowuje do nowego podkatalogu.
 
-## Key dependencies
+## Kluczowe zależności
 
-- `librefang-types` — shared config and type definitions
-- `librefang-subprocess` — supervised task spawning
-- `pdf-extract` — PDF text extraction for attachment enrichment
-- `image` — image format detection (JPEG, PNG, WebP)
-- `rustls` + `webpki-roots` + `rustls-native-certs` — TLS for the shared HTTP client
-- `include_dir` + `sha2` — embedded SDK extraction
-- `axum` — webhook route types for sidecar adapters
+- `librefang-types` — współdzielone definicje konfiguracji i typów
+- `librefang-subprocess` — nadzorowane uruchamianie zadań
+- `pdf-extract` — ekstrakcja tekstu PDF dla wzbogacania załączników
+- `image` — wykrywanie formatu obrazu (JPEG, PNG, WebP)
+- `rustls` + `webpki-roots` + `rustls-native-certs` — TLS dla współdzielonego klienta HTTP
+- `include_dir` + `sha2` — ekstrakcja osadzonego SDK
+- `axum` — typy ścieżek webhook dla adapterów sidecar
 
-## Benchmarks
+## Benchmarki
 
-`benches/dispatch.rs` covers three hot paths via Criterion:
+`benches/dispatch.rs` obejmuje trzy gorące ścieżki przez Criterion:
 
-- **Serialization**: `message_serialize`, `message_deserialize`, `message_roundtrip`
+- **Serializacja**: `message_serialize`, `message_deserialize`, `message_roundtrip`
 - **Routing**: `router_resolve_direct`, `router_resolve_default_fallback`, `router_resolve_binding_match`, `router_resolve_with_context`
-- **Formatting**: `format_markdown_passthrough`, `format_telegram_html`, `format_slack_mrkdwn`, `format_plain_text`, `split_message_short/long`, `default_phase_emoji_all`
+- **Formatowanie**: `format_markdown_passthrough`, `format_telegram_html`, `format_slack_mrkdwn`, `format_plain_text`, `split_message_short/long`, `default_phase_emoji_all`

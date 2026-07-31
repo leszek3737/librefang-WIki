@@ -1,94 +1,94 @@
 # Root
 
-# Root Module
+# Moduł Root
 
-The Root module is the **control plane of the LibreFang monorepo** — it contains no application code, but governs every aspect of how the project is built, tested, formatted, governed, deployed, and contributed to. Every file here is a single source of truth for some cross-cutting concern that applies workspace-wide.
-
----
-
-## File Families
-
-The root files cluster into five functional groups:
-
-### Project Identity & Governance
-
-| File | Role |
-|------|------|
-| [README.md](README.md) | Project overview — what LibreFang is, how crates relate, how to get started |
-| [GOVERNANCE.md](GOVERNANCE.md) | Decision-making charter; merge-first policy |
-| [MAINTAINERS.md](MAINTAINERS.md) | Who maintains what; maintainer responsibilities |
-| [AGENTS.md](AGENTS.md) | Scannable quick-reference for anyone working in the repo |
-| [CLAUDE.md](CLAUDE.md) | Full AI-agent contract — worktree rules, hooks, CI policy |
-
-`AGENTS.md` and `CLAUDE.md` are intentionally paired: the first is the summary, the second is the enforceable law. Together with `GOVERNANCE.md` and `MAINTAINERS.md`, they form the **collaboration layer** — defining boundaries for both human and AI-assisted contributions.
-
-### Build & Toolchain
-
-| File | Role |
-|------|------|
-| [Cargo.toml](Cargo.md) | Workspace manifest — declares member crates, pins all dependencies, sets profiles and lints |
-| [rust-toolchain.toml](rust-toolchain.md) | Pins the Rust compiler channel (`stable`, minimal profile with `rustfmt` + `clippy`) |
-| [rustfmt.toml](rustfmt.md) | Workspace formatting rules enforced via CI |
-| [deny.toml](deny.md) | Supply-chain audit — advisories, licenses, bans, sources |
-| [Cross.toml](Cross.md) | Cross-compilation config for ARM64 Linux and Android targets |
-| [mise.toml](mise.md) | Pins external dev tools (`just`, etc.) for reproducible local environments |
-
-These files form a **chain of version control**: `rust-toolchain.toml` locks the compiler, `mise.toml` locks the surrounding tools, `Cargo.toml` locks all Rust dependencies once for every member crate, and `deny.toml` audits those dependencies for vulnerabilities and license compliance.
-
-### Developer Entry Points
-
-| File | Role |
-|------|------|
-| [justfile](justfile.md) | Canonical command dispatcher — thin recipes that forward to `cargo` or `xtask` |
-| [flake.nix](flake.md) | Nix flake for building, testing, and NixOS deployment |
-
-The `justfile` is the primary interface for developers. It is deliberately lean — a dispatcher, not an implementation surface. Complex automation lives in the `xtask` crate, and the justfile forwards arguments to it.
-
-### Containerization & Deployment
-
-| File | Role |
-|------|------|
-| [Dockerfile](Dockerfile.md) | Three-stage production image (React build → Rust build → minimal runtime) |
-| [Dockerfile.rust-dev](Dockerfile.rust-dev.md) | Full Rust dev environment for contributors without a native toolchain |
-| [render.yaml](render.md) | Render.com blueprint for cloud deployment |
-
-### Runtime Contract & Configuration
-
-| File | Role |
-|------|------|
-| [openapi.json](openapi.md) | Machine-readable REST API contract for the LibreFang kernel |
-| [librefang.toml.example](librefang-toml-example.md) | Canonical configuration template for daemon deployment |
+Moduł Root jest **płaszczyzną sterowania monorepozytorium LibreFang** — nie zawiera kodu aplikacji, ale zarządza każdym aspektem budowania, testowania, formatowania, zarządzania, wdrażania i wnioskowania wkładów do projektu. Każdy plik tutaj stanowi jedyne źródło prawdy dla jakiegoś przekrojowego zagadnienia obowiązującego w całym obszarze roboczym.
 
 ---
 
-## Key Cross-File Workflows
+## Grupy plików
 
-### "I want to contribute a change"
+Pliki root klastrowane są w pięć grup funkcyjnych:
 
-1. Read [AGENTS.md](AGENTS.md) for orientation and [CLAUDE.md](CLAUDE.md) for the agent contract.
-2. `mise install` provisions the correct tool versions from [mise.toml](mise.md).
-3. The worktree gate from [CLAUDE.md](CLAUDE.md) enforces safe editing.
-4. `just <recipe>` dispatches build/test/lint through [justfile](justfile.md).
-5. `rust-toolchain.toml` and `rustfmt.toml` ensure formatting and compiler consistency.
-6. `deny.toml` gates the supply chain; CI enforces all of the above.
-7. [GOVERNANCE.md](GOVERNANCE.md) governs the merge decision (merge-first).
+### Tożsamość projektu i zarządzanie
 
-### "I want to deploy LibreFang"
+| Plik | Rola |
+|------|------|
+| [README.md](README.md) | Przegląd projektu — czym jest LibreFang, jak relacjonują się craty, jak zacząć |
+| [GOVERNANCE.md](GOVERNANCE.md) | Karta decyzyjna; polityka merge-first |
+| [MAINTAINERS.md](MAINTAINERS.md) | Kto utrzymuje co; odpowiedzialności maintainerów |
+| [AGENTS.md](AGENTS.md) | Szybka ściągawka dla każdego pracującego w repozytorium |
+| [CLAUDE.md](CLAUDE.md) | Pełny kontrakt agenta AI — zasady worktree, hooki, polityka CI |
 
-1. Copy [librefang.toml.example](librefang-toml-example.md) to configure the daemon.
-2. Build via [Dockerfile](Dockerfile.md) (or deploy through [render.yaml](render.md)).
-3. The API surface is defined by [openapi.json](openapi.md).
-4. For Nix-based deployments, use [flake.nix](flake.md).
+`AGENTS.md` i `CLAUDE.md` stanowią świadomie parę: pierwszy to podsumowanie, drugi to egzekwowalne prawo. Razem z `GOVERNANCE.md` i `MAINTAINERS.md` tworzą **warstwę współpracy** — określając granice zarówno dla ludzkich, jak i wspomaganych przez AI wkładów.
 
-### "I want to cross-compile for ARM64"
+### Budowanie i łańcuch narzędzi
 
-1. [rust-toolchain.toml](rust-toolchain.md) provides the base compiler.
-2. [Cross.toml](Cross.md) configures Docker images and system libraries per target.
-3. The workspace dependency pins in [Cargo.toml](Cargo.md) ensure reproducible builds across targets.
+| Plik | Rola |
+|------|------|
+| [Cargo.toml](Cargo.md) | Manifest obszaru roboczego — deklaruje craty-członków, przypina wszystkie zależności, ustawia profile i linty |
+| [rust-toolchain.toml](rust-toolchain.md) | Przypina kanał kompilatora Rust (`stable`, profil minimalny z `rustfmt` + `clippy`) |
+| [rustfmt.toml](rustfmt.md) | Reguły formatowania obszaru roboczego egzekwowane przez CI |
+| [deny.toml](deny.md) | Audyt łańcucha dostaw — doradztwa, licencje, blokady, źródła |
+| [Cross.toml](Cross.md) | Konfiguracja cross-kompilacji dla celów ARM64 Linux i Android |
+| [mise.toml](mise.md) | Przypina zewnętrzne narzędzia deweloperskie (`just` itp.) dla odtwarzalnych środowisk lokalnych |
+
+Te pliki tworzą **łańcuch kontroli wersji**: `rust-toolchain.toml` blokuje kompilator, `mise.toml` blokuje otaczające narzędzia, `Cargo.toml` blokuje wszystkie zależności Rust jednokrotnie dla każdego crata-członka, a `deny.toml` audytuje te zależności pod kątem luk i zgodności licencyjnej.
+
+### Punkty wejścia dewelopera
+
+| Plik | Rola |
+|------|------|
+| [justfile](justfile.md) | Kanoniczny dyspozytor komend — chude przepisy przekazujące do `cargo` lub `xtask` |
+| [flake.nix](flake.md) | Flake Nix do budowania, testowania i wdrażania NixOS |
+
+`justfile` jest głównym interfejsem dla deweloperów. Jest celowo chudy — dyspozytor, nie powierzchnia implementacyjna. Złożona automatyzacja znajduje się w cracie `xtask`, a justfile przekazuje mu argumenty.
+
+### Konteneryzacja i wdrażanie
+
+| Plik | Rola |
+|------|------|
+| [Dockerfile](Dockerfile.md) | Trzyetapowy obraz produkcyjny (build React → build Rust → minimalne środowisko uruchomieniowe) |
+| [Dockerfile.rust-dev](Dockerfile.rust-dev.md) | Pełne środowisko deweloperskie Rust dla współtwórców bez natywnego łańcucha narzędzi |
+| [render.yaml](render.md) | Schemat Render.com do wdrażania w chmurze |
+
+### Kontrakt uruchomieniowy i konfiguracja
+
+| Plik | Rola |
+|------|------|
+| [openapi.json](openapi.md) | Maszynowo czytelny kontrakt REST API dla jądra LibreFang |
+| [librefang.toml.example](librefang-toml-example.md) | Kanoniczny szablon konfiguracji do wdrażania demona |
 
 ---
 
-## Architecture Summary
+## Kluczowe przepływy między plikami
+
+### „Chcę wnioskować zmianę"
+
+1. Przeczytaj [AGENTS.md](AGENTS.md) dla orientacji i [CLAUDE.md](CLAUDE.md) dla kontraktu agenta.
+2. `mise install` dostarcza poprawne wersje narzędzi z [mise.toml](mise.md).
+3. Brama worktree z [CLAUDE.md](CLAUDE.md) wymusza bezpieczną edycję.
+4. `just <przepis>` wysyła komendy build/test/lint przez [justfile](justfile.md).
+5. `rust-toolchain.toml` i `rustfmt.toml` zapewniają spójność formatowania i kompilatora.
+6. `deny.toml` bramkuje łańcuch dostaw; CI wymusza wszystko powyższe.
+7. [GOVERNANCE.md](GOVERNANCE.md) zarządza decyzją o scaleniu (merge-first).
+
+### „Chcę wdrożyć LibreFang"
+
+1. Skopiuj [librefang.toml.example](librefang-toml-example.md), aby skonfigurować demona.
+2. Zbuduj przez [Dockerfile](Dockerfile.md) (lub wdróż przez [render.yaml](render.md)).
+3. Powierzchnia API jest zdefiniowana przez [openapi.json](openapi.md).
+4. Dla wdrożeń opartych na Nix, użyj [flake.nix](flake.md).
+
+### „Chcę cross-kompilować dla ARM64"
+
+1. [rust-toolchain.toml](rust-toolchain.md) dostarcza bazowy kompilator.
+2. [Cross.toml](Cross.md) konfiguruje obrazy Docker i biblioteki systemowe dla każdego celu.
+3. Przypinki zależności obszaru roboczego w [Cargo.toml](Cargo.md) zapewniają odtwarzalne buildy między celami.
+
+---
+
+## Podsumowanie architektury
 
 ```mermaid
 flowchart TD
@@ -99,7 +99,7 @@ flowchart TD
         MAINT[MAINTAINERS.md]
     end
 
-    subgraph "Build & Toolchain"
+    subgraph "Budowanie i łańcuch narzędzi"
         CARGO[Cargo.toml]
         RUST[rust-toolchain.toml]
         FMT[rustfmt.toml]
@@ -108,32 +108,32 @@ flowchart TD
         MISE[mise.toml]
     end
 
-    subgraph "Dev Entry Points"
+    subgraph "Punkty wejścia dewelopera"
         JUST[justfile]
         FLAKE[flake.nix]
     end
 
-    subgraph "Container & Deploy"
+    subgraph "Konteneryzacja i wdrażanie"
         DOCKER[Dockerfile]
         DOCKERDEV[Dockerfile.rust-dev]
         RENDER[render.yaml]
     end
 
-    subgraph "Runtime Contract"
+    subgraph "Kontrakt uruchomieniowy i konfiguracja"
         API[openapi.json]
         CFG[librefang.toml.example]
     end
 
-    MISE -->|provisions tools| JUST
-    JUST -->|dispatches to| CARGO
-    RUST -->|pins compiler| CARGO
-    FMT -->|formats all crates| CARGO
-    CARGO -->|audited by| DENY
-    CARGO -->|cross-compile via| CROSS
-    CARGO -->|dockerized by| DOCKER
-    DOCKER -->|deployed via| RENDER
-    API -->|implemented by member crates| CARGO
-    CFG -->|parsed at runtime| DOCKER
+    MISE -->|dostarcza narzędzia| JUST
+    JUST -->|wysyła do| CARGO
+    RUST -->|przypina kompilator| CARGO
+    FMT -->|formatuje wszystkie craty| CARGO
+    CARGO -->|audytowane przez| DENY
+    CARGO -->|cross-kompilacja przez| CROSS
+    CARGO -->|konteneryzowane przez| DOCKER
+    DOCKER -->|wdrażane przez| RENDER
+    API -->|implementowane przez craty-członków| CARGO
+    CFG -->|parsowane w trakcie uruchomienia| DOCKER
 ```
 
-The Root module's unifying principle is **single-source-of-truth configuration**: every version pin, formatting rule, lint policy, governance rule, and deployment shape is declared exactly once here and inherited downward by all member crates and CI pipelines.
+Nadrzędną zasadą modułu Root jest **jednoźródłowa konfiguracja**: każda przypinka wersji, reguła formatowania, polityka lintów, zasada zarządzania i kształt wdrożenia jest zadeklarowana dokładnie raz tutaj i dziedziczona w dół przez wszystkie craty-członków i potoki CI.

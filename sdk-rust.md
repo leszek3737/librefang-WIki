@@ -2,28 +2,28 @@
 
 # LibreFang Rust SDK
 
-The `sdk/rust` directory contains three crates that provide Rust integration with LibreFang Agent OS:
+Katalog `sdk/rust` zawiera trzy crate'y zapewniające integrację z LibreFang Agent OS w języku Rust:
 
-| Crate | Purpose |
+| Crate | Przeznaczenie |
 |---|---|
-| `librefang` | Async REST API client for agents, skills, models, and providers |
-| `librefang-sidecar` | Framework for building channel adapters that bridge external messaging platforms to LibreFang's agent runtime |
-| `librefang-sidecar-telegram` | Production Telegram adapter built on the sidecar framework |
+| `librefang` | Asynchroniczny klient REST API dla agentów, umiejętności, modeli i dostawców |
+| `librefang-sidecar` | Szkielet do budowania adapterów kanałów, które łączą zewnętrzne platformy komunikacyjne z runtime'em agentów LibreFang |
+| `librefang-sidecar-telegram` | Produkcyjny adapter Telegram zbudowany na bazie szkieletu sidecar |
 
 ---
 
-## `librefang` — REST API Client
+## `librefang` — Klient REST API
 
-A thin async wrapper around the LibreFang REST API (default `http://localhost:4545`). Built on `reqwest` with `tokio`.
+Cienka, asynchroniczna nakładka na REST API LibreFang (domyślnie `http://localhost:4545`). Zbudowana na `reqwest` z `tokio`.
 
-### Usage
+### Użycie
 
 ```rust
 use librefang::LibreFang;
 
 let client = LibreFang::new("http://localhost:4545");
 
-// Create an agent and send a message
+// Utworzenie agenta i wysłanie wiadomości
 let agent = client.agents()
     .create(librefang::agents::CreateAgentRequest {
         template: Some("assistant".to_string()),
@@ -36,35 +36,35 @@ let response = client.agents()
     .await?;
 ```
 
-### Resources
+### Zasoby
 
-Each resource is accessed via a method on the `LibreFang` client and returns deserialized types:
+Każdy zasób jest dostępny za pomocą metody na kliencie `LibreFang` i zwraca zdeserializowane typy:
 
 - **`client.agents()`** — `list()`, `get(id)`, `create(request)`, `delete(id)`, `message(id, text)`, `stream(id, text)`
 - **`client.skills()`** — `list()`, `install(name)`, `uninstall(name)`
 - **`client.models()`** — `list()`
 - **`client.providers()`** — `list()`
 
-Streaming responses return a `reqwest::Response` whose `bytes_stream()` can be consumed with `futures::StreamExt` for incremental SSE-style output.
+Odpowiedzi strumieniowe zwracają `reqwest::Response`, którego `bytes_stream()` można konsumować za pomocą `futures::StreamExt` w celu uzyskania przyrostowego wyjścia w stylu SSE.
 
 ---
 
-## `librefang-sidecar` — Channel Adapter Framework
+## `librefang-sidecar` — Szkielet adapterów kanałów
 
-Channel adapters are external processes that translate between a messaging platform (Telegram, Discord, etc.) and LibreFang's agent runtime. The daemon launches each adapter as a subprocess and communicates over stdin/stdout using newline-delimited JSON.
+Adaptery kanałów to procesy zewnętrzne, które tłumaczą między platformą komunikacyjną (Telegram, Discord itd.) a runtime'em agentów LibreFang. Demon uruchamia każdy adapter jako proces podrzędny i komunikuje się przez stdin/stdout za pomocą wierszy w formacie JSON.
 
-### Protocol
+### Protokół
 
-Every adapter speaks a line-based JSON protocol. The key message types:
+Każdy adapter posługuje się protokołem opartym na wierszach JSON. Kluczowe typy wiadomości:
 
-| Direction | Message | Purpose |
+| Kierunek | Wiadomość | Przeznaczenie |
 |---|---|---|
-| Adapter → Daemon | `Ready` | Announces capabilities, schema; re-sent until acked |
-| Adapter → Daemon | `Event` (message/callback/poll-answer) | Inbound content from the platform |
-| Daemon → Adapter | `Send` | Outbound content (text, media, interactive, etc.) |
-| Daemon → Adapter | `Command` | `Typing`, `Reaction`, `Interactive`, `StreamStart`/`StreamDelta`/`StreamEnd` |
+| Adapter → Demon | `Ready` | Ogłasza możliwości, schemę; wysyłana ponownie do momentu potwierdzenia |
+| Adapter → Demon | `Event` (message/callback/poll-answer) | Treść przychodząca z platformy |
+| Demon → Adapter | `Send` | Treść wychodząca (tekst, media, interaktywne itd.) |
+| Demon → Adapter | `Command` | `Typing`, `Reaction`, `Interactive`, `StreamStart`/`StreamDelta`/`StreamEnd` |
 
-### `SidecarAdapter` Trait
+### Cecha `SidecarAdapter`
 
 ```rust
 #[async_trait]
@@ -77,27 +77,27 @@ pub trait SidecarAdapter: Send + Sync {
 }
 ```
 
-- **`produce`** — Long-running loop that polls the platform and calls `emit(event)` for each inbound update. Runs on a dedicated task.
-- **`on_send`** — Called when the daemon sends content to the platform (text, media, interactive keyboards, etc.).
-- **`on_command`** — Called for non-content commands: typing indicators, reactions, streaming lifecycle.
+- **`produce`** — Długotrwała pętla odpytująca platformę i wywołująca `emit(event)` dla każdej aktualizacji przychodzącej. Uruchamiana w dedykowanym zadaniu.
+- **`on_send`** — Wywoływana, gdy demon wysyła treść na platformę (tekst, media, klawiatury interaktywne itd.).
+- **`on_command`** — Wywoływana dla poleceń nietreściowych: wskaźniki pisania, reakcje, cykl życia strumieniowania.
 
 ### Runtime
 
-The runtime (`librefang_sidecar::runtime`) drives the stdio loop:
+Runtime (`librefang_sidecar::runtime`) napędza pętlę stdio:
 
-1. Reads `SidecarAdapter` from stdin on start (or uses `--describe` to emit a JSON schema and exit).
-2. Spawns the adapter's `produce` loop.
-3. Reads newline-delimited JSON from stdin, dispatches `Send` → `on_send`, other commands → `on_command`.
-4. Emits `Ready` repeatedly until the daemon acknowledges, then transitions to active event emission.
-5. Malformed lines produce an error event and the loop continues — a single bad message never kills the adapter.
+1. Odczytuje `SidecarAdapter` ze stdin przy starcie (lub używa `--describe`, aby wypisać schemat JSON i zakończyć).
+2. Uruchamia pętlę `produce` adaptera.
+3. Odczytuje wiersze JSON ze stdin, przekierowowuje `Send` → `on_send`, pozostałe polecenia → `on_command`.
+4. Emituje `Ready` wielokrotnie, aż demon potwierdzi, a następnie przechodzi do aktywnego emitowania zdarzeń.
+5. Nieprawidłowe wiersze generują zdarzenie błędu i pętla kontynuuje — pojedyncza zła wiadomość nigdy nie zabija adaptera.
 
 ---
 
-## `librefang-sidecar-telegram` — Telegram Adapter
+## `librefang-sidecar-telegram` — Adapter Telegram
 
-A complete Telegram Bot API adapter implementing the `SidecarAdapter` trait. Feature-parity with the Python reference adapter (`sdk/python/librefang/sidecar/adapters/telegram.py`): same wire shape, same emoji-reaction map, same access-control semantics.
+Kompletny adapter Bot API Telegram implementujący cechę `SidecarAdapter`. Pełna zgodność funkcjonalna z referencyjnym adapterem Python (`sdk/python/librefang/sidecar/adapters/telegram.py`): ten sam kształt na kablu, ta sama mapa reakcji emoji, ta sama semantyka kontroli dostępu.
 
-### Architecture
+### Architektura
 
 ```mermaid
 graph TD
@@ -114,107 +114,107 @@ graph TD
     Dispatcher -->|format_and_sanitize| Format[format module]
 ```
 
-### Key Modules
+### Kluczowe moduły
 
 #### `adapter.rs` — `TelegramAdapter`
 
-Implements `SidecarAdapter`. Owns:
+Implementuje `SidecarAdapter`. Posiada:
 
-- **`BotClient`** — shared (`Arc`) HTTP client for all Bot API calls.
-- **`AllowList`** — parsed from `ALLOWED_USERS` env var.
-- **`streams`** — `Arc<Mutex<HashMap<String, StreamState>>>` tracking active streaming sessions: the placeholder `message_id`, accumulated buffer text, thread context, and last-edit timestamp for debounce throttling.
+- **`BotClient`** — współdzielony (`Arc`) klient HTTP dla wszystkich wywołań Bot API.
+- **`AllowList`** — parsowany ze zmiennej środowiskowej `ALLOWED_USERS`.
+- **`streams`** — `Arc<Mutex<HashMap<String, StreamState>>>` śledzący aktywne sesje strumieniowania: zastępczy `message_id`, buforowany tekst, kontekst wątku i znacznik czasu ostatniej edycji do ograniczania częstotliwości.
 
-**Produce loop** (`produce`): Calls `getUpdates` with a 30-second server-side long-poll timeout and a 35-second client deadline. Handles timeouts as normal (no backoff), retries real errors with exponential backoff capped at 300 seconds. Every update is access-checked before translation.
+**Pętla produce** (`produce`): Wywołuje `getUpdates` z 30-sekundowym serwerowym limitem long-poll i 35-sekundowym terminem po stronie klienta. Obsługuje limity czasu jako normalne (bez wycofania), ponawia prawdziwe błędy z wykładniczym wycofaniem skończonym na 300 sekund. Każda aktualizacja jest sprawdzana pod kątem dostępu przed translacją.
 
-**Streaming lifecycle**: `StreamStart` sends a `…` placeholder message and records its `message_id`. `StreamDelta` appends text to the buffer and edits the placeholder at most once per second (`STREAM_EDIT_INTERVAL_MS = 1000`). `StreamEnd` delivers the final answer as a **fresh message** (not an edit) so push notifications fire reliably, then deletes the placeholder. If the fresh send fails, falls back to editing the placeholder in place.
+**Cykl życia strumieniowania**: `StreamStart` wysyła zastępczą wiadomość `…` i zapisuje jej `message_id`. `StreamDelta` dołącza tekst do bufora i edytuje zastępczą wiadomość co najwyżej raz na sekundę (`STREAM_EDIT_INTERVAL_MS = 1000`). `StreamEnd` dostarcza ostateczną odpowiedź jako **nową wiadomość** (nie edycję), aby powiadomienia push działały niezawodnie, a następnie usuwa zastępczą wiadomość. Jeśli wysłanie nowej wiadomości się nie powiedzie, następuje powrót do edycji zastępczej wiadomości w miejscu.
 
-**HTML fallback**: Both `edit_with_fallback` and `finalize_as_new_message` attempt HTML parse mode first. If Telegram returns `"can't parse entities"`, they retry with plain text via `html_to_plain()`, which strips tags and decodes entities so the user sees readable prose instead of raw markup.
+**Rezerwa HTML**: Zarówno `edit_with_fallback`, jak i `finalize_as_new_message` próbują najpierw trybu analizy HTML. Jeśli Telegram zwróci `"can't parse entities"`, ponawiają z czystym tekstem za pomocą `html_to_plain()`, która usuwa tagi i dekoduje encje, aby użytkownik widział czytelny tekst zamiast surowego znaczników.
 
-**Environment variables**:
+**Zmienne środowiskowe**:
 
-| Variable | Default | Effect |
+| Zmienna | Domyślnie | Efekt |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` | (required) | Bot API token from @BotFather |
-| `ALLOWED_USERS` | empty (open) | Comma-separated numeric user IDs and/or `@usernames` |
-| `TELEGRAM_STREAMING` | enabled | Set to `0`/`false`/`off` to disable streaming capability |
-| `TELEGRAM_CLEAR_DONE_REACTION` | false | When true, ✅ clears the reaction instead of showing 🎉 |
-| `TELEGRAM_LOG` | off | One-line happy-path traces to stderr when non-empty and not `off`/`0` |
+| `TELEGRAM_BOT_TOKEN` | (wymagana) | Token Bot API z @BotFather |
+| `ALLOWED_USERS` | pusta (otwarta) | Rozdzielana przecinkami lista numerycznych identyfikatorów użytkowników i/lub `@usernames` |
+| `TELEGRAM_STREAMING` | włączone | Ustaw na `0`/`false`/`off`, aby wyłączyć możliwość strumieniowania |
+| `TELEGRAM_CLEAR_DONE_REACTION` | false | Gdy true, ✅ czyści reakcję zamiast wyświetlać 🎉 |
+| `TELEGRAM_LOG` | wyłączone | Jednoliniowe ślady ścieżki optymistycznej na stderr, gdy niepuste i różne od `off`/`0` |
 
 #### `api/client.rs` — `BotClient`
 
-Reqwest wrapper around the Telegram Bot API. Key design decisions:
+Nakładka reqwest na Bot API Telegram. Kluczowe decyzje projektowe:
 
-- **Token redaction**: `redact()` replaces the bot token with `[REDACTED]` in any string exposed via `Display` or error events. Proxies and some error paths echo the request URL (which embeds `bot<TOKEN>` in the path) back into the response body.
-- **429 retry**: `call_json` and `send_multipart` retry once on `429 Too Many Requests` after sleeping for the server-supplied `retry_after` (capped at `MAX_RETRY_AFTER_SECS = 300` — a multi-hour flood-wait would stall the entire produce loop).
-- **Multipart uploads**: `send_multipart` clones the byte buffer for each attempt to support retry without async-body rewinding.
-- **Long-poll timeout**: `get_updates` uses a per-request timeout of `timeout_secs + LONGPOLL_CLIENT_BUFFER_SECS` (35s default) to account for Telegram's post-deadline latency.
+- **Redakcja tokena**: `redact()` zastępuje token bota ciągiem `[REDACTED]` w dowolnym ciągu ujawnionym przez `Display` lub zdarzenia błędu. Proxy i niektóre ścieżki błędów echo'ują adres URL żądania (który zawiera `bot<TOKEN>` w ścieżce) z powrotem do treści odpowiedzi.
+- **Ponowienie 429**: `call_json` i `send_multipart` ponawiają raz przy `429 Too Many Requests` po uśpieniu na czas `retry_after` podany przez serwer (maksymalnie `MAX_RETRY_AFTER_SECS = 300` — wielogodzinny flood-wait zablokowałby całą pętlę produce).
+- **Wysyłanie multipart**: `send_multipart` klonuje bufor bajtów dla każdej próby, aby obsłużyć ponowienie bez przewijania async-body.
+- **Limit czasu long-poll**: `get_updates` używa na żądanie limitu czasu `timeout_secs + LONGPOLL_CLIENT_BUFFER_SECS` (domyślnie 35s), aby uwzględnić opóźnienie po terminie Telegram.
 
-Methods cover: `sendMessage`, `editMessageText`, `deleteMessage`, `sendChatAction`, `sendPhoto`/`Document`/`Voice`/`Audio`/`Video`/`Animation`/`Sticker`/`Location`/`MediaGroup`/`Poll`, `setMessageReaction`, `answerCallbackQuery`, `getFile`, and `send_multipart` for inline file bytes.
+Metody obejmują: `sendMessage`, `editMessageText`, `deleteMessage`, `sendChatAction`, `sendPhoto`/`Document`/`Voice`/`Audio`/`Video`/`Animation`/`Sticker`/`Location`/`MediaGroup`/`Poll`, `setMessageReaction`, `answerCallbackQuery`, `getFile` oraz `send_multipart` dla bajtów pliku inline.
 
-#### `api/types.rs` — Bot API Types
+#### `api/types.rs` — Typy Bot API
 
-Serde structs for `Update`, `Message`, `User`, `Chat`, `CallbackQuery`, `PollAnswer`, and media types. Every struct uses `#[serde(default)]` so unknown fields from future Bot API releases don't cause deserialization failures. Response envelopes (`ApiResponse<T>`, `SendMessageResult`, `GetFileResult`, `PollResult`) are typed for the specific endpoints the adapter reads.
+Struktury Serde dla `Update`, `Message`, `User`, `Chat`, `CallbackQuery`, `PollAnswer` i typów mediów. Każda struktura używa `#[serde(default)]`, aby nieznane pola z przyszłych wydań Bot API nie powodowały błędów deserializacji. Koperty odpowiedzi (`ApiResponse<T>`, `SendMessageResult`, `GetFileResult`, `PollResult`) są typowane dla konkretnych punktów końcowych, które adapter odczytuje.
 
-#### `translator.rs` — Inbound Translation
+#### `translator.rs` — Translacja przychodząca
 
-Converts Telegram `Update` objects into LibreFang `Event` values:
+Konwertuje obiekty Telegram `Update` na wartości LibreFang `Event`:
 
-- **Messages** → `message` event with `Content` (Text, Image, File, Voice, Video, Audio, Animation, Sticker, Location, Command, MediaGroup)
-- **`callback_query`** → `ButtonCallback` event (message_id emitted as string in both the top-level field and metadata)
-- **`poll_answer`** → `PollAnswer` event
+- **Wiadomości** → zdarzenie `message` z `Content` (Text, Image, File, Voice, Video, Audio, Animation, Sticker, Location, Command, MediaGroup)
+- **`callback_query`** → zdarzenie `ButtonCallback` (message_id emitowany jako ciąg zarówno w polu najwyższego poziomu, jak i w metadanych)
+- **`poll_answer`** → zdarzenie `PollAnswer`
 
-Leading `/cmd args…` text is parsed into a `Command` content variant with the `@botname` suffix stripped. Media downloads use `getFile` + `file_url()` to construct file URLs the daemon's media-fetch can retrieve (no auth header needed — the token is in the URL path).
+Tekst zaczynający się od `/cmd args…` jest parsowany do wariantu treści `Command` z usuniętym sufiksem `@botname`. Pobieranie mediów używa `getFile` + `file_url()` do konstruowania adresów URL plików, które media-fetch demona może pobrać (nagłówek autoryzacji nie jest potrzebny — token jest w ścieżce URL).
 
-#### `dispatcher.rs` — Outbound Dispatch
+#### `dispatcher.rs` — Wysyłanie wychodzące
 
-Routes externally-tagged `Content` JSON values to the appropriate Bot API call. The dispatch function:
+Kieruje zewnętrznie otagowane wartości JSON `Content` do odpowiedniego wywołania Bot API. Funkcja wysyłania:
 
-1. Validates the content is a single-key externally-tagged object (rejects multi-key objects that could silently route to the wrong arm).
-2. Matches on the tag (`Text`, `Image`, `File`, `FileData`, `Voice`, `Video`, `Audio`, `Animation`, `Sticker`, `Location`, `Command`, `Interactive`, `EditInteractive`, `DeleteMessage`, `MediaGroup`, `Poll`).
-3. For text and captioned media: runs `format_and_sanitize` → sends with HTML parse mode → on `"can't parse entities"` falls back to plain text via `html_to_plain`.
+1. Weryfikuje, czy treść jest obiektem zewnętrznie otagowanym z jednym kluczem (odrzuca obiekty z wieloma kluczami, które mogłyby cicho skierować się do niewłaściwego wariantu).
+2. Dopasowuje tag (`Text`, `Image`, `File`, `FileData`, `Voice`, `Video`, `Audio`, `Animation`, `Sticker`, `Location`, `Command`, `Interactive`, `EditInteractive`, `DeleteMessage`, `MediaGroup`, `Poll`).
+3. Dla tekstu i mediów z podpisem: uruchamia `format_and_sanitize` → wysyła z trybem analizy HTML → przy `"can't parse entities"` powraca do czystego tekstu przez `html_to_plain`.
 
-Notable behaviors:
+Godne uwagi zachowania:
 
-- **`FileData`**: Validates each byte-array element is an integer in `[0, 255]`; rejects malformed payloads loudly rather than silently corrupting the file. Caps at 64 MiB (`FILE_DATA_BYTE_CAP`) to prevent OOM from adversarial payloads. Detects Ogg/Opus magic bytes to route to `sendVoice` vs `sendDocument`.
-- **`MediaGroup`**: Rejects nested `MediaGroup` items before recursing to prevent stack overflow. Batches into groups of 2–10 (Bot API limit); single items are dispatched individually. No per-item caption fallback — `sendMediaGroup` is atomic.
-- **`Interactive`/`EditInteractive`**: Builds an inline keyboard from `buttons` array, truncating `callback_data` to 64 bytes on a UTF-8 char boundary. Falls back to plain text on parse errors so the keyboard still ships.
-- **Captions**: Truncated to 1024 UTF-16 units (`CAPTION_LIMIT_UTF16`) before sending.
+- **`FileData`**: Weryfikuje, że każdy element tablicy bajtów jest liczbą całkowitą w `[0, 255]`; odrzuca nieprawidłowe ładunki głośno zamiast cichego uszkodzenia pliku. Ogranicza do 64 MiB (`FILE_DATA_BYTE_CAP`) aby zapobiec OOM z wrogich ładunków. Wykrywa bajty magiczne Ogg/Opus, aby kierować do `sendVoice` vs `sendDocument`.
+- **`MediaGroup`**: Odrzuca zagnieżdżone elementy `MediaGroup` przed rekurencją, aby zapobiec przepełnieniu stosu. Grupuje w paczki po 2–10 (limit Bot API); pojedyncze elementy są wysyłane indywidualnie. Brak rezerwy podpisu per-element — `sendMediaGroup` jest atomowy.
+- **`Interactive`/`EditInteractive`**: Buduje klawiaturę inline z tablicy `buttons`, obcinając `callback_data` do 64 bajtów na granicy znaku UTF-8. Powraca do czystego tekstu przy błędach analizy, aby klawiatura nadal została wysłana.
+- **Podpisy**: Obcinane do 1024 jednostek UTF-16 (`CAPTION_LIMIT_UTF16`) przed wysłaniem.
 
-#### `format/markdown.rs` — Markdown → Telegram HTML
+#### `format/markdown.rs` — Markdown → HTML Telegram
 
-Converts a subset of Markdown to Telegram-compatible HTML. Block-level constructs: code fences (` ``` ` / ` ~~~ `), headings (`#` → `<b>`), blockquotes (`>` → `<blockquote>`), unordered lists (`-`/`*`/`+` → `•`), ordered lists (`1.` → `1.`). Inline: `**bold**`, `*italic*`, `` `code` ``, `[text](url)`.
+Konwertuje podzbiór Markdown do kompatybilnego z Telegram HTML. Konstrukcje blokowe: bloki kodu (` ``` ` / ` ~~~ `), nagłówki (`#` → `<b>`), cytaty blokowe (`>` → `<blockquote>`), listy nieuporządkowane (`-`/`*`/`+` → `•`), listy uporządkowane (`1.` → `1.`). W linii: `**bold**`, `*italic*`, `` `code` ``, `[text](url)`.
 
-Processing order: escape HTML → extract inline code to PUA-sentinel placeholders → bold → italic → links → restore code placeholders. The placeholder sentinels (`U+E000`/`U+E001`) are stripped by `escape_html` on input to prevent adversarial collision attacks.
+Kolejność przetwarzania: escape HTML → wyodrębnienie kodu w linii do symboli zastępczych PUA → bold → italic → linki → przywrócenie symboli zastępczych kodu. Sybole zastępcze (`U+E000`/`U+E001`) są usuwane przez `escape_html` na wejściu, aby zapobiec atakom kolizji.
 
-#### `format/chunk.rs` — UTF-16 Message Chunking
+#### `format/chunk.rs` — Fragmentacja wiadomości UTF-16
 
-Splits messages to respect Telegram's 4096 UTF-16 code-unit limit. Key features:
+Dzieli wiadomości z poszanowaniem limitu 4096 jednostek kodowych UTF-16 Telegram. Kluczowe funkcje:
 
-- **Tag-aware splitting**: Open HTML tags at a chunk boundary are closed with matching `</tag>` and re-opened verbatim (including attributes like `href="..."`) at the start of the next chunk.
-- **Entity-boundary safety**: If a chunk ends mid-entity (`&lt` without `;`), it backs off to before the `&`. Literal ampersands followed by non-entity text are preserved.
-- **Mid-tag safety**: If a chunk ends inside an HTML tag (`<` without `>`), it backs off to before the `<`.
-- **Budget accounting**: Reserves space for close-tag suffixes computed from the carry-over tag stack, preventing overshoot that would trigger Telegram's `MESSAGE_TOO_LONG` error.
+- **Dzielenie z świadomością tagów**: Otwarte tagi HTML na granicy fragmentu są zamykane pasującym `</tag>` i ponownie otwierane dosłownie (w tym atrybuty takie jak `href="..."`) na początku następnego fragmentu.
+- **Bezpieczeństwo granic encji**: Jeśli fragment kończy się w środku encji (`&lt` bez `;`), cofa się przed `&`. Dosłowne ampersandy następujące po tekście nienależącym do encji są zachowane.
+- **Bezpieczeństwo wewnątrz tagu**: Jeśli fragment kończy się wewnątrz tagu HTML (`<` bez `>`), cofa się przed `<`.
+- **Kalkulacja budżetu**: Rezerwuje miejsce na sufiksy tagów zamykających obliczone ze stosu przenoszonych tagów, zapobiegając przekroczeniu, które wywołałoby błąd `MESSAGE_TOO_LONG` Telegram.
 
 #### `access.rs` — `AllowList`
 
-Parses the `ALLOWED_USERS` environment variable. Numeric entries match `user_id` exactly; `@username` entries (leading `@` optional) match case-insensitively. Empty list permits all users. Disallowed updates are silently dropped in the poll loop with no log line to avoid leaking sender identity.
+Parsuje zmienną środowiskową `ALLOWED_USERS`. Wpisy liczbowe pasują dokładnie do `user_id`; wpisy `@username` (wiodący `@` opcjonalny) pasują bez uwzględniania wielkości liter. Pusta lista zezwala wszystkim użytkownikom. Niedozwolone aktualizacje są cicho odrzucane w pętli odpytywania bez linii logu, aby uniknąć ujawnienia tożsamości nadawcy.
 
-#### `reaction.rs` — Emoji Reaction Map
+#### `reaction.rs` — Mapa reakcji emoji
 
-Translates LibreFang reaction tokens to Telegram emoji:
+Tłumaczy tokeny reakcji LibreFang na emoji Telegram:
 
 | LibreFang | Telegram |
 |---|---|
-| ⏳ (working) | 👀 |
-| ⚙️ (processing) | ⚡ |
-| ✅ (done) | 🎉 (or cleared if `TELEGRAM_CLEAR_DONE_REACTION=true`) |
-| ❌ (error) | 👎 |
+| ⏳ (pracuję) | 👀 |
+| ⚙️ (przetwarzam) | ⚡ |
+| ✅ (gotowe) | 🎉 (lub usunięte jeśli `TELEGRAM_CLEAR_DONE_REACTION=true`) |
+| ❌ (błąd) | 👎 |
 
 ---
 
-## Configuration
+## Konfiguracja
 
-Adapters are registered in `~/.librefang/config.toml`:
+Adaptery są rejestrowane w `~/.librefang/config.toml`:
 
 ```toml
 [[sidecar_channels]]
@@ -230,20 +230,20 @@ ALLOWED_USERS = "123456789, @your_username"
 TELEGRAM_BOT_TOKEN = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 ```
 
-The `--describe` flag outputs a JSON schema for the dashboard's configure form, so adapter-specific fields are discovered automatically.
+Flaga `--describe` wypisuje schemat JSON dla formularza konfiguracji dashboardu, więc pola specyficzne dla adaptera są odkrywane automatycznie.
 
-## Build
+## Kompilacja
 
 ```bash
-# Client SDK
+# SDK klienta
 cargo build -p librefang
 
-# Telegram adapter (rustls, no system OpenSSL dependency)
+# Adapter Telegram (rustls, bez zależności systemowego OpenSSL)
 cargo build --release -p librefang-sidecar-telegram
 ```
 
-Binary lands at `target/release/librefang-sidecar-telegram`.
+Plik binarny trafia do `target/release/librefang-sidecar-telegram`.
 
-## Conformance Testing
+## Testy zgodności
 
-The `librefang-sidecar` crate includes a conformance test harness (`tests/conformance.rs`) that validates adapters against a shared corpus of protocol fixtures. The Telegram adapter is feature-parity verified against the Python reference adapter — same wire shape, same `Schema`, same access-control semantics, same emoji-reaction map.
+Crate `librefang-sidecar` zawiera strukturę testów zgodności (`tests/conformance.rs`), która weryfikuje adaptery względem współdzielonego korpusu danych testowych protokołu. Adapter Telegram jest sprawdzany pod kątem pełnej zgodności funkcjonalnej z referencyjnym adapterem Python — ten sam kształt na kablu, to samo `Schema`, ta sama semantyka kontroli dostępu, ta sama mapa reakcji emoji.

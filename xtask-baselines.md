@@ -1,44 +1,44 @@
-# xtask — baselines
+# xtask — linie bazowe
 
 # xtask/baselines
 
-Pinned SHA-256 checksums for critical, human-authored artifacts in the repository. These baselines serve as a tamper-detection mechanism: when a source file is intentionally modified, its corresponding baseline must be updated in the same commit. Unintended or silent drift triggers a verification failure in CI.
+Stałe sumy kontrolne SHA-256 dla krytycznych, tworzonych ręcznie artefaktów w repozytorium. Te linie bazowe służą jako mechanizm wykrywania manipulacji: gdy plik źródłowy jest celowo zmodyfikowany, jego odpowiednia linia bazowa musi zostać zaktualizowana w tym samym commicie. Niezamierzone lub ciche odchylenia powodują błąd weryfikacji w CI.
 
-## Files
+## Pliki
 
-| Baseline File | Tracked Artifact | Purpose |
+| Plik linii bazowej | Śledzony artefakt | Przeznaczenie |
 |---|---|---|
-| `agent.sha256` | `examples/custom-agent/agent.toml` | Reference agent definition shipped as a user-facing example |
-| `config.sha256` | `librefang.toml.example` | Documented example configuration consumed by users |
-| `openapi.sha256` | `openapi.json` | Machine-readable API contract |
+| `agent.sha256` | `examples/custom-agent/agent.toml` | Referencyjna definicja agenta dostarczana jako przykład dla użytkowników |
+| `config.sha256` | `librefang.toml.example` | Udokumentowany przykładowy plik konfiguracyjny wykorzystywany przez użytkowników |
+| `openapi.sha256` | `openapi.json` | Maszynowo czytelna umowa API |
 
-Each `.sha256` file follows the standard `coreutils` format:
+Każdy plik `.sha256` podąża za standardowym formatem `coreutils`:
 
 ```
-<64-hex-char-digest>  <relative-path>
+<64-znakowy-digest-szesnastkowy>  <ścieżka-względna>
 ```
 
-## How It Works
+## Jak to działa
 
-These files are **pure data** — there is no executable code, no imports, and no runtime call graph in this module. They are consumed by a verifier (typically invoked from the `xtask` automation layer or a CI job) that:
+Te pliki to **czyste dane** — nie ma w tym module żadnego kodu wykonywalnego, żadnych importów i żadnego grafu wywołań w czasie wykonywania. Są one wykorzystywane przez weryfikator (zazwyczaj wywoływany z warstwy automatyzacji `xtask` lub zadania CI), który:
 
-1. Reads the artifact at the path recorded in the baseline.
-2. Computes its SHA-256 digest.
-3. Compares the computed digest against the pinned digest.
-4. Fails the build/check if they differ.
+1. Odczytuje artefakt ze ścieżki zapisanej w linii bazowej.
+2. Oblicza jego digest SHA-256.
+3. Porównuje obliczony digest ze stałym digestem.
+4. Powoduje błąd buildu/sprawdzenia, jeśli różnią się.
 
 ```mermaid
 graph LR
-    A[CI / xtask run] --> B[Read baseline files]
-    B --> C[Compute SHA-256 of tracked artifacts]
-    C --> D{Digests match?}
-    D -- Yes --> E[Pass]
-    D -- No --> F[Fail: baseline drift detected]
+    A[CI / uruchomienie xtask] --> B[Odczyt plików linii bazowej]
+    B --> C[Obliczenie SHA-256 śledzonych artefaktów]
+    C --> D{Digesty się zgadzają?}
+    D -- Tak --> E[Przekazano]
+    D -- Nie --> F[Błąd: wykryto odchylenie linii bazowej]
 ```
 
-## Updating Baselines
+## Aktualizacja linii bazowych
 
-When you intentionally modify any of the tracked artifacts, regenerate the corresponding baseline:
+Gdy celowo modyfikujesz którykolwiek ze śledzonych artefaktów, wygeneruj ponownie odpowiednią linię bazową:
 
 ```sh
 sha256sum examples/custom-agent/agent.toml > xtask/baselines/agent.sha256
@@ -46,20 +46,20 @@ sha256sum librefang.toml.example > xtask/baselines/config.sha256
 sha256sum openapi.json > xtask/baselines/openapi.sha256
 ```
 
-Commit the updated `.sha256` file alongside the artifact change so reviewers can verify the modification was deliberate.
+Zatwierdź zaktualizowany plik `.sha256` razem ze zmianą artefaktu, aby recenzenci mogli zweryfikować, że modyfikacja była celowa.
 
-## Relationship to the Rest of the Codebase
+## Relacja z resztą bazy kodu
 
-- **`xtask/`** — The parent automation harness. xtask tasks orchestrate builds, tests, and checks. The verifier that consumes these baselines lives (or is invoked from) here.
-- **`examples/custom-agent/agent.toml`** — A template users copy and adapt. Baseline drift here might indicate an accidental edit to a documented starting point.
-- **`librefang.toml.example`** — The canonical example of the application's configuration schema. Changes should be reviewed carefully because users pattern their own configs on this file.
-- **`openapi.json`** — The public API specification. Baseline protection ensures that schema changes are always visible in code review.
+- **`xtask/`** — Nadrzędny szkielet automatyzacji. Zadania xtask koordynują buildy, testy i sprawdzenia. Weryfikator wykorzystujący te linie bazowe znajduje się tutaj (lub jest stąd wywoływany).
+- **`examples/custom-agent/agent.toml`** — Szablon, który użytkownicy kopiują i dostosowują. Odchylenie linii bazowej może wskazywać na przypadkową edycję udokumentowanego punktu wyjścia.
+- **`librefang.toml.example`** — Kanoniczny przykład schematu konfiguracji aplikacji. Zmiany należy dokładnie sprawdzić, ponieważ użytkownicy wzorują na tym pliku własne konfiguracje.
+- **`openapi.json`** — Publiczna specyfikacja API. Ochrona linii bazowej zapewnia, że zmiany schematu są zawsze widoczne podczas przeglądu kodu.
 
-## When to Add a New Baseline
+## Kiedy dodać nową linię bazową
 
-Add a new `.sha256` file when:
+Dodaj nowy plik `.sha256`, gdy:
 
-- A new non-code artifact (config template, spec file, fixture) becomes load-bearing for users or CI.
-- An existing file starts being consumed by a parser or code generator where silent changes could cause hard-to-debug failures.
+- Nowy niekodowy artefakt (szablon konfiguracji, plik specyfikacji, fixture) staje się krytyczny dla użytkowników lub CI.
+- Istniejący plik zaczyna być przetwarzany przez parser lub generator kodu, gdzie ciche zmiany mogłyby powodować trudne do debugowania błędy.
 
-Do **not** add baselines for files that are auto-generated, build outputs, or already covered by version control tags/releases — those have their own integrity story.
+**Nie** dodawaj linii bazowych dla plików, które są generowane automatycznie, wynikami buildu lub już objęte tagami/wersjami kontroli wersji — te mają własny mechanizm zapewnienia integralności.

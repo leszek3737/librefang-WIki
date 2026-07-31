@@ -2,54 +2,54 @@
 
 # SDK
 
-Multi-language client libraries for the LibreFang Agent OS. The SDK module provides typed access to the REST API and a framework for building channel adapters that bridge external messaging platforms to the agent runtime.
+Wielojęzyczne biblioteki klienckie dla LibreFang Agent OS. Moduł SDK zapewnia typowany dostęp do REST API oraz framework do budowania adapterów kanałów łączących zewnętrzne platformy komunikacyjne z runtime'em agenta.
 
-## What's Here
+## Zawartość
 
-| Sub-module | Language | Auto-generated? | Focus |
+| Podmoduł | Język | Auto-generowany? | Zakres |
 |---|---|---|---|
-| [Go SDK](sdk-go.md) | Go 1.21 | Yes — from `openapi.json` | REST client only |
-| [JavaScript SDK](sdk-javascript.md) | JS/TS (Node ≥ 18) | Yes — from `openapi.json` | REST client only |
-| [Python SDK](sdk-python.md) | Python (stdlib only) | REST client generated; sidecar hand-written | REST client + agent scripts + sidecar framework |
-| [Rust SDK](sdk-rust.md) | Rust (async, tokio) | REST client manual; sidecar hand-written | REST client + sidecar framework + Telegram adapter |
+| [Go SDK](sdk-go.md) | Go 1.21 | Tak — z `openapi.json` | Tylko klient REST |
+| [JavaScript SDK](sdk-javascript.md) | JS/TS (Node ≥ 18) | Tak — z `openapi.json` | Tylko klient REST |
+| [Python SDK](sdk-python.md) | Python (tylko stdlib) | Klient REST wygenerowany; sidecar pisany ręcznie | Klient REST + skrypty agenta + framework sidecar |
+| [Rust SDK](sdk-rust.md) | Rust (async, tokio) | Klient REST pisany ręcznie; sidecar pisany ręcznie | Klient REST + framework sidecar + adapter Telegram |
 
-## Two Layers, Shared Contracts
+## Dwie warstwy, wspólne kontrakty
 
-### REST API Clients
+### Klienci REST API
 
-The Go, JavaScript, Python (`LibreFang`), and Rust (`librefang`) clients all expose the same resource surface — agents, skills, models, providers, channels, credentials, workflows, plugins, audit, and more — over the LibreFang REST API (default `http://localhost:4545`). Each client supports SSE streaming for real-time agent responses.
+Klienci Go, JavaScript, Python (`LibreFang`) oraz Rust (`librefang`) udostępniają tę samą powierzchnię zasobów — agentów, umiejętności, modele, dostawców, kanały, poświadczenia, przepływy pracy, wtyczki, audyt i inne — przez LibreFang REST API (domyślnie `http://localhost:4545`). Każdy klient obsługuje strumieniowanie SSE dla odpowiedzi agenta w czasie rzeczywistym.
 
-The Go and JavaScript clients are fully auto-generated from `openapi.json` by `scripts/codegen-sdks.py`. The Python and Rust REST clients cover the same endpoints with idiomatic, hand-maintained wrappers. Pick whichever matches your runtime; the wire contract is identical.
+Klienci Go i JavaScript są w pełni auto-generowani z `openapi.json` przez `scripts/codegen-sdks.py`. Klienci REST Python i Rust obejmują te same punkty końcowe za pomocą idiomatycznych, utrzymywanych ręcznie wrapperów. Wybierz ten, który pasuje do Twojego środowiska uruchomieniowego; kontrakt sieciowy jest identyczny.
 
-### Sidecar Framework
+### Framework Sidecar
 
-Channel adapters are external processes that translate between a messaging platform (Telegram, Bluesky, DingTalk, Feishu, Email, etc.) and the LibreFang daemon. The daemon launches each adapter as a subprocess and communicates over stdin/stdout using newline-delimited JSON.
+Adaptery kanałów to procesy zewnętrzne, które tłumaczą między platformą komunikacyjną (Telegram, Bluesky, DingTalk, Feishu, Email itd.) a demonem LibreFang. Demon uruchamia każdy adapter jako proces podrzędny i komunikuje się przez stdin/stdout za pomocą JSON rozdzielonego znakami nowej linii.
 
-Both [Python](sdk-python.md) and [Rust](sdk-rust.md) ship a sidecar runtime implementing this protocol:
+Zarówno [Python](sdk-python.md), jak i [Rust](sdk-rust.md) zawierają runtime sidecar implementujący ten protokół:
 
-| Message | Direction | Purpose |
+| Wiadomość | Kierunek | Przeznaczenie |
 |---|---|---|
-| `Ready` | Adapter → Daemon | Announce capabilities and schema |
-| `Event` | Adapter → Daemon | Inbound content (message, callback, poll answer) |
-| `Send` | Daemon → Adapter | Outbound text, media, interactive content |
-| `Command` | Daemon → Adapter | Typing indicators, reactions, streaming lifecycle |
+| `Ready` | Adapter → Demon | Ogłaszanie możliwości i schematu |
+| `Event` | Adapter → Demon | Treść przychodząca (wiadomość, wywołanie zwrotne, odpowiedź z ankiety) |
+| `Send` | Demon → Adapter | Treść wychodząca: tekst, media, zawartość interaktywna |
+| `Command` | Demon → Adapter | Wskaźniki pisania, reakcje, cykl życia strumieniowania |
 
-The Python package serves as the reference implementation, with production adapters for Telegram, Bluesky, DingTalk, Feishu, and Email. The Rust `librefang-sidecar` crate provides a `SidecarAdapter` trait and a `librefang-sidecar-telegram` adapter that is explicitly feature-parity with the Python Telegram adapter — same wire shape, same emoji-reaction map, same access-control semantics.
+Pakiet Python służy jako implementacja referencyjna, z produkcyjnymi adapterami dla Telegrama, Bluesky, DingTalk, Feishu oraz Email. Crate Rust `librefang-sidecar` dostarcza trait `SidecarAdapter` oraz adapter `librefang-sidecar-telegram`, który ma jawną parzystość funkcjonalną z adapterem Python Telegram — ten sam kształt sieciowy, ta sama mapa reakcji emoji, ta sama semantyka kontroli dostępu.
 
-## Cross-Language Parity
+## Parzystość między językami
 
-The Telegram adapter is the canonical example of cross-language equivalence: the Rust implementation mirrors `sdk/python/librefang/sidecar/adapters/telegram.py` field-for-field. When a new capability lands in the Python reference, the Rust adapter is expected to follow.
+Adapter Telegram to kanoniczny przykład równoważności między językami: implementacja Rust odzwierciedla `sdk/python/librefang/sidecar/adapters/telegram.py` pole po polu. Gdy nowa funkcjonalność trafi do Python referencyjnego, adapter Rust jest oczekiwany, że podąży za nim.
 
-## Choosing a Client
+## Wybór klienta
 
-| If you need... | Use |
+| Jeśli potrzebujesz... | Użyj |
 |---|---|
-| Quick REST calls from a serverless function | **JavaScript** or **Go** — zero-friction, generated |
-| An agent script running inside a sandbox (no dependencies) | **Python** — runs on stdlib alone |
-| A high-throughput or type-safe backend service | **Rust** — async, zero-cost |
-| A new channel adapter | **Python** (reference adapters to copy) or **Rust** (trait-based framework) |
+| Szybkich wywołań REST z funkcji serverless | **JavaScript** lub **Go** — bezproblemowe, generowane |
+| Skryptu agenta uruchamianego w piaskownicy (bez zależności) | **Python** — działa wyłącznie na stdlib |
+| Wysokowydajnej lub bezpiecznej typowo usługi backendowej | **Rust** — async, zero-kosztowy |
+| Nowego adaptera kanału | **Python** (adaptery referencyjne do skopiowania) lub **Rust** (framework oparty na traitach) |
 
-## Generation Pipeline
+## Potok generowania
 
 ```
 openapi.json
@@ -57,8 +57,8 @@ openapi.json
     ▼
 scripts/codegen-sdks.py
     │
-    ├──► sdk/go/librefang.go          (overwrite on regen)
-    └──► sdk/javascript/index.js      (overwrite on regen)
+    ├──► sdk/go/librefang.go          (nadpisywanie przy regeneracji)
+    └──► sdk/javascript/index.js      (nadpisywanie przy regeneracji)
 ```
 
-The Python REST client and all sidecar code are maintained manually. Never edit generated files — they will be overwritten on the next regeneration.
+Klient REST Python oraz cały kod sidecar są utrzymywane ręcznie. Nigdy nie edytuj wygenerowanych plików — zostaną nadpisane przy następnej regeneracji.

@@ -1,104 +1,104 @@
 # web — web
 
-# Web Module — LibreFang Marketing Site
+# Moduł Web — Strona marketingowa LibreFang
 
-## Purpose
+## Przeznaczenie
 
-This module is the public-facing marketing website and installer entry point for LibreFang. It is **not** the core Rust codebase. It serves:
+Ten moduł to publiczna strona marketingowa oraz punkt wejścia instalatora dla LibreFang. **Nie** jest to główny kod w języku Rust. Pełni funkcje:
 
-- A localized single-page landing site at `https://librefang.ai`
-- Install scripts (`install.sh`, `install.ps1`) and install metadata
-- Two Cloudflare Workers backing GitHub stats and visit counting
-- PWA assets, SEO metadata, sitemap, and RSS feed
+- Lokalizowanej jednostronicowej strony docelowej pod adresem `https://librefang.ai`
+- Skryptów instalacyjnych (`install.sh`, `install.ps1`) oraz metadanych instalatora
+- Dwóch Cloudflare Workers obsługujących statystyki GitHuba oraz licznik odwiedzin
+- Zasobów PWA, metadanych SEO, mapy witryny i kanału RSS
 
-The core repository lives elsewhere (`https://github.com/librefang/librefang`); this module only consumes its APIs and download artifacts.
+Główne repozytorium znajduje się w innym miejscu (`https://github.com/librefang/librefang`); ten moduł jedynie korzysta z jego API i artefaktów do pobrania.
 
-## Architecture
+## Architektura
 
-The production deployment has three independently shipped parts:
+Wdrożenie produkcyjne składa się z trzech niezależnie dostarczanych części:
 
 ```mermaid
 flowchart LR
-  Browser[Browser / SPA] -->|"GitHub releases"| GHAPI[api.github.com]
+  Browser[Przeglądarka / SPA] -->|"Wydania GitHuba"| GHAPI[api.github.com]
   Browser -->|"/api/github, /api/registry"| StatsW[github-stats-worker]
   Browser -->|"/api/track, /script.js"| VisitW[visit-counter-worker]
   StatsW --> KV1[(KV)]
   VisitW --> KV2[(VISIT_COUNTER)]
   StatsW -->|"proxy + cache"| GHAPI
-  Browser -->|"fonts"| GFonts[Google Fonts CDN]
-  subgraph "Static host (dist/)"
+  Browser -->|"czcionki"| GFonts[Google Fonts CDN]
+  subgraph "Host statyczny (dist/)"
     SPA[React SPA]
-    Reg[registry.json fallback]
+    Reg[registry.json jako rezerwowy]
     Scripts[install.sh / .ps1]
   end
-  StatsW -.->|"build-time fetch"| Reg
+  StatsW -.->|"pobieranie w czasie budowania"| Reg
 ```
 
-The frontend is intentionally thin: most dynamic data is fetched at runtime rather than held in local application state. The zustand store only carries language/UI state and lazy font loading.
+Frontend jest celowo minimalistyczny: większość danych dynamicznych jest pobierana w czasie rzeczywistym, a nie trzymana w lokalnym stanie aplikacji. Store zustand przechowuje wyłącznie stan języka/UI oraz leniwe ładowanie czcionek.
 
-## Tech Stack
+## Stos technologiczny
 
-| Layer | Choice |
+| Warstwa | Wybór |
 |---|---|
-| UI | React 19, TypeScript (strict) |
-| Build | Vite 8 with Rolldown-based manual chunking |
-| Styling | Tailwind CSS v4 via `@tailwindcss/postcss` + autoprefixer |
-| State | zustand |
-| Data fetching | `@tanstack/react-query` |
-| Animation | framer-motion |
-| Validation | zod |
-| Classnames | `clsx` + `tailwind-merge` (via `src/lib/utils.ts`) |
-| Icons | lucide-react |
+| UI | React 19, TypeScript (tryb ścisły) |
+| Build | Vite 8 z ręcznym dzieleniem na chunki opartym na Rolldown |
+| Stylowanie | Tailwind CSS v4 przez `@tailwindcss/postcss` + autoprefixer |
+| Stan | zustand |
+| Pobieranie danych | `@tanstack/react-query` |
+| Animacja | framer-motion |
+| Walidacja | zod |
+| Nazwy klas | `clsx` + `tailwind-merge` (przez `src/lib/utils.ts`) |
+| Ikony | lucide-react |
 | Edge | Cloudflare Workers + KV |
 
-## Key Components
+## Kluczowe komponenty
 
-### Frontend source (`src/`)
+### Kod źródłowy frontendu (`src/`)
 
-- **`App.tsx`** — Owns the page sections (Header, Hero, Features, Comparison, Install, FAQ, etc.), GitHub stats requests, visit counter requests, and path-prefix-based language detection.
-- **`main.tsx`** — React entrypoint; mounts the React Query provider.
-- **`i18n.ts`** — `rawTranslations` for every supported locale, plus the `languages` list and the `getTranslation(lang)` helper that deep-merges a locale over English so missing keys fall back.
-- **`store.ts`** — Zustand store for language state. Lazily injects the appropriate Google Fonts stylesheet (Noto Sans SC/TC/JP/KR) only when a CJK locale is active. Non-CJK locales use the base `Inter` + `JetBrains Mono` fonts and load no extra resources.
-- **`useRegistry.ts`** — Registry data hook. Hits the remote endpoint and falls back to the static `public/registry.json` on failure.
-- **`lib/utils.ts`** — `clsx` + `tailwind-merge` className helper.
-- **`index.css`** — Global styles and Tailwind component styles.
-- **`components/SearchDialog.tsx`** — Owns path-prefix handling for locale-aware search.
+- **`App.tsx`** — Zarządza sekcjami strony (Header, Hero, Funkcje, Porównanie, Instalacja, FAQ itd.), żądaniami statystyk GitHuba, żądaniami licznika odwiedzin oraz wykrywaniem języka na podstawie prefiksu ścieżki.
+- **`main.tsx`** — Punkt wejścia React; rejestruje provider React Query.
+- **`i18n.ts`** — `rawTranslations` dla każdej obsługiwanej lokalizacji, lista `languages` oraz funkcja pomocnicza `getTranslation(lang)`, która głęboko łączy lokalizację z angielską, aby brakujące klucze miały wartości zastępcze.
+- **`store.ts`** — Store zustand dla stanu języka. Leniwie wstrzykuje odpowiedni arkusz stylów Google Fonts (Noto Sans SC/TC/JP/KR) tylko wtedy, gdy aktywna jest lokalizacja CJK. Lokalizacje nie-CJK korzystają z podstawowych czcionek `Inter` + `JetBrains Mono` i nie ładują dodatkowych zasobów.
+- **`useRegistry.ts`** — Hook danych rejestru. Odpytuje zdalny punkt końcowy i w razie niepowodzenia przechodzi na statyczny `public/registry.json`.
+- **`lib/utils.ts`** — Funkcja pomocnicza `clsx` + `tailwind-merge` dla nazw klas.
+- **`index.css`** — Style globalne i style komponentów Tailwind.
+- **`components/SearchDialog.tsx`** — Zarządza obsługą prefiksów ścieżek dla wyszukiwania z uwzględnieniem lokalizacji.
 
-### Build-time scripts (`scripts/`)
+### Skrypty czasu budowania (`scripts/`)
 
-Three pre-scripts run automatically before both `dev` and `build` (see `predev` / `prebuild` in `package.json`):
+Trzy preskrypty uruchamiają się automatycznie przed `dev` i `build` (patrz `predev` / `prebuild` w `package.json`):
 
-1. **`fetch-registry.ts`** — Fetches agent registry data and writes `public/registry.json`. This is the static fallback consumed by `useRegistry.ts` when the live API is unavailable.
-2. **`gen-og-images.ts`** — Generates Open Graph images.
-3. **`gen-rss.ts`** — Generates the `/feed.xml` Atom changelog referenced from `index.html`.
+1. **`fetch-registry.ts`** — Pobiera dane rejestru agentów i zapisuje `public/registry.json`. Jest to statyczna kopia zapasowa wykorzystywana przez `useRegistry.ts`, gdy aktywny API jest niedostępny.
+2. **`gen-og-images.ts`** — Generuje obrazy Open Graph.
+3. **`gen-rss.ts`** — Generuje kanał Atom `/feed.xml` powiązany z `index.html`.
 
-A standalone utility script:
+Niezależny skrypt narzędziowy:
 
-- **`audit-locale-completeness.ts`** — Invoked via `pnpm i18n:audit <locale>` (or `--all`). Compares `rawTranslations[locale]` against `rawTranslations.en` and reports untranslated keys. Run this before opening a translation PR.
+- **`audit-locale-completeness.ts`** — Uruchamiany przez `pnpm i18n:audit <locale>` (lub `--all`). Porównuje `rawTranslations[locale]` z `rawTranslations.en` i raportuje nieprzetłumaczone klucze. Uruchom przed otwarciem PR z tłumaczeniem.
 
-### Static assets (`public/`)
+### Zasoby statyczne (`public/`)
 
-- `install.sh`, `install.ps1`, `install-manifest.json` — installer distribution
-- `registry.json` — generated registry fallback
-- `_headers`, `_redirects` — security headers, CSP rules, cache policies, redirects for static hosts that support them
-- `sitemap.xml`, `robots.txt`, OG image, favicon, PWA icons, mascot
+- `install.sh`, `install.ps1`, `install-manifest.json` — dystrybucja instalatora
+- `registry.json` — wygenerowana kopia zapasowa rejestru
+- `_headers`, `_redirects` — nagłówki bezpieczeństwa, reguły CSP, polityki cache, przekierowania dla hostów statycznych, które je obsługują
+- `sitemap.xml`, `robots.txt`, obraz OG, favicon, ikony PWA, maskotka
 
-> **Maintenance constraint:** installer scripts and metadata exist in **both** the repo root and `public/`. Editing one copy without the other is almost always a bug.
+> **Ograniczenie utrzymania:** skrypty instalacyjne i metadane istnieją **jednocześnie** w katalogu głównym repozytorium i w `public/`. Edycja jednej kopii bez drugiej jest prawie zawsze błędem.
 
 ### Cloudflare Workers (`workers/`)
 
 **`github-stats-worker`**
-- `GET /api/github` — aggregates stars, forks, issues, PRs, downloads
-- Caches responses in KV, records daily snapshots via a cron trigger
-- Bindings: `KV`; optional secret `GITHUB_TOKEN`
+- `GET /api/github` — agreguje gwiazdki, forki, issues, PR-y, pobrania
+- Buforuje odpowiedzi w KV, zapisuje dzienne migawki przez wyzwalacz cron
+- Powiązania: `KV`; opcjonalny sekret `GITHUB_TOKEN`
 
 **`visit-counter-worker`**
-- `GET /api` — current visit stats for the frontend
-- `POST /api/track` — records a visit
-- `GET /script.js` — embeddable tracking script (loaded by `index.html`)
-- Binding: `VISIT_COUNTER`
+- `GET /api` — bieżące statystyki odwiedzin dla frontendu
+- `POST /api/track` — rejestruje wizytę
+- `GET /script.js` — osadzony skrypt śledzenia (ładowany przez `index.html`)
+- Powiązanie: `VISIT_COUNTER`
 
-Worker deployment is **not** wired into the frontend build — it is a separate operational step:
+Wdrożenie workerów **nie** jest powiązane z buildem frontendu — jest to osobny krok operacyjny:
 
 ```bash
 cd workers/github-stats-worker
@@ -109,107 +109,107 @@ cd ../visit-counter-worker
 wrangler deploy
 ```
 
-Replace `account_id` and KV namespace IDs in each `wrangler.toml` before deploying to a different Cloudflare account.
+Przed wdrożeniem na inne konto Cloudflare, zamień `account_id` i identyfikatory przestrzeni nazw KV w każdym `wrangler.toml`.
 
-## Internationalization
+## Internacjonalizacja
 
-The site supports nine locales, detected purely from URL path prefix:
+Strona obsługuje dziewięć lokalizacji, wykrywanych wyłącznie na podstawie prefiksu ścieżki URL:
 
-| Prefix | Locale |
+| Prefiks | Lokalizacja |
 |---|---|
-| `/` | English |
-| `/zh/` | Simplified Chinese |
-| `/zh-TW/` | Traditional Chinese |
-| `/de/` | Deutsch |
-| `/ja/` | Japanese |
-| `/ko/` | Korean |
-| `/es/` | Spanish |
-| `/pl/` | Polish |
-| `/uk/` | Ukrainian |
+| `/` | Angielski |
+| `/zh/` | Chiński uproszczony |
+| `/zh-TW/` | Chiński tradycyjny |
+| `/de/` | Niemiecki |
+| `/ja/` | Japoński |
+| `/ko/` | Koreański |
+| `/es/` | Hiszpański |
+| `/pl/` | Polski |
+| `/uk/` | Ukraiński |
 
-Detection happens in two places that must stay in sync:
+Wykrywanie odbywa się w dwóch miejscach, które muszą pozostać zsynchronizowane:
 
-1. **`index.html` bootstrap script** — runs before React hydrates. Sets `document.documentElement.lang`, `window.__INITIAL_LANG__`, and rewrites the `<meta name="description">` / OG / Twitter descriptions to the localized string so crawlers and link unfurls see the correct language without executing JS. Note that `/zh-TW` is matched **before** `/zh` because the latter is a prefix of the former.
-2. **`src/store.ts`** — runtime path detection feeding the zustand store.
+1. **Skrypt bootstrap w `index.html`** — uruchamia się przed hydratacją React. Ustawia `document.documentElement.lang`, `window.__INITIAL_LANG__` i nadpisuje `<meta name="description">` / opisy OG / Twitter na zlokalizowany ciąg znaków, aby roboty indeksujące i podglądy linków widziały poprawny język bez wykonywania JS. Uwaga: `/zh-TW` jest dopasowywany **przed** `/zh`, ponieważ ten drugi jest prefiksem pierwszego.
+2. **`src/store.ts`** — wykrywanie ścieżki w czasie rzeczywistym przekazujące dane do store'a zustand.
 
-CJK locales (zh, zh-TW, ja, ko) trigger lazy loading of Noto Sans SC/TC/JP/KR via a second bootstrap script in `index.html` and a parallel mechanism in the store.
+Lokalizacje CJK (zh, zh-TW, ja, ko) uruchamiają leniwe ładowanie Noto Sans SC/TC/JP/KR przez drugi skrypt bootstrap w `index.html` oraz równoległy mechanizm w store.
 
-### Adding a new language
+### Dodawanie nowego języka
 
-When introducing a locale, update **all** of these:
+Podczas wprowadzania lokalizacji zaktualizuj **wszystkie** z tych elementów:
 
-1. `src/i18n.ts` — add translations and a `languages` entry
-2. `src/store.ts` — add path detection
-3. `index.html` — add to both the language-detection bootstrap script and the meta-description map
-4. `src/components/SearchDialog.tsx` — add path-prefix handling
-5. `public/sitemap.xml` — add the new URL
-6. Run `pnpm i18n:audit <locale>` once translations are intended to be complete
+1. `src/i18n.ts` — dodaj tłumaczenia i wpis `languages`
+2. `src/store.ts` — dodaj wykrywanie ścieżki
+3. `index.html` — dodaj do skryptu bootstrap wykrywającego język oraz do mapy meta-opisów
+4. `src/components/SearchDialog.tsx` — dodaj obsługę prefiksu ścieżki
+5. `public/sitemap.xml` — dodaj nowy URL
+6. Uruchom `pnpm i18n:audit <locale>`, gdy tłumaczenia mają być ukończone
 
-## Build & Bundle
+## Build i paczka
 
-`vite.config.ts` defines explicit vendor chunks via the function form of `manualChunks` (Rolldown in Vite 8 rejects the object form):
+`vite.config.ts` definiuje jawne vendor chunks przez formę funkcyjną `manualChunks` (Rolldown w Vite 8 odrzuca formę obiektową):
 
 - `vendor-react` — `react` + `react-dom`
 - `vendor-motion` — `framer-motion`
 - `vendor-query` — `@tanstack/react-query`
 
-The dev server runs on port `3002` with `host: true`.
+Serwer deweloperski działa na porcie `3002` z `host: true`.
 
-PWA is registered from `index.html` (`navigator.serviceWorker.register('/sw.js')`); the service worker itself is generated by `vite-plugin-pwa` configuration referenced from the README (the plugin registration is not present in the current `vite.config.ts` snippet — verify before relying on it).
+PWA jest rejestrowane z `index.html` (`navigator.serviceWorker.register('/sw.js')`); sam service worker jest generowany przez konfigurację `vite-plugin-pwa` powiązaną z README (rejestracja wtyczki nie jest obecna w obecnym fragmencie `vite.config.ts` — zweryfikuj przed poleganiem na niej).
 
-## Local Development
+## Rozwój lokalny
 
 ```bash
 pnpm install
-pnpm dev          # runs predev (registry/OG/RSS generation), then vite
-pnpm build        # runs prebuild, outputs dist/
-pnpm preview      # serves the production build
+pnpm dev          # uruchamia predev (generacja rejestru/OG/RSS), a następnie vite
+pnpm build        # uruchamia prebuild, wynik w dist/
+pnpm preview      # serwuje build produkcyjny
 pnpm fetch-registry
 pnpm gen-og
 pnpm gen-rss
 pnpm i18n:audit <locale> | --all
 ```
 
-Note that **`dev` and `build` target production external endpoints** unless you edit the source. If any of these are down, the affected UI sections degrade gracefully but show empty data:
+Uwaga: **`dev` i `build` celują w zewnętrzne punkty końcowe produkcyjne**, chyba że edytujesz kod źródłowy. Jeśli którykolwiek z nich jest niedostępny, odpowiednie sekcje UI degradują się z elegancją, ale pokazują puste dane:
 
-- `api.github.com/repos/librefang/librefang/releases/latest` — Hero section
-- `stats.librefang.ai/api/github` — GitHub community stats
-- `stats.librefang.ai/api/registry` — agent registry (with `public/registry.json` fallback)
-- `counter.librefang.ai/api` and `/script.js` — visit counter
-- `fonts.googleapis.com` / `fonts.gstatic.com` — Inter, JetBrains Mono, CJK fonts
+- `api.github.com/repos/librefang/librefang/releases/latest` — sekcja Hero
+- `stats.librefang.ai/api/github` — statystyki społeczności GitHub
+- `stats.librefang.ai/api/registry` — rejestr agentów (z kopią zapasową `public/registry.json`)
+- `counter.librefang.ai/api` oraz `/script.js` — licznik odwiedzin
+- `fonts.googleapis.com` / `fonts.gstatic.com` — Inter, JetBrains Mono, czcionki CJK
 - Google Analytics (`G-9Q0WS7SHZ6`) — `gtag`
 
-## Testing & Quality
+## Testowanie i jakość
 
-| Command | What it does |
+| Polecenie | Co robi |
 |---|---|
-| `pnpm lint` | `tsc --noEmit` typecheck (strict mode, `noUncheckedIndexedAccess`, `noUnusedLocals/Parameters`) |
-| `pnpm test` | Vitest run — picks up `src/**/*.{test,spec}.{ts,tsx}` and `scripts/**/*.{test,spec}.ts` |
-| `pnpm test:watch` | Vitest in watch mode |
-| `pnpm test:e2e` | Playwright suite from `e2e/`; builds then previews on `127.0.0.1:4174` |
+| `pnpm lint` | `tsc --noEmit` typecheck (tryb ścisły, `noUncheckedIndexedAccess`, `noUnusedLocals/Parameters`) |
+| `pnpm test` | Uruchomienie Vitest — pobiera `src/**/*.{test,spec}.{ts,tsx}` oraz `scripts/**/*.{test,spec}.ts` |
+| `pnpm test:watch` | Vitest w trybie watch |
+| `pnpm test:e2e` | Pakiet Playwright z `e2e/`; buduje i serwuje podgląd na `127.0.0.1:4174` |
 
-ESLint (`eslint.config.js`) applies `js.configs.recommended`, `react-hooks`, and `react-refresh` (Vite preset), with `no-unused-vars` permitting identifiers starting with uppercase or underscore.
+ESLint (`eslint.config.js`) aplikuje `js.configs.recommended`, `react-hooks` oraz `react-refresh` (preset Vite), z `no-unused-vars` zezwalającym na identyfikatory zaczynające się od wielkiej litery lub podkreślnika.
 
-Lighthouse CI (`lighthouserc.json`) audits the root plus `/skills`, `/agents`, and `/hands` against performance (warn ≥ 0.85), accessibility (error ≥ 0.9), best-practices (warn ≥ 0.9), and SEO (error ≥ 0.9), skipping `uses-http2`.
+Lighthouse CI (`lighthouserc.json`) audytuje stronę główną oraz `/skills`, `/agents` i `/hands` pod kątem wydajności (ostrzeżenie ≥ 0.85), dostępności (błąd ≥ 0.9), dobrych praktyk (ostrzeżenie ≥ 0.9) oraz SEO (błąd ≥ 0.9), pomijając `uses-http2`.
 
-## Content Maintenance
+## Utrzymanie treści
 
-- **Copy / translations** → `src/i18n.ts` (raw translations, navigation, FAQ, GitHub/community/docs section text, language switcher entries)
-- **Page structure / sections** → `src/App.tsx`
-- **SEO metadata, GA, visit-counter script, bootstrap detection, JSON-LD** → `index.html`
-- **Installer resources** → keep repo-root scripts, `public/` copies, and `public/install-manifest.json` in sync
-- **Static assets** → `public/`
+- **Kopiowanie / tłumaczenia** → `src/i18n.ts` (surowe tłumaczenia, nawigacja, FAQ, teksty sekcji GitHub/społeczność/docs, wpisy przełącznika języków)
+- **Struktura strony / sekcje** → `src/App.tsx`
+- **Metadane SEO, GA, skrypt licznika odwiedzin, wykrywanie bootstrap, JSON-LD** → `index.html`
+- **Zasoby instalatora** — utrzymuj skrypty w katalogu głównym repozytorium, kopie w `public/` oraz `public/install-manifest.json` w synchronizacji
+- **Zasoby statyczne** → `public/`
 
-## Operational Constraints
+## Ograniczenia operacyjne
 
-Several invariants are easy to break silently — keep them in mind:
+Kilka niezmienników łatwo złamać bez zauważenia — miej je na uwadze:
 
-- **Dual installer copies**: root scripts and `public/` scripts must stay aligned with `public/install-manifest.json`.
-- **Hardcoded API domains** in `src/App.tsx` and `index.html`. If worker domains change, update both, plus the CSP allowlist in `public/_headers`.
-- **CSP** in `public/_headers` will block any new third-party script or asset origin not explicitly allowlisted.
-- **Locale paths** are spread across `sitemap.xml`, the `index.html` bootstrap script, `src/store.ts`, and `src/components/SearchDialog.tsx`.
-- **Worker deployment** is a manual `wrangler deploy` step, independent of `pnpm build`.
+- **Podwójne kopie instalatora**: skrypty w katalogu głównym i skrypty w `public/` muszą pozostać zsynchronizowane z `public/install-manifest.json`.
+- **Zahardkodowane domeny API** w `src/App.tsx` i `index.html`. Jeśli domeny workerów ulegną zmianie, zaktualizuj oba miejsca oraz allowlistę CSP w `public/_headers`.
+- **CSP** w `public/_headers` zablokuje każdy nowy skrypt lub zasób zewnętrzny nie znajdujący się jawnie na allowliście.
+- **Ścieżki lokalizacji** są rozproszone w `sitemap.xml`, skrypcie bootstrap w `index.html`, `src/store.ts` i `src/components/SearchDialog.tsx`.
+- **Wdrożenie workerów** to ręczny krok `wrangler deploy`, niezależny od `pnpm build`.
 
-## Relationship to the Rest of the Codebase
+## Relacja z resztą bazy kodu
 
-This module is a leaf: it has no inbound or outbound internal dependencies on other LibreFang modules. It consumes three external surfaces of the core project — the GitHub releases API, the binary download URLs referenced by `install-manifest.json`, and (transitively, via the stats worker) the GitHub repository metadata. Changes to installer filenames, release artifact locations, or the registry schema in the core repository will require coordinated updates here, primarily in `scripts/fetch-registry.ts`, `public/install-manifest.json`, and the installer scripts.
+Ten moduł jest liściem: nie ma wewnętrznych zależności wejściowych ani wyjściowych względem innych modułów LibreFang. Konsumuje trzy zewnętrzne powierzchnie projektu głównego — API wydań GitHuba, URL-e pobierania binariów powiązane w `install-manifest.json` oraz (transytywnie, przez stats worker) metadane repozytorium GitHub. Zmiany nazw plików instalatora, lokalizacji artefaktów wydań lub schematu rejestru w głównym repozytorium będą wymagały skoordynowanych aktualizacji tutaj, przede wszystkim w `scripts/fetch-registry.ts`, `public/install-manifest.json` oraz skryptach instalacyjnych.

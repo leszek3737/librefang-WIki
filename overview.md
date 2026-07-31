@@ -1,16 +1,16 @@
 # librefang — Wiki
 
-# LibreFang — Libre Agent Operating System
+# LibreFang — Libre System Operacyjny Agentów
 
-Welcome to the LibreFang codebase. LibreFang is an open-source **Agent Operating System** written in Rust — a self-hosted platform for building, running, and federating autonomous LLM-powered agents. It provides multi-provider LLM support, autonomous task scheduling, messaging-platform integration, skill evolution, and peer-to-peer federation, all behind a unified HTTP API.
+Witamy w repozytorium kodu LibreFang. LibreFang to otwartoźródłowy **System Operacyjny Agentów** napisany w języku Rust — samodzielnie hostowana platforma do budowania, uruchamiania i federowania autonomicznych agentów napędzanych przez LLM. Zapewnia wielodostawcowe wsparcie dla LLM, autonomiczne planowanie zadań, integrację z platformami komunikacyjnymi, ewolucję umiejętności oraz federację peer-to-peer — wszystko za pomocą zunifikowanego interfejsu HTTP API.
 
-The workspace contains 24 crates, 2,100+ tests, and zero clippy warnings.
+Obszar roboczy zawiera 24 craty, ponad 2100 testów i zero ostrzeżeń clippy.
 
 ---
 
-## Architecture at a Glance
+## Architektura w pigułce
 
-LibreFang is structured as a layered monorepo. At the bottom sits a shared type system; above that, a kernel orchestrates work across a runtime engine, persistent memory, LLM drivers, messaging channels, and user-defined skills. Clients (CLI, desktop app, external SDKs) talk to the system through an HTTP API surface.
+LibreFang jest zorganizowany jako warstwowy monorepo. Na samym dole znajduje się współdzielony system typów; powyżej jądro (kernel) koordynuje pracę silnika wykonywania, trwałej pamięci, sterowników LLM, kanałów komunikacyjnych i zdefiniowanych przez użytkownika umiejętności. Klienci (CLI, aplikacja desktopowa, zewnętrzne SDK) komunikują się z systemem przez warstwę HTTP API.
 
 ```mermaid
 graph TB
@@ -41,98 +41,98 @@ graph TB
     TYPES -.-> RT
 ```
 
-Solid arrows show direct ownership and call paths. Dashed arrows from `librefang-types` indicate that nearly every crate depends on it for shared domain models — it is the lingua franca of the workspace.
+Ciągłe strzałki oznaczają bezpośrednią własność i ścieżki wywołań. Kreskowane strzałki z `librefang-types` wskazują, że niemal każdy crat zależy od niego ze względu na współdzielone modele domeny — jest to lingua franca obszaru roboczego.
 
 ---
 
-## Core Subsystems
+## Podsystemy podstawowe
 
-### Type Foundation
+### Fundament typów
 
-Everything in LibreFang speaks the same vocabulary. [`librefang-types`](librefang-types.md) defines the domain models, error types, and internationalization primitives (including the `resolve_language` / `t` translation pipeline) used across all other crates. With 600+ call sites from the kernel alone, this is the first crate a new contributor should read.
+Wszystko w LibreFang mówi tym samym słownictwem. [`librefang-types`](librefang-types.md) definiuje modele domeny, typy błędów oraz prymitywy internacjonalizacji (w tym potok tłumaczeń `resolve_language` / `t`) używane przez wszystkie pozostałe craty. Z ponad 600 punktami wywołań z samego jądra, jest to pierwszy crat, który nowy współtwórca powinien przeczytać.
 
-### API Surface
+### Warstwa API
 
-[`librefang-api`](librefang-api.md) is the HTTP front door. It exposes REST routes for agent lifecycle, skill management, channel configuration, MCP tool grants, and more. The API delegates business logic to the kernel and runtime, and depends on [`librefang-wire`](librefang-wire.md) for protocol-level serialization.
+[`librefang-api`](librefang-api.md) to główne wejście HTTP. Udostępnia ścieżki REST dla cyklu życia agentów, zarządzania umiejętnościami, konfiguracji kanałów, przyznawania uprawnień narzędzi MCP i wielu innych. API deleguje logikę biznesową do jądra i silnika wykonywania, a zależy od [`librefang-wire`](librefang-wire.md) w celu serializacji na poziomie protokołu.
 
-### Kernel — The Control Plane
+### Jądro — płaszczyzna sterowania
 
-[`librefang-kernel`](librefang-kernel.md) is the orchestration brain. It coordinates agent spawning, routes messages between channels and the runtime, manages MCP OAuth registration, and meters resource usage through [`librefang-kernel-metering`](librefang-kernel-metering.md). The kernel also owns the [`librefang-kernel-handle`](librefang-kernel-handle.md) abstraction that lets external processes interact with a running agent safely.
+[`librefang-kernel`](librefang-kernel.md) to mózg orkiestracji. Koordynuje uruchamianie agentów, przekierowuje wiadomości między kanałami a silnikiem wykonywania, zarządza rejestracją MCP OAuth i monitoruje zużycie zasobów za pomocą [`librefang-kernel-metering`](librefang-kernel-metering.md). Jądro posiada również abstrakcję [`librefang-kernel-handle`](librefang-kernel-handle.md), która umożliwia zewnętrznym procesom bezpieczną interakcję z działającym agentem.
 
-### Runtime — The Execution Engine
+### Silnik wykonywania — silnik wykonawczy
 
-[`librefang-runtime`](librefang-runtime.md) is where agents actually *run*. It manages execution loops, invokes LLM drivers, executes skills, processes media, and communicates with sandboxed subprocesses. Specialized sub-crates handle specific runtime concerns:
+[`librefang-runtime`](librefang-runtime.md) to miejsce, gdzie agenci faktycznie *działają*. Zarządza pętlami wykonania, wywołuje sterowniki LLM, wykonuje umiejętności, przetwarza multimedia i komunikuje się z izolowanymi procesami potomnymi. Specjalizowane sub-craty obsługują konkretne aspekty środowiska wykonawczego:
 
-- [`librefang-runtime-audit`](librefang-runtime-audit.md) — execution auditing and safety inspection
-- [`librefang-runtime-media`](librefang-runtime-media.md) — media processing (image, audio)
-- [`librefang-runtime-mcp`](librefang-runtime-mcp.md) — Model Context Protocol tool integration
-- [`librefang-runtime-sandbox-docker`](librefang-runtime-sandbox-docker.md) — Docker-based code execution sandbox
+- [`librefang-runtime-audit`](librefang-runtime-audit.md) — audyt wykonania i kontrola bezpieczeństwa
+- [`librefang-runtime-media`](librefang-runtime-media.md) — przetwarzanie multimediów (obraz, dźwięk)
+- [`librefang-runtime-mcp`](librefang-runtime-mcp.md) — integracja narzędzi Model Context Protocol
+- [`librefang-runtime-sandbox-docker`](librefang-runtime-sandbox-docker.md) — piaskownica wykonywania kodu oparta na Dockerze
 
-### Memory
+### Pamięć
 
-[`librefang-memory`](librefang-memory.md) provides persistent context storage and retrieval — the long-term memory that agents draw on across sessions. It is called heavily by both the kernel and the runtime.
+[`librefang-memory`](librefang-memory.md) zapewnia trwałe przechowywanie i pobieranie kontekstu — długotrwałą pamięć, z której agenci korzystają w ramach wielu sesji. Jest intensywnie wywoływana zarówno przez jądro, jak i silnik wykonywania.
 
-### LLM Drivers
+### Sterowniki LLM
 
-[`librefang-llm-drivers`](librefang-llm-drivers.md) is the multi-provider aggregation layer, built on the trait-based [`librefang-llm-driver`](librefang-llm-driver.md) abstraction. Swapping or adding an LLM provider is a matter of implementing the driver trait — no kernel or runtime changes required.
+[`librefang-llm-drivers`](librefang-llm-drivers.md) to warstwa agregacji wielodostawcowej, zbudowana na bazie abstrakcji opartej na cechach (traits) [`librefang-llm-driver`](librefang-llm-driver.md). Zamiana lub dodanie dostawcy LLM sprowadza się do implementacji cechy sterownika — bez konieczności zmian w jądrze lub silniku wykonywania.
 
-### Channels
+### Kanały
 
-[`librefang-channels`](librefang-channels.md) bridges external messaging platforms (WhatsApp, Telegram, Discord, etc.) to the agent runtime, so agents can converse with users on the platforms they already use.
+[`librefang-channels`](librefang-channels.md) łączy zewnętrzne platformy komunikacyjne (WhatsApp, Telegram, Discord itp.) z silnikiem wykonywania agentów, umożliwiając agentom rozmowy z użytkownikami na platformach, z których już korzystają.
 
-### Skills
+### Umiejętności
 
-[`librefang-skills`](librefang-skills.md) is the skill system — composable, user-defined capabilities that agents can invoke. Skills can be prompt-only TOML manifests or compute-heavy WASM/Python modules. The skill evolution pipeline includes built-in prompt-injection scanning via threat-pattern verification before any update is committed.
+[`librefang-skills`](librefang-skills.md) to system umiejętności — kompozytowe, zdefiniowane przez użytkownika możliwości, które agenci mogą wywoływać. Umiejętności mogą być wyłącznie promptowymi manifestami TOML lub obciążonymi obliczeniowo modułami WASM/Python. Potok ewolucji umiejętności obejmuje wbudowane skanowanie wstrzykiwania promptów poprzez weryfikację wzorców zagrożeń, zanim jakakolwiek aktualizacja zostanie zatwierdzona.
 
-### Subprocess Execution
+### Wykonywanie procesów potomnych
 
-[`librefang-subprocess`](librefang-subprocess.md) is the workhorse for spawning and managing child processes — used by the kernel, runtime, channels, and CLI for everything from sandboxed code execution to external tool invocation.
-
----
-
-## Key End-to-End Flows
-
-**Agent Spawn.** A request enters through `librefang-api` route handlers, which call into `librefang-kernel` to resolve the agent manifest. The kernel calls through to `librefang-types` for i18n language resolution (`resolve_language`), then hands the configured agent to `librefang-runtime` to begin its execution loop. Along the way, `librefang-memory` is consulted for prior context.
-
-**MCP OAuth / TLS.** When an agent needs to connect to an MCP server, the API's `auth_start` handler delegates to the kernel's MCP OAuth provider (`register_client`), which builds an HTTP client through `librefang-http` — flowing through `oauth_client_builder` → `proxied_client_builder` → `build_http_client` → `tls_config`. The TLS configuration is the terminal step that produces a ready-to-use authenticated client.
-
-**Skill Evolution & Security.** When a skill is updated or rolled back via the API, the request flows into `librefang-skills`' evolution module. Before any change is persisted, `validate_prompt_content` invokes `scan_prompt_content`, which builds and applies `ThreatPattern` definitions to catch prompt-injection attempts. This is a hard gate — no skill update bypasses it.
+[`librefang-subprocess`](librefang-subprocess.md) to wół roboczy do uruchamiania i zarządzania procesami potomnymi — używany przez jądro, silnik wykonywania, kanały i CLI do wszystkiego, od izolowanego wykonywania kodu po wywoływanie zewnętrznych narzędzi.
 
 ---
 
-## Beyond the Crates
+## Kluczowe przepływy end-to-end
 
-The repository also contains significant non-Rust infrastructure:
+**Uruchomienie agenta.** Żądanie trafia przez obsługę ścieżek `librefang-api`, która wywołuje `librefang-kernel` w celu rozwiązania manifestu agenta. Jądro wywołuje `librefang-types` w celu ustalenia języka i18n (`resolve_language`), a następnie przekazuje skonfigurowanego agenta do `librefang-runtime` w celu rozpoczęcia pętli wykonania. W trakcie procesu konsultowana jest `librefang-memory` w celu pobrania wcześniejszego kontekstu.
 
-- **SDKs** — auto-generated client libraries in [Go](sdk-go.md), [JavaScript](sdk-javascript.md), and [Python](sdk-python.md), plus a hand-written [Rust SDK](sdk-rust.md) for sidecar channel adapters.
-- **Deployment** — Docker compose, systemd units, [NixOS module](nix.md), [Fly.io](deploy-fly.md) and [GCP](deploy-gcp.md) configs, and [Arch Linux packaging](packaging.md).
-- **Examples** — copy-and-modify templates for [custom agents, skills, and channel adapters](examples.md).
-- **Documentation site** — the Next.js app powering [docs.librefang.io](docs.md).
-- **[xtask](xtask.md)** — the workspace's single task runner (`cargo xtask <command>`), used for benchmarks, CI gates, release cutting, and changelog assembly.
+**MCP OAuth / TLS.** Gdy agent musi połączyć się z serwerem MCP, obsługiwacz `auth_start` w API deleguje zadanie do dostawcy MCP OAuth jądra (`register_client`), który buduje klienta HTTP przez `librefang-http` — przechodząc przez `oauth_client_builder` → `proxied_client_builder` → `build_http_client` → `tls_config`. Konfiguracja TLS to krok końcowy, który tworzy gotowego do użycia uwierzytelnionego klienta.
+
+**Ewolucja umiejętności i bezpieczeństwo.** Gdy umiejętność jest aktualizowana lub przywracana do wcześniejszej wersji przez API, żądanie trafia do modułu ewolucji `librefang-skills`. Zanim jakakolwiek zmiana zostanie utrwalona, `validate_prompt_content` wywołuje `scan_prompt_content`, który buduje i stosuje definicje `ThreatPattern` w celu wykrycia prób wstrzykiwania promptów. Jest to twarde zabezpieczenie — żadna aktualizacja umiejętności go nie omija.
 
 ---
 
-## Getting Started
+## Poza cratami
+
+Repozytorium zawiera również znaczącą infrastrukturę spoza ekosystemu Rusta:
+
+- **SDK** — automatycznie generowane biblioteki klienckie w językach [Go](sdk-go.md), [JavaScript](sdk-javascript.md) i [Python](sdk-python.md), a także ręcznie pisany [Rust SDK](sdk-rust.md) dla adapterów kanałów typu sidecar.
+- **Wdrożenie** — Docker Compose, jednostki systemd, [moduł NixOS](nix.md), konfiguracje [Fly.io](deploy-fly.md) i [GCP](deploy-gcp.md) oraz [pakowanie dla Arch Linux](packaging.md).
+- **Przykłady** — szablony typu kopiuj-i-modyfikuj dla [niestandardowych agentów, umiejętności i adapterów kanałów](examples.md).
+- **Witryna dokumentacji** — aplikacja Next.js obsługująca [docs.librefang.io](docs.md).
+- **[xtask](xtask.md)** — jedyny uruchamiacz zadań obszaru roboczego (`cargo xtask <command>`), używany do benchmarków, bramek CI, wycinania wydań i kompilacji changelogów.
+
+---
+
+## Pierwsze kroki
 
 ```bash
-# Clone the repository
+# Klonowanie repozytorium
 git clone https://github.com/nicksarafa/librefang.git
 cd librefang
 
-# Build the entire workspace
+# Budowanie całego obszaru roboczego
 cargo build
 
-# Run the test suite (2,100+ tests)
+# Uruchomienie testów (ponad 2100 testów)
 cargo test
 
-# Launch the API server and dashboard
+# Uruchomienie serwera API i panelu
 cargo xtask serve
 ```
 
-The default configuration starts an HTTP API on `localhost:8080` with a web dashboard. To configure an LLM provider, set the appropriate environment variables (see the [API configuration docs](librefang-api.md)) or edit the config file generated on first run.
+Domyślna konfiguracja uruchamia HTTP API na `localhost:8080` z panelem webowym. Aby skonfigurować dostawcę LLM, ustaw odpowiednie zmienne środowiskowe (zobacz [dokumentację konfiguracji API](librefang-api.md)) lub edytuj plik konfiguracyjny wygenerowany przy pierwszym uruchomieniu.
 
-To create your first agent, copy a template from [`examples/custom-agent/`](examples.md) and register it through the API or CLI. The [examples module](examples.md) walks through all three extension surfaces — agents, skills, and channel adapters.
+Aby utworzyć pierwszego agenta, skopiuj szablon z [`examples/custom-agent/`](examples.md) i zarejestruj go przez API lub CLI. [Moduł przykładów](examples.md) przeprowadzi przez wszystkie trzy powierzchnie rozszerzeń — agentów, umiejętności i adaptery kanałów.
 
 ---
 
-> **New here?** The best reading order is: [`librefang-types`](librefang-types.md) → [`librefang-kernel`](librefang-kernel.md) → [`librefang-runtime`](librefang-runtime.md) → [`librefang-api`](librefang-api.md). That path takes you from the shared vocabulary, through orchestration and execution, to the HTTP surface that ties everything together.
+> **Nowy tutaj?** Najlepsza kolejność czytania to: [`librefang-types`](librefang-types.md) → [`librefang-kernel`](librefang-kernel.md) → [`librefang-runtime`](librefang-runtime.md) → [`librefang-api`](librefang-api.md). Ta ścieżka prowadzi od współdzielonego słownictwa, przez orkiestrację i wykonywanie, aż do warstwy HTTP, która spina wszystko w całość.

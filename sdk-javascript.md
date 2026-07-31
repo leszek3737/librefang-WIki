@@ -1,40 +1,40 @@
 # sdk — javascript
 
-# @librefang/sdk — JavaScript/TypeScript Client
+# @librefang/sdk — Klient JavaScript/TypeScript
 
-Official client library for the LibreFang Agent OS REST API. Provides typed, Promise-based access to every endpoint in the LibreFang API surface, including streaming (SSE) support for real-time agent responses, logs, and comms events.
+Oficjalna biblioteka kliencka dla REST API LibreFang Agent OS. Zapewnia typowany, oparty na Promise'ach dostęp do każdego punktu końcowego API LibreFang, w tym obsługę strumieniowania (SSE) dla odpowiedzi agentów w czasie rzeczywistym, logów i zdarzeń komunikacyjnych.
 
-> **Note:** This SDK is **auto-generated** from the server's `openapi.json`. Do not edit `index.js` by hand — regenerate via `python3 scripts/codegen-sdks.py`. The rest of this document describes the generated API as it exists.
+> **Uwaga:** Ten SDK jest **generowany automatycznie** z `openapi.json` serwera. Nie edytuj `index.js` ręcznie — generuj ponownie za pomocą `python3 scripts/codegen-sdks.py`. Reszta tego dokumentu opisuje wygenerowane API w jego aktualnej postaci.
 
 ---
 
-## Installation
+## Instalacja
 
 ```bash
 npm install @librefang/sdk
 ```
 
-Requires **Node.js ≥ 18** (uses the global `fetch` and `URLSearchParams`).
+Wymaga **Node.js ≥ 18** (korzysta z globalnych `fetch` i `URLSearchParams`).
 
 ---
 
-## Quick Start
+## Szybki start
 
 ```javascript
 const { LibreFang } = require("@librefang/sdk");
 
 const client = new LibreFang("http://localhost:4545");
 
-// Health check (note: lives under client.system, not top-level)
+// Sprawdzanie stanu (uwaga: znajduje się w client.system, a nie na najwyższym poziomie)
 const health = await client.system.health();
 
-// Spawn an agent
+// Uruchomienie agenta
 const agent = await client.agents.spawnAgent({ template: "assistant" });
 
-// Send a message and await the full reply
+// Wysłanie wiadomości i oczekiwanie na pełną odpowiedź
 const reply = await client.agents.sendMessage(agent.id, { message: "Hello!" });
 
-// Stream tokens as they arrive
+// Strumieniowanie tokenów na bieżąco
 for await (const event of client.agents.sendMessageStream(agent.id, { message: "Tell me a story" })) {
   if (event.type === "text_delta") process.stdout.write(event.delta);
 }
@@ -42,17 +42,17 @@ for await (const event of client.agents.sendMessageStream(agent.id, { message: "
 
 ---
 
-## Architecture
+## Architektura
 
-The client follows a **resource pattern**: a single `LibreFang` instance owns the transport (HTTP + SSE) and exposes one property per API domain. Each resource is a thin class that delegates every call back to the shared `_request` or `_stream` methods on the client.
+Klient opiera się na **wzorcu zasobów**: pojedyncza instancja `LibreFang` zarządza transportem (HTTP + SSE) i eksponuje jedną właściwość dla każdej domeny API. Każdy zasób to cienka klasa, która deleguje każde wywołanie do współdzielonych metod `_request` lub `_stream` w kliencie.
 
 ```mermaid
 flowchart LR
-    App["Your Code"]
+    App["Twój kod"]
     LF["LibreFang<br/>(baseUrl, headers)"]
     Req["_request(method, path, body, query)"]
     Str["_stream(method, path, body, query)"]
-    API["LibreFang Server<br/>REST + SSE"]
+    API["Serwer LibreFang<br/>REST + SSE"]
 
     App -->|"client.agents.*<br/>client.system.*<br/>client.workflows.* ..."| LF
     LF --> Req
@@ -61,38 +61,38 @@ flowchart LR
     Str -->|"fetch + text/event-stream"| API
 ```
 
-Key transport details:
+Kluczowe szczegóły transportu:
 
-| Mechanism | Where | Behavior |
+| Mechanizm | Gdzie | Zachowanie |
 |---|---|---|
-| **JSON requests** | `_request(method, path, body, query)` | Serializes `body` to JSON, appends `query` via `_withQuery`, parses JSON response (or returns raw text for non-JSON content types). Throws `LibreFangError` on non-2xx. |
-| **SSE streaming** | `_stream(method, path, body, query)` | Sets `Accept: text/event-stream`, reads the response body chunk-by-chunk, splits on newlines, and yields each `data:` payload as a parsed JSON object. Terminates on a `[DONE]` sentinel. |
-| **Query building** | `_withQuery(path, query)` | Skips `null`/`undefined` values; appends with `?` or `&` depending on whether the path already contains a query string. |
+| **Żądania JSON** | `_request(method, path, body, query)` | Serializuje `body` do JSON, dołącza `query` przez `_withQuery`, parsuje odpowiedź JSON (lub zwraca surowy tekst dla typów innych niż JSON). Rzuca `LibreFangError` przy odpowiedziach innych niż 2xx. |
+| **Strumieniowanie SSE** | `_stream(method, path, body, query)` | Ustawia `Accept: text/event-stream`, czyta treść odpowiedzi fragment po fragmencie, dzieli po nowych liniach i przekazuje każdy ładunek `data:` jako sparsowany obiekt JSON. Kończy przy znaku końcowym `[DONE]`. |
+| **Budowanie zapytań** | `_withQuery(path, query)` | Pomija wartości `null`/`undefined`; dołącza z `?` lub `&` w zależności od tego, czy ścieżka zawiera już ciąg zapytania. |
 
-All resource methods are `async` and return the parsed response directly. Streaming methods are `async function*` generators.
+Wszystkie metody zasobów są `async` i zwracają sparsowaną odpowiedź bezpośrednio. Metody strumieniowe to asynchroniczne generatory `async function*`.
 
 ---
 
-## The `LibreFang` Class
+## Klasa `LibreFang`
 
-### Constructor
+### Konstruktor
 
 ```javascript
 new LibreFang(baseUrl, options?)
 ```
 
-- **`baseUrl`** *(string)* — Server origin, e.g. `"http://localhost:4545"`. Trailing slashes are stripped.
-- **`options.headers`** *(object, optional)* — Extra headers merged into every request. Defaults to `{ "Content-Type": "application/json" }`.
+- **`baseUrl`** *(string)* — Adres serwera, np. `"http://localhost:4545"`. Końcowe slashe są usuwane.
+- **`options.headers`** *(object, opcjonalne)* — Dodatkowe nagłówki dołączane do każdego żądania. Domyślnie `{ "Content-Type": "application/json" }`.
 
-### Error Handling
+### Obsługa błędów
 
-Non-2xx responses throw a `LibreFangError` with:
+Odpowiedzi inne niż 2xx rzucają `LibreFangError` z:
 
-| Property | Description |
+| Właściwość | Opis |
 |---|---|
 | `message` | `HTTP {status}: {body}` |
-| `status` | HTTP status code |
-| `body` | Raw response text |
+| `status` | Kod statusu HTTP |
+| `body` | Surowy tekst odpowiedzi |
 
 ```javascript
 const { LibreFang, LibreFangError } = require("@librefang/sdk");
@@ -108,70 +108,70 @@ try {
 
 ---
 
-## Resources
+## Zasoby
 
-The client exposes 28 resource namespaces. Each is an instance attached at construction time.
+Klient eksponuje 28 przestrzeni nazw zasobów. Każda z nich to instancja dołączona podczas konstruowania klienta.
 
-| Property | Domain | Representative Methods |
+| Właściwość | Domena | Reprezentatywne metody |
 |---|---|---|
-| `client.a2a` | Agent-to-agent networking | `a2aDiscoverExternal`, `a2aSendExternal`, `a2aListExternalAgents` |
-| `client.agents` | Agent lifecycle & messaging | `spawnAgent`, `sendMessage`, `sendMessageStream`, `killAgent`, `listAgentSessions` |
-| `client.approvals` | Human-in-the-loop approvals | `listApprovals`, `approveRequest`, `rejectRequest`, `batchResolve` |
-| `client.auth` | Authentication & passkeys | `dashboardLogin`, `authProviders`, `registrationOptions`, `authRefresh` |
-| `client.auto_dream` | Autonomous dreaming | `autoDreamTrigger`, `autoDreamSetEnabled`, `autoDreamStatus` |
-| `client.budget` | Budget & usage tracking | `budgetStatus`, `agentBudgetRanking`, `usageStats`, `usageByModel` |
-| `client.channels` | Communication channels | `listChannels`, `configureSidecarChannel`, `getChannelQr` |
-| `client.extensions` | Extension management | `installExtension`, `uninstallExtension`, `getExtension` |
-| `client.goals` | Goal templates | `listGoalTemplates` |
-| `client.hands` | "Hands" (action executors) | `installHand`, `activateHand`, `getHandManifest`, `setHandSecret` |
-| `client.inbox` | Inbox status | `inboxStatus` |
-| `client.mcp` | Model Context Protocol servers | `listMcpServers`, `addMcpServer`, `authStart`, `patchMcpServerTaint` |
-| `client.memory` | Per-agent KV store | `getAgentKvKey`, `setAgentKvKey`, `memoryConfigPatch` |
-| `client.models` | Models, providers, aliases | `listAllModels`, `addCustomModel`, `setProviderKey`, `testProvider` |
-| `client.network` | Peer networking & comms | `commsSend`, `commsTopology`, `commsEventsStream` |
-| `client.pairing` | Device pairing | `pairingRequest`, `pairingComplete`, `pairingDevices` |
-| `client.plugins` | Plugin system | `installPlugin`, `reloadPlugin`, `pluginDoctor`, `scaffoldPlugin` |
-| `client.proactive_memory` | Memory graph & consolidation | `memoryAdd`, `memorySearchAgent`, `memoryConsolidate`, `memoryDecay` |
-| `client.sessions` | Session CRUD & search | `listSessions`, `getSession`, `setSessionLabel`, `searchSessions` |
-| `client.skills` | Skills, ClawHub, tools | `createSkill`, `installSkill`, `clawhubSearch`, `evolvePatchSkill` |
-| `client.system` | Health, config, audit, backups | `health`, `status`, `version`, `prometheusMetrics`, `configReload` |
-| `client.tools` | Tool invocation | `invokeTool` |
-| `client.users` | User & policy management | `createUser`, `updateUserPolicy`, `rotateUserKey` |
-| `client.webhooks` | Inbound webhooks | `webhookAgent`, `webhookWake` |
-| `client.workflows` | Workflows, schedules, triggers, cron | `createWorkflow`, `runWorkflow`, `createSchedule`, `createTrigger` |
+| `client.a2a` | Sieć agent-do-agenta | `a2aDiscoverExternal`, `a2aSendExternal`, `a2aListExternalAgents` |
+| `client.agents` | Cykl życia agentów i wiadomości | `spawnAgent`, `sendMessage`, `sendMessageStream`, `killAgent`, `listAgentSessions` |
+| `client.approvals` | Zatwierdzenia z udziałem człowieka | `listApprovals`, `approveRequest`, `rejectRequest`, `batchResolve` |
+| `client.auth` | Uwierzytelnianie i klucze dostępu | `dashboardLogin`, `authProviders`, `registrationOptions`, `authRefresh` |
+| `client.auto_dream` | Autonomiczne marzenia | `autoDreamTrigger`, `autoDreamSetEnabled`, `autoDreamStatus` |
+| `client.budget` | Budżet i śledzenie użycia | `budgetStatus`, `agentBudgetRanking`, `usageStats`, `usageByModel` |
+| `client.channels` | Kanały komunikacyjne | `listChannels`, `configureSidecarChannel`, `getChannelQr` |
+| `client.extensions` | Zarządzanie rozszerzeniami | `installExtension`, `uninstallExtension`, `getExtension` |
+| `client.goals` | Szablony celów | `listGoalTemplates` |
+| `client.hands` | „Ręce" (wykonawcze akcje) | `installHand`, `activateHand`, `getHandManifest`, `setHandSecret` |
+| `client.inbox` | Status skrzynki odbiorczej | `inboxStatus` |
+| `client.mcp` | Serwery Model Context Protocol | `listMcpServers`, `addMcpServer`, `authStart`, `patchMcpServerTaint` |
+| `client.memory` | Magazyn KV na agenta | `getAgentKvKey`, `setAgentKvKey`, `memoryConfigPatch` |
+| `client.models` | Modele, dostawcy, aliasy | `listAllModels`, `addCustomModel`, `setProviderKey`, `testProvider` |
+| `client.network` | Sieć peer-to-peer i komunikacja | `commsSend`, `commsTopology`, `commsEventsStream` |
+| `client.pairing` | Parowanie urządzeń | `pairingRequest`, `pairingComplete`, `pairingDevices` |
+| `client.plugins` | System wtyczek | `installPlugin`, `reloadPlugin`, `pluginDoctor`, `scaffoldPlugin` |
+| `client.proactive_memory` | Graf pamięci i konsolidacja | `memoryAdd`, `memorySearchAgent`, `memoryConsolidate`, `memoryDecay` |
+| `client.sessions` | CRUD i wyszukiwanie sesji | `listSessions`, `getSession`, `setSessionLabel`, `searchSessions` |
+| `client.skills` | Umiejętności, ClawHub, narzędzia | `createSkill`, `installSkill`, `clawhubSearch`, `evolvePatchSkill` |
+| `client.system` | Zdrowie, konfiguracja, audyt, kopie zapasowe | `health`, `status`, `version`, `prometheusMetrics`, `configReload` |
+| `client.tools` | Wywoływanie narzędzi | `invokeTool` |
+| `client.users` | Zarządzanie użytkownikami i politykami | `createUser`, `updateUserPolicy`, `rotateUserKey` |
+| `client.webhooks` | Webhooki przychodzące | `webhookAgent`, `webhookWake` |
+| `client.workflows` | Workflowsy, harmonogramy, wyzwalacze, cron | `createWorkflow`, `runWorkflow`, `createSchedule`, `createTrigger` |
 
 ---
 
-## Deep-Dive: `client.agents`
+## Szczegóły: `client.agents`
 
-The agents resource is the most feature-rich namespace. Key method groups:
+Zasób agentów jest najbogatszą w funkcje przestrzenią nazw. Kluczowe grupy metod:
 
-### Lifecycle
+### Cykl życia
 
 ```javascript
-// Create
+// Tworzenie
 const agent = await client.agents.spawnAgent({ template: "assistant", name: "bot-1" });
 
-// Bulk operations
+// Operacje masowe
 await client.agents.bulkCreateAgents({ templates: [...] });
 await client.agents.bulkStartAgents({ ids: [...] });
 
-// Read / update / delete
+// Odczyt / aktualizacja / usuwanie
 const found = await client.agents.getAgent(agent.id);
 await client.agents.patchAgent(agent.id, { name: "renamed" });
 await client.agents.killAgent(agent.id);
 
-// Clone
+// Klonowanie
 const copy = await client.agents.cloneAgent(agent.id, { name: "bot-1-clone" });
 ```
 
-### Messaging
+### Wiadomości
 
 ```javascript
-// Full response (awaits completion)
+// Pełna odpowiedź (czeka na zakończenie)
 const reply = await client.agents.sendMessage(agent.id, { message: "Hi" });
 
-// Token-by-token streaming (SSE)
+// Strumieniowanie token po tokenie (SSE)
 for await (const event of client.agents.sendMessageStream(agent.id, { message: "Hi" })) {
   switch (event.type) {
     case "text_delta": process.stdout.write(event.delta); break;
@@ -181,30 +181,30 @@ for await (const event of client.agents.sendMessageStream(agent.id, { message: "
 }
 ```
 
-### Sessions
+### Sesje
 
-Each agent can have multiple sessions. The agents resource mirrors session endpoints scoped to a specific agent:
+Każdy agent może mieć wiele sesji. Zasób agentów odzwierciedla punkty końcowe sesji z zakresu konkretnego agenta:
 
 ```javascript
 const sessions = await client.agents.listAgentSessions(agent.id);
 await client.agents.createAgentSession(agent.id, { label: "research" });
 await client.agents.switchAgentSession(agent.id, sessionId);
 
-// Export / import
+// Eksport / import
 const blob = await client.agents.exportSession(agent.id, sessionId);
 await client.agents.importSession(agent.id, blob);
 
-// Live-attach to a running session stream
+// Dołączenie na żywo do strumienia działającej sesji
 for await (const event of client.agents.attachSessionStream(agent.id, sessionId)) {
   console.log(event);
 }
 ```
 
-### Configuration
+### Konfiguracja
 
-Methods like `setAgentTools`, `setAgentSkills`, `setAgentChannels`, `setAgentMcpServers`, `setModel`, and `setAgentMode` accept a `data` object whose shape is defined by the server's OpenAPI schema. Use `patchAgentConfig` for partial updates.
+Metody takie jak `setAgentTools`, `setAgentSkills`, `setAgentChannels`, `setAgentMcpServers`, `setModel` i `setAgentMode` przyjmują obiekt `data`, którego struktura jest określona przez schemat OpenAPI serwera. Użyj `patchAgentConfig` do częściowych aktualizacji.
 
-### Files
+### Pliki
 
 ```javascript
 await client.agents.setAgentFile(agent.id, "notes.md", { content: "..." });
@@ -214,20 +214,20 @@ await client.agents.deleteAgentFile(agent.id, "notes.md");
 
 ---
 
-## Deep-Dive: `client.system`
+## Szczegóły: `client.system`
 
-Server-level operations. **Health, status, and version live here** — not on the top-level client:
+Operacje na poziomie serwera. **Zdrowie, status i wersja znajdują się tutaj** — a nie na najwyższym poziomie klienta:
 
 ```javascript
 await client.system.health();          // GET /api/health
 await client.system.healthDetail();    // GET /api/health/detail
 await client.system.status();          // GET /api/status
 await client.system.version();         // GET /api/version
-await client.system.prometheusMetrics();// GET /api/metrics (returns text, not JSON)
+await client.system.prometheusMetrics();// GET /api/metrics (zwraca tekst, nie JSON)
 await client.system.ready();           // GET /api/ready
 ```
 
-Config management:
+Zarządzanie konfiguracją:
 
 ```javascript
 const cfg = await client.system.getConfig();
@@ -236,7 +236,7 @@ await client.system.configReload();
 const schema = await client.system.configSchema();
 ```
 
-Backups, audit, and shutdown:
+Kopie zapasowe, audyt i wyłączenie:
 
 ```javascript
 await client.system.createBackup();
@@ -246,7 +246,7 @@ const audit = await client.system.auditRecent();
 await client.system.shutdown();
 ```
 
-Live log streaming:
+Strumieniowanie logów na żywo:
 
 ```javascript
 for await (const line of client.system.logsStream()) {
@@ -256,54 +256,54 @@ for await (const line of client.system.logsStream()) {
 
 ---
 
-## Deep-Dive: `client.workflows`
+## Szczegóły: `client.workflows`
 
-Workflows, schedules, triggers, and cron jobs are all under this single resource.
+Workflowsy, harmonogramy, wyzwalacze i zadania cron znajdują się pod tym jednym zasobem.
 
 ```javascript
-// Define and run a workflow
+// Definicja i uruchomienie workflowu
 const wf = await client.workflows.createWorkflow({ name: "nightly", steps: [...] });
 const run = await client.workflows.runWorkflow(wf.id, { input: {} });
 
-// Inspect / control a run
+// Inspekcja / kontrola uruchomienia
 await client.workflows.getWorkflowRun(run.id);
 await client.workflows.pauseWorkflowRun(run.id, {});
 await client.workflows.resumeWorkflowRun(run.id, {});
 await client.workflows.cancelWorkflowRun(run.id);
 await client.workflows.rerunWorkflowRun(run.id);
 
-// Schedules (recurring workflow runs)
+// Harmonogramy (cykliczne uruchomienia workflowów)
 await client.workflows.createSchedule({ workflow_id: wf.id, cron: "0 * * * *" });
 await client.workflows.runSchedule(scheduleId);
 
-// Triggers (event-driven workflow activation)
+// Wyzwalacze (aktywacja workflowów sterowana zdarzeniami)
 await client.workflows.createTrigger({ workflow_id: wf.id, event: "inbox.message" });
 
-// Templates
+// Szablony
 const templates = await client.workflows.listWorkflowTemplates();
 await client.workflows.instantiateTemplate(templateId, { name: "my-instance" });
 ```
 
 ---
 
-## Streaming Endpoints
+## Punkty końcowe strumieniowe
 
-Four endpoints use Server-Sent Events and are exposed as async generators:
+Cztery punkty końcowe wykorzystują Server-Sent Events i są eksponowane jako asynchroniczne generatory:
 
-| Method | Resource | SSE Endpoint |
+| Metoda | Zasób | Punkt końcowy SSE |
 |---|---|---|
 | `sendMessageStream(id, data)` | `agents` | `POST /api/agents/:id/message/stream` |
 | `attachSessionStream(id, session_id)` | `agents` | `GET /api/agents/:id/sessions/:session_id/stream` |
 | `commsEventsStream()` | `network` | `GET /api/comms/events/stream` |
 | `logsStream()` | `system` | `GET /api/logs/stream` |
 
-Each yielded value is the parsed JSON from the `data:` field. If parsing fails, the raw string is yielded as `{ raw: data }`. The generator returns when the server sends `data: [DONE]` or closes the connection.
+Każda przekazana wartość to sparsowany JSON z pola `data:`. Jeśli parsowanie się nie powiedzie, surowy ciąg jest przekazywany jako `{ raw: data }`. Generator kończy działanie, gdy serwer wyśle `data: [DONE]` lub zamknie połączenie.
 
 ---
 
 ## TypeScript
 
-Type definitions ship in `index.d.ts`. The package declares `"types"` in `package.json` and a `"types"` condition in `exports`, so both `import` and `require` resolve types correctly:
+Definicje typów są dostarczane w `index.d.ts`. Pakiet deklaruje `"types"` w `package.json` oraz warunek `"types"` w `exports`, więc zarówno `import`, jak i `require` poprawnie rozdzielają typy:
 
 ```typescript
 import { LibreFang, LibreFangError } from "@librefang/sdk";
@@ -317,9 +317,9 @@ const agents = await client.agents.listAgents();
 
 ---
 
-## Authentication
+## Uwierzytelnianie
 
-The SDK does not manage tokens itself. Pass auth headers via the constructor and they apply to every request:
+SDK nie zarządza tokenami samodzielnie. Przekaż nagłówki autoryzacji przez konstruktor — będą one stosowane do każdego żądania:
 
 ```javascript
 const client = new LibreFang("https://fang.example.com", {
@@ -327,49 +327,49 @@ const client = new LibreFang("https://fang.example.com", {
 });
 ```
 
-For OAuth/passkey flows, use `client.auth.*` methods (`dashboardLogin`, `authRefresh`, `registrationOptions`, etc.) to obtain and refresh credentials, then reconstruct the client with the new token.
+Dla przepływów OAuth/passkey używaj metod `client.auth.*` (`dashboardLogin`, `authRefresh`, `registrationOptions` itp.), aby uzyskać i odświeżyć poświadczenia, a następnie odbuduj klienta z nowym tokenem.
 
 ---
 
-## Examples
+## Przykłady
 
-Two runnable examples ship in `examples/`:
+Dwa gotowe do uruchomienia przykłady są dołączone w katalogu `examples/`:
 
-| File | Demonstrates |
+| Plik | Demonstruje |
 |---|---|
-| `basic.js` | Health check, list-or-spawn agent, send a message, clean up |
-| `streaming.js` | Token-by-token streaming via `sendMessageStream`, handling `text_delta` / `tool_call` / `done` events |
+| `basic.js` | Sprawdzanie stanu, wylistowanie lub uruchomienie agenta, wysłanie wiadomości, porządki |
+| `streaming.js` | Strumieniowanie token po tokenie przez `sendMessageStream`, obsługę zdarzeń `text_delta` / `tool_call` / `done` |
 
-Run with:
+Uruchomienie:
 
 ```bash
 node examples/basic.js
 node examples/streaming.js
 ```
 
-Both examples reuse an existing agent if one exists, otherwise spawn a temporary one and delete it afterward.
+Oba przykłady ponownie wykorzystują istniejącego agenta, jeśli taki istnieje, w przeciwnym razie uruchamiają tymczasowego i usuwają go po zakończeniu.
 
 ---
 
-## Regeneration
+## Regeneracja
 
-Because this module is code-generated, the source of truth is the server's OpenAPI spec. After API changes:
+Ponieważ ten moduł jest generowany automatycznie, głównym źródłem prawdy jest specyfikacja OpenAPI serwera. Po zmianach w API:
 
 ```bash
 python3 scripts/codegen-sdks.py
 ```
 
-This regenerates `index.js` (and `index.d.ts`). Resource classes, method names, and parameter orders all derive from operation IDs and path parameters in the spec — there is no hand-written per-endpoint logic to maintain.
+Spowoduje to ponowne wygenerowanie `index.js` (oraz `index.d.ts`). Klasy zasobów, nazwy metod i kolejność parametrów wynikają z identyfikatorów operacji i parametrów ścieżek w specyfikacji — nie ma żadnej ręcznie pisanej logiki per punkt końcowy do utrzymania.
 
 ---
 
-## Package Metadata
+## Metadane pakietu
 
-| Field | Value |
+| Pole | Wartość |
 |---|---|
-| Name | `@librefang/sdk` |
-| Module system | CommonJS (`"type": "commonjs"`) |
-| Entry | `index.js` |
-| Types | `index.d.ts` |
-| Engine | `node >= 18.0.0` |
-| License | MIT |
+| Nazwa | `@librefang/sdk` |
+| System modułów | CommonJS (`"type": "commonjs"`) |
+| Punkt wejścia | `index.js` |
+| Typy | `index.d.ts` |
+| Silnik | `node >= 18.0.0` |
+| Licencja | MIT |

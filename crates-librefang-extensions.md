@@ -2,24 +2,24 @@
 
 # librefang-extensions
 
-The "everything-side-of-an-agent" toolkit for LibreFang. This crate owns the infrastructure that surrounds an MCP (Model Context Protocol) agent without touching kernel callback wiring, HTTP routing, or channel adapters. It sits above `librefang-kernel` and below the API / CLI / desktop layers.
+Zestaw narzędzi „wszystko-po-stronie-agenta" dla LibreFang. Ten crate zarządza infrastrukturą otaczającą agenta MCP (Model Context Protocol) bez dotykania okablowania wywołań zwrotnych jądra, routingu HTTP ani adapterów kanałów. Znajduje się powyżej `librefang-kernel` i poniżej warstw API / CLI / desktop.
 
-## What This Crate Owns
+## Za co odpowiada ten crate
 
-- **MCP Server Catalog** — read-only template metadata cached at `~/.librefang/mcp/catalog/`
-- **Credential Vault** — AES-256-GCM encrypted secret storage with OS keyring integration
-- **Credential Resolution** — unified lookup chain across vault, dotenv, and environment variables
-- **`.env` Loading** — process-wide secret injection from `~/.librefang/.env` and `secrets.env`
-- **OAuth2 PKCE** — localhost callback flows with HMAC-signed state tokens
-- **Health Monitor** — MCP server liveness tracking with auto-reconnect and exponential backoff
-- **Installer** — pure transforms from catalog entries into `McpServerConfigEntry` values
-- **HTTP Client** — shared `reqwest` builder with native + bundled CA roots
+- **Katalog serwerów MCP** — metadane szablonów tylko do odczytu, buforowane w `~/.librefang/mcp/catalog/`
+- **Magazyn poświadczeń** — szyfrowane AES-256-GCM przechowywanie sekretów z integracją z pęklą kluczy systemu operacyjnego
+- **Rozwiązywanie poświadczeń** — ujednolicony łańcuch wyszukiwania w magazynie, dotenv i zmiennych środowiskowych
+- **Ładowanie `.env`** — wstrzykiwanie sekretów w zakresie całego procesu z `~/.librefang/.env` i `secrets.env`
+- **OAuth2 PKCE** — przepływy wywołań zwrotnych localhost z tokenami stanu podpisanymi HMAC
+- **Monitor zdrowia** — śledzenie dostępności serwerów MCP z automatycznym ponownym łączeniem i wykładniczym wycofywaniem
+- **Instalator** — czyste transformacje z wpisów katalogu na wartości `McpServerConfigEntry`
+- **Klient HTTP** — współdzielony konstruktor `reqwest` z natywnymi + dołączonymi głównymi certyfikatami CA
 
-## What This Crate Does NOT Own
+## Za co ten crate NIE odpowiada
 
-The `McpOAuthProvider` trait lives in `librefang-runtime`; the implementation lives in `librefang-api`. This crate does not handle kernel callback wiring, HTTP routing, or channel adapters. Nothing in this crate may depend on the API / CLI / desktop layers.
+Cecha `McpOAuthProvider` znajduje się w `librefang-runtime`; implementacja znajduje się w `librefang-api`. Ten crate nie obsługuje okablowania wywołań zwrotnych jądra, routingu HTTP ani adapterów kanałów. Nic w tym crate nie może zależeć od warstw API / CLI / desktop.
 
-## Architecture
+## Architektura
 
 ```mermaid
 graph TD
@@ -39,180 +39,180 @@ graph TD
     Vault --> Types
 ```
 
-## Module Reference
+## Odniesienie do modułów
 
-### `catalog` — MCP Template Registry
+### `catalog` — Rejestr szablonów MCP
 
-Read-only in-memory view of MCP server templates stored as TOML files under `~/.librefang/mcp/catalog/`. Templates are synced from the upstream `librefang-registry` by `librefang_runtime::registry_sync`; this crate only reads them.
+Widok tylko do odczytu w pamięci szablonów serwerów MCP przechowywanych jako pliki TOML w `~/.librefang/mcp/catalog/`. Szablony są synchronizowane z nadrzędnego `librefang-registry` przez `librefang_runtime::registry_sync`; ten crate je tylko odczytuje.
 
-`McpCatalog` supports two on-disk layouts:
+`McpCatalog` obsługuje dwa układy na dysku:
 
-- **Flat:** `<id>.toml` — id derived from the filename.
-- **Directory-backed:** `<id>/MCP.toml` — id derived from the directory name. Used for multi-file MCP packages.
+- **Płaski:** `<id>.toml` — identyfikator pochodzi z nazwy pliku.
+- **Oparty na katalogach:** `<id>/MCP.toml` — identyfikator pochodzi z nazwy katalogu. Używany dla wieloplikowych pakietów MCP.
 
-`load()` performs a full reload: the in-memory map is cleared before reading disk so deleted or renamed entries don't linger. Key methods:
+`load()` wykonuje pełne przeładowanie: mapa w pamięci jest czyszczona przed odczytem z dysku, aby usunięte lub przemianowane wpisy nie pozostawały. Kluczowe metody:
 
-| Method | Description |
+| Metoda | Opis |
 |---|---|
-| `new(home_dir)` | Create an empty catalog rooted at `home_dir/mcp/catalog/` |
-| `load(home_dir)` | Reload all templates from disk; returns count loaded |
-| `get(id)` | Fetch a specific entry by ID |
-| `list()` | All entries sorted by ID |
-| `list_by_category(category)` | Filter by `McpCategory` |
-| `search(query)` | Case-insensitive match against id, name, description, and tags |
+| `new(home_dir)` | Tworzy pusty katalog z korzeniem w `home_dir/mcp/catalog/` |
+| `load(home_dir)` | Przeładowuje wszystkie szablony z dysku; zwraca liczbę załadowanych wpisów |
+| `get(id)` | Pobiera konkretny wpis po ID |
+| `list()` | Wszystkie wpisy posortowane po ID |
+| `list_by_category(category)` | Filtruje po `McpCategory` |
+| `search(query)` | Dopasowanie bez uwzględniania wielkości liter względem id, nazwy, opisu i tagów |
 
-The catalog is purely metadata. Installed MCP servers live in `config.toml` under `[[mcp_servers]]` with an optional `template_id` pointing back to the catalog entry they originated from.
+Katalog zawiera wyłącznie metadane. Zainstalowane serwery MCP znajdują się w `config.toml` w sekcji `[[mcp_servers]]` z opcjonalnym `template_id` wskazującym na wpis w katalogu, z którego pochodzą.
 
-### `vault` — AES-256-GCM Encrypted Storage
+### `vault` — Szyfrowane przechowywanie AES-256-GCM
 
-`CredentialVault` stores secrets at `~/.librefang/vault.enc`. The on-disk format begins with magic bytes `OFV1` and contains an Argon2id salt, AES-256-GCM nonce, and ciphertext — all base64-encoded.
+`CredentialVault` przechowuje sekrety w `~/.librefang/vault.enc`. Format na dysku zaczyna się od bajtów magicznych `OFV1` i zawiera sól Argon2id, nonce AES-256-GCM oraz szyfrogram — wszystko zakodowane w base64.
 
-**Master key resolution** follows a strict priority chain:
+**Rozwiązywanie klucza głównego** następuje w ścisłym łańcuchu priorytetów:
 
-1. `LIBREFANG_VAULT_KEY` environment variable
-2. OS keyring (Windows Credential Manager, macOS Keychain, Linux Secret Service)
-3. AES-256-GCM file fallback at `<data_local_dir>/librefang/.keyring` (mode 0600)
+1. Zmienna środowiskowa `LIBREFANG_VAULT_KEY`
+2. Pętla kluczy systemu operacyjnego (Menedżer poświadczeń Windows, Keychain macOS, Secret Service Linux)
+3. Awaryjny plik AES-256-GCM w `<data_local_dir>/librefang/.keyring` (tryb 0600)
 
-The OS keyring backend is target-gated in `Cargo.toml`. On musl-static Linux and Android, the `keyring` crate is not pulled to avoid libdbus-sys C-FFI issues. The vault transparently falls back to the file-based store.
+Backend pętli kluczy systemu operacyjnego jest warunkowany na platformę docelową w `Cargo.toml`. Na Linuxie musl-static i Androidzie crate `keyring` nie jest dołączany, aby uniknąć problemów z C-FFI libdbus-sys. Magazyn bezproblemowo przechodzi na magazyn oparty na plikach.
 
-**macOS default:** `default_use_os_keyring_for_platform()` returns `false` on macOS because the Keychain ACL is per-binary signature — every `cargo build` invalidates it and triggers a prompt. Linux and Windows have stable ACLs and default to `true`. Override with:
+**Domyślne na macOS:** `default_use_os_keyring_for_platform()` zwraca `false` na macOS, ponieważ ACL Keychain jest per-podpis binarny — każdy `cargo build` unieważnia go i wyzwala monit. Linux i Windows mają stabilne ACL i domyślnie zwracają `true`. Można nadpisać za pomocą:
 
-- `LIBREFANG_VAULT_NO_KEYRING=1` — force file fallback regardless of platform/config
-- `CredentialVault::init_with_config(use_os_keyring)` — process-global override, first call wins
+- `LIBREFANG_VAULT_NO_KEYRING=1` — wymusza awaryjny magazyn plikowy niezależnie od platformy/konfiguracji
+- `CredentialVault::init_with_config(use_os_keyring)` — globalne nadpisanie w zakresie procesu, pierwsze wywołanie wygrywa
 
-**Startup sentinel (#3651):** Every vault is born with a known plaintext under `SENTINEL_KEY` (`__sentinel__`) set to `SENTINEL_VALUE` (`librefang-vault-sentinel-v1`). On every `unlock()`, the sentinel is read and compared; a mismatch means the key doesn't match the encryption key and boot refuses to start. This surfaces `ExtensionError::VaultKeyMismatch` instead of letting the daemon silently boot into a state where every vault read fails with a generic decryption error. Writes to `SENTINEL_KEY` are rejected by `set()`.
+**Strażnik startowy (#3651):** Każdy magazyn powstaje ze znanym tekstem jawnym pod `SENTINEL_KEY` (`__sentinel__`) ustawionym na `SENTINEL_VALUE` (`librefang-vault-sentinel-v1`). Przy każdym `unlock()` strażnik jest odczytywany i porównywany; niezgodność oznacza, że klucz nie pasuje do klucza szyfrującego i uruchomienie jest blokowane. To powoduje `ExtensionError::VaultKeyMismatch` zamiast pozwalania demonowi na ciche uruchomienie w stanie, gdzie każdy odczyt z magazynu kończy się ogólnym błędem deszyfrowania. Zapisy pod `SENTINEL_KEY` są odrzucane przez `set()`.
 
-**Key rotation** is supported via `rewrap_with_new_key()`, which re-encrypts the entire vault (including the sentinel) under a new master key. The caller is responsible for persisting the new key. The CLI's `vault rotate-key` command drives this end-to-end.
+**Rotacja kluczy** jest obsługiwana przez `rewrap_with_new_key()`, który ponownie szyfruje cały magazyn (włącznie ze strażnikiem) nowym kluczem głównym. Wywołujący jest odpowiedzialny za utrwalenie nowego klucza. Polecenie CLI `vault rotate-key` realizuje to kompleksowo.
 
-**Lazy initialization:** `set()` on an unopened handle where `vault.enc` does not exist will run `init()` automatically, so the credential lands in a real persisted vault instead of being dropped. This satisfies the contract documented by `kernel::vault_handle()`.
+**Leniwa inicjalizacja:** `set()` na niezamkniętym uchwycie, gdzie `vault.enc` nie istnieje, automatycznie uruchomi `init()`, aby poświadczenie trafiło do rzeczywistego utrwalonego magazynu zamiast zostać utracone. To spełnia kontrakt udokumentowany przez `kernel::vault_handle()`.
 
-`init()` performs a post-write verification: it constructs a fresh `CredentialVault::new` on the same path and runs `unlock()` to confirm the file is decryptable. If verification fails, the written file is rolled back (unlinked) and an error is returned explaining the init/unlock divergence.
+`init()` przeprowadza weryfikację po zapisie: tworzy świeży `CredentialVault::new` na tej samej ścieżce i uruchamia `unlock()`, aby potwierdzić, że plik jest deszyfrowalny. Jeśli weryfikacja się nie powiedzie, zapisany plik jest wycofywany (usuwany) i zwracany jest błąd z wyjaśnieniem rozbieżności init/unlock.
 
-### `credentials` — Unified Resolution Chain
+### `credentials` — Ujednolicony łańcuch rozwiązywania
 
-`CredentialResolver` unifies secret lookup across four sources, tried in order:
+`CredentialResolver` ujednolica wyszukiwanie sekretów z czterech źródeł, sprawdzanych w kolejności:
 
-1. **Vault** — `~/.librefang/vault.enc` (if unlocked)
-2. **Dotenv** — `~/.librefang/.env` snapshot loaded at construction time
-3. **Process environment** — `std::env::var()`
-4. **Interactive prompt** — stdin read, only when `with_interactive(true)` is set
+1. **Magazyn** — `~/.librefang/vault.enc` (jeśli odblokowany)
+2. **Dotenv** — migawka `~/.librefang/.env` załadowana w momencie tworzenia
+3. **Środowisko procesu** — `std::env::var()`
+4. **Interaktywny monit** — odczyt ze stdin, tylko gdy ustawiono `with_interactive(true)`
 
-Two constructors cover the two caller patterns:
+Dwa konstruktory obejmują dwa wzorce wywołań:
 
-- `new(vault, dotenv_path)` — for short-lived callers (CLI subcommands, tests) that own their vault.
-- `with_vault_handle(handle, dotenv_path)` — for long-lived callers (API request handlers) that route through the kernel's cached, already-unlocked vault via `Arc<RwLock<CredentialVault>>`. This avoids re-running the Argon2id KDF on every request (#3598).
+- `new(vault, dotenv_path)` — dla krótkotrwałych wywołań (podkomendy CLI, testy), które są właścicielami swojego magazynu.
+- `with_vault_handle(handle, dotenv_path)` — dla długotrwałych wywołań (obsługa żądań API), które kierują przez buforowany, już odblokowany magazyn jądra przez `Arc<RwLock<CredentialVault>>`. To unika ponownego uruchamiania Argon2id KDF przy każdym żądaniu (#3598).
 
-All resolved values are wrapped in `Zeroizing<String>`. The dotenv cache can be invalidated at runtime via `clear_dotenv_cache(key)` so a key deleted through the dashboard doesn't return a stale boot-time snapshot.
+Wszystkie rozwiązane wartości są opakowane w `Zeroizing<String>`. Pamięć podręczna dotenv może zostać unieważniona w czasie działania przez `clear_dotenv_cache(key)`, aby klucz usunięty przez panel nie zwracał nieaktualnej migawki z czasu uruchomienia.
 
-The dotenv file parser includes a `len() >= 2` guard before stripping surrounding quotes. Without it, a bare single-quote character (`KEY="`) satisfies both `starts_with('"')` and `ends_with('"')` on the same byte, and `value[1..0]` would panic.
+Analizator pliku dotenv zawiera zabezpieczenie `len() >= 2` przed usunięciem otaczających cudzysłowów. Bez niego pojedynczy znak apostrofu (`KEY="`) spełniałby warunki `starts_with('"')` i `ends_with('"')` na tym samym bajcie, a `value[1..0]` spowodowałby panikę.
 
-### `dotenv` — Process-Wide Secret Injection
+### `dotenv` — Wstrzykiwanie sekretów w zakresie całego procesu
 
-`load_dotenv()` is designed to be called exactly once from a binary's synchronous `main()`, **before** the tokio runtime starts. `std::env::set_var` is UB in Rust 1.80+ once other threads exist.
+`load_dotenv()` jest zaprojektowane do wywołania dokładnie raz z synchronicznej funkcji `main()` binary, **przed** uruchomieniem runtime tokio. `std::env::set_var` to niezdefiniowane zachowanie w Rust 1.80+ po istnieniu innych wątków.
 
-The loading order is carefully sequenced:
+Kolejność ładowania jest starannie ułożona:
 
-1. **Pre-seed `LIBREFANG_VAULT_KEY`** from `.env` / `secrets.env` into the process environment (but only if the system environment doesn't already have it — system env wins). This is necessary because `CredentialVault::resolve_master_key()` reads the key from `std::env`, and the vault must be unlocked before its secrets are injected. Without pre-seeding, the vault silently fails to unlock and every vault-stored secret becomes unavailable for the process lifetime (#5139).
-2. **Load vault** — unlock and inject all vault secrets into `std::env`.
-3. **Load `.env`** — inject remaining entries, skipping any key already set.
-4. **Load `secrets.env`** — same, skipping existing keys.
+1. **Wstępne zasiewanie `LIBREFANG_VAULT_KEY`** z `.env` / `secrets.env` do środowiska procesu (ale tylko jeśli środowisko systemowe go jeszcze nie ma — środowisko systemowe wygrywa). Jest to konieczne, ponieważ `CredentialVault::resolve_master_key()` odczytuje klucz ze `std::env`, a magazyn musi być odblokowany przed wstrzyknięciem jego sekretów. Bez wstępnego zasiewania magazyn cicho nie udaje się odblokować i każdy sekret przechowywany w magazynie staje się niedostępny na czas życia procesu (#5139).
+2. **Załadowanie magazynu** — odblokowanie i wstrzyknięcie wszystkich sekretów magazynu do `std::env`.
+3. **Załadowanie `.env`** — wstrzyknięcie pozostałych wpisów, z pominięciem już ustawionych kluczy.
+4. **Załadowanie `secrets.env`** — analogicznie, z pominięciem istniejących kluczy.
 
-The overall priority is: **system env > vault > .env > secrets.env**. Existing process environment variables are never overridden.
+Ogólny priorytet to: **środowisko systemowe > magazyn > .env > secrets.env**. Istniejące zmienne środowiskowe procesu nigdy nie są nadpisywane.
 
-`parse_env_line()` handles quote stripping and escape sequences:
-- Double-quoted values undergo escape unescaping (`\n`, `\r`, `\"`, `\\`)
-- Single-quoted values are literal (no escape processing)
-- The `len() >= 2` guard prevents the bare-quote panic
+`parse_env_line()` obsługuje usuwanie cudzysłowów i sekwencje ucieczki:
+- Wartości w podwójnych cudzysłowach podlegają odwrotnemu przetwarzaniu ucieczki (`\n`, `\r`, `\"`, `\\`)
+- Wartości w pojedynczych cudzysłowach są dosłowne (bez przetwarzania ucieczki)
+- Zabezpieczenie `len() >= 2` zapobiega panice pojedynczego cudzysłowu
 
-`write_env_file()` writes atomically: a temp file (named with PID for uniqueness) is created with mode 0600 at open time on Unix, written, flushed, fsynced, then renamed over the target. This closes three issues from the old `std::fs::write` path: mid-write crashes leaving truncated files, default-perms TOCTOU windows, and concurrent saves sharing a staging path.
+`write_env_file()` zapisuje atomowo: tworzony jest plik tymczasowy (nazwany z PID dla unikalności) z trybem 0600 w momencie otwarcia na Unix, zapisywany, opróżniany, fsyncowany, a następnie zmieniany jako nazwa docelowa. To zamyka trzy problemy ze starej ścieżki `std::fs::write`: awarie w trakcie zapisu zostawiające obcięte pliki, okna TOCTOU z domyślnymi uprawnieniami oraz współbieżne zapisy współdzielące ścieżkę tymczasową.
 
-### `oauth` — OAuth2 PKCE with Dynamic Client Registration
+### `oauth` — OAuth2 PKCE z dynamiczną rejestracją klienta
 
-Implements the complete PKCE flow for MCP-integrated providers (Google, GitHub, Microsoft, Slack). The flow is:
+Realizuje kompletny przepływ PKCE dla dostawców zintegrowanych z MCP (Google, GitHub, Microsoft, Slack). Przepływ to:
 
-1. Generate a PKCE verifier/challenge pair (S256)
-2. Bind a random localhost port via `tokio::net::TcpListener`
-3. Build an HMAC-signed state token binding `(provider, client_id, redirect_uri, nonce, expiry)` with a 10-minute TTL
-4. Open the browser to the authorization URL
-5. Serve a one-shot axum callback handler that verifies state, rejects replays, and extracts the authorization code
-6. Exchange the code for tokens via the token endpoint
-7. Return `OAuthTokens`
+1. Wygenerowanie pary weryfikator/wyzwanie PKCE (S256)
+2. Powiązanie losowego portu localhost przez `tokio::net::TcpListener`
+3. Zbudowanie tokenu stanu podpisanego HMAC łączącego `(provider, client_id, redirect_uri, nonce, expiry)` z TTL 10 minut
+4. Otwarcie przeglądarki pod adresem URL autoryzacji
+5. Obsługa jednorazowego wywołania zwrotnego axum, które weryfikuje stan, odrzuca powtórki i wyodrębnia kod autoryzacji
+6. Wymiana kodu na tokeny przez endpoint tokenów
+7. Zwrócenie `OAuthTokens`
 
-**State security (#3791):** The state token is `base64url(payload_json).base64url(hmac)`. The HMAC key is process-global and re-seeded on every daemon restart, invalidating any in-flight flows from a prior process. `verify_signed_state()` rejects:
+**Bezpieczeństwo stanu (#3791):** Token stanu to `base64url(payload_json).base64url(hmac)`. Klucz HMAC jest globalny w zakresie procesu i ponownie zasiewany przy każdym restarcie demona, unieważniając wszystkie trwające przepływy z poprzedniego procesu. `verify_signed_state()` odrzuca:
 
-- Malformed tokens
-- Bad HMAC signatures (constant-time comparison via `subtle::ct_eq`)
-- Expired payloads
-- Provider, client_id, or redirect_uri mismatches
+- Zniekształcone tokeny
+- Błędne sygnatury HMAC (porównanie w stałym czasie przez `subtle::ct_eq`)
+- Przeterminowane ładunki
+- Niedopasowania provider, client_id lub redirect_uri
 
-The callback handler also enforces nonce equality and only honors the first valid callback — subsequent hits on the same listener receive a "Gone" response.
+Procedura obsługi wywołania zwrotnego wymusza również równość nonce i honoruje tylko pierwsze prawidłowe wywołanie zwrotne — kolejne trafienia na tym samym nasłuchiwaczu otrzymują odpowiedź „Gone".
 
-Client IDs resolve from `resolve_client_ids()` which overlays config overrides (`OAuthConfig.google_client_id`, etc.) on top of `default_client_ids()`.
+Client ID są rozwiązywane z `resolve_client_ids()`, który nakłada nadpisania z konfiguracji (`OAuthConfig.google_client_id` itd.) na `default_client_ids()`.
 
-`run_pkce_flow()` has a 5-minute timeout. If the provider returns an `error` parameter, the callback signals the waiter immediately rather than letting it hang until timeout.
+`run_pkce_flow()` ma 5-minutowy limit czasu. Jeśli dostawca zwróci parametr `error`, wywołanie zwrotne sygnalizuje oczekujący natychmiast, zamiast pozwalania mu czekać do limitu czasu.
 
-### `health` — MCP Server Liveness Monitoring
+### `health` — Monitorowanie dostępności serwerów MCP
 
-`HealthMonitor` tracks per-server health state in a `DashMap<String, McpHealth>`. The kernel's config-reload path calls `register()` / `unregister()` as servers are added or removed via hot-reload.
+`HealthMonitor` śledzi stan zdrowia dla każdego serwera w `DashMap<String, McpHealth>`. Ścieżka przeładowania konfiguracji jądra wywołuje `register()` / `unregister()` gdy serwery są dodawane lub usuwane przez hot-reload.
 
-Health states tracked per server:
-- Current `McpStatus` (Available, Ready, Error)
-- Tool count from last successful check
-- Last successful check timestamp
-- Consecutive failure count
-- Reconnect state (in-progress, attempt count)
-- Connected-since timestamp
+Stany zdrowia śledzone dla każdego serwera:
+- Bieżący `McpStatus` (Available, Ready, Error)
+- Liczba narzędzi z ostatniego udanego sprawdzenia
+- Znacznik czasu ostatniego udanego sprawdzenia
+- Liczba kolejnych niepowodzeń
+- Stan ponownego łączenia (w trakcie, liczba prób)
+- Znacznik czasu połączenia od
 
-Auto-reconnect uses exponential backoff: `5s * 2^attempt`, capped at `max_backoff_secs` (default 300s/5min), with a maximum of 10 attempts before giving up. `should_reconnect()` returns `false` when auto-reconnect is disabled, the server is healthy, or the attempt budget is exhausted.
+Automatyczne ponowne łączenie używa wykładniczego wycofywania: `5s * 2^próba`, ograniczone do `max_backoff_secs` (domyślnie 300s/5min), z maksymalnie 10 próbami przed poddaniem się. `should_reconnect()` zwraca `false` gdy automatyczne ponowne łączenie jest wyłączone, serwer jest zdrowy lub budżet prób jest wyczerpany.
 
-### `http_client` — Shared TLS Client Builder
+### `http_client` — Współdzielony konstruktor klienta TLS
 
-`client_builder()` and `new_client()` produce a `reqwest` client preconfigured with:
+`client_builder()` i `new_client()` tworzą klienta `reqwest` wstępnie skonfigurowanego z:
 
-- Native CA roots loaded via `rustls-native-certs`, falling back to `webpki-roots` if zero native certs are added
-- 10-second connect timeout, 30-second read timeout (bounds hung requests / SSRF amplification)
-- Redirect policy limited to 5 hops (prevents redirect-loop SSRF amplification)
+- Natywnymi głównymi certyfikatami CA ładowanymi przez `rustls-native-certs`, z awaryjnym przejściem na `webpki-roots` jeśli nie dodano żadnych natywnych certyfikatów
+- 10-sekundowym limitem czasu połączenia, 30-sekundowym limitem czasu odczytu (ogranicza zawieszone żądania / amplifikację SSRF)
+- Polityką przekierowań ograniczoną do 5 przeskoków (zapobiega amplifikacji SSRF przez pętle przekierowań)
 
-There is no `shared_client()` — callers should use `client_builder()` for custom configuration or `new_client()` for the defaults.
+Nie ma `shared_client()` — wywołujący powinni używać `client_builder()` do konfiguracji niestandardowej lub `new_client()` dla wartości domyślnych.
 
-### `installer` — Pure Catalog-to-Config Transforms
+### `installer` — Czyste transformacje katalog-konfiguracja
 
-`install_integration()` is a pure function that transforms a catalog entry plus provided credentials into an `InstallResult` containing a ready-to-persist `McpServerConfigEntry`. No side effects — the caller decides when to write to `config.toml` and trigger a kernel reload.
+`install_integration()` jest czystą funkcją, która przekształca wpis katalogu plus dostarczone poświadczenia w `InstallResult` zawierający gotowy do utrwalenia `McpServerConfigEntry`. Bez skutków ubocznych — wywołujący decyduje, kiedy zapisać do `config.toml` i wyzwolić przeładowanie jądra.
 
-The transform:
+Transformacja:
 
-1. Looks up the template by ID from the catalog
-2. Stores provided keys in the vault (best-effort, non-fatal on failure)
-3. Checks which required env vars still lack credentials (excluding those just provided)
-4. Maps the template transport + required env into a `McpServerConfigEntry`
-5. Returns a status of `Ready` (all creds present) or `Setup` (creds still missing)
+1. Wyszukuje szablon po ID z katalogu
+2. Przechowuje dostarczone klucze w magazynie (best-effort, niekrytyczne przy niepowodzeniu)
+3. Sprawdza, których wymaganych zmiennych środowiskowych nadal brakuje poświadczeń (wykluczając te właśnie dostarczone)
+4. Mapuje transport szablonu + wymagane zmienne środowiskowe na `McpServerConfigEntry`
+5. Zwraca status `Ready` (wszystkie poświadczenia obecne) lub `Setup` (brakuje poświadczeń)
 
-The returned `InstallResult` converts into `IntegrationOutcome` from `librefang-types` via `From`, preserving all field data so the kernel's `install_integration` façade can return the dependency-free type.
+Zwrócony `InstallResult` konwertuje na `IntegrationOutcome` z `librefang-types` przez `From`, zachowując wszystkie dane pól, aby fasada jądra `install_integration` mogła zwrócić typ bez zależności.
 
-`catalog_entry_to_mcp_server()` sets `template_id` to the catalog ID so the dashboard can trace which entries originated from the catalog. `oauth_template_to_config()` maps an `OAuthTemplate` to `McpOAuthConfig` with `client_id` left as `None` (resolved later by the OAuth flow).
+`catalog_entry_to_mcp_server()` ustawia `template_id` na ID katalogu, aby panel mógł śledzić, które wpisy pochodzą z katalogu. `oauth_template_to_config()` mapuje `OAuthTemplate` na `McpOAuthConfig` z `client_id` pozostawionym jako `None` (rozwiązanym później przez przepływ OAuth).
 
-`scaffold_integration()` and `scaffold_skill()` generate template files for users building custom MCP servers or skills.
+`scaffold_integration()` i `scaffold_skill()` generują pliki szablonów dla użytkowników budujących niestandardowe serwery MCP lub umiejętności.
 
-## Error Handling
+## Obsługa błędów
 
-`ExtensionError` is the crate-wide error enum. Notable variants:
+`ExtensionError` to crate-owa wyliczenie błędów. Istotne warianty:
 
-- `NotFound` — catalog entry not found
-- `VaultLocked` — vault needs unlocking before operations
-- `VaultKeyMismatch` — carries a `hint` field with operator recovery instructions; surfaces from the sentinel check and triggers a `BootFailed` in the daemon
-- `Vault` — generic vault errors
+- `NotFound` — wpis katalogu nie znaleziony
+- `VaultLocked` — magazyn wymaga odblokowania przed operacjami
+- `VaultKeyMismatch` — zawiera pole `hint` z instrukcjami odzyskiwania dla operatora; wynika ze sprawdzenia strażnika i wyzwala `BootFailed` w demona
+- `Vault` — ogólne błędy magazynu
 
-`From<ExtensionError> for IntegrationError` bridges this crate's error space to the dependency-free `IntegrationError` in `librefang-types`. The mapping preserves the discriminant the API layer keys HTTP status codes off: `NotFound` → 404, vault variants → `Vault`, everything else → `Other` with the original `Display` message preserved verbatim.
+`From<ExtensionError> for IntegrationError` łączy przestrzeń błędów tego crate z wolnym od zależności `IntegrationError` w `librefang-types`. Mapowanie zachowuje dyskryminant, na którym warstwa API opiera kody statusu HTTP: `NotFound` → 404, warianty magazynu → `Vault`, wszystko inne → `Other` z zachowaniem oryginalnej wiadomości `Display` dosłownie.
 
-## Integration Points
+## Punkty integracji
 
-| Consumer | How it connects |
+| Odbiorca | Jak się łączy |
 |---|---|
-| **CLI (`librefang-cli`)** | Calls `dotenv::load_dotenv()` from `main()` before runtime start; calls `vault::CredentialVault::init()` from the launcher, init wizard, and free-provider-guide screens; calls `installer::install_integration()` from `cmd_mcp_add`; calls `installer::scaffold_integration/scaffold_skill` from `cmd_scaffold`; calls `dotenv::save_env_key/remove_env_key` from config commands |
-| **Kernel (`librefang-kernel`)** | Calls `HealthMonitorConfig` and `CredentialVault::init_with_config()` from `boot_with_config`; calls `credentials::CredentialResolver::with_vault_handle()` from `install_integration`; calls `health::HealthMonitor::register/unregister` from config-reload hot actions |
-| **API (`librefang-api`)** | Calls `credentials::CredentialResolver::with_vault_handle()` for request-scoped resolution; calls `health::HealthMonitor::get_health()` for status display |
-| **TUI** | Calls `vault::CredentialVault::init()` from chat runner and module init; calls `dotenv::save_env_key()` from the init wizard and free-provider-guide screens |
+| **CLI (`librefang-cli`)** | Wywołuje `dotenv::load_dotenv()` z `main()` przed uruchomieniem runtime; wywołuje `vault::CredentialVault::init()` z launchera, kreatora inicjalizacji i ekranów free-provider-guide; wywołuje `installer::install_integration()` z `cmd_mcp_add`; wywołuje `installer::scaffold_integration/scaffold_skill` z `cmd_scaffold`; wywołuje `dotenv::save_env_key/remove_env_key` z poleceń konfiguracyjnych |
+| **Jądro (`librefang-kernel`)** | Wywołuje `HealthMonitorConfig` i `CredentialVault::init_with_config()` z `boot_with_config`; wywołuje `credentials::CredentialResolver::with_vault_handle()` z `install_integration`; wywołuje `health::HealthMonitor::register/unregister` z akcji hot-reload konfiguracji |
+| **API (`librefang-api`)** | Wywołuje `credentials::CredentialResolver::with_vault_handle()` do rozwiązywania w zakresie żądania; wywołuje `health::HealthMonitor::get_health()` do wyświetlania statusu |
+| **TUI** | Wywołuje `vault::CredentialVault::init()` z chat runner i inicjalizacji modułów; wywołuje `dotenv::save_env_key()` z kreatora inicjalizacji i ekranów free-provider-guide |
 
-## Cross-Cutting Rules
+## Zasady poprzeczne
 
-Cross-cutting concerns (Docker callback URLs, OAuth flow ownership between daemon and API, vault key handling, `LIBREFANG_VAULT_KEY` constraints, the auth middleware allowlist) are defined in the top-level `CLAUDE.md` and should be consulted before adding code that crosses the crate boundary. They are intentionally not duplicated here to avoid drift.
+Zagadnienia poprzeczne (URL-e wywołań zwrotnych Docker, własność przepływu OAuth między demonem a API, obsługa kluczy magazynu, ograniczenia `LIBREFANG_VAULT_KEY`, lista dozwolonych middleware autoryzacji) są zdefiniowane w nadrzędnym `CLAUDE.md` i powinny być konsultowane przed dodawaniem kodu przekraczającego granicę crate. Są celowo nie dublowane tutaj, aby uniknąć rozbieżności.

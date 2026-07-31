@@ -1,182 +1,182 @@
-# packaging
+# pakietowanie
 
-# Packaging Module
+# Moduł pakietowania
 
-Arch Linux distribution of LibreFang across two complementary channels — the Arch User Repository (AUR) and a self-hosted pacman repository — both driven from a single set of committed PKGBUILD sources and automated through release-triggered CI.
+Dystrybucja LibreFang dla Arch Linuxa przez dwa komplementarne kanały — Arch User Repository (AUR) i samodzielnie hostowane repozytorium pacman — oba oparte na jednym wspólnym zestawie zatwierdzonych źródeł PKGBUILD i zautomatyzowane przez CI wyzwalane przy wydaniu.
 
-## Module Layout
+## Układ modułu
 
 ```
 packaging/
-├── aur/                          # Source of truth for all three packages
+├── aur/                          # Jedno źródło prawdy dla wszystkich trzech pakietów
 │   ├── README.md
-│   ├── publish-to-aur.sh         # CI: build + push one package to AUR
-│   ├── librefang-bin/            # CLI, daemon, HTTP API, web dashboard
-│   ├── librefang-desktop-bin/    # Native Tauri desktop launcher
-│   └── librefang-docker/         # Docker-backed systemd service
-└── arch-repo/                    # Project-maintained pacman repository
+│   ├── publish-to-aur.sh         # CI: kompilacja + publikacja jednego pakietu do AUR
+│   ├── librefang-bin/            # CLI, demon, API HTTP, panel webowy
+│   ├── librefang-desktop-bin/    # Natywna aplikacja desktopowa Tauri
+│   └── librefang-docker/         # Usługa systemd oparta na Dockerze
+└── arch-repo/                    # Repozytorium pacman utrzymywane przez projekt
     ├── README.md
-    └── publish-arch-repo.sh      # CI: build + sign + publish to R2
+    └── publish-arch-repo.sh      # CI: kompilacja + podpisanie + publikacja do R2
 ```
 
-## Packages
+## Pakiety
 
-All three packages repackage prebuilt release artifacts — no Rust compilation occurs during packaging.
+Wszystkie trzy pakiety przepakowują gotowe artefakty wydań — podczas pakietowania nie ma żadnej kompilacji Rusta.
 
-| Package | Provides | Architecture | Dependencies |
+| Pakiet | Dostarcza | Architektura | Zależności |
 |---|---|---|---|
-| `librefang-bin` | CLI, daemon, HTTP API on port 4545, browser dashboard | `x86_64`, `aarch64` | `gcc-libs`, `glibc`, `dbus` |
-| `librefang-desktop-bin` | Native desktop launcher via `.desktop` entry | `x86_64` only | `gtk3`, `webkit2gtk-4.1` |
-| `librefang-docker` | Container-managed service pinned to a release image | `any` | `docker` |
+| `librefang-bin` | CLI, demon, API HTTP na porcie 4545, panel przeglądarkowy | `x86_64`, `aarch64` | `gcc-libs`, `glibc`, `dbus` |
+| `librefang-desktop-bin` | Natywna aplikacja desktopowa przez wpis `.desktop` | tylko `x86_64` | `gtk3`, `webkit2gtk-4.1` |
+| `librefang-docker` | Usługa zarządzana przez kontenery przypięta do obrazu wydania | `any` | `docker` |
 
-Optional dependencies across all packages: `python` (first-party channel sidecar adapters) and `docker` (sandbox workflows).
+Zależności opcjonalne we wszystkich pakietach: `python` (adaptery sidecar pierwszej strony dla kanałów) oraz `docker` (workflows piaskownicy).
 
-The packages are independent — users install only what matches their deployment.
+Pakiety są niezależne — użytkownicy instalują tylko to, co odpowiada ich wdrożeniu.
 
-## Shared Source of Truth
+## Wspólne źródło prawdy
 
-Both the AUR publisher and the pacman repo publisher treat the committed PKGBUILDs under `packaging/aur/<package>/` as the single source of truth. The committed `pkgver`, `sha256sums`, and `.SRCINFO` values are a **working baseline for local `makepkg`** — not the values shipped on each release. The per-release values are derived at publish time:
+Zarówno wydawca AUR, jak i wydawca repozytorium pacman traktują zatwierdzone PKGBUILDi w `packaging/aur/<paket>/` jako jedno źródło prawdy. Zatwierdzone wartości `pkgver`, `sha256sums` i `.SRCINFO` stanowią **działającą bazę dla lokalnego `makepkg`** — a nie wartości dostarczane przy każdym wydaniu. Wartości dla poszczególnych wydań są wyliczane w momencie publikacji:
 
-- **`pkgver`**: tag minus the `v` prefix with the first `-` replaced by `_` (Arch disallows `-` in pkgver). Example: `v2026.6.26-beta.24` → `2026.6.26_beta.24`.
-- **`pkgrel`**: reset to `1` on each release.
-- **`sha256sums`**: regenerated via `updpkgsums` after sources are resolved.
-- **`_desktop_ver`** (`librefang-desktop-bin` only): parsed from the actual `LibreFang_<ver>_amd64.deb` release asset name, since the Tauri bundle version is independent of the release tag.
-- **Docker image tag** (`librefang-docker` only): re-pinned inside `librefang-docker` and `librefang-docker.env` via regex on `ghcr.io/librefang/librefang:<version>`.
+- **`pkgver`**: tag bez prefiksu `v`, z pierwszym `-` zamienionym na `_` (Arch nie dopuszcza `-` w pkgver). Przykład: `v2026.6.26-beta.24` → `2026.6.26_beta.24`.
+- **`pkgrel`**: resetowany do `1` przy każdym wydaniu.
+- **`sha256sums`**: regenerowane przez `updpkgsums` po rozwiązaniu źródeł.
+- **`_desktop_ver`** (tylko `librefang-desktop-bin`): parsowane z rzeczywistej nazwy artefaktu wydania `LibreFang_<ver>_amd64.deb`, ponieważ wersja pakietu Tauri jest niezależna od tagu wydania.
+- **Tag obrazu Docker** (tylko `librefang-docker`): przypinany ponownie wewnątrz `librefang-docker` i `librefang-docker.env` przez regex na `ghcr.io/librefang/librefang:<version>`.
 
 ```mermaid
 flowchart LR
-    PKGBUILD["Committed PKGBUILDs<br/>packaging/aur/"] --> AUR["publish-to-aur.sh<br/>→ AUR git repos"]
+    PKGBUILD["Zatwierdzone PKGBUILDi<br/>packaging/aur/"] --> AUR["publish-to-aur.sh<br/>→ repozytoria git AUR"]
     PKGBUILD --> REPO["publish-arch-repo.sh<br/>→ Cloudflare R2"]
-    REL["GitHub Release<br/>assets"] --> AUR
+    REL["Artefakty wydania<br/>GitHub"] --> AUR
     REL --> REPO
-    AUR --> YAY["yay users"]
-    REPO --> PACMAN["pacman users<br/>packages.librefang.ai"]
+    AUR --> YAY["użytkownicy yay"]
+    REPO --> PACMAN["użytkownicy pacman<br/>packages.librefang.ai"]
 ```
 
-## Publishing Scripts
+## Skrypty publikacji
 
-Both scripts follow the same self-bootstrapping pattern designed for `archlinux:base-devel` containers.
+Oba skrypty stosują ten sam wzorzec samodzielnego bootstrapu zaprojektowany dla kontenerów `archlinux:base-devel`.
 
-### Root Phase
+### Faza roota
 
-When invoked as root, each script:
+Po wywołaniu jako root, każdy skrypt:
 
-1. Installs the required tooling (`base-devel`, `pacman-contrib`, `jq`, plus `rclone` for arch-repo or `git`/`openssh` for AUR), refreshing `archlinux-keyring` in the same transaction.
-2. Creates an unprivileged `builder` user (`makepkg` refuses to run as root).
-3. Stages credentials (GPG key or SSH key) with tight file permissions.
-4. Re-execs itself as `builder` with `HOME` set, passing through all configuration via environment variables.
+1. Instaluje wymagane narzędzia (`base-devel`, `pacman-contrib`, `jq`, oraz `rclone` dla arch-repo lub `git`/`openssh` dla AUR), odświeżając `archlinux-keyring` w tej samej transakcji.
+2. Tworzy nieuprzywilejowanego użytkownika `builder` (`makepkg` odmawia działania jako root).
+3. Przygotowuje poświadczenia (klucz GPG lub SSH) z restrykcyjnymi uprawnieniami plików.
+4. Ponownie uruchamia się jako `builder` z ustawionym `HOME`, przekazując całą konfigurację przez zmienne środowiskowe.
 
-### Builder Phase
+### Faza buildera
 
-The builder copies the committed package source to a working directory (using `cp -R` without `-a` because the bind-mounted source has a foreign owner), patches per-release values, regenerates checksums, then diverges by channel.
+Builder kopiuje zatwierdzone źródła pakietu do katalogu roboczego (używając `cp -R` bez `-a`, ponieważ zamontowane źródło ma obce uprawnienia właściciela), łata wartości dla wydania, regeneruje sumy kontrolne, a następnie rozgałęzia się w zależności od kanału.
 
 #### `publish-to-aur.sh`
 
-Runs for one package at a time (passed as `$1`). After patching, it regenerates `.SRCINFO` via `makepkg --printsrcinfo`, clones the AUR git repository, copies only the original committed source files (never downloaded artifacts), commits, and pushes:
+Uruchamiany dla jednego pakietu naraz (przekazanego jako `$1`). Po nałożeniu łatek regeneruje `.SRCINFO` przez `makepkg --printsrcinfo`, klonuje repozytorium git AUR, kopiuje tylko oryginalne zatwierdzone pliki źródłowe (nigdy pobrane artefakty), commituje i wysyła:
 
 ```
-ssh://aur@aur.archlinux.org/<package>.git
+ssh://aur@aur.archlinux.org/<paket>.git
 ```
 
-AUR rejects pushes whose `.SRCINFO` doesn't match the PKGBUILD, so the script always generates it with `makepkg --printsrcinfo`.
+AUR odrzuca wypchnięcia, których `.SRCINFO` nie zgadza się z PKGBUILD, więc skrypt zawsze generuje je przez `makepkg --printsrcinfo`.
 
-If `git diff --cached --quiet` reports no changes, the push is skipped (the package is already at that version).
+Jeśli `git diff --cached --quiet` raportuje brak zmian, wypchnięcie jest pomijane (pakiet jest już w tej wersji).
 
 #### `publish-arch-repo.sh`
 
-Builds all packages for all configured architectures. For each architecture:
+Kompiluje wszystkie pakiety dla wszystkich skonfigurowanych architektur. Dla każdej architektury:
 
-1. **Sets `CARCH`** in `$HOME/.makepkg.conf` — `makepkg` reads CARCH from config, not the environment, so this is how cross-arch builds are driven on an x86_64 runner.
-2. **Builds** each package with `makepkg --force --nodeps --nocheck --sign` (runtime dependencies aren't installed in the container; these repackage prebuilt binaries).
-3. **Folds** into the existing per-arch pacman database with `repo-add --sign`, pulling the current database from R2 first so updates are incremental.
-4. **Materializes symlinks** — `repo-add` writes `librefang.db` / `librefang.files` as symlinks to their `.tar.gz` targets. R2 has no symlinks, so each is replaced with a real file via `cp --remove-destination "$(readlink -f ...)". A missing `.db.sig` breaks signed-database verification on the client.
-5. **Uploads** packages, signatures, database files, and the public key to R2 via rclone's S3 backend.
-6. **Prunes** old package files beyond `RETAIN` (default 5) per package name — best-effort, kept only for manual `pacman -U <url>` downgrades. Pruning deletes orphaned files only; it never calls `repo-remove` (which would drop the current database entry).
+1. **Ustawia `CARCH`** w `$HOME/.makepkg.conf` — `makepkg` odczytuje CARCH z konfiguracji, nie ze środowiska, więc w ten sposób steruje się kompilacjami cross-arch na runnerze x86_64.
+2. **Kompiluje** każdy pakiet przez `makepkg --force --nodeps --nocheck --sign` (zależności runtime nie są instalowane w kontenerze; pakiety przepakowują gotowe binaria).
+3. **Integruje** z istniejącą bazą danych pacman dla danej architektury przez `repo-add --sign`, pobierając najpierw aktualną bazę z R2, aby aktualizacje były przyrostowe.
+4. **Materializuje symlinki** — `repo-add` zapisuje `librefang.db` / `librefang.files` jako symlinki do ich celów `.tar.gz`. R2 nie obsługuje symlinków, więc każdy jest zamieniany na prawdziwy plik przez `cp --remove-destination "$(readlink -f ...)". Brakujący `.db.sig` przerywa weryfikację podpisanej bazy po stronie klienta.
+5. **Wysyła** pakiety, podpisy, pliki bazy danych i klucz publiczny do R2 przez backend S3 rclone.
+6. **Czyści** stare pliki pakietów powyżej `RETAIN` (domyślnie 5) na nazwę pakietu — best-effort, zachowane tylko dla ręcznych obniżenia wersji `pacman -U <url>`. Czyszczenie usuwa tylko osierocone pliki; nigdy nie wywołuje `repo-remove` (co usunęłoby aktualny wpis w bazie).
 
-The signing public key is published once to the bucket root at `librefang.gpg` for stable user-facing URL.
+Klucz publiczny do podpisywania jest publikowany raz w katalogu głównym bucketa jako `librefang.gpg` dla stabilnego URL dostępnego dla użytkowników.
 
-### Cross-Architecture Handling
+### Obsługa cross-architektur
 
-aarch64 packages are built on the x86_64 runner because packaging involves no compilation. For `librefang-bin` on a non-x86_64 target:
+Pakiety aarch64 są kompilowane na runnerze x86_64, ponieważ pakietowanie nie obejmuje kompilacji. Dla `librefang-bin` na celu innym niż x86_64:
 
-- The source tarball URL is repointed from `x86_64-unknown-linux-gnu` to `${arch}-unknown-linux-gnu`.
-- `arch=('x86_64')` is rewritten to `arch=('$arch')`.
-- `options` gains `!strip` — the host `strip` cannot process foreign binaries (the release tarball is already stripped upstream).
-- `CARCH` is overridden via `~/.makepkg.conf`.
+- URL tarballa źródłowego jest przekierowany z `x86_64-unknown-linux-gnu` na `${arch}-unknown-linux-gnu`.
+- `arch=('x86_64')` jest przepisywane na `arch=('$arch')`.
+- `options` zyskuje `!strip` — hostowy `strip` nie może przetworzyć obcych binariów (tarball wydania jest już obcięty upstream).
+- `CARCH` jest nadpisywany przez `~/.makepkg.conf`.
 
-`librefang-desktop-bin` is x86_64 only because no ARM Linux desktop bundle exists upstream. `librefang-docker` is `arch=('any')` and lands in every arch's repo path.
+`librefang-desktop-bin` jest tylko dla x86_64, ponieważ upstream nie dostarcza pakietu desktopowego dla ARM Linuxa. `librefang-docker` to `arch=('any')` i trafia do ścieżki repozytorium każdej architektury.
 
-### Asset Visibility
+### Widoczność artefaktów
 
-Both scripts poll the GitHub Releases API (up to 18 attempts at 10-second intervals) to wait for release assets to become visible. The `wait_for_asset` function checks for assets by suffix:
+Oba skrypty odpytują API GitHub Releases (do 18 prób w 10-sekundowych odstępach), aby poczekać na udostępnienie się artefaktów wydania. Funkcja `wait_for_asset` sprawdza artefakty po sufiksie:
 
-- `librefang-bin`: waits for `librefang-x86_64-unknown-linux-gnu.tar.gz` (or the target arch variant)
-- `librefang-desktop-bin`: waits for `_amd64.deb` and parses the bundle version from the filename
-- `librefang-docker`: no asset dependency — only re-pins the image tag
+- `librefang-bin`: czeka na `librefang-x86_64-unknown-linux-gnu.tar.gz` (lub wariant dla docelowej architektury)
+- `librefang-desktop-bin`: czeka na `_amd64.deb` i parsuje wersję pakietu z nazwy pliku
+- `librefang-docker`: brak zależności od artefaktów — tylko przypina ponownie tag obrazu
 
-`GH_API_TOKEN` is optional but raises the unauthenticated API rate limit.
+`GH_API_TOKEN` jest opcjonalny, ale podnosi limit nieautoryzowanych żądań API.
 
-## systemd Integration
+## Integracja z systemd
 
-Two packages ship systemd units that run the LibreFang daemon under a dedicated service user:
+Dwa pakiety dostarczają jednostki systemd, które uruchamiają demona LibreFang pod dedykowanym użytkownikiem serwisu:
 
 **`librefang-bin`** (`librefang.service`):
-- Runs `/usr/bin/librefang start --foreground` as user/group `librefang`
-- Working directory: `/var/lib/librefang`
-- Hardened service: `ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `RestrictSUIDSGID`, `RestrictRealtime`
-- Write access restricted to `/var/lib/librefang` via `ReadWritePaths`
-- Resource limits: `LimitNOFILE=65536`, `LimitNPROC=4096`
-- Environment loaded from `/etc/librefang/env` (backed up on upgrade)
-- sysusers entry creates the `librefang` system user; tmpfiles creates `/var/lib/librefang` (0750) and `/etc/librefang` (0755)
+- Uruchamia `/usr/bin/librefang start --foreground` jako użytkownik/grupa `librefang`
+- Katalog roboczy: `/var/lib/librefang`
+- Usługa zaostrzona: `ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `RestrictSUIDSGID`, `RestrictRealtime`
+- Dostęp do zapisu ograniczony do `/var/lib/librefang` przez `ReadWritePaths`
+- Limity zasobów: `LimitNOFILE=65536`, `LimitNPROC=4096`
+- Środowisko ładowane z `/etc/librefang/env` (kopia zapasowa przy aktualizacji)
+- Wpis sysusers tworzy systemowego użytkownika `librefang`; tmpfiles tworzy `/var/lib/librefang` (0750) oraz `/etc/librefang` (0755)
 
 **`librefang-docker`** (`librefang-docker.service`):
 - `Requires=docker.service`
 - `ExecStart=/usr/bin/librefang-docker run` / `ExecStop=/usr/bin/librefang-docker stop`
-- Environment from `/etc/librefang/docker.env`
-- `TimeoutStartSec=0` (allows slow image pulls)
+- Środowisko z `/etc/librefang/docker.env`
+- `TimeoutStartSec=0` (pozwala na wolne pobieranie obrazów)
 
-The `librefang-docker` helper script manages the container lifecycle with commands: `run`, `start`, `stop`, `pull`, `logs`, `status`, `shell`. It publishes port 4545 on `127.0.0.1` only, mounts a named volume `librefang-data` at `/data`, and forwards known provider/channel environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, `TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `LIBREFANG_ALLOW_NO_AUTH`) if set.
+Skrypt pomocniczy `librefang-docker` zarządza cyklem życia kontenera poleceniami: `run`, `start`, `stop`, `pull`, `logs`, `status`, `shell`. Publikuje port 4545 tylko na `127.0.0.1`, montuje nazwany wolumen `librefang-data` w `/data` i przekazuje znane zmienne środowiskowe dostawców/kanałów (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, `TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `LIBREFANG_ALLOW_NO_AUTH`), jeśli są ustawione.
 
-## CI Integration
+## Integracja CI
 
-The `release.yml` workflow triggers these scripts on every `v*` tag:
+Workflow `release.yml` uruchamia te skrypty przy każdym tagu `v*`:
 
-| Job | Script | Output |
+| Zadanie | Skrypt | Wynik |
 |---|---|---|
-| `sync_aur_bin` | `publish-to-aur.sh librefang-bin` | AUR git repo |
-| `sync_aur_desktop` | `publish-to-aur.sh librefang-desktop-bin` | AUR git repo |
-| `sync_aur_docker` | `publish-to-aur.sh librefang-docker` | AUR git repo |
-| `publish_arch_repo` | `publish-arch-repo.sh` | R2 pacman repo (both arches) |
+| `sync_aur_bin` | `publish-to-aur.sh librefang-bin` | Repozytorium git AUR |
+| `sync_aur_desktop` | `publish-to-aur.sh librefang-desktop-bin` | Repozytorium git AUR |
+| `sync_aur_docker` | `publish-to-aur.sh librefang-docker` | Repozytorium git AUR |
+| `publish_arch_repo` | `publish-arch-repo.sh` | Repozytorium pacman R2 (obie architektury) |
 
-Both scripts degrade to a no-op with a notice when the required secrets are absent, so they are safe to merge before the maintainer configures credentials.
+Oba skrypty degradują do no-op z powiadomieniem, gdy wymagane sekrety są nieobecne, więc są bezpieczne do scalenia przed skonfigurowaniem poświadczeń przez maintainera.
 
-### Required Secrets
+### Wymagane sekrety
 
 **AUR** (`.github/SECRETS.md`):
-- `AUR_SSH_PRIVATE_KEY` — dedicated CI keypair registered on the AUR account
-- `AUR_KNOWN_HOSTS` (optional) — pins `aur.archlinux.org`
-- `AUR_GIT_NAME` / `AUR_GIT_EMAIL` (optional) — commit author identity
+- `AUR_SSH_PRIVATE_KEY` — dedykowana para kluczy CI zarejestrowana na koncie AUR
+- `AUR_KNOWN_HOSTS` (opcjonalny) — przypinuje `aur.archlinux.org`
+- `AUR_GIT_NAME` / `AUR_GIT_EMAIL` (opcjonalne) — tożsamość autora commita
 
 **Arch pacman repo**:
-- `ARCH_REPO_GPG_PRIVATE_KEY` — passphrase-less signing subkey (primary key kept offline)
-- `ARCH_REPO_GPG_KEY_ID` — subkey id for `makepkg --sign` and `repo-add --sign`
-- `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` — Cloudflare R2 S3 credentials
-- `CLOUDFLARE_ACCOUNT_ID` — reused from Workers deploys
+- `ARCH_REPO_GPG_PRIVATE_KEY` — podklucz do podpisywania bez hasła (klucz główny przechowywany offline)
+- `ARCH_REPO_GPG_KEY_ID` — identyfikator podklucza dla `makepkg --sign` i `repo-add --sign`
+- `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` — poświadczenia S3 Cloudflare R2
+- `CLOUDFLARE_ACCOUNT_ID` — współdzielone z wdrożeń Workers
 
-## Local Development
+## Rozwój lokalny
 
-To test a package build locally, run from the package directory:
+Aby przetestować kompilację pakietu lokalnie, uruchom z katalogu pakietu:
 
 ```sh
-makepkg -g                        # print checksums
-makepkg --printsrcinfo > .SRCINFO # verify metadata
-makepkg -f                        # full build
-pacman -Qp ./*.pkg.tar.zst        # inspect package info
-pacman -Qlp ./*.pkg.tar.zst       # list package contents
+makepkg -g                        # wyświetl sumy kontrolne
+makepkg --printsrcinfo > .SRCINFO # zweryfikuj metadane
+makepkg -f                        # pełna kompilacja
+pacman -Qp ./*.pkg.tar.zst        # sprawdź informacje o pakiecie
+pacman -Qlp ./*.pkg.tar.zst       # wyświetl zawartość pakietu
 ```
 
-Do not commit downloaded sources, `src/`, `pkg/`, or `*.pkg.tar.*` outputs. Commit only the AUR source files (`PKGBUILD`, install hooks, service files, env templates).
+Nie commituj pobranych źródeł, `src/`, `pkg/` ani wyników `*.pkg.tar.*`. Commituj tylko pliki źródłowe AUR (`PKGBUILD`, skrypty install, pliki serwisowe, szablony env).
 
-## Relationship Between Channels
+## Relacja między kanałami
 
-The AUR and pacman repo channels exist because AUR account registration was closed indefinitely (see #6334), blocking the AUR automation (#6341). The pacman repo ships the same release-pinned binary packages directly, requiring no AUR account. When AUR registration reopens, #6341 will publish the AUR `-bin` packages for `yay` users while the pacman repo continues serving `pacman` users. The two channels are complementary and always share the same PKGBUILD sources.
+Kanały AUR i pacman repo istnieją, ponieważ rejestracja kont AUR została zamknięta na czas nieokreślony (zob. #6334), co blokuje automatyzację AUR (#6341). Repozytorium pacman dostarcza te same binarne pakiety przypięte do wydania bezpośrednio, bez wymagania konta AUR. Gdy rejestracja AUR zostanie ponownie otwarta, #6341 opublikuje pakiety AUR `-bin` dla użytkowników `yay`, podczas gdy repozytorium pacman będzie nadal obsługiwać użytkowników `pacman`. Dwa kanały są komplementarne i zawsze współdzielą te same źródła PKGBUILD.

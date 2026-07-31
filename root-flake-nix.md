@@ -2,31 +2,31 @@
 
 # flake.nix — LibreFang Nix Flake
 
-## Purpose
+## Przeznaczenie
 
-The root `flake.nix` is the entry point for all Nix-based building, testing, and deployment of LibreFang. It defines:
+Główny plik `flake.nix` to punkt wejścia dla wszystkich opartych na Nixie procesów budowania, testowania i wdrażania LibreFang. Definiuje:
 
-- **Two main package derivations** — the CLI/daemon (`librefang-cli`) and the Tauri-based desktop UI (`librefang-desktop`) — built via [crane](https://github.com/ipetkov/crane) against a pinned Rust toolchain.
-- **Checks** — clippy, formatting, eval-time NixOS module assertions, and a NixOS VM test.
-- **A NixOS module** (`nixosModules.default`) that wires LibreFang into `services.librefang` on a host.
-- **An overlay** and **a dev shell** for local development.
+- **Dwie główne derywacje pakietów** — CLI/daemon (`librefang-cli`) oraz oparty na Tauri interfejs desktopowy (`librefang-desktop`) — budowane za pomocą [crane](https://github.com/ipetkov/crane) względem przypiętego łańcucha narzędzi Rust.
+- **Testy** — clippy, formatowanie, asercje modułu NixOS w czasie ewaluacji oraz test maszyny wirtualnej NixOS.
+- **Moduł NixOS** (`nixosModules.default`) integrujący LibreFang z `services.librefang` na hoście.
+- **Overlay** i **powłokę deweloperską** do lokalnego rozwoju.
 
-The flake is structured as a thin per-system layer wrapped around a small set of system-agnostic outputs, reflecting the split between things that produce a binary (system-specific) and things that describe configuration (system-agnostic).
+Flake jest ustrukturyzowany jako cienka warstwa per-system oparta na niewielkim zestawie wyników niezależnych od systemu, co odzwierciedla podział między elementami produkującymi binarię (specyficznymi dla systemu) a elementami opisującymi konfigurację (niezależnymi od systemu).
 
-## Inputs
+## Wejścia
 
-| Input | Purpose |
+| Wejście | Przeznaczenie |
 |---|---|
-| `nixpkgs` | Pinned to `nixpkgs-unstable` for the package set used across all derivations. |
-| `crane` | The Rust build library. Provides `buildPackage`, `buildDepsOnly`, `cargoClippy`, `cargoFmt`, `devShell`, and the `fileset.commonCargoSources` helper. |
-| `flake-utils` | `eachDefaultSystem` — drives the per-system loop. |
-| `rust-overlay` | Oxalica's overlay, used to source a specific stable Rust toolchain with `rust-src`, `rust-analyzer`, and `clippy` extensions. Follows `nixpkgs` to avoid a second nixpkgs instantiation. |
+| `nixpkgs` | Przypięte do `nixpkgs-unstable` dla zestawu pakietów używanego we wszystkich derywacjach. |
+| `crane` | Biblioteka budowania Rust. Zapewnia `buildPackage`, `buildDepsOnly`, `cargoClippy`, `cargoFmt`, `devShell` oraz pomocnik `fileset.commonCargoSources`. |
+| `flake-utils` | `eachDefaultSystem` — napędza pętlę per-system. |
+| `rust-overlay` | Overlay Oxalica, używany do pozyskania konkretnego stabilnego łańcucha narzędzi Rust z rozszerzeniami `rust-src`, `rust-analyzer` i `clippy`. Śledzi `nixpkgs`, aby uniknąć drugiej instancji nixpkgs. |
 
-## Per-System Outputs
+## Wyniki Per-System
 
-Everything inside `flake-utils.lib.eachDefaultSystem` is evaluated once per target system.
+Wszystko wewnątrz `flake-utils.lib.eachDefaultSystem` jest ewaluowane raz dla każdego docelowego systemu.
 
-### Toolchain and Library Setup
+### Konfiguracja łańcucha narzędzi i bibliotek
 
 ```nix
 rustToolchain = pkgs.rust-bin.stable.latest.default.override {
@@ -35,11 +35,11 @@ rustToolchain = pkgs.rust-bin.stable.latest.default.override {
 craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 ```
 
-`crane.mkLib` produces a crane library scoped to this nixpkgs instance, and `.overrideToolchain` pins the exact Rust version used for every crane-driven build. This indirection is important: it guarantees the CLI, desktop, clippy, and devShell all compile with the same compiler.
+`crane.mkLib` tworzy bibliotekę crane zasięgowaną do tej instancji nixpkgs, a `.overrideToolchain` przypina dokładną wersję Rust używaną dla każdej budowy napędzanej przez crane. Ta pośredniość jest ważna: gwarantuje, że CLI, desktop, clippy i devShell kompilują się tym samym kompilatorem.
 
-### Native and Runtime Dependencies
+### Zależności natywne i runtime
 
-The flake deliberately separates three dependency tiers:
+Flake celowo rozdziela trzy poziomy zależności:
 
 ```mermaid
 graph TD
@@ -52,25 +52,25 @@ graph TD
     F --> G[clippy check]
 ```
 
-- **`nativeBuildInputs`** — `pkg-config`, the Rust toolchain, `perl`. Present in every build.
-- **`buildInputs`** — `openssl`, `dbus`, plus macOS-only `apple-sdk` and `libiconv`. Also universal.
-- **`desktopBuildInputs`** — Linux-only GTK/webview stack (`glib`, `gtk3`, `libsoup_3`, `webkitgtk_4_1`, `atkmm`, `cairo`, `gdk-pixbuf`, `pango`). This set is empty on Darwin.
+- **`nativeBuildInputs`** — `pkg-config`, łańcuch narzędzi Rust, `perl`. Obecne w każdej budowie.
+- **`buildInputs`** — `openssl`, `dbus`, oraz specyficzne dla macOS `apple-sdk` i `libiconv`. Również uniwersalne.
+- **`desktopBuildInputs`** — Łańcuch GTK/webview tylko dla Linuksa (`glib`, `gtk3`, `libsoup_3`, `webkitgtk_4_1`, `atkmm`, `cairo`, `gdk-pixbuf`, `pango`). Ten zestaw jest pusty na Darwin.
 
-This split is the fix for issue **#2937**: compiling the CLI on stock NixOS previously dragged in the entire GTK link chain through workspace-level dependency resolution. By scoping `cliArgs` to `--package librefang-cli` and keeping `desktopBuildInputs` out of `commonArgs`, the CLI build stays self-contained.
+Ten podział to rozwiązanie problemu **#2937**: kompilacja CLI na czystym NixOS wcześniej ciągnęła cały łańcuch linkowania GTK przez rozwiązywanie zależności na poziomie workspace. Ograniczając `cliArgs` do `--package librefang-cli` i wyłączając `desktopBuildInputs` z `commonArgs`, budowa CLI pozostaje samowystarczalna.
 
-### Source Filtering
+### Filtrowanie źródeł
 
-The `src` attribute uses `pkgs.lib.fileset` to include only the files Crane needs, plus non-Rust assets embedded at compile time:
+Atrybut `src` używa `pkgs.lib.fileset` do uwzględnienia tylko plików wymaganych przez Crane, plus zasobów nierustowych osadzanych w czasie kompilacji:
 
-- `craneLib.fileset.commonCargoSources` — Cargo manifests, lockfile, Rust sources.
-- Locale directories, static HTML, Tauri config, icons, capabilities.
-- `openrouter-models.snapshot.json` — embedded via `include_str!` in `librefang-runtime` as the offline model catalog fallback.
-- `sdk/python/librefang` — embedded via `include_dir!` in `librefang-channels`.
-- Deployment configs under `deploy/` and `packages/whatsapp-gateway`.
+- `craneLib.fileset.commonCargoSources` — manifesty Cargo, lockfile, źródła Rust.
+- Katalogi locale, statyczny HTML, konfiguracja Tauri, ikony, capabilities.
+- `openrouter-models.snapshot.json` — osadzony przez `include_str!` w `librefang-runtime` jako rezerwowy katalog modeli offline.
+- `sdk/python/librefang` — osadzony przez `include_dir!` w `librefang-channels`.
+- Konfiguracje wdrażania w `deploy/` i `packages/whatsapp-gateway`.
 
-This keeps the Nix store path minimal, improving cache hit rates and rebuild speed.
+To utrzymuje ścieżkę w sklepie Nix minimalną, poprawiając wskaźnik trafień w pamięci podręcznej i szybkość przebudów.
 
-### CLI Derivation
+### Derywacja CLI
 
 ```nix
 cliArgs = commonArgs // {
@@ -84,26 +84,26 @@ librefang-cli = craneLib.buildPackage (cliArgs // {
 });
 ```
 
-The deps-only artifact set is built once and reused as the `cargoArtifacts` input to the final package build. This is the standard Crane caching pattern: dependency compilation is cached independently of application code changes.
+Zestaw artefaktów deps-only jest budowany raz i ponownie używany jako wejście `cargoArtifacts` dla finalnej budowy pakietu. To standardowy wzorzec buforowania Crane: kompilacja zależności jest buforowana niezależnie od zmian w kodzie aplikacji.
 
-Tests are disabled (`doCheck = false`) because they require network and runtime setup not available in the Nix build sandbox.
+Testy są wyłączone (`doCheck = false`), ponieważ wymagają sieci i konfiguracji runtime niedostępnej w piaskownicy budowania Nix.
 
-The package's `meta` sets `mainProgram = "librefang"`, `platforms = platforms.unix`, and an MIT license.
+`meta` pakietu ustawia `mainProgram = "librefang"`, `platforms = platforms.unix` oraz licencję MIT.
 
-### Desktop Derivation
+### Derywacja Desktop
 
-The desktop build extends `desktopArgs` with:
+Budowa desktop rozszerza `desktopArgs` o:
 
-- `desktopBuildInputs` on Linux (GTK/webview).
-- `copyDesktopItems` and `wrapGAppsHook3` as additional native build inputs on Linux.
-- A `.desktop` entry generated via `pkgs.makeDesktopItem` with `startupWMClass = "librefang-desktop"` (matching the GTK app id Tauri reports).
-- A `postInstall` hook that installs hicolor icons at 32×32, 128×128, 256×256 (from `128x128@2x.png`), and 512×512.
+- `desktopBuildInputs` na Linuksie (GTK/webview).
+- `copyDesktopItems` i `wrapGAppsHook3` jako dodatkowe natywne wejścia budowy na Linuksie.
+- Wpis `.desktop` wygenerowany przez `pkgs.makeDesktopItem` z `startupWMClass = "librefang-desktop"` (odpowiadający identyfikatorowi aplikacji GTK, który zgłasza Tauri).
+- Hook `postInstall` instalujący ikony hicolor w rozmiarach 32×32, 128×128, 256×256 (z `128x128@2x.png`) oraz 512×512.
 
-The `wrapGAppsHook3` hook is critical: it injects the GTK runtime environment variables (`XDG_DATA_DIRS`, `GIO_MODULE_DIR`, `GSETTINGS_SCHEMA_DIR`) that the webview process needs at launch time. Without it, the Tauri app starts but the webview fails to render.
+Hook `wrapGAppsHook3` jest krytyczny: wstrzykuje zmienne środowiskowe runtime GTK (`XDG_DATA_DIRS`, `GIO_MODULE_DIR`, `GSETTINGS_SCHEMA_DIR`), których proces webview potrzebuje w czasie uruchamiania. Bez niego aplikacja Tauri się uruchamia, ale webview nie renderuje.
 
-Platform support: `platforms.linux ++ platforms.darwin`. The macOS build path skips all the GTK hooks and icon installs via `optionalString` / `optionals` guards.
+Obsługa platform: `platforms.linux ++ platforms.darwin`. Ścieżka budowania macOS pomija wszystkie hooki GTK i instalację ikon poprzez strażniki `optionalString` / `optionals`.
 
-### Checks
+### Testy
 
 ```nix
 checks = {
@@ -118,26 +118,26 @@ checks = {
 };
 ```
 
-Four categories:
+Cztery kategorie:
 
-1. **`librefang-cli`** — the CLI derivation itself acts as a build check.
-2. **`librefang-desktop`** — the desktop derivation, gated to Linux. Including it in `checks` (not just `packages`) means a regression in the packaging logic fails `nix flake check`, not just the CI matrix.
-3. **`librefang-clippy`** — runs `cargo clippy --workspace --all-targets -- -D warnings`. Uses `workspaceArgs` (which includes `desktopBuildInputs`) because clippy compiles the desktop crate too.
-4. **`librefang-fmt`** — `cargo fmt` check against the filtered `src`.
+1. **`librefang-cli`** — sama derywacja CLI pełni rolę testu budowy.
+2. **`librefang-desktop`** — derywacja desktop, ograniczona do Linuksa. Umieszczenie jej w `checks` (a nie tylko w `packages`) oznacza, że regresja w logice pakowania powoduje niepowodzenie `nix flake check`, a nie tylko macierzy CI.
+3. **`librefang-clippy`** — uruchamia `cargo clippy --workspace --all-targets -- -D warnings`. Używa `workspaceArgs` (które zawiera `desktopBuildInputs`), ponieważ clippy kompiluje też crate desktop.
+4. **`librefang-fmt`** — test `cargo fmt` względem przefiltrowanego `src`.
 
-### NixOS Module Eval
+### Ewaluacja modułu NixOS
 
-`nixosModuleEval` is an evaluation-time check. It:
+`nixosModuleEval` to test w czasie ewaluacji. On:
 
-1. Calls `nixpkgs.lib.nixosSystem` with `self.nixosModules.default` and a minimal container config enabling `services.librefang`.
-2. Reads the resulting `systemd.services.librefang` and runs a list of **12 assertions** against it — verifying `ExecStart`, `Type`, environment variables (`LIBREFANG_HOME`, `LIBREFANG_LISTEN`, `RUST_LOG`), `StateDirectory`, `EnvironmentFile`, address family restrictions, hardening flags, `git` on PATH, and the `librefang` system user.
-3. Throws an assertion error listing any failed expectations.
+1. Wywołuje `nixpkgs.lib.nixosSystem` z `self.nixosModules.default` i minimalną konfiguracją kontenera włączającą `services.librefang`.
+2. Odczytuje wynikowe `systemd.services.librefang` i uruchamia listę **12 asercji** względem niego — weryfikując `ExecStart`, `Type`, zmienne środowiskowe (`LIBREFANG_HOME`, `LIBREFANG_LISTEN`, `RUST_LOG`), `StateDirectory`, `EnvironmentFile`, ograniczenia rodziny adresów, flagi utwardzania, obecność `git` w PATH oraz użytkownika systemowego `librefang`.
+3. Rzuca błąd asercji wyliczający wszystkie niespełnione oczekiwania.
 
-The derivation deliberately holds **no reference** to the rendered unit text. The rendered unit embeds `${librefang-cli}/bin/librefang`, so depending on it would force the full workspace compile (80–95 minutes cold). By keeping the check at the evaluation layer, `nix flake check --no-build` catches regressions in ~43 seconds.
+Derywacja celowo **nie trzyma odniesienia** do wyrenderowanego tekstu jednostki. Wyrenderowana jednostka zawiera `${librefang-cli}/bin/librefang`, więc zależność od niej wymusiłaby pełną kompilację workspace (80–95 minut od zera). Utrzymując test na warstwie ewaluacji, `nix flake check --no-build` wyłapuje regresje w ~43 sekundy.
 
-### NixOS VM Test
+### Test maszyny wirtualnej NixOS
 
-`nixosVmTest` uses `pkgs.testers.runNixOSTest` to boot a real NixOS guest with `services.librefang.enable = true` and verifies the daemon actually starts and serves:
+`nixosVmTest` używa `pkgs.testers.runNixOSTest` do uruchomienia prawdziwego gościa NixOS z `services.librefang.enable = true` i weryfikuje, czy daemon faktycznie się uruchamia i obsługuje żądania:
 
 ```python
 machine.wait_for_unit("librefang.service")
@@ -146,29 +146,29 @@ machine.succeed("curl -sf http://127.0.0.1:4545/api/health")
 machine.succeed("test -d /var/lib/librefang")
 ```
 
-This is the only check that proves the process survives being started by systemd — something `nixosModuleEval` cannot do. It is expensive (compiles the CLI + boots a VM) and is intentionally **not** built by CI. The PR lane runs `nix flake check --no-build`, which evaluates the test without compiling it. Running it for real requires a Linux host with KVM:
+To jedyny test udowadniający, że proces przetrwa uruchomienie przez systemd — czego `nixosModuleEval` nie może zrobić. Jest kosztowny (kompiluje CLI + uruchamia maszynę wirtualną) i celowo **nie jest** budowany przez CI. Ścieżka PR uruchamia `nix flake check --no-build`, który ewaluuje test bez kompilacji. Uruchomienie go w pełni wymaga hosta Linuks z KVM:
 
 ```
 nix build .#checks.x86_64-linux.nixos-vm-test -L
 ```
 
-The guest config sets `LIBREFANG_REGISTRY_OFFLINE = "1"` because the VM has no outbound network, and bumps `virtualisation.memorySize` to 2048 MB (the Rust kernel + axum server OOMs at the 1024 MB default).
+Konfiguracja gościa ustawia `LIBREFANG_REGISTRY_OFFLINE = "1"`, ponieważ maszyna wirtualna nie ma dostępu do sieci zewnętrznej, i podnosi `virtualisation.memorySize` do 2048 MB (jądro Rust + serwer axum kończy się brakiem pamięci przy domyślnych 1024 MB).
 
-### Packages, Apps, and Dev Shell
+### Pakiety, aplikacje i powłoka deweloperska
 
-| Output | Value |
+| Wynik | Wartość |
 |---|---|
 | `packages.default` | `librefang-cli` |
-| `packages.librefang-cli` | CLI/daemon derivation |
-| `packages.librefang-desktop` | Desktop derivation |
-| `apps.default` | `mkApp` wrapper around `librefang-cli`, with propagated `meta` |
-| `devShells.default` | Crane dev shell including all checks, dev tools (`cargo-watch`, `cargo-edit`, `cargo-expand`, `just`, `gh`, `nodejs`, `python3`), and `desktopBuildInputs` for local desktop development |
+| `packages.librefang-cli` | Derywacja CLI/daemon |
+| `packages.librefang-desktop` | Derywacja desktop |
+| `apps.default` | Wrapper `mkApp` wokół `librefang-cli`, z propagowanym `meta` |
+| `devShells.default` | Powłoka deweloperska Crane obejmująca wszystkie testy, narzędzia deweloperskie (`cargo-watch`, `cargo-edit`, `cargo-expand`, `just`, `gh`, `nodejs`, `python3`) oraz `desktopBuildInputs` do lokalnego rozwoju desktop |
 
-The dev shell inherits `inputsFrom = [ librefang-cli ]`, so it carries the CLI's build dependencies automatically.
+Powłoka deweloperska dziedziczy `inputsFrom = [ librefang-cli ]`, więc automatycznie niesie zależności budowy CLI.
 
-## System-Agnostic Outputs
+## Wyniki niezależne od systemu
 
-These are merged onto the flake result **outside** `eachDefaultSystem`. This is a schema requirement: `nixosModules` and `overlays` are consumed by the host's own `nixpkgs`, not scoped to a system.
+Te wyniki są dołączane do rezultatu flake **poza** `eachDefaultSystem`. To wymóg schematu: `nixosModules` i `overlays` są konsumowane przez własne `nixpkgs` hosta, a nie zasięgowane do systemu.
 
 ### `nixosModules.default` / `nixosModules.librefang`
 
@@ -183,9 +183,9 @@ nixosModules.librefang = { lib, pkgs, ... }: {
 nixosModules.default = self.nixosModules.librefang;
 ```
 
-The module delegates to `./nix/nixos-module.nix` (the actual option definitions) and wires `services.librefang.package` to this flake's own `librefang-cli` build using `mkDefault`. This means importing the module is sufficient — the consumer does not also need to apply the overlay.
+Moduł deleguje do `./nix/nixos-module.nix` (faktyczne definicje opcji) i łączy `services.librefang.package` z budową `librefang-cli` tego flake za pomocą `mkDefault`. Oznacza to, że zaimportowanie modułu jest wystarczające — konsument nie musi również stosować overlay.
 
-`mkDefault` ensures an explicit `services.librefang.package = …` in the host config takes precedence, and the `throw` is lazy: it only fires if the option is read on a system this flake doesn't build for.
+`mkDefault` zapewnia, że jawne `services.librefang.package = …` w konfiguracji hosta ma pierwszeństwo, a `throw` jest leniwy: uruchamia się tylko jeśli opcja jest odczytywana na systemie, dla którego ten flake nie buduje.
 
 ### `overlays.default`
 
@@ -197,11 +197,11 @@ overlays.default = final: prev:
   };
 ```
 
-Key detail: the system is read from `prev`, not `final`. Reading `final.stdenv` to decide *which* attributes the overlay defines creates a self-referential fixed point. Using `prev` breaks the cycle.
+Kluczowy szczegół: system jest odczytywany z `prev`, nie z `final`. Odczytywanie `final.stdenv` do decydowania *które* atrybuty overlay definiuje tworzy samoodniesiony punkt stały. Użycie `prev` przerywa cykl.
 
-The overlay exposes packages built against this flake's pinned nixpkgs/crane/rust-overlay — not the consumer's nixpkgs. This is intentional: the dependency-tier split and Crane configuration that keep `nix build .#librefang-cli` working on stock NixOS would be forked if Crane were re-instantiated against a foreign nixpkgs.
+Overlay eksponuje pakiety zbudowane względem przypiętych nixpkgs/crane/rust-overlay tego flake — a nie nixpkgs konsumenta. To celowe: podział na poziomy zależności i konfiguracja Crane utrzymujące działanie `nix build .#librefang-cli` na czystym NixOS zostałyby rozgałęzione, gdyby Crane został ponownie zainicjowany względem obcych nixpkgs.
 
-## Output Topology
+## Topologia wyników
 
 ```mermaid
 graph TD
@@ -227,29 +227,29 @@ graph TD
     OVL -->|"exposes"| DESKTOP
 ```
 
-## Usage Reference
+## Podręcznik użytkowania
 
 ```bash
-# Build the CLI/daemon
+# Budowanie CLI/daemon
 nix build .#librefang-cli
 
-# Build the desktop UI (Linux only)
+# Budowanie interfejsu desktop (tylko Linux)
 nix build .#librefang-desktop
 
-# Run the CLI via flake app
+# Uruchomienie CLI przez aplikację flake
 nix run .#default
 
-# Enter the dev shell
+# Wejście do powłoki deweloperskiej
 nix develop
 
-# Run all checks without building (fast CI path)
+# Uruchomienie wszystkich testów bez budowania (szybka ścieżka CI)
 nix flake check --no-build
 
-# Run the full NixOS VM test (requires KVM)
+# Uruchomienie pełnego testu maszyny wirtualnej NixOS (wymaga KVM)
 nix build .#checks.x86_64-linux.nixos-vm-test -L
 ```
 
-NixOS host configuration:
+Konfiguracja hosta NixOS:
 
 ```nix
 {

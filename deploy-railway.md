@@ -1,23 +1,23 @@
 # deploy — railway
 
-# Railway Deployment Configuration
+# Konfiguracja wdrożenia na Railway
 
-## Overview
+## Przegląd
 
-The `deploy/railway` module contains configuration files that define how the application is built and deployed on the [Railway](https://railway.com) platform. Railway reads one of these files at deploy time to determine the Dockerfile location, health check endpoint, and container restart behavior.
+Moduł `deploy/railway` zawiera pliki konfiguracyjne określające sposób budowania i wdrażania aplikacji na platformie [Railway](https://railway.com). Railway odczytuje jeden z tych plików podczas wdrożenia, aby ustalić lokalizację pliku Dockerfile, endpoint sprawdzania stanu oraz zachowanie restartu kontenera.
 
-## Files
+## Pliki
 
-| File | Format | Usage |
-|------|--------|-------|
-| `railway.json` | JSON (schema-validated) | Primary configuration, validated against Railway's published schema |
-| `railway.toml` | TOML | Alternative configuration for tooling or editor workflows that prefer TOML |
+| Plik | Format | Zastosowanie |
+|------|--------|---------------|
+| `railway.json` | JSON (walidacja schematem) | Konfiguracja główna, walidowana względem opublikowanego schematu Railway |
+| `railway.toml` | TOML | Alternatywna konfiguracja dla narzędzi lub edytorów preferujących TOML |
 
-Both files declare identical settings. Railway will use whichever format is present; if both exist, `railway.json` typically takes precedence. Keeping them in sync is important to avoid unexpected behavior.
+Oba pliki deklarują identyczne ustawienia. Railway użyje dowolnego z dostępnych formatów; jeśli istnieją oba, `railway.json` zazwyczaj ma pierwszeństwo. Utrzymanie ich spójności jest istotne, aby uniknąć nieoczekiwanego zachowania.
 
-## Configuration Reference
+## Odniesienie do konfiguracji
 
-### Build
+### Budowanie
 
 ```json
 {
@@ -27,9 +27,9 @@ Both files declare identical settings. Railway will use whichever format is pres
 }
 ```
 
-- **`dockerfilePath`** — Relative path to the Dockerfile used for the image build. The path is resolved from the repository root (or the configured service root). It points to `./Dockerfile`, meaning Railway expects a Dockerfile at the top level of the project.
+- **`dockerfilePath`** — Ścieżka względna do pliku Dockerfile używanego do budowania obrazu. Ścieżka jest resolved od głównego katalogu repozytorium (lub skonfigurowanego katalogu usługi). Wskazuje na `./Dockerfile`, co oznacza, że Railway oczekuje pliku Dockerfile na najwyższym poziomie projektu.
 
-### Deploy
+### Wdrożenie
 
 ```json
 {
@@ -40,19 +40,19 @@ Both files declare identical settings. Railway will use whichever format is pres
 }
 ```
 
-- **`healthcheckPath`** — HTTP path Railway polls to confirm the container is healthy and ready to receive traffic. The application **must** expose `GET /api/health` and return a `200` status code when fully started. A failing health check will block the deployment from going live.
-- **`restartPolicyType`** — Controls when Railway restarts the container. `ON_FAILURE` means the container restarts only when it exits with a non-zero code. Crashes trigger a restart; clean exits (`0`) do not.
+- **`healthcheckPath`** — Ścieżka HTTP, którą Railway odpytuje, aby potwierdzić, że kontener jest zdrowy i gotowy do obsługi ruchu. Aplikacja **musi** eksponować `GET /api/health` i zwracać kod statusu `200` po pełnym uruchomieniu. Niepowodzenie sprawdzania stanu zablokuje przejście wdrożenia na produkcję.
+- **`restartPolicyType`** — Określa, kiedy Railway restartuje kontener. `ON_FAILURE` oznacza, że kontener jest restartowany tylko wtedy, gdy zakończy działanie z kodem różnym od zera. Awarie wyzwalają restart; czyste zakończenia (`0`) — nie.
 
-## How It Connects to the Codebase
+## Powiązanie z bazą kodu
 
-This module is configuration-only; it has no executable code or internal call dependencies. However, it establishes two hard contracts with the rest of the application:
+Ten moduł zawiera wyłącznie konfigurację; nie posiada kodu wykonywalnego ani wewnętrznych zależności wywołań. Stanowi jednak dwa twarde kontrakty z resztą aplikacji:
 
-1. **A `Dockerfile` must exist** at the repository root capable of building a runnable image.
-2. **An `/api/health` endpoint must be implemented** by the application's HTTP server and must return `200 OK` once the service is ready.
+1. **Plik `Dockerfile` musi istnieć** w głównym katalogu repozytorium i umożliwiać budowanie uruchamialnego obrazu.
+2. **Endpoint `/api/health` musi być zaimplementowany** przez serwer HTTP aplikacji i musi zwracać `200 OK`, gdy usługa jest gotowa.
 
-If either of these is missing or misconfigured, Railway deploys will fail or stall at the health-check stage.
+Jeśli dowolny z tych elementów jest nieobecny lub błędnie skonfigurowany, wdrożenia na Railway zakończą się niepowodzeniem lub zawieszą się na etapie sprawdzania stanu.
 
-## Deployment Lifecycle
+## Cykl życia wdrożenia
 
 ```mermaid
 sequenceDiagram
@@ -60,32 +60,32 @@ sequenceDiagram
     participant Docker
     participant App as Container
 
-    Railway->>Docker: Build image from ./Dockerfile
-    Docker-->>Railway: Image ready
-    Railway->>App: Start container
-    loop Every few seconds
+    Railway->>Docker: Build obrazu z ./Dockerfile
+    Docker-->>Railway: Obraz gotowy
+    Railway->>App: Uruchomienie kontenera
+    loop Co kilka sekund
         Railway->>App: GET /api/health
         App-->>Railway: 200 OK
     end
-    alt Health check fails
+    alt Sprawdzanie stanu nie powiodło się
         Railway->>App: Restart (ON_FAILURE)
     end
 ```
 
-## Modifying This Module
+## Modyfikacja tego modułu
 
-When changing deployment behavior:
+Zmieniając zachowanie wdrożenia:
 
-1. **Update both files** (`railway.json` and `railway.toml`) so they remain consistent.
-2. **Verify the health endpoint** still responds at `/api/health` if you change `healthcheckPath`.
-3. **Confirm the Dockerfile path** is correct relative to the Railway service root if you restructure the repository.
-4. **Consult the [Railway configuration reference](https://docs.railway.com/deploy/config-as-code)** for the full list of supported keys before adding new settings.
+1. **Zaktualizuj oba pliki** (`railway.json` i `railway.toml`), aby pozostały spójne.
+2. **Zweryfikuj endpoint sprawdzania stanu** — nadal odpowiada pod `/api/health`, jeśli zmienisz `healthcheckPath`.
+3. **Potwierdź poprawność ścieżki pliku Dockerfile** względem głównego katalogu usługi Railway, jeśli restrukturyzujesz repozytorium.
+4. **Sprawdź [odniesienie do konfiguracji Railway](https://docs.railway.com/deploy/config-as-code)**, aby zapoznać się z pełną listą obsługiwanych kluczy przed dodaniem nowych ustawień.
 
-## Common Settings You Might Add
+## Często używane ustawienia, które możesz dodać
 
-These are not currently configured but are frequently useful:
+Te ustawienia nie są obecnie skonfigurowane, ale często się przydają:
 
-- **`restartPolicyMaxRetries`** — Limits how many times Railway restarts a failing container before giving up.
-- **`healthcheckTimeout`** — How long to wait for a health-check response before considering it failed.
-- **`numReplicas`** — Scales the service across multiple container instances.
-- **`env`** — Inline environment variables (though Railway's dashboard or linked variables are usually preferred).
+- **`restartPolicyMaxRetries`** — Ogranicza liczbę restartów nieudanego kontenera przez Railway przed poddaniem się.
+- **`healthcheckTimeout`** — Określa czas oczekiwania na odpowiedź sprawdzania stanu przed uzaniem jej za nieudaną.
+- **`numReplicas`** — Skaluje usługę na wiele instancji kontenera.
+- **`env`** — Wbudowane zmienne środowiskowe (choć zazwyczaj preferowany jest panel Railway lub połączone zmienne).

@@ -2,364 +2,364 @@
 
 # whatsapp-gateway
 
-A Node.js gateway that bridges WhatsApp (via the Baileys library) to the LibreFang kernel. It receives inbound WhatsApp messages, forwards them to an AI agent for processing, and delivers the agent's responses back to the originating chat. The gateway runs as a long-lived process managed by PM2 and is designed for unattended, headless operation.
+Bramka Node.js łącząca WhatsAppa (za pomocą biblioteki Baileys) z jądrem LibreFang. Odbiera przychodzące wiadomości WhatsApp, przesyła je do agenta AI do przetworzenia i dostarcza odpowiedzi agenta z powrotem do czatu źródłowego. Bramka działa jako długotrwały proces zarządzany przez PM2 i jest zaprojektowana do bezobsługowej pracy w trybie headless.
 
-## Architecture Overview
+## Architektura
 
 ```mermaid
 graph TD
-    WA[WhatsApp Servers] <-->|Baileys socket| GW[whatsapp-gateway]
-    GW -->|POST /api/agents/chat| K[LibreFang Kernel]
-    K -->|SSE stream| GW
+    WA[Serwery WhatsApp] <-->|Gniazdo Baileys| GW[whatsapp-gateway]
+    GW -->|POST /api/agents/chat| K[Jądro LibreFang]
+    K -->|Strumień SSE| GW
     GW -->|sendMessage / edit| WA
     GW -->|WAL| DB[(SQLite messages.db)]
     GW -->|config.toml| CFG[~/.librefang/config.toml]
-    K -->|Agent execution| AGT[Agent + Tools]
+    K -->|Wykonywanie agenta| AGT[Agent + Narzędzia]
 ```
 
-The gateway is the sole WhatsApp transport for a LibreFang deployment. It owns the WhatsApp session credentials, the message persistence layer, and all connection-recovery logic. The kernel is a separate HTTP service that the gateway calls as a client.
+Bramka jest jedynym transportem WhatsApp w wdrożeniu LibreFang. Przechowuje poświadczenia sesji WhatsApp, warstwę trwałości wiadomości i całą logikę odzyskiwania połączenia. Jądro jest osobną usługą HTTP, którą bramka wywołuje jako klient.
 
-## Configuration
+## Konfiguracja
 
-### Sources of truth (precedence: env var > config.toml > defaults)
+### Źródła prawdy (priorytet: zmienna środowiskowa > config.toml > wartości domyślne)
 
-| Setting | Env var | config.toml path | Default |
+| Ustawienie | Zmienna środowiskowa | Ścieżka w config.toml | Domyślnie |
 |---|---|---|---|
-| Kernel URL | `LIBREFANG_URL` | — | `http://127.0.0.1:4545` |
-| Kernel API key | `LIBREFANG_API_KEY` | root `api_key` | *(empty)* |
-| Default agent | `LIBREFANG_DEFAULT_AGENT` | `[channels.whatsapp].default_agent` | `assistant` |
-| Owner numbers | `WHATSAPP_OWNER_JID` | `[channels.whatsapp].owner_numbers` | `[]` |
-| Conversation TTL | `CONVERSATION_TTL_HOURS` | `[channels.whatsapp].conversation_ttl_hours` | `24` |
-| Stream to channel | — | `[channels.whatsapp].stream_to_channel` | `true` |
-| Group trigger patterns | — | `[channels.whatsapp].group_trigger_patterns` | `[]` |
-| Relay intent languages | — | `[relay_intent].languages` | `["en"]` |
+| URL jądra | `LIBREFANG_URL` | — | `http://127.0.0.1:4545` |
+| Klucz API jądra | `LIBREFANG_API_KEY` | korzeń `api_key` | *(puste)* |
+| Domyślny agent | `LIBREFANG_DEFAULT_AGENT` | `[channels.whatsapp].default_agent` | `assistant` |
+| Numery właściciela | `WHATSAPP_OWNER_JID` | `[channels.whatsapp].owner_numbers` | `[]` |
+| TTL konwersacji | `CONVERSATION_TTL_HOURS` | `[channels.whatsapp].conversation_ttl_hours` | `24` |
+| Strumieniuj na kanał | — | `[channels.whatsapp].stream_to_channel` | `true` |
+| Wzorce wyzwalaczy grupowych | — | `[channels.whatsapp].group_trigger_patterns` | `[]` |
+| Języki intencji przekazywania | — | `[relay_intent].languages` | `["en"]` |
 
-The config file path defaults to `~/.librefang/config.toml` but can be overridden with `LIBREFANG_CONFIG`.
+Ścieżka pliku konfiguracyjnego to domyślnie `~/.librefang/config.toml`, ale można ją nadpisać zmienną `LIBREFANG_CONFIG`.
 
-### PM2 process configuration
+### Konfiguracja procesu PM2
 
-`ecosystem.config.cjs` defines a single `whatsapp-gateway` app:
+`ecosystem.config.cjs` definiuje pojedynczą aplikację `whatsapp-gateway`:
 
-- **Restart policy**: autorestart enabled, max 5 restarts, 30s minimum uptime, 3s base restart delay with exponential backoff, 256MB memory ceiling.
-- **Log paths**: `logs/pm2-error.log` and `logs/pm2-out.log` under the package directory (override with `WA_GATEWAY_LOG_DIR` / `WA_GATEWAY_CWD`).
-- **Deployment-specific values** (agents, owner numbers, API keys) are injected via environment variables at runtime — they are never committed in the ecosystem file.
+- **Polityka restartu**: autorestart włączony, maksymalnie 5 restartów, 30s minimalny czas pracy, 3s podstawowe opóźnienie restartu z wykładniczym wycofywaniem, limit pamięci 256MB.
+- **Ścieżki logów**: `logs/pm2-error.log` i `logs/pm2-out.log` w katalogu pakietu (do nadpisania przez `WA_GATEWAY_LOG_DIR` / `WA_GATEWAY_CWD`).
+- **Wartości specyficzne dla wdrożenia** (agenci, numery właściciela, klucze API) są wstrzykiwane przez zmienne środowiskowe w czasie działania — nigdy nie są zatwierdzane w pliku ekosystemu.
 
-### Feature flags (env vars)
+### Flagi funkcji (zmienne środowiskowe)
 
-| Flag | Effect when set to `off` |
+| Flaga | Efekt gdy ustawiona na `off` |
 |---|---|
-| `LIBREFANG_ECHO_TRACKER` | Disables echo-loop detection (self-message suppression) |
-| `LIBREFANG_DISPATCH_LOG` | Silences the per-dispatch structured log line |
-| `LIBREFANG_LID_PERSIST` | Disables SQLite-backed LID→PN cache; in-memory only |
-| `LIBREFANG_SILENT_V2` | Reverts to legacy regex-based silent-response scrubbing |
-| `LIBREFANG_OWNER_CHANNEL` | Falls back to legacy `NOTIFY_OWNER` text-tag path |
+| `LIBREFANG_ECHO_TRACKER` | Wyłącza detekcję pętli echa (pomijanie własnych wiadomości) |
+| `LIBREFANG_DISPATCH_LOG` | Wycisza ustrukturyzowaną linię log na dyspozycję |
+| `LIBREFANG_LID_PERSIST` | Wyłącza pamięć podręczną LID→PN wspieraną przez SQLite; tylko w pamięci |
+| `LIBREFANG_SILENT_V2` | Powraca do starszego czyszczenia cichych odpowiedzi opartego na regex |
+| `LIBREFANG_OWNER_CHANNEL` | Powraca do starszej ścieżki tagu tekstowego `NOTIFY_OWNER` |
 
-## Connection Lifecycle
+## Cykl życia połączenia
 
-### Startup and authentication
+### Uruchomienie i uwierzytelnianie
 
-`startConnection()` dynamically imports Baileys (ESM-only in v6), loads the multi-file auth state from `./auth_store`, fetches the latest WA protocol version, and creates the socket. The browser identity is set to `['LibreFang', 'Desktop', '1.0.0']`.
+`startConnection()` dynamicznie importuje Baileys (tylko ESM w v6), ładuje wieloplikowy stan uwierzytelnienia z `./auth_store`, pobiera najnowszą wersję protokołu WA i tworzy gniazdo. Tożsamość przeglądarki jest ustawiona na `['LibreFang', 'Desktop', '1.0.0']`.
 
-On first connect there are no stored credentials, so Baileys emits a QR code. The gateway renders it to a PNG data URL (`qrDataUrl`) and exposes it via the HTTP status endpoint for the operator to scan. After a successful scan, `creds.update` events persist credentials so subsequent restarts reconnect without re-pairing.
+Przy pierwszym połączeniu nie ma zapisanych poświadczeń, więc Baileys emituje kod QR. Bramka renderuje go jako URL danych PNG (`qrDataUrl`) i udostępnia przez punkt końcowy statusu HTTP do zeskanowania przez operatora. Po udanym skanowaniu zdarzenia `creds.update` zapisują poświadczenia, dzięki czemu kolejne restarty łączą się ponownie bez ponownego parowania.
 
-### Reconnect and backoff
+### Ponowne połączenie i wycofywanie
 
-Disconnect handling distinguishes three cases:
+Obsługa rozłączenia rozróżnia trzy przypadki:
 
-- **`loggedOut` (401)**: The user removed the linked device from their phone. The auth store is deleted, the cached agent ID is invalidated, and the gateway enters a waiting state until the operator triggers `/login/start`.
-- **`forbidden`**: Non-recoverable; no auto-reconnect.
-- **All other reasons**: Exponential backoff with jitter via `computeBackoffDelay(attempts)`.
+- **`loggedOut` (401)**: Użytkownik usunął powiązane urządzenie z telefonu. Magazyn uwierzytelnienia jest usuwany, buforowany identyfikator agenta jest unieważniany, a bramka przechodzi w stan oczekiwania do momentu wyzwolenia `/login/start` przez operatora.
+- **`forbidden`**: Nie do odzyskania; bez automatycznego ponownego połączenia.
+- **Wszystkie inne przyczyny**: Wykładnicze wycofywanie z losowym rozproszeniem przez `computeBackoffDelay(attempts)`.
 
-The backoff formula: `base = min(2000 * 1.8^(attempts-1), 30000)`, multiplied by a `0.75–1.25` jitter factor. There is no hard stop on retry count — a transient outage longer than the previous 5-attempt cap no longer strands the gateway permanently. The `scheduleReconnect()` helper self-reschedules if `startConnection()` throws before the new socket's close listener is installed, ensuring the recovery loop never goes idle.
+Wzór wycofywania: `base = min(2000 * 1.8^(próby-1), 30000)`, pomnożony przez współczynnik losowości `0,75–1,25`. Nie ma twardego limitu liczby prób — dłuższa awaria trwająca ponad poprzedni limit 5 prób nie zostawia już bramki w stanie zawieszenia na stałe. Pomocnik `scheduleReconnect()` samodzielnie planuje ponowne wywołanie, jeśli `startConnection()` rzuci wyjątek przed zainstalowaniem nowego listenera zamknięcia gniazda, zapewniając, że pętla odzyskiwania nigdy nie przechodzi w stan bezczynności.
 
-### Heartbeat watchdog (ST-01)
+### Watchdog tętna (ST-01)
 
-A periodic interval (default 30s) checks whether inbound `messages.upsert` events have arrived within `HEARTBEAT_MS` (default 5 minutes). If the socket goes silent — indicating a dead-but-not-closed connection — the gateway force-closes the socket via `sock.end()`, which triggers the normal reconnect path. The watchdog is torn down in `cleanupSocket()` alongside all other per-connection timers to avoid leaked intervals across reconnect cycles.
+Okresowy interwał (domyślnie 30s) sprawdza, czy przychodzące zdarzenia `messages.upsert` dotarły w ciągu `HEARTBEAT_MS` (domyślnie 5 minut). Jeśli gniazdo milczy — wskazując na martwe, ale nie zamknięte połączenie — bramka wymusza zamknięcie gniazda przez `sock.end()`, co wyzwala normalną ścieżkę ponownego połączenia. Watchdog jest usuwany w `cleanupSocket()` wraz ze wszystkimi innymi timerami połączeniowymi, aby uniknąć wyciekających interwałów między cyklami ponownego połączenia.
 
-### Process-level error handling
+### Obsługa błędów na poziomie procesu
 
-Two handlers protect against silent corruption:
+Dwa programy obsługi chronią przed cichą korupcją:
 
-- **`uncaughtException`**: Logs the stack and calls `process.exit(1)` immediately. PM2 restarts the process.
-- **`unhandledRejection`**: Maintains a rolling 5-minute window of rejection timestamps. A single rejection is logged but tolerated (often a recoverable network blip in a `setInterval` cleanup). If 5 or more rejections accumulate within the window, the process exits for a clean PM2 restart rather than continuing with half-finished transactions.
+- **`uncaughtException`**: Loguje stos i natychmiast wywołuje `process.exit(1)`. PM2 restartuje proces.
+- **`unhandledRejection`**: Utrzymuje przesuwające się 5-minutowe okno znaczników czasu odrzuceń. Pojedyncze odrzucenie jest logowane, ale tolerowane (często odwracalny błąd sieciowy w czyszczeniu `setInterval`). Jeśli w oknie zgromadzi się 5 lub więcej odrzuceń, proces kończy działanie dla czystego restartu PM2, zamiast kontynuować z niedokończonymi transakcjami.
 
-## Identity Resolution
+## Rozwiązywanie tożsamości
 
-WhatsApp assigns every account two independent identifiers:
+WhatsApp przypisuje każdemu kontu dwa niezależne identyfikatory:
 
-- **Phone-number JID** (`<digits>@s.whatsapp.net`) — the classic, publicly known address.
-- **LID** (`<digits>@lid`) — an opaque, privacy-preserving identifier that is unrelated to the phone number.
+- **JID numeru telefonu** (`<cyfry>@s.whatsapp.net`) — klasyczny, publicznie znany adres.
+- **LID** (`<cyfry>@lid`) — nieprzezroczysty, chroniący prywatność identyfikator, niespowiązany z numerem telefonu.
 
-The `remoteJid` of an inbound message may be either form. The gateway must resolve LIDs back to phone-number JIDs to recognize owners, extract phone numbers for logging/routing, and build consistent session keys.
+`remoteJid` przychodzącej wiadomości może być w obu formach. Bramka musi rozwiązać LID z powrotem na JID numeru telefonu, aby rozpoznać właścicieli, wydobyć numery telefonów do logowania/routingu i budować spójne klucze sesji.
 
-### Resolution pipeline
+### Potok rozwiązywania
 
-The helper `resolvePeerId()` (from `lib/identity.js`) consults these sources in order:
+Pomocnik `resolvePeerId()` (z `lib/identity.js`) konsultuje następujące źródła w kolejności:
 
-1. `msg.key.senderPn` — Baileys sometimes provides the PN JID directly.
-2. `lidToPnJid` cache — populated from prior observations and the SQLite-backed LID cache.
-3. `msg.key.participant` — for group messages, the actual sender.
-4. The raw `sender` itself, when it is already an `@s.whatsapp.net` JID.
+1. `msg.key.senderPn` — Baileys czasami dostarcza JID PN bezpośrednio.
+2. Pamięć podręczna `lidToPnJid` — zasilana z wcześniejszych obserwacji i pamięci podręcznej LID wspieranej przez SQLite.
+3. `msg.key.participant` — dla wiadomości grupowych, rzeczywisty nadawca.
+4. Sam `sender`, gdy jest już JID-em `@s.whatsapp.net`.
 
-### LID cache persistence (ID-02)
+### Trwałość pamięci podręcznej LID (ID-02)
 
-When `LIBREFANG_LID_PERSIST` is not `off`, every LID→PN mapping is written through to a SQLite `lid_cache` table via `lib/lid-cache.js`. On boot:
+Gdy `LIBREFANG_LID_PERSIST` nie jest `off`, każde mapowanie LID→PN jest zapisywane do tabeli SQLite `lid_cache` przez `lib/lid-cache.js`. Przy starcie:
 
-1. The table is pruned to the 10,000 most recently updated entries.
-2. All surviving rows are loaded into the in-memory `lidToPnJid` Map.
+1. Tabela jest przycinana do 10 000 najnowszych zaktualizowanych wpisów.
+2. Wszystkie przetrwałe wiersze są ładowane do wewnętrznej mapy `lidToPnJid`.
 
-Write-through failures (`lid_cache_write_failed`) are logged but never block the caller — identity resolution continues to work even if the database becomes read-only.
+Błędy zapisu (`lid_cache_write_failed`) są logowane, ale nigdy nie blokują wywołującego — rozwiązywanie tożsamości nadal działa nawet jeśli baza danych stanie się tylko do odczytu.
 
-### Proactive LID resolution (CS-02)
+### Proaktywne rozwiązywanie LID (CS-02)
 
-For a first-seen LID with no `senderPn` and no cache entry, `resolveLidProactively()` races `sock.onWhatsApp([lid])` against a 5-second timeout. On success, the result populates the cache so subsequent messages in the same burst resolve synchronously. On timeout or empty response, the caller proceeds in degraded mode (LID used as-is); a later `senderPn` event may still populate the cache.
+Dla LID widzianego po raz pierwszy bez `senderPn` i bez wpisu w pamięci podręcznej, `resolveLidProactively()` wyściguje `sock.onWhatsApp([lid])` z 5-sekundowym limitem czasu. Po sukcesie wynik zasilana pamięć podręczną, więc kolejne wiadomości w tym samym ataku są rozwiązywane synchronicznie. Po przekroczeniu limitu czasu lub pustej odpowiedzi, wywołujący kontynuuje w trybie zdegradowanym (LID używane jak jest); późniejsze zdarzenie `senderPn` może nadal zasilana pamięć podręczną.
 
-### Owner LID pre-resolution
+### Wstępne rozwiązywanie LID właściciela
 
-At every successful connect, the gateway calls `sock.onWhatsApp()` for each configured owner number and populates `ownerLidJids`. This ensures the very first LID-addressed message from an owner is recognized, before any `senderPn` event arrives.
+Przy każdym udanym połączeniu bramka wywołuje `sock.onWhatsApp()` dla każdego skonfigurowanego numeru właściciela i zasilana `ownerLidJids`. Zapewnia to, że pierwsza wiadomość od właściciela z LID jest rozpoznana, zanim dotrze jakiejkolwiek zdarzenie `senderPn`.
 
-## Inbound Message Pipeline
+## Potok wiadomości przychodzących
 
-The `messages.upsert` handler is the core of the gateway. Here is the processing order for each inbound message:
+Program obsługi `messages.upsert` jest rdzeniem bramki. Oto kolejność przetwarzania każdej przychodzącej wiadomości:
 
 ```mermaid
 graph TD
     A[messages.upsert] --> B{type === notify?}
-    B -->|No| Z[Skip]
-    B -->|Yes| C[Store raw msg for retry]
-    C --> D{Duplicate?}
-    D -->|Yes| Z
-    D -->|No| E{fromMe?}
-    E -->|Self-chat| F[Process as owner input]
-    E -->|Other outgoing| Z
-    F --> G{Null payload?}
-    G -->|Yes| H[Session recovery]
-    G -->|No| I[Mark dedup]
-    I --> J[Unwrap nested wrappers]
-    J --> K[Extract text/media]
-    K --> L{Rate limited?}
-    L -->|Yes| Z
-    L -->|No| M[Resolve identity]
-    M --> N[Classify: owner/stranger/group]
-    N --> O[Process media + attachments]
-    O --> P[Echo-tracker gate]
-    P --> Q[Build reply context quoted/forwarded]
-    Q --> R[Save to DB + mark processing]
-    R --> S[Forward to LibreFang agent]
-    S --> T[Stream/edit response to WA]
-    T --> U[Mark processed]
+    B -->|Nie| Z[Pomiń]
+    B -->|Tak| C[Zapisz surową wiadomość do ponownej próby]
+    C --> D{Duplikat?}
+    D -->|Tak| Z
+    D -->|Nie| E{fromMe?}
+    E -->|Czat z samym sobą| F[Przetwórz jako wejście właściciela]
+    E -->|Inne wychodzące| Z
+    F --> G{Pusty ładunek?}
+    G -->|Tak| H[Odzyskiwanie sesji]
+    G -->|Nie| I[Oznacz deduplikację]
+    I --> J[Odwij zagnieżdżone wrapperki]
+    J --> K[Wydobądź tekst/media]
+    K --> L{Ograniczenie częstotliwości?}
+    L -->|Tak| Z
+    L -->|Nie| M[Rozwiąż tożsamość]
+    M --> N[Klasyfikuj: właściciel/obca osoba/grupa]
+    N --> O[Przetwórz media + załączniki]
+    O --> P[Bramka echa]
+    P --> Q[Zbuduj kontekst odpowiedzi cytowanej/przekazanej]
+    Q --> R[Zapisz do DB + oznacz przetwarzanie]
+    R --> S[Przekaż do agenta LibreFang]
+    S --> T[Strumieniuj/edytuj odpowiedź do WA]
+    T --> U[Oznacz przetworzone]
 ```
 
-### Message unwrapping
+### Odwijanie wiadomości
 
-WhatsApp wraps user-visible content in multiple protocol layers — ephemeral messages, view-once containers, edited messages, device-sent messages, and document-with-caption wrappers. `unwrapMessageWrappers()` recursively collapses these (up to depth 5) so downstream handlers see the actual payload. `protocolMessage` is intentionally excluded since it carries receipts/revokes, not user content.
+WhatsApp zawija widoczną dla użytkownika treść w wiele warstw protokołu — wiadomości efemeryczne, kontenery view-once, zredagowane wiadomości, wiadomości wysłane przez urządzenie i wrapperki dokumentów z podpisem. `unwrapMessageWrappers()` rekursywnie zwija je (do głębokości 5), aby programy obsługi niszowe widziały rzeczywisty ładunek. `protocolMessage` jest celowo wyłączone, ponieważ niesie potwierdzenia/odwołania, a nie treść użytkownika.
 
-### Text and media extraction
+### Wydobywanie tekstu i mediów
 
-The handler checks for text in `conversation`, `extendedTextMessage.text`, image/video captions, and document captions. Downloadable media (image, video, audio, sticker, document) is detected by `getDownloadableMedia()` and processed through the media pipeline. Location and contact messages are converted to enriched text descriptors (e.g. `[Location: ... — https://maps.google.com/?q=...]`).
+Program obsługi sprawdza tekst w `conversation`, `extendedTextMessage.text`, podpisyach obrazów/wideo i podpisyach dokumentów. Pobieralne media (obraz, wideo, audio, naklejka, dokument) są wykrywane przez `getDownloadableMedia()` i przetwarzane przez potok mediów. Wiadomości o lokalizacji i kontakcie są konwertowane na wzbogacone deskryptory tekstu (np. `[Lokalizacja: ... — https://maps.google.com/?q=...]`).
 
-### Echo suppression (EB-01)
+### Tłumienie echa (EB-01)
 
-`EchoTracker` (from `lib/echo-tracker.js`) maintains a process-local LRU of the last 100 outbound text bodies. On every inbound `messages.upsert`, the gateway normalizes the message body and checks it against the tracker. If it matches a recently sent outbound message, the inbound is dropped as a self-loop echo (WhatsApp reflects cross-device messages back via sync). This prevents the agent from responding to its own output.
+`EchoTracker` (z `lib/echo-tracker.js`) utrzymuje lokalny dla procesu LRU ostatnich 100 tekstów wychodzących. Przy każdym przychodzącym `messages.upsert` bramka normalizuje treść wiadomości i sprawdza ją względem trackera. Jeśli pasuje do niedawno wysłanej wiadomości wychodzącej, wiadomość przychodząca jest odrzucana jako echo pętli własnej (WhatsApp odbija wiadomości między urządzeniami przez synchronizację). Zapobiega to odpowiedziom agenta na jego własne wyniki.
 
-### Rate limiting
+### Ograniczenie częstotliwości
 
-Strangers and group senders are limited to 3 messages per 60-second window (`RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS`). Rate-limited messages are silently dropped.
+Obce osoby i nadawcy grupowi są ograniczeni do 3 wiadomości w oknie 60 sekund (`RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS`). Wiadomości z ograniczeniem częstotliwości są cicho odrzucane.
 
-### Reply context enrichment
+### Wzbogacenie kontekstu odpowiedzi
 
-If the inbound message quotes another message (`contextInfo.quotedMessage`), the gateway prepends `[In risposta a: "<quoted text>"]` to the forwarded text. The quoted-text extraction handles text, captions, and typed placeholders for audio (`[voice note]`), images, videos, stickers, documents, locations, and contacts. Forwarded messages are annotated with `[Forwarded message]`.
+Jeśli przychodząca wiadomość cytuje inną wiadomość (`contextInfo.quotedMessage`), bramka dodaje `[In risposta a: "<cytowany tekst>"]` na początku przesyłanego tekstu. Wydobywanie cytowanego tekstu obsługuje tekst, podpisy i wpisywane zastępcze znaki dla audio (`[wiadomość głosowa]`), obrazów, wideo, naklejek, dokumentów, lokalizacji i kontaktów. Przekazane wiadomości są opatrzone adnotacją `[Przekazana wiadomość]`.
 
-### Group message handling
+### Obsługa wiadomości grupowych
 
-Group messages are detected via `isGroupJid()`. The gateway determines whether the bot was mentioned via:
+Wiadomości grupowe są wykrywane przez `isGroupJid()`. Bramka określa, czy bot był wspomniany przez:
 
-1. **Structured mentions**: `contextInfo.mentionedJid` containing the bot's own JID.
-2. **Pattern fallback**: `[channels.whatsapp].group_trigger_patterns` compiled to JS RegExps. Rust-style `(?i)` inline flags are translated to the JS `i` flag; mid-pattern flag groups are rejected with a warning.
+1. **Ustrukturyzowane wzmianki**: `contextInfo.mentionedJid` zawierające własny JID bota.
+2. **Rezerwowy wzorzec**: `[channels.whatsapp].group_trigger_patterns` skompilowane do JS RegExp. Flagi inline w stylu Rust `(?i)` są tłumaczone na flagę JS `i`; grupy flag w środku wzorca są odrzucane z ostrzeżeniem.
 
-The participant roster is fetched via `getGroupParticipants()` with a 5-minute TTL cache. Membership changes (`group-participants.update` event) invalidate the cache immediately.
+Lista uczestników jest pobierana przez `getGroupParticipants()` z 5-minutową pamięcią podręczną TTL. Zmiany członkostwa (zdarzenie `group-participants.update`) natychmiast unieważniają pamięć podręczną.
 
-## Message Persistence
+## Trwałość wiadomości
 
-### SQLite store
+### Magazyn SQLite
 
-All inbound and outbound messages are persisted in `messages.db` (path overridable via `WHATSAPP_DB_PATH`). The database uses WAL journaling with a 5-second busy timeout and file permissions set to `0600`.
+Wszystkie wiadomości przychodzące i wychodzące są utrwalane w `messages.db` (ścieżka do nadpisania przez `WHATSAPP_DB_PATH`). Baza danych używa logowania WAL z 5-sekundowym limitem zajętości i uprawnieniami pliku ustawionymi na `0600`.
 
-Schema highlights:
+Podświetlenia schematu:
 
-- **`messages`** — primary table with columns for `id`, `jid`, `sender_jid`, `push_name`, `phone`, `text`, `direction` (`inbound`/`outbound`), `timestamp`, `processed` (0 = pending, 1 = done, -1 = failed), `retry_count`, `raw_type`, and `processing_since` (the in-flight lease timestamp).
-- **`jid_last_seen`** — tracks the last message timestamp per JID for gap detection.
+- **`messages`** — tabela główna z kolumnami dla `id`, `jid`, `sender_jid`, `push_name`, `phone`, `text`, `direction` (`inbound`/`outbound`), `timestamp`, `processed` (0 = oczekujące, 1 = gotowe, -1 = nieudane), `retry_count`, `raw_type` i `processing_since` (znacznik czasu aktywnej dzierżawy).
+- **`jid_last_seen`** — śledzi ostatni znacznik czasu wiadomości na JID do wykrywania luk.
 
-### Processing lease and catch-up sweep
+### Dzierżawa przetwarzania i sweep odzyskiwania
 
-Before the slow media-download-and-forward path begins, the gateway stamps `processing_since` via `dbMarkProcessing()`. A periodic catch-up sweep (`runCatchUpSweep()`) queries for unprocessed rows whose lease has expired (`processing_since < Date.now() - PROCESSING_LEASE_MS`), so a crashed handler's claim eventually expires and the sweep recovers the message. On successful processing, the lease is cleared and `processed` is set to 1.
+Zanim rozpocznie się powolna ścieżka pobierania i przesyłania mediów, bramka oznacza `processing_since` przez `dbMarkProcessing()`. Okresowy sweep odzyskiwania (`runCatchUpSweep()`) odpytuje nieprzetworzone wiersze, których dzierżawa wygasła (`processing_since < Date.now() - PROCESSING_LEASE_MS`), aby dzierżawa awarii programu obsługi ostatecznie wygasła, a sweep odzyskał wiadomość. Po udanym przetworzeniu dzierżawa jest czyszczona, a `processed` jest ustawione na 1.
 
-The `shouldSkipCatchupForMissingJid()` predicate filters orphan rows with null/empty JIDs — these cannot be scoped to any WhatsApp chat and are skipped.
+Predykat `shouldSkipCatchupForMissingJid()` filtruje sierotę wiersze z pustymi/null JID — nie mogą być przypisane do żadnego czatu WhatsApp i są pomijane.
 
-### Deduplication
+### Deduplikacja
 
-Baileys can re-emit `messages.upsert` for the same `msgId` during reconnect storms or after decryption retries. The dedup tracker (`lib/dedup-tracker.js`) uses a two-phase protocol:
+Baileys może ponownie emitować `messages.upsert` dla tego samego `msgId` podczas burz ponownego połączenia lub po ponownych próbach deszyfrowania. Tracker deduplikacji (`lib/dedup-tracker.js`) używa dwufazowego protokołu:
 
-1. **`wasProcessed(msgId)`** — read-only check; does NOT mark.
-2. **`markProcessed(msgId)`** — called only after decryption succeeds.
+1. **`wasProcessed(msgId)`** — sprawdzenie tylko do odczytu; NIE oznacza.
+2. **`markProcessed(msgId)`** — wywoływane dopiero po udanym deszyfrowaniu.
 
-This ensures that WA's retransmit of a failed-decrypt message reaches the session-recovery path instead of being stranded by an overly eager mark-on-sight. The window is 10 minutes (600s), bounded by inbound rate.
+Zapewnia to, że ponowna transmisja WA wiadomości z nieudanym deszyfrowaniem trafia do ścieżki odzyskiwania sesji zamiast być uwięziona przez zbyt gorliwe oznaczenie na widok. Okno to 10 minut (600s), ograniczone przez częstotliwość przychodzących.
 
-## Agent Forwarding
+## Przekazywanie do agenta
 
-### Streaming protocol
+### Protokół strumieniowania
 
-The gateway calls the kernel's chat endpoint via `forwardToLibreFangStreaming()`, which returns a Server-Sent Events stream of text deltas. When `STREAM_TO_CHANNEL` is `true` (default), each delta triggers an `onProgress` callback that:
+Bramka wywołuje punkt końcowy czatu jądra przez `forwardToLibreFangStreaming()`, który zwraca strumień zdarzeń wysyłanych przez serwer z deltami tekstu. Gdy `STREAM_TO_CHANNEL` jest `true` (domyślnie), każda delta wyzwala wywołanie zwrotne `onProgress`, które:
 
-1. Buffers the text in a hold-back accumulator until it exceeds 32 characters and does not match a silent-response prefix.
-2. Sends the first flush as a new WhatsApp message.
-3. Subsequent deltas edit that message in place (`sendMessage(..., { edit: streamMsgKey })`).
+1. Buforyzuje tekst w akumulatorze opóźnienia, dopóki nie przekroczy 32 znaków i nie pasuje do prefiksu cichej odpowiedzi.
+2. Wysyła pierwszy przepływ jako nową wiadomość WhatsApp.
+3. Kolejne delty edytują tę wiadomość w miejscu (`sendMessage(..., { edit: streamMsgKey })`).
 
-When `STREAM_TO_CHANNEL` is `false`, all deltas are accumulated and only the final text is sent in a single message, avoiding the "edited" tag flicker on every chunk.
+Gdy `STREAM_TO_CHANNEL` jest `false`, wszystkie delty są akumulowane i tylko końcowy tekst jest wysyłany w pojedynczej wiadomości, unikając migotania tagu „zredagowano" przy każdym fragmencie.
 
-After the stream completes, the final accumulated text is sent via `sendOrEdit()` — either editing the streamed message (if one exists for this JID) or sending a new message.
+Po zakończeniu strumienia końcowy akumulowany tekst jest wysyłany przez `sendOrEdit()` — edytując strumieniowaną wiadomość (jeśli istnieje dla tego JID) lub wysyłając nową wiadomość.
 
-### Silent response suppression (OB-02 / OB-07)
+### Tłumienie cichych odpowiedzi (OB-02 / OB-07)
 
-The gateway mirrors the Rust canonical silent-response detector to prevent sentinel phrases like `[no reply needed]` or `NO_REPLY` from reaching WhatsApp. Two layers of protection:
+Bramka dubluje kanoniczny detektor cichych odpowiedzi z Rust, aby zapobiec dotarciu fraz-sentyneł takich jak `[brak odpowiedzi wymagany]` lub `NO_REPLY` do WhatsAppa. Dwie warstwy ochrony:
 
-1. **`isSilentResponse(text)`** — classifies a complete response. Strips trailing punctuation, whitespace, and non-ASCII (emoji), then matches against known sentinel forms with word-boundary checks. Case-insensitive.
+1. **`isSilentResponse(text)`** — klasyfikuje kompletną odpowiedź. Usuwa końcową interpunkcję, białe znaki i nie-ASCII (emoji), następnie dopasowuje do znanych form sentyneł z kontrolą granic słów. Bez uwzględniania wielkości liter.
 
-2. **`createHoldbackAccumulator()`** — the streaming gate. Buffers deltas until the cumulative text has clearly diverged from any sentinel shape. If the stream ends silent, `onFlush` is never called, guaranteeing zero partial sentinel leaks.
+2. **`createHoldbackAccumulator()`** — bramka strumieniowania. Buforyzuje delty, dopóki skumulowany tekst wyraźnie nie rozchodzi się od jakiejkolwiek formy sentynełu. Jeśli strumień kończy się cicho, `onFlush` nigdy nie jest wywoływane, gwarantując zero częściowych wycieków sentynełów.
 
-3. **`isProgressTextLeak(text)`** — detects CLI progress placeholders the model sometimes emits as a whole reply (e.g. `(thinking)`, `[Reading the conversation context]`) and suppresses them.
+3. **`isProgressTextLeak(text)`** — wykrywa zastępcze znaki postępu CLI, które model czasami emituje jako pełną odpowiedź (np. `(myślenie)`, `[Odczytywanie kontekstu konwersacji]`) i je tłumi.
 
-The legacy `stripNoReply()` entry point is preserved for non-streaming call sites. `LIBREFANG_SILENT_V2=off` reverts to the old regex-scrub behavior.
+Starszy punkt wejścia `stripNoReply()` jest zachowany dla niestrumieniowych punktów wywołania. `LIBREFANG_SILENT_V2=off` powraca do starego zachowania czyszczenia regex.
 
-### Progress-placeholder leak guard
+### Strażnik wycieku zastępczych znaków postępu
 
-Messages consisting solely of bracketed or parenthetical progress verbs (thinking, reading, loading, processing, analyzing, etc.) are detected by `isProgressTextLeak()` and suppressed. Each branch (stranger, owner, group) logs the event as `progress_placeholder_leak` for observability.
+Wiadomości składające się wyłącznie z czasowników postępu w nawiasach kwadratowych lub okrągłych (myślenie, czytanie, ładowanie, przetwarzanie, analizowanie itp.) są wykrywane przez `isProgressTextLeak()` i tłumione. Każda gałąź (obca osoba, właściciel, grupa) loguje zdarzenie jako `progress_placeholder_leak` dla obserwowalności.
 
-## Owner / Stranger Routing
+## Routing właściciel / obca osoba
 
-When owner numbers are configured, every inbound message is classified as **owner**, **stranger**, or **group**:
+Gdy numery właściciela są skonfigurowane, każda przychodząca wiadomość jest klasyfikowana jako **właściciel**, **obca osoba** lub **grupa**:
 
-### Owner (DM)
+### Właściciel (DM)
 
-Owner messages are forwarded to the agent directly. If there are active stranger conversations and the owner's text expresses a relay intent (checked by `ownerIntentsRelay()`), the gateway prepends the active-conversations context and a relay system instruction so the owner can delegate replies.
+Wiadomości właściciela są przesyłane bezpośrednio do agenta. Jeśli są aktywne konwersacje z obcymi osobami, a tekst właściciela wyraża intencję przekazania (sprawdzaną przez `ownerIntentsRelay()`), bramka dodaje kontekst aktywnych konwersacji i instrukcję systemową przekazania, aby właściciel mógł delegować odpowiedzi.
 
-The agent can respond with relay commands embedded as JSON tags:
+Agent może odpowiadać z komendami przekazania osadzonymi jako tagi JSON:
 
 ```
 [RELAY_TO_STRANGER]{"jid":"...@s.whatsapp.net","message":"..."}[/RELAY_TO_STRANGER]
 ```
 
-`extractRelayCommands()` parses these, and `executeRelay()` validates that the target JID has an active conversation (anti-confusion safeguard F1), sends the message to the stranger, and logs an audit trail. Failed relays are reported back to the owner.
+`extractRelayCommands()` analizuje je, a `executeRelay()` weryfikuje, że docelowy JID ma aktywną konwersację (zabezpieczenie antyzamieszania F1), wysyła wiadomość do obcej osoby i loguje ślad audytu. Nieudane przekazania są zgłaszane z powrotem do właściciela.
 
-### Stranger (DM)
+### Obca osoba (DM)
 
-Stranger messages are prefixed with a factual context block (`[WHATSAPP_STRANGER_CONTEXT]`) that tells the agent the sender is an external contact and documents the available `NOTIFY_OWNER` routing tag. The agent's response is sent directly to the stranger.
+Wiadomości obcych osób są poprzedzane blokiem kontekstowym faktycznym (`[WHATSAPP_STRANGER_CONTEXT]`), który informuje agenta, że nadawca jest kontaktem zewnętrznym i dokumentuje dostępny tag routingu `NOTIFY_OWNER`. Odpowiedź agenta jest wysyłana bezpośrednio do obcej osoby.
 
-If the agent emits `NOTIFY_OWNER` tags, the gateway:
+Jeśli agent emituje tagi `NOTIFY_OWNER`, bramka:
 
-1. Extracts the JSON payload via `extractNotifyOwner()`.
-2. Applies a 5-minute escalation debounce per stranger (`shouldDebounceEscalation()`).
-3. Marks the conversation as escalated.
-4. Sends the notification to the primary owner JID.
+1. Wydobywa ładunek JSON przez `extractNotifyOwner()`.
+2. Stosuje 5-minutowe odrzucenie eskalacji na obcą osobę (`shouldDebounceEscalation()`).
+3. Oznacza konwersację jako eskalowaną.
+4. Wysyła powiadomienie do głównego JID właściciela.
 
-The typed `notify_owner` LLM tool (when `LIBREFANG_OWNER_CHANNEL` is `on`) routes owner notices through the `onOwnerNotice` callback, which fans out to every configured `OWNER_JID`. This is preferred over the legacy text-tag path, which logs a deprecation warning on every hit.
+Typowane narzędzie LLM `notify_owner` (gdy `LIBREFANG_OWNER_CHANNEL` jest `on`) kieruje powiadomienia właściciela przez wywołanie zwrotne `onOwnerNotice`, które rozsyła do każdego skonfigurowanego `OWNER_JID`. Jest to preferowane nad starszą ścieżką tagów tekstowych, która loguje ostrzeżenie o przestarzaniu przy każdym trafieniu.
 
-### Group
+### Grupa
 
-Group messages include the sender's identity in the forwarded text (`[Group message from <name>]`). The agent response is sent directly to the group chat. Relay commands are ignored in group contexts.
+Wiadomości grupowe zawierają tożsamość nadawcy w przesyłanym tekście (`[Wiadomość grupowa od <nazwa>]`). Odpowiedź agenta jest wysyłana bezpośrednio do czatu grupowego. Komendy przekazania są ignorowane w kontekście grupowym.
 
-## Media Processing
+## Przetwarzanie mediów
 
-`processMediaMessage()` handles the download-upload pipeline:
+`processMediaMessage()` obsługuje potok pobierania i przesyłania:
 
-1. **Download** from WhatsApp servers via Baileys' `downloadMediaMessage()`, with a 30-second timeout and 50MB size cap (`MAX_MEDIA_SIZE`).
-2. **Upload** to the kernel's attachment endpoint via multipart POST, with a 60-second timeout.
-3. **Transcription** for audio/voice messages — if the kernel returns a transcription, it replaces the message text as `[Voice transcription]: ...`.
+1. **Pobieranie** z serwerów WhatsApp przez `downloadMediaMessage()` Baileys, z 30-sekundowym limitem czasu i limitem rozmiaru 50MB (`MAX_MEDIA_SIZE`).
+2. **Przesyłanie** do punktu końcowego załączników jądra przez multipart POST, z 60-sekundowym limitem czasu.
+3. **Transkrypcja** dla wiadomości audio/głosowych — jeśli jądro zwraca transkrypcję, zastępuje ona tekst wiadomości jako `[Transkrypcja głosowa]: ...`.
 
-The entire pipeline is bounded by `MEDIA_PIPELINE_TIMEOUT_MS` (90 seconds). On timeout or failure, the message is forwarded to the agent without the attachment but with a text descriptor (e.g. `[Photo from <name>]`), ensuring the agent still responds rather than dropping the message silently.
+Cały potok jest ograniczony przez `MEDIA_PIPELINE_TIMEOUT_MS` (90 sekund). Po przekroczeniu limitu czasu lub błędzie wiadomość jest przesyłana do agenta bez załącznika, ale z deskryptorem tekstu (np. `[Zdjęcie od <nazwa>]`), zapewniając, że agent nadal odpowiada zamiast cicho porzucać wiadomość.
 
-`getMediaDescriptor()` produces fallback text descriptors for all media types. `getMediaFilename()` generates a display filename when no caption is present.
+`getMediaDescriptor()` tworzy zapasowe deskryptory tekstu dla wszystkich typów mediów. `getMediaFilename()` generuje nazwę pliku wyświetlaną, gdy nie ma podpisu.
 
-## Session Recovery and Decryption Retry
+## Odzyskiwanie sesji i ponowna próba deszyfrowania
 
-### Decryption retry tracking
+### Śledzenie ponownych prób deszyfrowania
 
-When Baileys emits a `messages.update` with stub type 39 (CIPHERTEXT) or status ERROR, the gateway tracks retry counts in `decryptRetryMap`. After `DECRYPT_RETRY_MAX` (3) retries, the message is marked permanently failed, the owner is notified with a fallback message, and a system notification is forwarded to the agent.
+Gdy Baileys emituje `messages.update` z typem-stub 39 (CIPHERTEXT) lub stanem ERROR, bramka śledzi liczbę prób w `decryptRetryMap`. Po `DECRYPT_RETRY_MAX` (3) ponownych próbach wiadomość jest oznaczana jako trwale nieudana, właściciel jest powiadamiany zapasową wiadomością, a powiadomienie systemowe jest przesyłane do agenta.
 
-### Signal session renegotiation
+### Renegocjacja sesji Signal
 
-A different failure class — libsignal throwing from `session_cipher.js` before any stub is emitted — produces inbound messages with `msg.message = null`. The gateway detects this null-content case in the `messages.upsert` handler and forces a fresh Signal session via `handleSessionRecovery()`:
+Inna klasa awarii — libsignal rzucający wyjątek z `session_cipher.js` przed emitowaniem jakiegokolwiek stub — powoduje przychodzące wiadomości z `msg.message = null`. Bramka wykrywa ten przypadek pustej treści w programie obsługi `messages.upsert` i wymusza nową sesję Signal przez `handleSessionRecovery()`:
 
-1. Calls `sock.assertSessions([deviceJid], true)` to trigger re-keying with the specific device (not the base JID, since sessions are per-device).
-2. Respects a 20-second cooldown between attempts and a maximum of 3 attempts per base JID.
-3. On exhaustion, notifies all configured owners with troubleshooting guidance.
+1. Wywołuje `sock.assertSessions([deviceJid], true)` aby wyzwolić ponowne kluczowanie z określonym urządzeniem (nie bazowym JID, ponieważ sesje są per urządzenie).
+2. Uwzględnia 20-sekundowe opóźnienie między próbami i maksymalnie 3 próby na bazowy JID.
+3. Po wyczerpaniu powiadamia wszystkich skonfigurowanych właścicieli z poradą rozwiązywania problemów.
 
-`sessionRecoveryMap` tracks attempts, last-attempt timestamps, and notification state per base JID, with entries expiring after 30 minutes of inactivity.
+`sessionRecoveryMap` śledzi próby, znaczniki czasu ostatniej próby i stan powiadomień na bazowy JID, z wpisami wygasającymi po 30 minutach nieaktywności.
 
-### Raw message store
+### Magazyn surowych wiadomości
 
-A bounded in-memory `Map` (`messageStore`, max 500 entries, 10-minute TTL) stores raw decrypted messages. Baileys calls `getMessage(key)` during its retry mechanism to re-decrypt messages; the store provides the original ciphertext payload. A periodic cleanup (every 60s, `.unref()`) evicts expired entries from the message store, decrypt retry map, and session recovery map.
+Ograniczona wewnętrzna mapa (`messageStore`, max 500 wpisów, 10-minutowy TTL) przechowuje surowe odszyfrowane wiadomości. Baileys wywołuje `getMessage(key)` podczas swojego mechanizmu ponownych prób do ponownego deszyfrowania wiadomości; magazyn dostarcza oryginalny ładunek szyfrogramu. Okresowe czyszczenie (co 60s, `.unref()`) usuwa wygasłe wpisy z magazynu wiadomości, mapy ponownych prób deszyfrowania i mapy odzyskiwania sesji.
 
-## Conversation Tracker
+## Tracker konwersacji
 
-`activeConversations` is an in-memory `Map<jid, ConversationState>` tracking stranger conversations with:
+`activeConversations` to wewnętrzna mapa `Map<jid, ConversationState>` śledząca konwersacje z obcymi osobami z:
 
-- Push name, phone, and up to 20 recent messages (capped at 500 chars each).
-- Message count, escalation flag, and last-activity timestamp.
-- TTL-based eviction every 15 minutes (`CONVERSATION_TTL_MS`, default 24 hours).
+- Nazwą push, numerem telefonu i do 20 ostatnich wiadomości (ograniczonych do 500 znaków każda).
+- Liczbą wiadomości, flagą eskalacji i znacznikiem czasu ostatniej aktywności.
+- Ewiczją opartą na TTL co 15 minut (`CONVERSATION_TTL_MS`, domyślnie 24 godziny).
 
-`buildConversationsContext()` renders this state as a structured text block (`[ACTIVE_STRANGER_CONVERSATIONS]`) that is injected into owner-facing relay messages, giving the owner situational awareness of pending stranger interactions.
+`buildConversationsContext()` renderuje ten stan jako ustrukturyzowany blok tekstu (`[ACTIVE_STRANGER_CONVERSATIONS]`), który jest wstrzykiwany do wiadomości przekazywania dla właściciela, dając właścicielowi świadomość sytuacyjną oczekujących interakcji z obcymi osobami.
 
-`buildStrangerContext()` produces the `[WHATSAPP_STRANGER_CONTEXT]` prefix for stranger messages, documenting the `NOTIFY_OWNER` routing tag.
+`buildStrangerContext()` tworzy prefiks `[WHATSAPP_STRANGER_CONTEXT]` dla wiadomości od obcych osób, dokumentujący tag routingu `NOTIFY_OWNER`.
 
-## Markdown Conversion
+## Konwersja Markdown
 
-`markdownToWhatsApp()` translates common Markdown patterns to WhatsApp's native formatting syntax:
+`markdownToWhatsApp()` tłumaczy wspólne wzorce Markdown na natywną składnię formatowania WhatsApp:
 
-- `**bold**` → `*bold*` (WhatsApp bold)
-- `*italic*` → `_italic_` (WhatsApp italic), with bullet-list items excluded
-- `` `code` `` → ` ```code``` ` (WhatsApp monospace)
+- `**bold**` → `*bold*` (pogrubienie WhatsApp)
+- `*italic*` → `_italic_` (kursywa WhatsApp), z wyłączeniem elementów listy punktowanej
+- `` `code` `` → ` ```code``` ` (monospace WhatsApp)
 - `~~strikethrough~~` → `~strikethrough~`
 
-The conversion uses placeholder slots to protect inline code from bold/italic processing and handles escaped stars (`\*`) to keep them literal. The `__text__` dunder form is intentionally skipped due to ambiguity with Python identifiers.
+Konwersja używa slotów zastępczych do ochrony kodu inline przed przetwarzaniem pogrubienia/kursywy i obsługuje ucieczki gwiazdek (`\*`), aby zachować je dosłownie. Forma `__text__` jest celowo pomijana z powodu niejednoznaczności z identyfikatorami Python.
 
-## HTTP API
+## API HTTP
 
-The gateway exposes a minimal HTTP server (default port 3009, overridable via `WHATSAPP_GATEWAY_PORT`) for operator interaction:
+Bramka udostępnia minimalny serwer HTTP (domyślny port 3009, do nadpisania przez `WHATSAPP_GATEWAY_PORT`) do interakcji z operatorem:
 
-| Endpoint | Method | Purpose |
+| Punkt końcowy | Metoda | Cel |
 |---|---|---|
-| `/health` | GET | Health check; reports connection status and heartbeat freshness |
-| `/status` | GET | Current connection state, QR code data URL, session ID |
-| `/login/start` | POST | Force a fresh connection (generates new QR if needed) |
-| `/reset` | POST | Clear auth state and restart pairing |
-| `/messages/unprocessed` | GET | Debug endpoint listing pending messages |
-| `/messages/:jid` | GET | Retrieve message history for a specific chat |
+| `/health` | GET | Sprawdzenie stanu; raportuje status połączenia i aktualność tętna |
+| `/status` | GET | Aktualny stan połączenia, URL danych QR, identyfikator sesji |
+| `/login/start` | POST | Wymusza nowe połączenie (generuje nowy QR jeśli potrzebne) |
+| `/reset` | POST | Czyści stan uwierzytelnienia i restartuje parowanie |
+| `/messages/unprocessed` | GET | Punkt końcowy debugowania listujący oczekujące wiadomości |
+| `/messages/:jid` | GET | Pobiera historię wiadomości dla konkretnego czatu |
 
-The health endpoint uses a separate staleness threshold (`WA_HEALTH_STALE_MS`, default 5 minutes) so external monitoring degrades earlier than the heartbeat watchdog's force-reconnect trigger.
+Punkt końcowy zdrowia używa osobnego progu nieaktualności (`WA_HEALTH_STALE_MS`, domyślnie 5 minut), aby zewnętrzny monitoring degradował wcześniej niż wyzwalacz wymuszonego ponownego połączenia watchdoga tętna.
 
-## Gap Detection
+## Wykrywanie luk
 
-A 10-minute interval (`gapDetectionTimer`) checks `jid_last_seen` for active conversations that have gone silent for more than 30 minutes. If an active stranger conversation shows no messages within the threshold, the gateway logs a `gap-detect` warning — this catches potential message loss that would otherwise go unnoticed.
+10-minutowy interwał (`gapDetectionTimer`) sprawdza `jid_last_seen` pod kątem aktywnych konwersacji, które milczały przez więcej niż 30 minut. Jeśli aktywna konwersacja z obcą osobą nie wykazuje wiadomości w ramach progu, bramka loguje ostrzeżenie `gap-detect` — wyłapuje to potencjalną utratę wiadomości, która inaczej pozostałaby niezauważona.
 
-## Key Dependencies
+## Kluczowe zależności
 
-- **`@whiskeysockets/baileys`** — WhatsApp Web protocol implementation (ESM dynamic import).
-- **`better-sqlite3`** — Synchronous SQLite driver for the message store and LID cache.
-- **`toml`** — Parser for `config.toml`.
-- **`qrcode`** — QR code rendering for pairing.
-- **`pino`** — Structured logging (configured at `warn` level for Baileys internals).
+- **`@whiskeysockets/baileys`** — Implementacja protokołu WhatsApp Web (dynamiczny import ESM).
+- **`better-sqlite3`** — Synchroniczny sterownik SQLite dla magazynu wiadomości i pamięci podręcznej LID.
+- **`toml`** — Analizator dla `config.toml`.
+- **`qrcode`** — Renderowanie kodów QR do parowania.
+- **`pino`** — Ustrukturyzowane logowanie (skonfigurowane na poziomie `warn` dla wewnętrzności Baileys).
 
-## Internal Libraries
+## Biblioteki wewnętrzne
 
-| Module | Responsibility |
+| Moduł | Odpowiedzialność |
 |---|---|
-| `lib/echo-tracker.js` | LRU of outbound texts for self-loop echo detection |
-| `lib/lid-cache.js` | SQLite persistence layer for LID→PN JID mappings |
-| `lib/dedup-tracker.js` | Two-phase message dedup with time-windowed eviction |
-| `lib/identity.js` | JID classification (`isLidJid`, `isGroupJid`), phone extraction, owner derivation, peer resolution |
-| `lib/session-key.js` | Per-conversation session key derivation and channel type mapping |
+| `lib/echo-tracker.js` | LRU tekstów wychodzących do detekcji echa pętli własnej |
+| `lib/lid-cache.js` | Warstwa trwałości SQLite dla mapowań LID→PN JID |
+| `lib/dedup-tracker.js` | Dwufazowa deduplikacja wiadomości z ewikcją opartą na oknie czasowym |
+| `lib/identity.js` | Klasyfikacja JID (`isLidJid`, `isGroupJid`), wydobywanie numeru, wyprowadzanie właściciela, rozwiązywanie peerów |
+| `lib/session-key.js` | Wyprowadzanie klucza sesji per konwersacja i mapowanie typów kanałów |
 
-## Agent ID Resolution and Caching
+## Rozwiązywanie i buforowanie identyfikatora agenta
 
-On the first inbound message after boot (or after a reconnect that cleared the cache), the gateway resolves the configured agent name to a UUID via `GET /api/agents`. The resolved ID is persisted atomically (tmp-file + rename) to `agent_id.json` next to the database, so a gateway restart during kernel downtime does not force a fresh resolution round-trip. If the agent name is not found, the first available agent is used as a fallback.
+Przy pierwszej przychodzącej wiadomości po starcie (lub po ponownym połączeniu, które wyczyściło pamięć podręczną), bramka rozwiązuje skonfigurowaną nazwę agenta na UUID przez `GET /api/agents`. Rozwiązany identyfikator jest zapisywany atomowo (plik tmp + zmiana nazwy) do `agent_id.json` obok bazy danych, aby restart bramki podczas przestoju jądra nie wymuszał nowej rundy rozwiązywania. Jeśli nazwa agenta nie zostanie znaleziona, pierwszy dostępny agent jest używany jako rezerwa.

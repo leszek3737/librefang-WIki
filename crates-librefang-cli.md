@@ -2,268 +2,268 @@
 
 # librefang-cli
 
-The command-line interface for the LibreFang Agent OS. Ships the `librefang` binary, which serves as the primary user-facing entry point for daemon management, agent lifecycle, configuration, diagnostics, and an interactive terminal UI.
+Interfejs wiersza poleceń dla LibreFang Agent OS. Dostarcza binarkę `librefang`, która służy jako główne wejście użytkownika do zarządzania demonem, cyklem życia agentów, konfiguracją, diagnostyką oraz interaktywnym interfejsem terminalowym.
 
-## Purpose
+## Przeznaczenie
 
-The CLI operates in one of two modes depending on whether a daemon is running:
+CLI działa w jednym z dwóch trybów, w zależności od tego, czy demon jest uruchomiony:
 
-- **Daemon mode** — when a daemon is listening on `http://127.0.0.1:4545` (default), the CLI forwards commands over HTTP to the running daemon's API. This is the primary workflow for persistent agents and multi-session operation.
-- **In-process mode** — when no daemon is detected, the CLI boots a kernel directly in-process for single-shot commands (e.g., `librefang chat`, `librefang spawn`). Agents spawned this way are lost when the process exits, and several features that require daemon-side state are unavailable (session management, workflow creation, skill installation, etc.).
+- **Tryb demona** — gdy demon nasłuchuje na `http://127.0.0.1:4545` (domyślnie), CLI przekazuje polecenia przez HTTP do API uruchomionego demona. To jest główny przepływ pracy dla agentów trwałych i operacji wielosesyjnych.
+- **Tryb w procesie** — gdy nie wykryto demona, CLI uruchamia jądro bezpośrednio w procesie dla poleceń jednorazowych (np. `librefang chat`, `librefang spawn`). Agenci uruchomieni w ten sposób są traćni po zakończeniu procesu, a kilka funkcji wymagających stanu po stronie demona jest niedostępnych (zarządzanie sesjami, tworzenie przepływów pracy, instalacja umiejętności itp.).
 
 ```mermaid
 flowchart LR
-    User[User] --> CLI[librefang binary]
-    CLI -->|"daemon running?"| Check{find_daemon}
-    Check -->|Yes| HTTP["HTTP API<br/>127.0.0.1:4545"]
-    Check -->|No| Kernel["In-process kernel<br/>(single-shot)"]
-    HTTP --> Daemon[Daemon process]
-    Kernel --> Agent1[Ephemeral agent]
-    Daemon --> Agent2[Persistent agent]
+    User[Użytkownik] --> CLI[binarka librefang]
+    CLI -->|"demon uruchomiony?"| Check{find_daemon}
+    Check -->|Tak| HTTP["HTTP API<br/>127.0.0.1:4545"]
+    Check -->|Nie| Kernel["Jądro w procesie<br/>(jednorazowe)"]
+    HTTP --> Daemon[Proces demona]
+    Kernel --> Agent1[Agent efemeryczny]
+    Daemon --> Agent2[Agent trwały]
 ```
 
-## Build System
+## System budowania
 
-The build script (`build.rs`) stamps three compile-time environment variables into the binary:
+Skrypt budowania (`build.rs`) wbudowuje trzy zmienne środowiskowe czasu kompilacji do binarki:
 
-| Variable | Source | Purpose |
+| Zmienna | Źródło | Przeznaczenie |
 |---|---|---|
-| `GIT_SHA` | `GITHUB_SHA` / `CI_COMMIT_SHA` env var, or `git rev-parse --short HEAD` | Short commit hash shown in `--version` and `doctor` |
-| `BUILD_DATE` | `chrono::Utc::now()` | UTC date of the build |
-| `RUSTC_VERSION` | `rustc --version` | Compiler version for diagnostics |
+| `GIT_SHA` | Zmienna środowiskowa `GITHUB_SHA` / `CI_COMMIT_SHA`, lub `git rev-parse --short HEAD` | Krótki skrót commita wyświetlany w `--version` i `doctor` |
+| `BUILD_DATE` | `chrono::Utc::now()` | Data UTC budowania |
+| `RUSTC_VERSION` | `rustc --version` | Wersja kompilatora do diagnostyki |
 
-`resolve_git_sha()` prefers CI-provided environment variables to avoid spawning a `git` subprocess on hosted runners, and locates the `git` binary via `which::which()` rather than relying on shell PATH lookup. The `SOURCE_DATE_EPOCH` env var is tracked for reproducibility re-runs.
+`resolve_git_sha()` preferuje zmienne środowiskowe dostarczane przez CI, aby unikać uruchamiania podprocesu `git` na runnerach hostowanych, i lokalizuje binarkę `git` za pomocą `which::which()` zamiast polegać na wyszukiwaniu w PATH powłoki. Zmienna środowiskowa `SOURCE_DATE_EPOCH` jest śledzona na potrzeby ponownych uruchomień powtarzalnych.
 
-### Cargo Features
+### Funkcje Cargo
 
-| Feature | Description |
+| Funkcja | Opis |
 |---|---|
-| `default` | Enables `telemetry` |
-| `telemetry` | Activates `opentelemetry` and `tracing-opentelemetry` for distributed tracing, propagated through `librefang-api/telemetry` |
-| `mini` | Empty legacy alias. Retained so existing `cli_*_mini` release jobs continue producing `librefang-${target}-mini.tar.gz` artifacts. Byte-identical to the default build since per-channel cargo features were removed. |
+| `default` | Włącza `telemetry` |
+| `telemetry` | Aktywuje `opentelemetry` i `tracing-opentelemetry` do śledzenia rozproszonego, propagowane przez `librefang-api/telemetry` |
+| `mini` | Pusty pusty alias. Zachowany, aby istniejące zadania wydawnicze `cli_*_mini` nadal produkowały artefakty `librefang-${target}-mini.tar.gz`. Identyczny bajtowo z domyślną kompilacją, ponieważ per-kanałowe funkcje cargo zostały usunięte. |
 
-Historical feature flags (`core-channels`, `all-channels`, `android`) have been removed. All channel adapters now run as out-of-process sidecars via the SDK package (`pip install librefang-sdk`).
+Historyczne flagi funkcji (`core-channels`, `all-channels`, `android`) zostały usunięte. Wszystkie adaptery kanałów uruchamiają się teraz jako procesy poboczne spoza procesu przez pakiet SDK (`pip install librefang-sdk`).
 
-### Global Allocator
+### Globalny alokator
 
-On non-MSVC targets, `tikv-jemallocator` replaces the default global allocator with `disable_initial_exec_tls` enabled to avoid TLS initialization conflicts in dynamically linked binaries.
+Na celach innych niż MSVC, `tikv-jemallocator` zastępuje domyślny globalny alokator z włączonym `disable_initial_exec_tls`, aby uniknąć konfliktów inicjalizacji TLS w binarkach dynamicznie linkowanych.
 
-## Architecture
+## Architektura
 
-### Entry Point and Command Dispatch
+### Punkt wejścia i dyspozyczja poleceń
 
-`src/main.rs` defines the top-level `clap` command tree and dispatches to handler functions. The CLI uses `clap` with subcommands organized by domain:
+`src/main.rs` definiuje drzewo poleceń najwyższego poziomu `clap` i przekazuje je do funkcji obsługi. CLI używa `clap` z podpoleceniami zorganizowanymi według domeny:
 
 ```
 librefang
-├── start / stop / restart / status    — daemon lifecycle
-├── init / upgrade                      — first-run setup and migration
-├── agent / spawn / chat                — agent management
-├── config (get/set/edit/show/set-key)  — configuration
-├── doctor                              — environment diagnostics
-├── vault (init/unlock/set/get/...)     — credential vault
-├── channel (setup/list/rm/reload)      — channel sidecar management
-├── skill (install/list/remove/test/...) — skill lifecycle
-├── hand (install/activate/deactivate/...) — hand management
-├── mcp (add/remove/catalog/list)       — MCP server configuration
-├── auth (pool/hash/...)                — authentication and credential pools
-├── models (connect/list/set)           — model catalog and routing
-├── automation (workflow/trigger/cron)  — automation rules
-├── service (install/uninstall/status)  — OS auto-start service
-├── update / uninstall / reset          — maintenance
-├── tui                                 — interactive terminal UI
-└── acp                                 — Agent Communication Protocol server
+├── start / stop / restart / status    — cykl życia demona
+├── init / upgrade                      — konfiguracja pierwszego uruchomienia i migracja
+├── agent / spawn / chat                — zarządzanie agentami
+├── config (get/set/edit/show/set-key)  — konfiguracja
+├── doctor                              — diagnostyka środowiska
+├── vault (init/unlock/set/get/...)     — magazyn poświadczeń
+├── channel (setup/list/rm/reload)      — zarządzanie procesami pobocznymi kanałów
+├── skill (install/list/remove/test/...) — cykl życia umiejętności
+├── hand (install/activate/deactivate/...) — zarządzanie rękami
+├── mcp (add/remove/catalog/list)       — konfiguracja serwerów MCP
+├── auth (pool/hash/...)                — uwierzytelnianie i pule poświadczeń
+├── models (connect/list/set)           — katalog modeli i routing
+├── automation (workflow/trigger/cron)  — reguły automatyzacji
+├── service (install/uninstall/status)  — usługa autostartu systemu operacyjnego
+├── update / uninstall / reset          — konserwacja
+├── tui                                 — interaktywny interfejs terminalowy
+└── acp                                 — serwer Agent Communication Protocol
 ```
 
-### Startup Sequence
+### Sekwencja uruchamiania
 
 ```mermaid
 flowchart TD
-    A["main()"] --> B["init() — load i18n bundles"]
-    A --> C["load_dotenv() — read ~/.librefang/.env"]
-    A --> D["setup_tracing() — configure logging"]
-    B --> E["clap::parse() — interpret args"]
+    A["main()"] --> B["init() — ładuj pakiety i18n"]
+    A --> C["load_dotenv() — czytaj ~/.librefang/.env"]
+    A --> D["setup_tracing() — konfiguruj logowanie"]
+    B --> E["clap::parse() — interpretuj argumenty"]
     C --> E
     D --> E
-    E --> F{Subcommand}
-    F -->|start| G["spawn detached daemon"]
-    F -->|most others| H["find_daemon()"]
-    H --> I{Daemon running?}
-    I -->|Yes| J["daemon_client() — HTTP"]
-    I -->|No| K["Boot in-process kernel"]
+    E --> F{Podpolecenie}
+    F -->|start| G["uruchom odłączony demon"]
+    F -->|większość pozostałych| H["find_daemon()"]
+    H --> I{Demon uruchomiony?}
+    I -->|Tak| J["daemon_client() — HTTP"]
+    I -->|Nie| K["Uruchom jądro w procesie"]
 ```
 
-The `main` function initializes three subsystems before dispatching:
+Funkcja `main` inicjalizuje trzy podsystemy przed dyspozycją:
 
-1. **Internationalization** (`src/i18n.rs`) — loads Fluent `.ftl` resource bundles for the user's locale. `init()` calls `bundle_for()` to resolve language identifiers via `unic-langid` and compile translation messages from `locales/`.
+1. **Internacjonalizacja** (`src/i18n.rs`) — ładuje pakiety zasobów Fluent `.ftl` dla locale użytkownika. `init()` wywołuje `bundle_for()`, aby rozwiązać identyfikatory języków przez `unic-langid` i kompilować komunikaty tłumaczeń z `locales/`.
 
-2. **Environment loading** — `load_dotenv()` from `librefang-extensions` reads `~/.librefang/.env`, calling `preseed_vault_key_from()` and `parse_env_line()` which invokes `unescape_env_value()` for each entry.
+2. **Ładowanie środowiska** — `load_dotenv()` z `librefang-extensions` czyta `~/.librefang/.env`, wywołując `preseed_vault_key_from()` i `parse_env_line()`, które wywołuje `unescape_env_value()` dla każdego wpisu.
 
-3. **Tracing** — configures `tracing-subscriber`, conditionally with `tracing-opentelemetry` when the `telemetry` feature is active.
+3. **Śledzenie** — konfiguruje `tracing-subscriber`, warunkowo z `tracing-opentelemetry` gdy funkcja `telemetry` jest aktywna.
 
-### Command Implementation Pattern
+### Wzór implementacji poleceń
 
-Commands are organized in `src/commands/` by domain. Each file follows a consistent pattern:
+Polecenia są zorganizowane w `src/commands/` według domeny. Każdy plik podąża za spójnym wzorem:
 
-- A public `cmd_*` function receives parsed `clap` arguments.
-- Commands that require a running daemon call `require_daemon()` or `daemon_client()` from `src/commands/common.rs`.
-- Commands that can operate with or without a daemon call `find_daemon()` first, branching between HTTP and in-process code paths.
+- Publiczna funkcja `cmd_*` odbiera sparsowane argumenty `clap`.
+- Polecenia wymagające uruchomionego demona wywołują `require_daemon()` lub `daemon_client()` z `src/commands/common.rs`.
+- Polecenia, które mogą działać z demonem lub bez niego, wywołują najpierw `find_daemon()`, rozgałęziając się między ścieżkami kodu HTTP i w procesie.
 
-**`src/commands/common.rs`** is the shared infrastructure layer:
+**`src/commands/common.rs`** to współdzielona warstwa infrastruktury:
 
-| Function | Purpose |
+| Funkcja | Przeznaczenie |
 |---|---|
-| `daemon_client()` | Builds an authenticated `reqwest::blocking::Client` targeting the daemon's HTTP API |
-| `daemon_json()` | Convenience wrapper that GETs a JSON endpoint and deserializes |
-| `find_daemon()` / `find_daemon_with_probe()` | Reads `daemon.json` (via `librefang-api/src/server.rs::read_daemon_info`) to check if a daemon is running |
-| `require_daemon()` | Returns an error with a fix hint if no daemon is found, used by commands that cannot work in-process |
-| `resolve_agent_id()` | Resolves agent names/IDs through the daemon |
-| `cli_librefang_home()` | Resolves the `~/.librefang` directory |
-| `restrict_file_permissions()` | Sets `0600` permissions on sensitive files (`.env`, secrets) |
-| `test_api_key()` | Validates an LLM provider API key by issuing a lightweight request |
-| `copy_dir_recursive_skips_symlinks()` | Used during migration to copy agent/channel/skill directories |
+| `daemon_client()` | Buduje uwierzytelnionego `reqwest::blocking::Client` celującego w HTTP API demona |
+| `daemon_json()` | Wygodny wrapper, który GET-uje punkt końcowy JSON i deserializuje |
+| `find_daemon()` / `find_daemon_with_probe()` | Czyta `daemon.json` (przez `librefang-api/src/server.rs::read_daemon_info`), aby sprawdzić czy demon jest uruchomiony |
+| `require_daemon()` | Zwraca błąd z podpowiedzią naprawy, jeśli nie znaleziono demona — używane przez polecenia, które nie mogą działać w procesie |
+| `resolve_agent_id()` | Rozwiązuje nazwy/identyfikatory agentów przez demona |
+| `cli_librefang_home()` | Rozwiązuje katalog `~/.librefang` |
+| `restrict_file_permissions()` | Ustawia uprawnienia `0600` na plikach wrażliwych (`.env`, sekrety) |
+| `test_api_key()` | Waliduje klucz API dostawcy LLM, wydając lekki żądanie |
+| `copy_dir_recursive_skips_symlinks()` | Używane podczas migracji do kopiowania katalogów agentów/kanalów/umiejętności |
 
-### Daemon Lifecycle Management
+### Zarządzanie cyklem życia demona
 
-The daemon lifecycle commands (`src/commands/daemon.rs`) handle:
+Polecenia cyklu życia demona (`src/commands/daemon.rs`) obsługują:
 
-- **`start`** — launches the daemon as a detached background process. Writes a log file, polls for health readiness, and reports the daemon URL. On first run, triggers quick setup via `daemon-first-run-setup`.
-- **`stop`** — sends a `POST /api/shutdown` request. Handles the 401 fallback scenario (issue #4693) where a CLI upgrade rotates API credentials while the old daemon is still running, falling back to PID-based termination.
-- **`restart`** — combines stop + start with graceful error handling.
-- **`status`** — queries daemon health, active agents, sessions, memory, and channels.
+- **`start`** — uruchamia demona jako odłączony proces w tle. Zapisuje plik logów, odpytuje o gotowość zdrowotną i raportuje URL demona. Przy pierwszym uruchomieniu wyzwala szybka konfiguracja przez `daemon-first-run-setup`.
+- **`stop`** — wysyła żądanie `POST /api/shutdown`. Obsługuje scenariusz awaryjny 401 (zagadnienie #4693), gdzie aktualizacja CLI rotuje poświadczenia API, podczas gdy stary demon nadal działa — następuje powrót do terminacji opartej na PID.
+- **`restart`** — łączy stop + start z łagodną obsługą błędów.
+- **`status`** — odpytuje zdrowie demona, aktywne agentów, sesje, pamięć i kanały.
 
-### Internationalization
+### Internacjonalizacja
 
-All user-facing strings are externalized to Fluent translation files in `locales/`. The primary bundle is `locales/en/main.ftl`, containing hundreds of message keys organized by domain:
+Wszystkie ciągi znaków widoczne dla użytkownika są externalizowane do plików tłumaczeń Fluent w `locales/`. Głównym pakietem jest `locales/en/main.ftl`, zawierający setki kluczy komunikatów zorganizowanych według domeny:
 
-- Messages use Fluent's ICU pluralization and variable interpolation: `{ $count } agent(s) loaded`, `{ $count -> [one] ... *[other] ... }`
-- Error messages are paired with fix hints: `shutdown-401-detected` / `shutdown-401-explainer` / `shutdown-401-fallback-attempt` / `shutdown-401-fallback-fix`
-- TUI-specific strings are namespaced with `tui-` prefixes
+- Komunikaty używają liczby mnogiej ICU i interpolacji zmiennych Fluent: `{ $count } agent(s) loaded`, `{ $count -> [one] ... *[other] ... }`
+- Komunikaty błędów są sparowane z podpowiedziami naprawy: `shutdown-401-detected` / `shutdown-401-explainer` / `shutdown-401-fallback-attempt` / `shutdown-401-fallback-fix`
+- Ciągi specyficzne dla TUI są przestrzenione prefiksami `tui-`
 
-The `i18n` module resolves the user's locale from system settings and falls back to English. Messages are retrieved at call sites using the Fluent bundle's `get_message()` + pattern formatting.
+Moduł `i18n` rozwiązuje locale użytkownika z ustawień systemowych i przechodzi do angielskiego. Komunikaty są pobierane w punktach wywołania używając `get_message()` + formatowania wzorców pakietu Fluent.
 
-## Terminal UI
+## Interfejs Terminalowy
 
-The TUI subsystem (`src/tui/`) provides a full-screen interactive dashboard built with `ratatui`. It is launched via `librefang tui` or the interactive setup wizard.
+Podsystem TUI (`src/tui/`) zapewnia interaktywny pełnoekranowy dashboard zbudowany z `ratatui`. Jest uruchamiany przez `librefang tui` lub interaktywny kreator konfiguracji.
 
-### Tab Architecture
+### Architektura zakładek
 
 ```mermaid
 flowchart TB
-    TUI["TUI App"] --> Dash[Dashboard]
-    TUI --> Agents[Agents]
-    TUI --> Chat[Chat]
-    TUI --> Sessions[Sessions]
-    TUI --> Flows[Workflows]
-    TUI --> Triggers[Triggers]
-    TUI --> Memory[Memory]
-    TUI --> Skills[Skills]
-    TUI --> Hands[Hands]
-    TUI --> Ext[Extensions]
-    TUI --> Sec[Security]
-    TUI --> Audit[Audit Trail]
-    TUI --> Usage[Usage]
-    TUI --> Peers[OFP Peers]
-    TUI --> Comms[Comms]
+    TUI["Aplikacja TUI"] --> Dash[Dashboard]
+    TUI --> Agents[Agenci]
+    TUI --> Chat[Czat]
+    TUI --> Sessions[Sesje]
+    TUI --> Flows[Przepływy pracy]
+    TUI --> Triggers[Wyzwalacze]
+    TUI --> Memory[Pamięć]
+    TUI --> Skills[Umiejętności]
+    TUI --> Hands[Ręce]
+    TUI --> Ext[Rozszerzenia]
+    TUI --> Sec[Bezpieczeństwo]
+    TUI --> Audit[Ślad audytu]
+    TUI --> Usage[Użycie]
+    TUI --> Peers[Peery OFP]
+    TUI --> Comms[Komunikacja]
 ```
 
-Each tab is implemented in `src/tui/` or `tui/screens/` and follows a pattern of:
+Każda zakładka jest zaimplementowana w `src/tui/` lub `tui/screens/` i podąża za wzorem:
 
-1. `on_tab_enter()` — called when the tab becomes active, triggers data refresh
-2. Event handlers process keyboard input via `handle_key()` → `switch_tab()` → `on_tab_enter()` → `refresh_dashboard()`
-3. State mutations propagate through `to_ref()` which provides mutable access to the active tab's state
+1. `on_tab_enter()` — wywoływane gdy zakładka staje się aktywna, wyzwala odświeżenie danych
+2. Obsługa zdarzeń przetwarza wejście klawiatury przez `handle_key()` → `switch_tab()` → `on_tab_enter()` → `refresh_dashboard()`
+3. Mutacje stanu propagują się przez `to_ref()`, który zapewnia mutowalny dostęp do stanu aktywnej zakładki
 
-### Key TUI Components
+### Kluczowe komponenty TUI
 
-- **`tui/mod.rs`** — core app loop, tab switching, global key handling, slash commands (`/help`, `/model`, `/status`, `/clear`, `/new`, `/kill`, `/exit`)
-- **`tui/screens/init_wizard.rs`** — multi-step setup wizard: migration detection → provider selection → API key entry → model selection → smart routing configuration. Calls `load_models_for_provider()` and `default_model_for_provider()` from `librefang-runtime/src/model_catalog.rs`
-- **`tui/screens/welcome.rs`** — landing screen with daemon detection, showing provider status and agent count
-- **Chat interface** — streaming responses, model picker (Ctrl+M), token estimation, tool call rendering with `thinking…` / `running…` states
-- **Security tab** — displays active security features (path traversal prevention, SSRF protection, WASM dual metering, taint tracking, Merkle audit trail) and allows on-demand chain verification
+- **`tui/mod.rs`** — główna pętla aplikacji, przełączanie zakładek, globalna obsługa klawiszy, polecenia ukośnikowe (`/help`, `/model`, `/status`, `/clear`, `/new`, `/kill`, `/exit`)
+- **`tui/screens/init_wizard.rs`** — wieloetapowy kreator konfiguracji: wykrywanie migracji → wybór dostawcy → wprowadzenie klucza API → wybór modelu → konfiguracja inteligentnego routingu. Wywołuje `load_models_for_provider()` i `default_model_for_provider()` z `librefang-runtime/src/model_catalog.rs`
+- **`tui/screens/welcome.rs`** — ekran powitalny z wykrywaniem demona, pokazujący status dostawcy i liczbę agentów
+- **Interfejs czatu** — strumieniowe odpowiedzi, wybór modelu (Ctrl+M), szacowanie tokenów, renderowanie wywołań narzędzi ze stanami `thinking…` / `running…`
+- **Zakładka bezpieczeństwa** — wyświetla aktywne funkcje bezpieczeństwa (zapobieganie traversowaniu ścieżek, ochrona SSRF, podwójny pomiar WASM, śledzenie zanieczyszczeń, ślad audytu Merkle) i pozwala na na żądanie weryfikację łańcucha
 
-### In-Process Limitations
+### Ograniczenia w procesie
 
-The TUI detects in-process mode and disables operations that require daemon-side state. When operating without a daemon, the following show explicit "not available in-process" messages:
+TUI wykrywa tryb w procesie i wyłącza operacje wymagające stanu po stronie demona. Podczas pracy bez demona, następujące pokazują jawne komunikaty „niedostępne w procesie”:
 
-- Workflow execution and creation
-- Trigger creation, deletion, and toggling
-- Session management and deletion
-- Memory KV store operations
-- Skill installation/uninstallation
-- Provider key management and testing
-- Hand activation/deactivation
-- Extension install/remove/reconnect
-- Inter-agent messaging and task posting
+- Wykonanie i tworzenie przepływów pracy
+- Tworzenie, usuwanie i przełączanie wyzwalaczy
+- Zarządzanie sesjami i usuwanie sesji
+- Operacje na magazynie KV pamięci
+- Instalacja/deinstalacja umiejętności
+- Zarządzanie kluczami dostawcy i testowanie
+- Aktywacja/dezaktywacja rąk
+- Instalacja/usunięcie/ponowne połączenie rozszerzeń
+- Komunikacja międzyagentowa i publikowanie zadań
 
-## ACP Server
+## Serwer ACP
 
-`src/acp.rs` implements the Agent Communication Protocol server, which can attach to a running daemon or boot an in-process kernel:
+`src/acp.rs` implementuje serwer Agent Communication Protocol, który może podłączyć się do uruchomionego demona lub uruchomić jądro w procesie:
 
-- **UDS mode** (`acp-attached-uds`) — connects to the daemon via Unix domain socket
-- **Named pipe mode** (`acp-attached-pipe`) — Windows equivalent
-- **In-process mode** (`acp-in-process`) — boots a kernel directly when no daemon is detected
+- **Tryb UDS** (`acp-attached-uds`) — łączy się z demonem przez gniazdo domeny Unix
+- **Tryb nazwanego potoku** (`acp-attached-pipe`) — odpowiednik dla Windows
+- **Tryb w procesie** (`acp-in-process`) — uruchamia jądro bezpośrednio gdy nie wykryto demona
 
-`run_acp_server()` calls `resolve_agent()` from `librefang-acp/src/kernel_adapter.rs` to locate the target agent by name. `run_pipe_proxy()` handles bidirectional I/O, using `split()` from `librefang-memory-wiki` for stream demultiplexing.
+`run_acp_server()` wywołuje `resolve_agent()` z `librefang-acp/src/kernel_adapter.rs`, aby zlokalizować docelowego agenta po nazwie. `run_pipe_proxy()` obsługuje dwukierunkowe I/O, używając `split()` z `librefang-memory-wiki` do demultiplekserowania strumieni.
 
-## Credential and Security Management
+## Zarządzanie poświadczeniami i bezpieczeństwem
 
-### Vault
+### Magazyn
 
-The vault subsystem provides encrypted credential storage:
+Podsystem magazynu zapewnia zaszyfrowane przechowywanie poświadczeń:
 
-- **`vault init`** — initializes the vault with a master key derived from `LIBREFANG_VAULT_KEY` (32-byte base64)
-- **`vault set/get/remove`** — CRUD operations on individual secrets
-- **`vault rotate-key`** (`cmd_vault_rotate_key`) — re-encrypts the entire vault under a new master key. Reads old/new keys from `LIBREFANG_VAULT_KEY_OLD` / `LIBREFANG_VAULT_KEY_NEW` env vars or `--from-stdin`. Calls `decode_master_key()` from `librefang-extensions/src/vault.rs`, verifies the sentinel under the old key, rewraps all entries, and preserves the original file on failure.
+- **`vault init`** — inicjalizuje magazyn kluczem głównym pochodzącym z `LIBREFANG_VAULT_KEY` (32-bajtowy base64)
+- **`vault set/get/remove`** — operacje CRUD na poszczególnych sekretach
+- **`vault rotate-key`** (`cmd_vault_rotate_key`) — szyfruje ponownie cały magazyn nowym kluczem głównym. Czyta stare/nowe klucze ze zmiennych środowiskowych `LIBREFANG_VAULT_KEY_OLD` / `LIBREFANG_VAULT_KEY_NEW` lub `--from-stdin`. Wywołuje `decode_master_key()` z `librefang-extensions/src/vault.rs`, weryfikuje wartownik pod starym kluczem, przepakowuje wszystkie wpisy i zachowuje oryginalny plik w przypadku niepowodzenia.
 
-### Authentication
+### Uwierzytelnianie
 
-`src/commands/auth.rs` handles:
+`src/commands/auth.rs` obsługuje:
 
-- **API key hashing** — `cmd_hash_api_key()` generates bearer tokens via `generate_bearer_token()` and hashes via `hash_device_token()` from `librefang-api/src/password_hash.rs`
-- **Password hashing** — `cmd_hash_password()` uses `hash_password()` for dashboard credentials
-- **Credential pools** — multi-key rotation with strategies: `fill_first`, `round_robin`, `random`, `least_used`. Pools track per-key request counts, cooldown timers, and health status (`healthy`, `exhausted`, `cooldown`, `env-missing`, `invalid`)
-- **ChatGPT OAuth** — `authenticate_chatgpt()` orchestrates the full OAuth flow via `librefang-runtime/src/chatgpt_oauth.rs`: device auth flow (`start_device_auth_flow` → `poll_device_auth_flow`) with browser fallback (`start_oauth_flow` → `run_oauth_callback_server` → `exchange_code_for_tokens`). Tokens are persisted via `write_chatgpt_secrets()` with owner-only file permissions verified by `write_chatgpt_secrets_is_owner_only_on_fresh_file()`
+- **Haszowanie kluczy API** — `cmd_hash_api_key()` generuje tokeny bearer przez `generate_bearer_token()` i haszuje przez `hash_device_token()` z `librefang-api/src/password_hash.rs`
+- **Haszowanie haseł** — `cmd_hash_password()` używa `hash_password()` dla poświadczeń dashboardu
+- **Pule poświadczeń** — rotacja wielokluczowa ze strategiami: `fill_first`, `round_robin`, `random`, `least_used`. Pule śledzą liczbę żądań na klucz, timery cooldown i status zdrowia (`healthy`, `exhausted`, `cooldown`, `env-missing`, `invalid`)
+- **ChatGPT OAuth** — `authenticate_chatgpt()` orkiestruje pełny przepływ OAuth przez `librefang-runtime/src/chatgpt_oauth.rs`: przepływ uwierzytelniania urządzenia (`start_device_auth_flow` → `poll_device_auth_flow`) z awaryjnym przeglądarkowym (`start_oauth_flow` → `run_oauth_callback_server` → `exchange_code_for_tokens`). Tokeny są utrwalane przez `write_chatgpt_secrets()` z weryfikacją uprawnień tylko dla właściciela przez `write_chatgpt_secrets_is_owner_only_on_fresh_file()`
 
-### EveryAPI Gateway Integration
+### Integracja z bramką EveryAPI
 
-`src/commands/everyapi.rs` (`librefang models connect everyapi`) registers an EveryAPI gateway as a provider:
+`src/commands/everyapi.rs` (`librefang models connect everyapi`) rejestruje bramkę EveryAPI jako dostawcę:
 
-1. `load_credentials()` — reads the EveryAPI credentials file, validating JSON structure and required fields (`api_base`, `relay_key`)
-2. Fetches the gateway's model catalog and pricing feed
-3. Filters models that lack context window or output limit metadata (borrowing values from the built-in OpenRouter snapshot when possible)
-4. `write_provider_file()` — writes the provider definition to the LibreFang config directory
-5. Optionally pins the gateway URL in `config.toml` and sets the default model
+1. `load_credentials()` — czyta plik poświadczeń EveryAPI, weryfikując strukturę JSON i wymagane pola (`api_base`, `relay_key`)
+2. Pobiera katalog modeli i źródło cenowe bramki
+3. Filtruje modele, którym brakuje metadanych okna kontekstu lub limitu wyjścia (korzystając z wartości z wbudowanej migawki OpenRouter, gdy możliwe)
+4. `write_provider_file()` — zapisuje definicję dostawcy w katalogu konfiguracyjnym LibreFang
+5. Opcjonalnie przypina URL bramki w `config.toml` i ustawia domyślny model
 
-## Doctor Diagnostics
+## Diagnostyka Doctor
 
-`src/commands/doctor_cmd.rs` implements `librefang doctor`, a comprehensive environment diagnostic that checks:
+`src/commands/doctor_cmd.rs` implementuje `librefang doctor`, kompleksową diagnostykę środowiska sprawdzającą:
 
-- **Filesystem** — `~/.librefang` directory, `.env` permissions (should be `0600`), config file existence and syntax
-- **Database** — SQLite validity and connectivity
-- **Daemon** — running status, health endpoint, uptime, MCP server health, database connectivity
-- **Providers** — API key validity (tests against provider endpoints, detecting 401/403 rejections), endpoint reachability
-- **Config validation** — TOML parse, `KernelConfig` deserialization, `api_listen` address validity (rejects port 0, privileged ports, malformed addresses), include file existence
-- **MCP servers** — validates command/URL fields, `http_compat` tool/header configuration
-- **Skills** — load count, prompt injection scan
-- **Runtime tools** — Rust, Python, and Node.js availability
-- **Desktop dependencies** — GTK/WebKit stack via `pkg-config` (Linux only)
-- **Vault key** — base64 validity, 32-byte length requirement
+- **System plików** — katalog `~/.librefang`, uprawnienia `.env` (powinny być `0600`), istnienie i składnia pliku konfiguracyjnego
+- **Baza danych** — ważność SQLite i łączność
+- **Demon** — status uruchomienia, punkt końcowy zdrowia, uptime, zdrowie serwerów MCP, łączność z bazą danych
+- **Dostawcy** — ważność kluczy API (testuje względem punktów końcowych dostawców, wykrywając odrzucenia 401/403), osiągalność punktów końcowych
+- **Walidacja konfiguracji** — parsowanie TOML, deserializacja `KernelConfig`, ważność adresu `api_listen` (odrzuca port 0, uprzywilejowane porty, nieprawidłowo sformułowane adresy), istnienie plików include
+- **Serwery MCP** — weryfikuje pola command/URL, konfigurację narzędzi/nagłówków `http_compat`
+- **Umiejętności** — liczba załadowanych, skanowanie wstrzykiwania promptów
+- **Narzędzia środowiska uruchomieniowego** — dostępność Rust, Python i Node.js
+- **Zależności desktopowe** — stos GTK/WebKit przez `pkg-config` (tylko Linux)
+- **Klucz magazynu** — ważność base64, wymóg 32-bajtowej długości
 
-With `--repair`, the doctor can auto-fix common issues (create missing directories, fix `.env` permissions, remove stale `daemon.json`, create default config).
+Z opcją `--repair`, doctor może automatycznie naprawiać typowe problemy (tworzyć brakujące katalogi, naprawić uprawnienia `.env`, usunąć przestarzały `daemon.json`, utworzyć domyślną konfigurację).
 
-## OS Service Management
+## Zarządzanie usługą systemu operacyjnego
 
-`src/commands/maintenance.rs` handles auto-start service installation and removal across platforms:
+`src/commands/maintenance.rs` obsługuje instalację i usuwanie usługi autostartu na różnych platformach:
 
-| Platform | Mechanism | Notes |
+| Platforma | Mechanizm | Uwagi |
 |---|---|---|
-| Linux | systemd user service | Recommends `loginctl enable-linger` for headless servers |
-| macOS | LaunchAgent (per-user) or LaunchDaemon (`--system`, requires root) | Detects and prevents conflicting per-user + boot-time installations |
-| Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` registry entry | |
+| Linux | Usługa użytkownika systemd | Rekomenduje `loginctl enable-linger` dla serwerów headless |
+| macOS | LaunchAgent (na użytkownika) lub LaunchDaemon (`--system`, wymaga roota) | Wykrywa i zapobiega konfliktom instalacji per-użytkownika + boot-time |
+| Windows | Wpis rejestru `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` | |
 
-`librefang update` performs self-update by checking GitHub Releases, downloading the appropriate asset, and swapping the binary. It detects installation method (official path, cargo install, package manager) and blocks unsupported scenarios (e.g., updating a `cargo install` binary in-place).
+`librefang update` wykonuje samodzielną aktualizację, sprawdzając GitHub Releases, pobierając odpowiedni artefakt i podmieniając binarkę. Wykrywa metodę instalacji (oficjalna ścieżka, cargo install, menedżer pakietów) i blokuje nieobsługiwane scenariusze (np. aktualizacja w miejscu binarki `cargo install`).
 
-## Integration with Workspace Crates
+## Integracja z pakietami workspace
 
 ```mermaid
 flowchart LR
@@ -287,26 +287,26 @@ flowchart LR
     ACP --> Adapter["kernel_adapter.rs<br/>resolve_agent"]
 ```
 
-The CLI is the orchestration layer — it rarely contains business logic directly. Instead, it:
+CLI jest warstwą orkiestracji — rzadko zawiera bezpośrednio logikę biznesową. Zamiast tego:
 
-- Calls `librefang-kernel/src/config.rs::load_config()` for configuration parsing
-- Talks to `librefang-api` for HTTP daemon communication and daemon info discovery
-- Uses `librefang-extensions` for vault operations and `.env` management
-- Delegates model catalog queries to `librefang-runtime/src/model_catalog.rs`
-- Relies on `librefang-runtime/src/registry_sync.rs::sync_registry()` for agent template synchronization (called from `src/bundled_agents.rs::sync_registry_agents()`)
-- Uses `librefang-acp` with the `kernel-adapter` feature for ACP agent resolution
+- Wywołuje `librefang-kernel/src/config.rs::load_config()` do parsowania konfiguracji
+- Komunikuje się z `librefang-api` w celu komunikacji HTTP z demonem i odkrywania informacji o demonie
+- Używa `librefang-extensions` do operacji na magazynie i zarządzania `.env`
+- Deleguje zapytania katalogu modeli do `librefang-runtime/src/model_catalog.rs`
+- Polega na `librefang-runtime/src/registry_sync.rs::sync_registry()` do synchronizacji szablonów agentów (wywoływane z `src/bundled_agents.rs::sync_registry_agents()`)
+- Używa `librefang-acp` z funkcją `kernel-adapter` do rozwiązywania agentów ACP
 
-## Migration Support
+## Wsparcie migracji
 
-The CLI supports migration from legacy installations:
+CLI wspiera migrację z przestarzałych instalacji:
 
-- **`librefang init`** with `init-upgrade-existing` — detects existing `config.toml` and runs an upgrade flow that backs up the config, syncs the registry, merges new config fields, and reports what changed
-- **`librefang migrate --from openclaw`** (`src/commands/system.rs`) — migrates from OpenClaw/OpenFang installations, importing agents, channels, skills, memory files, sessions, and configuration
-- The TUI init wizard includes a migration detection step with summary reporting (imported/skipped/warnings counts)
+- **`librefang init`** z `init-upgrade-existing` — wykrywa istniejący `config.toml` i uruchamia przepływ aktualizacji, który kopiuje zapasową konfigurację, synchronizuje rejestr, łączy nowe pola konfiguracyjne i raportuje co się zmieniło
+- **`librefang migrate --from openclaw`** (`src/commands/system.rs`) — migruje z instalacji OpenClaw/OpenFang, importując agentów, kanały, umiejętności, pliki pamięci, sesje i konfigurację
+- Kreator konfiguracji TUI zawiera krok wykrywania migracji z raportowaniem podsumowania (liczby zaimportowanych/pominiętych/ostrzeżeń)
 
-## Logging and Observability
+## Logowanie i obserwowalność
 
-- The `telemetry` feature enables `opentelemetry` + `tracing-opentelemetry` for distributed tracing export
-- Non-telemetry builds use `tracing-subscriber` for local structured logging
-- Daemon logs are tailable via `librefang logs --follow`
-- The TUI Logs tab provides filtering by level (Error/Warn/Info/All), text search, and auto-refresh toggling
+- Funkcja `telemetry` włącza `opentelemetry` + `tracing-opentelemetry` do eksportu śledzenia rozproszonego
+- Kompilacje bez telemetry używają `tracing-subscriber` do lokalnego logowania strukturalnego
+- Logi demona mogą być obserwowane przez `librefang logs --follow`
+- Zakładka logów TUI zapewnia filtrowanie według poziomu (Błąd/Ostrzeżenie/Info/Wszystkie), wyszukiwanie tekstowe i przełączanie autoodświeżania

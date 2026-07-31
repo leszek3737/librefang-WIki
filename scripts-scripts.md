@@ -1,51 +1,51 @@
-# scripts — scripts
+# scripts — skrypty
 
 # scripts/
 
-Repository automation: CI lint gates, architectural invariant enforcement, release tooling, and SDK code generation. Every script here is designed to run locally by contributors and in CI without modification.
+Automatyzacja repozytorium: bramki lint w CI, wymuszanie niezmienników architektonicznych, narzędzia wydawnicze i generowanie kodu SDK. Każdy skrypt jest zaprojektowany tak, aby uruchamiał się lokalnie u współtwórców oraz w CI bez modyfikacji.
 
-## What lives here
+## Co się tu znajduje
 
-| Script | Language | Purpose | Issue tracking |
-|--------|----------|---------|----------------|
-| `changelog-to-article.sh` | Bash | Scaffolds `articles/release-<date>.md` from a CHANGELOG section | #3397 |
-| `check-changelog-attribution.py` | Python | Enforces `(@user)` attribution on new CHANGELOG bullets and `changelog.d/` fragments | #3400 |
-| `check-agents-claude-pair.sh` | POSIX sh | Verifies every non-root `AGENTS.md` has a sibling `CLAUDE.md` symlink | #3297 |
-| `check-api-kernel-imports.sh` | Bash | Reports `librefang_kernel::<internal>` import surface; hard-gates direct `LibreFangKernel` type references | #3744 |
-| `check-api-runtime-decoupling.sh` | Bash | Prevents re-introduction of direct `librefang-runtime` dependency in `librefang-api` | #3596 |
-| `check-error-shape.sh` | Bash | Rejects non-canonical HTTP error envelopes in route handlers | #3505 |
-| `check-no-empty-string-sentinels.sh` | Bash | Flags empty-string sentinel patterns in API responses | #3302 |
-| `check-pubkey-lockstep.sh` | Bash | Ensures registry pubkey is byte-identical across daemon + workers | — |
-| `check-k8s-manifests.py` | Python | Validates rendered Kubernetes manifests for safety properties | #6632, #6633 |
-| `check-skills-supply-chain.py` | Python | Static audit for malicious patterns in skill/hand/extension bundles | #3305, #3333 |
-| `codegen-sdks.py` | Python | Generates Python, JS, Go, Rust SDK clients from `openapi.json` | — |
+| Skrypt | Język | Przeznaczenie | Śledzenie zgłoszeń |
+|--------|-------|---------------|---------------------|
+| `changelog-to-article.sh` | Bash | Tworzy szkielet `articles/release-<data>.md` na podstawie sekcji CHANGELOG | #3397 |
+| `check-changelog-attribution.py` | Python | Wymusza atrybucję `(@użytkownik)` w nowych punktach CHANGELOG i fragmentach `changelog.d/` | #3400 |
+| `check-agents-claude-pair.sh` | POSIX sh | Weryfikuje, czy każdy niegłówny `AGENTS.md` ma powiązany dowiązanie symboliczne `CLAUDE.md` | #3297 |
+| `check-api-kernel-imports.sh` | Bash | Raportuje powierzchnię importów `librefang_kernel::<internal>`; twardo blokuje bezpośrednie odwołania do typów `LibreFangKernel` | #3744 |
+| `check-api-runtime-decoupling.sh` | Bash | Zapobiega ponownemu wprowadzeniu bezpośredniej zależności `librefang-runtime` w `librefang-api` | #3596 |
+| `check-error-shape.sh` | Bash | Odrzuca niekanoniczne koperty błędów HTTP w obsłudze tras | #3505 |
+| `check-no-empty-string-sentinels.sh` | Bash | Flaga dla wzorców wartowników pustych ciągów w odpowiedziach API | #3302 |
+| `check-pubkey-lockstep.sh` | Bash | Zapewnia, że klucz publiczny rejestru jest identyczny bajt po bajcie w daemonie i workerach | — |
+| `check-k8s-manifests.py` | Python | Waliduje wyrenderowane manifesty Kubernetes pod kątem właściwości bezpieczeństwa | #6632, #6633 |
+| `check-skills-supply-chain.py` | Python | Statystyczny audyt wzorców złośliwych w pakietach skill/hand/extension | #3305, #3333 |
+| `codegen-sdks.py` | Python | Generuje klienty SDK w Pythonie, JS, Go i Rust na podstawie `openapi.json` | — |
 
-## Architectural enforcement scripts
+## Skrypty wymuszania architektury
 
-These scripts guard invariants that the compiler cannot enforce on its own — layering rules, error shape conventions, and cross-file consistency.
+Skrypty te pilnują niezmienników, których kompilator nie może wymusić samodzielnie — reguł warstwowania, konwencji kształtu błędów i spójności między plikami.
 
-### API → Kernel → Runtime layering
+### Warstwowanie API → Kernel → Runtime
 
-Two scripts work together to enforce the crate dependency direction:
+Dwa skrypty współpracują, aby wymusić kierunek zależności crate'ów:
 
 ```mermaid
 graph TD
-    A["librefang-api"] -->|must go through| K["librefang-kernel"]
+    A["librefang-api"] -->|musi przechodzić przez| K["librefang-kernel"]
     K --> R["librefang-runtime"]
-    A -.->|forbidden direct dep| R
-    A -.->|tracked surface| KI["librefang_kernel::internal::*"]
+    A -.->|zabroniony bezpośredni dep| R
+    A -.->|śledzona powierzchnia| KI["librefang_kernel::internal::*"]
 ```
 
-**`check-api-runtime-decoupling.sh`** is a hard gate. It fails CI if:
-1. `crates/librefang-api/Cargo.toml` declares a `librefang-runtime` dependency line, or
-2. Any `.rs` file under `crates/librefang-api/{src,tests}/` contains a `use librefang_runtime` or `librefang_runtime::` reference outside doc comments.
+**`check-api-runtime-decoupling.sh`** jest twardą bramką. Nie przechodzi w CI, jeśli:
+1. `crates/librefang-api/Cargo.toml` deklaruje linię zależności `librefang-runtime`, lub
+2. Dowolny plik `.rs` w `crates/librefang-api/{src,tests}/` zawiera odwołanie `use librefang_runtime` lub `librefang_runtime::` poza komentarzami dokumentacyjnymi.
 
-Runtime types must be reached through `librefang-kernel` re-exports.
+Typy runtime'u muszą być osiągalne poprzez re-eksporty z `librefang-kernel`.
 
-**`check-api-kernel-imports.sh`** has two sections:
+**`check-api-kernel-imports.sh`** ma dwie sekcje:
 
-- **Section 1 (informational):** Counts `librefang_kernel::` references in `librefang-api/src/`. Comments are stripped; facade re-export modules are counted by design so the boundary is auditable. Output goes to `/tmp/api-kernel-imports.txt` for PR-diff visibility.
-- **Section 2 (hard gate):** Scans for direct `LibreFangKernel` concrete-type references in non-test source. An allowlist permits four files where widening is still in progress:
+- **Sekcja 1 (informacyjna):** Zlicza odwołania `librefang_kernel::` w `librefang-api/src/`. Komentarze są usuwane; moduły fasad re-eksportujące są zliczane celowo, aby granica była audytowalna. Wynik trafia do `/tmp/api-kernel-imports.txt` dla widoczności w diffach PR-ów.
+- **Sekcja 2 (twarda bramka):** Skanuje w poszukiwaniu bezpośrednich odwołań do typów konkretnych `LibreFangKernel` w kodzie źródłowym niedotyczącym testów. Lista dozwolonych dopuszcza cztery pliki, w których poszerzanie nadal trwa:
 
   ```bash
   ALLOWLIST=(
@@ -56,166 +56,166 @@ Runtime types must be reached through `librefang-kernel` re-exports.
   )
   ```
 
-  Any file outside the allowlist introducing a new `LibreFangKernel` reference fails CI. Comment stripping uses `sed 's|//.*$||'` rather than `grep -v` to catch both leading and trailing comment forms without masking production code.
+  Dowolny plik spoza listy dozwolonych wprowadzający nowe odwołanie `LibreFangKernel` powoduje niepowodzenie CI. Usuwanie komentarzy używa `sed 's|//.*$||'` zamiast `grep -v`, aby wyłapać zarówno komentarze wiodące, jak i końcowe bez maskowania kodu produkcyjnego.
 
-### Error envelope shape (`check-error-shape.sh`)
+### Kształt koperty błędu (`check-error-shape.sh`)
 
-Guards the canonical `ApiErrorResponse` shape (`{"error": "<string>"}`) against regression. Rejects two ad-hoc patterns under `crates/librefang-api/src/routes/`:
+Chroni kanoniczny kształt `ApiErrorResponse` (`{"error": "<ciąg>"}`) przed regresją. Odrzuca dwa nieformalne wzorce w `crates/librefang-api/src/routes/`:
 
-1. `json!({"detail": …})` — matched via `json!\(\{\s*"detail"\s*:` so `AuditEntry` data fields with `"detail"` keys are excluded.
-2. `{"status": "error", …}` — matched as a key-value pair.
+1. `json!({"detail": …})` — dopasowane przez `json!\(\{\s*"detail"\s*:`, aby wykluczyć pola danych `AuditEntry` z kluczami `"detail"`.
+2. `{"status": "error", …}` — dopasowane jako para klucz-wartość.
 
-Files still carrying legacy shapes are listed in the `LEGACY_FILES` array, each with a cleanup tracking reference. New files must be clean from day one. The permanent exception is `openai_compat.rs` (OpenAI SDK contract), which lives outside `routes/` and is naturally out of scope.
+Pliki nadal zawierające przestarzałe kształty są wymienione w tablicy `LEGACY_FILES`, każdy z odniesieniem do śledzenia porządkowania. Nowe pliki muszą być czyste od pierwszego dnia. Wyjątek stały to `openai_compat.rs` (kontrakt SDK OpenAI), który znajduje się poza `routes/` i jest naturalnie poza zakresem.
 
-### Empty-string sentinels (`check-no-empty-string-sentinels.sh`)
+### Wartowniki pustych ciągów (`check-no-empty-string-sentinels.sh`)
 
-Informational by default (exit 0); pass `--strict` to fail on any hit. Scans four pattern categories:
+Domyślnie informacyjne (exit 0); przekaż `--strict`, aby niepowodzenie przy każdym trafieniu. Skanuje cztery kategorie wzorców:
 
-| Pattern | Signal strength |
-|---------|----------------|
-| Textual literals (`"<unknown>"`, `"none"`, etc.) | Unambiguous offender |
-| `"".to_string()` defaults | Strong signal |
-| `.is_empty()` calls | High false-positive — reviewer judges |
-| `.unwrap_or_default()` on `Option<String>` | Soft signal |
+| Wzorzec | Siła sygnału |
+|---------|-------------|
+| Literały tekstowe (`"<unknown>"`, `"none"` itp.) | Niezbywalny wykroczenie |
+| Domyślne `"".to_string()` | Silny sygnał |
+| Wywołania `.is_empty()` | Wysoki współczynnik fałszywych alarmów — ocenia recenzent |
+| `.unwrap_or_default()` na `Option<String>` | Łagodny sygnał |
 
-Suppress false positives with an inline marker: `// allow-empty-sentinel: <reason>`.
+Pomiń fałszywe alarmy za pomocą znacznika inline: `// allow-empty-sentinel: <powód>`.
 
-### Pubkey lockstep (`check-pubkey-lockstep.sh`)
+### Synchronizacja klucza publicznego (`check-pubkey-lockstep.sh`)
 
-Extracts the Ed25519 registry public key from four locations and fails if any differ:
+Ekstrahuje klucz publiczny rejestru Ed25519 z czterech lokalizacji i kończy się niepowodzeniem, jeśli którykolwiek się różni:
 
-1. `crates/librefang-runtime/src/plugin_manager.rs` — first `pubkey_b64:` field (active slot in the embedded slice)
+1. `crates/librefang-runtime/src/plugin_manager.rs` — pierwsze pole `pubkey_b64:` (aktywny slot w osadzonym wycinku)
 2. `web/workers/registry-worker/wrangler.toml` — `REGISTRY_PUBLIC_KEY`
 3. `web/workers/marketplace-worker/wrangler.toml` — `REGISTRY_PUBLIC_KEY`
 4. `web/public/_worker.js` — `REGISTRY_PUBLIC_KEY`
 
-Extraction uses a Perl one-liner anchored at line start with a word boundary on the constant name, capturing exactly 44 base64 characters. The daemon side uses the unique field name `pubkey_b64` to avoid matching stray literals.
+Ekstrakcja używa jednowierszowego skryptu Perla zakotwiczonego na początku linii z granicą słowa na nazwie stałej, przechwytując dokładnie 44 znaki base64. Strona daemona używa unikalnej nazwy pola `pubkey_b64`, aby uniknąć dopasowania przypadkowych literałów.
 
-### AGENTS.md / CLAUDE.md pairing (`check-agents-claude-pair.sh`)
+### Sparowanie AGENTS.md / CLAUDE.md (`check-agents-claude-pair.sh`)
 
-Validates that every `AGENTS.md` outside the repo root has a sibling `CLAUDE.md` that is a symlink to `AGENTS.md`. The repo root is exempt — there, `AGENTS.md` and `CLAUDE.md` are separate files by design (the latter carries Claude-Code-specific rules).
+Waliduje, że każdy `AGENTS.md` poza katalogiem głównym repozytorium ma powiązany `CLAUDE.md`, który jest dowiązaniem symbolicznym do `AGENTS.md`. Katalog główny repozytorium jest zwolniony — tam `AGENTS.md` i `CLAUDE.md` to celowo oddzielne pliki (ten drugi zawiera reguły specyficzne dla Claude Code).
 
-Excludes `./target/*`, `./node_modules/*`, and `./.git/*` from the scan.
+Skan wyklucza `./target/*`, `./node_modules/*` i `./.git/*`.
 
-## CHANGELOG validation (`check-changelog-attribution.py`)
+## Walidacja CHANGELOG (`check-changelog-attribution.py`)
 
-Enforces the `(@username)` attribution convention on CHANGELOG entries. Operates in four mutually exclusive modes:
+Wymusza konwencję atrybucji `(@nazwa-użytkownika)` na wpisach CHANGELOG. Działa w czterech wzajemnie wykluczających się trybach:
 
-| Mode | Flag | Scope | Used by |
-|------|------|-------|---------|
-| Diff (default) | — | Lines the current PR adds to `[Unreleased]` | CI |
-| All unreleased | `--all-unreleased` | Every bullet in `[Unreleased]` | Pre-release audit |
-| Full file | `--full` | Every bullet in CHANGELOG.md | Inventory |
-| Staged | `--staged` | Lines staged in the index | Pre-commit hook |
+| Tryb | Flaga | Zakres | Używany przez |
+|------|-------|--------|---------------|
+| Diff (domyślny) | — | Linie dodane przez bieżący PR do `[Unreleased]` | CI |
+| Wszystkie nieopublikowane | `--all-unreleased` | Każdy punkt w `[Unreleased]` | Audyt przed wydaniem |
+| Pełny plik | `--full` | Każdy punkt w CHANGELOG.md | Inwentaryzacja |
+| Zmiany w indeksie | `--staged` | Linie w indeksie | Hook pre-commit |
 
-### Attribution checking logic
+### Logika sprawdzania atrybucji
 
-The attribution regex is `\(@[A-Za-z0-9_][A-Za-z0-9_-]*\)` — at least one character, no leading dash. The `bullet_block_has_attribution` predicate checks the entire bullet block (marker line + indented continuation lines), not just the `- ` line, because the project's prose rule wraps long bullets one sentence per line:
+Wyrażenie regularne atrybucji to `\(@[A-Za-z0-9_][A-Za-z0-9_-]*\)` — co najmniej jeden znak, bez wiodącego myślnika. Predykat `bullet_block_has_attribution` sprawdza cały blok punktu (linia znacznika + kontynuacja z wcięciem), a nie tylko linię `- `, ponieważ reguła prozy projektu zawija długie punkty jedno zdanie na linię:
 
 ```markdown
-- First sentence.
-  Second sentence.
-  Third sentence. (@houko)
+- Pierwsze zdanie.
+  Drugie zdanie.
+  Trzecie zdanie. (@houko)
 ```
 
-The block ends at the first blank line, new bullet, or heading. A `# pragma: no-attribution` suffix on a line exempts it.
+Blok kończy się przy pierwszej pustej linii, nowym punkcie lub nagłówku. Suffiks `# pragma: no-attribution` w linii zwalnia z obowiązku.
 
-### Fragment handling
+### Obsługa fragmentów
 
-`changelog.d/` fragments (one file = one bullet body, assembled at release time by `cargo xtask collect-fragments`) are held to the same standard in every mode. The `FRAGMENT_SECTIONS` frozenset is a cross-language contract:
+Fragmenty `changelog.d/` (jeden plik = treść jednego punktu, składane w czasie wydania przez `cargo xtask collect-fragments`) podlegają temu samemu standardowi w każdym trybie. `FRAGMENT_SECTIONS` typu frozenset to kontrakt między językami:
 
 ```python
 FRAGMENT_SECTIONS = frozenset({"added", "changed", "documentation", "fixed", "security"})
 ```
 
-This must stay in sync with `FRAGMENT_SECTIONS` in `xtask/src/changelog.rs`. The xtask test `fragment_sections_match_the_python_validator` fails if they drift.
+Musisz utrzymywać to w synchronizacji z `FRAGMENT_SECTIONS` w `xtask/src/changelog.rs`. Test xtask `fragment_sections_match_the_python_validator` kończy się niepowodzeniem, gdy rozbiegną się.
 
-A fragment must live at `changelog.d/<section>/<name>.md`. An unrecognized section directory is flagged because assembly would silently drop the entry.
+Fragment musi znajdować się w `changelog.d/<sekcja>/<nazwa>.md`. Nierozpoznany katalog sekcji jest oflagowany, ponieważ składanie po cichu pominąłby wpis.
 
-### Diff range resolution
+### Rozpoznawanie zakresu diff
 
-The `resolve_diff_range` function uses this precedence:
-1. CLI flags `--base` / `--head`
-2. Environment variables `BASE_SHA` / `HEAD_SHA` (set by CI)
-3. `git merge-base origin/main HEAD` and `HEAD`
+Funkcja `resolve_diff_range` używa następującego priorytetu:
+1. Flagi CLI `--base` / `--head`
+2. Zmienne środowiskowe `BASE_SHA` / `HEAD_SHA` (ustawiane przez CI)
+3. `git merge-base origin/main HEAD` oraz `HEAD`
 
-Added lines are extracted from unified diff hunks, mapping `+`-prefixed lines to their post-image line numbers via `@@` hunk headers. Post-image line numbers are validated against the `[Unreleased]` section range found in the HEAD blob.
+Dodane linie są ekstrahowane z zunifikowanych bloków diff, mapując linie z prefiksem `+` na ich numery linii obrazu post przez nagłówki bloków `@@`. Numery linii obrazu post są weryfikowane względem zakresu sekcji `[Unreleased]` znalezionego w blobie HEAD.
 
-## Release article generation (`changelog-to-article.sh`)
+## Generowanie artykułu wydawniczego (`changelog-to-article.sh`)
 
-Scaffolds `articles/release-<YYYY.M.D>.md` from a CHANGELOG section. The generated file is consumed by two GitHub workflows on push to main:
+Tworzy szkielet `articles/release-<RRRR.M.D>.md` na podstawie sekcji CHANGELOG. Wygenerowany plik jest konsumowany przez dwa workflowy GitHub po wypchnięciu do main:
 
-- `.github/workflows/devto-publish.yml` — publishes/updates the dev.to post
-- `.github/workflows/release-notify.yml` — posts a GitHub Discussion using the article body
+- `.github/workflows/devto-publish.yml` — publikuje/aktualizuje post na dev.to
+- `.github/workflows/release-notify.yml` — publikuje Dyskusję GitHub używając treści artykułu
 
-### Usage
+### Użycie
 
 ```bash
-bash scripts/changelog-to-article.sh <YYYY.M.D> [<git-tag>]
+bash scripts/changelog-to-article.sh <RRRR.M.D> [<tag-git>]
 ```
 
-The date must match a `## [YYYY.M.D]` heading in CHANGELOG.md. The git tag defaults to `v<YYYY.M.D>` but CalVer tags often carry suffixes (`v2026.4.27-beta6`); pass the actual tag for an accurate `canonical_url`.
+Data musi odpowiadać nagłówkowi `## [RRRR.M.D]` w CHANGELOG.md. Tag git domyślnie to `v<RRRR.M.D>`, ale tagi CalVer często niosą suffiksy (`v2026.4.27-beta6`); przekaż rzeczywisty tag dla poprawnego `canonical_url`.
 
-### Extraction
+### Ekstrakcja
 
-Uses `awk` with a literal string match (not regex) to find the heading — the dots in the date would be interpreted as wildcards otherwise. The section slice runs from the heading to the next `## [` line. Leading/trailing blank lines are trimmed.
+Używa `awk` z dopasowaniem dosłownego ciągu (nie wyrażenie regularne) do znalezienia nagłówka — kropki w dacie zostałyby inaczej zinterpretowane jako wieloznaczności. Wycinek sekcji biegnie od nagłówka do następnej linii `## [`. Puste linie wiodące/końcowe są usuwane.
 
-### Output shape
+### Kształt wyjścia
 
-The heredoc produces a dev.to-friendly format matching the most recent hand-written articles: outer `` ```markdown `` fence (stripped by `release-notify.yml`), YAML front matter between `---`, and the body below. Includes `canonical_url`, `cover_image`, and a standardized Links section.
+Heredoc produkuje format przyjazny dev.to, odpowiadający najnowszym ręcznie pisanym artykułom: zewnętrzna ramka `` ```markdown `` ( usuwana przez `release-notify.yml`), front matter YAML między `---`, i treść poniżej. Zawiera `canonical_url`, `cover_image` i standaryzowaną sekcję Links.
 
-## Kubernetes manifest validation (`check-k8s-manifests.py`)
+## Walidacja manifestów Kubernetes (`check-k8s-manifests.py`)
 
-Asserts safety properties on rendered manifests (output of `kubectl kustomize` or `kustomize build`). Properties checked:
+Sprawdza właściwości bezpieczeństwa na wyrenderowanych manifestach (wyjście `kubectl kustomize` lub `kustomize build`). Sprawdzane właściwości:
 
 **StatefulSet:**
-- `replicas == 1` — cron, triggers, session ownership, budget enforcement, and the audit hash chain are all process-local
-- Selector labels match pod template labels
-- `terminationGracePeriodSeconds >= 30` for SQLite WAL checkpoint
-- Exactly one `volumeClaimTemplate` with `ReadWriteOnce` access mode, mounted at `/data`
-- Container has named port `http` on 4545
+- `replicas == 1` — cron, triggery, własność sesji, wymuszanie budżetu i łańcuch skrótów audytu są wszystkie lokalne dla procesu
+- Etykiety selektora odpowiadają etykietom szablonu poda
+- `terminationGracePeriodSeconds >= 30` dla punktu kontrolnego SQLite WAL
+- Dokładnie jeden `volumeClaimTemplate` z trybem dostępu `ReadWriteOnce`, montowany w `/data`
+- Kontener ma nazwany port `http` na 4545
 
-**Pod Security (restricted standard):**
+**Bezpieczeństwo poda (standard restricted):**
 - `runAsNonRoot: true`, `runAsUser/runAsGroup/fsGroup: 1001`
 - `seccompProfile.type: RuntimeDefault`
 - `fsGroupChangePolicy: OnRootMismatch`
 - `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`
 
-**Environment:**
-- `LIBREFANG_LISTEN` must be `0.0.0.0:4545` (container loopback is unreachable from kubelet)
-- `LIBREFANG_HOME` must be `/data` (must match volume mount)
-- Required secrets (`LIBREFANG_API_KEY`, `LIBREFANG_VAULT_KEY`, `LIBREFANG_DASHBOARD_USER`, `LIBREFANG_DASHBOARD_PASS`) must come from `secretKeyRef`, not literal values, and must not be optional
-- Non-required secret refs must be `optional: true`
+**Środowisko:**
+- `LIBREFANG_LISTEN` musi być `0.0.0.0:4545` (pętla zwrotna kontenera jest nieosiągalna z kubelet)
+- `LIBREFANG_HOME` musi być `/data` (musi odpowiadać mountowi wolumenu)
+- Wymagane sekrety (`LIBREFANG_API_KEY`, `LIBREFANG_VAULT_KEY`, `LIBREFANG_DASHBOARD_USER`, `LIBREFANG_DASHBOARD_PASS`) muszą pochodzić z `secretKeyRef`, nie z wartości dosłownych, i nie mogą być opcjonalne
+- Niedotyczące sekrety opcjonalne muszą mieć `optional: true`
 
-**Probes:**
-- `startupProbe` → `/api/ready`, budget ≥ 60s
-- `livenessProbe` → `/api/health` (must NOT target `/api/ready` — readiness returns 503 for recoverable outages, which would restart-loop the pod)
+**Sondy:**
+- `startupProbe` → `/api/ready`, budżet ≥ 60s
+- `livenessProbe` → `/api/health` (NIE może celować w `/api/ready` — gotowość zwraca 503 dla odzyskiwalnych przerw, co zapętliłoby restart poda)
 - `readinessProbe` → `/api/ready`
-- All probes must target named port `http`
+- Wszystkie sondy muszą celować w nazwany port `http`
 
-**Services:**
-- Governing Service (matching `StatefulSet.spec.serviceName`) must be headless (`clusterIP: None`)
-- At least one non-headless ClusterIP Service for clients
-- No LoadBalancer/NodePort (cluster-external reach should be deliberate Ingress)
+**Usługi:**
+- Usługa zarządzająca (odpowiadająca `StatefulSet.spec.serviceName`) musi być bezgłowa (`clusterIP: None`)
+- Co najmniej jedna niebezgłowa usługa ClusterIP dla klientów
+- Brak LoadBalancer/NodePort (zasięg zewnętrzny klastra powinien być celowym Ingress)
 
-**Secrets:**
-- No rendered `Secret` resources (credentials must be created out of band)
+**Sekrety:**
+- Brak wyrenderowanych zasobów `Secret` (poświadczenia muszą być tworzone poza pasmem)
 
-## Supply chain audit (`check-skills-supply-chain.py`)
+## Audyt łańcucha dostaw (`check-skills-supply-chain.py`)
 
-Pure-stdlib Python (no third-party imports) static analysis of skill/hand/extension bundles. Scans:
+Czysty stdlib Python (brak importów zewnętrznych) statystyczna analiza pakietów skill/hand/extension. Skanuje:
 
 - `crates/librefang-skills`, `crates/librefang-hands`, `crates/librefang-extensions`, `examples`
 
-Excludes `tests/fixtures/supply-chain`, `target`, `.git`, `node_modules` by default (pass `--include-fixtures` to scan fixtures).
+Domyślnie wyklucza `tests/fixtures/supply-chain`, `target`, `.git`, `node_modules` (przekaż `--include-fixtures`, aby skanować fikstury).
 
-### Detection rules
+### Reguły detekcji
 
-| Rule | Target | Method |
-|------|--------|--------|
-| `pth-import-hijack` | `.pth` files | Any `.pth` file anywhere in bundle |
-| `py-eval-exec` | Python | AST: direct `eval()` / `exec()` calls |
-| `base64-decode-exec` | Python | AST: `eval/exec` of base64-decoded payload (walks call chain looking for `b64decode`, `b32decode`, etc.) |
+| Reguła | Cel | Metoda |
+|--------|-----|--------|
+| `pth-import-hijack` | pliki `.pth` | Dowolny plik `.pth` gdziekolwiek w pakiecie |
+| `py-eval-exec` | Python | AST: bezpośrednie wywołania `eval()` / `exec()` |
+| `base64-decode-exec` | Python | AST: `eval/exec` ładunku zdekodowanego base64 (przechodzi łańcuch wywołań szukając `b64decode`, `b32decode` itp.) |
 | `py-compile-exec` | Python | AST: `compile(..., mode='exec')` |
 | `py-syspath-mutation` | Python | AST: `sys.path.insert/append` |
 | `py-importlib-spec` | Python | AST: `importlib.util.spec_from_file_location/module_from_spec` |
@@ -223,51 +223,51 @@ Excludes `tests/fixtures/supply-chain`, `target`, `.git`, `node_modules` by defa
 | `js-function-ctor` | JS/MS/CS | Regex: `new Function(...)` |
 | `js-settimeout-string` | JS/MS/CS | Regex: `setTimeout('code', ...)` |
 | `js-base64-decode-exec` | JS/MS/CS | Regex: `atob(...)...eval` |
-| `jailbreak/*` | `.toml/.md/.prompt` | Regex against curated phrase list |
+| `jailbreak/*` | `.toml/.md/.prompt` | Regex względem wyselekcjonowanej listy fraz |
 
-The jailbreak phrase list covers: ignore-previous-instructions, exfiltrate, post-to-webhook, system-prompt-leak, bypass-safety, override-system-prompt, disregard-rules.
+Lista fraz jailbreak obejmuje: ignore-previous-instructions, exfiltrate, post-to-webhook, system-prompt-leak, bypass-safety, override-system-prompt, disregard-rules.
 
-Per-file opt-out: add `supply-chain-audit: allow` anywhere in the file.
+Opcja wyłączenia per plik: dodaj `supply-chain-audit: allow` gdziekolwiek w pliku.
 
-### Self-test
+### Samotest
 
-Run `--self-test` to verify the script against embedded fixtures (clean and malicious cases). Returns exit code 2 on any fixture failure.
+Uruchom `--self-test`, aby zweryfikować skrypt względem wbudowanych fikstur (czyste i złośliwe przypadki). Zwraca kod wyjścia 2 przy każdym niepowodzeniu fikstury.
 
-## SDK code generation (`codegen-sdks.py`)
+## Generowanie kodu SDK (`codegen-sdks.py`)
 
-Reads `openapi.json` and generates client SDKs in four languages. All are zero-dependency (Python uses only `urllib`; JS uses `fetch`; Go uses `net/http`; Rust uses `reqwest`/`serde_json`/`tokio`/`futures`/`thiserror`).
+Czyta `openapi.json` i generuje klienty SDK w czterech językach. Wszystkie są bez zależności (Python używa wyłącznie `urllib`; JS używa `fetch`; Go używa `net/http`; Rust używa `reqwest`/`serde_json`/`tokio`/`futures`/`thiserror`).
 
-### Operation loading
+### Ładowanie operacji
 
-The `load_ops` function reads `openapi.json`, filters to paths starting with `/api/`, skips the `openai` tag (OpenAI compat endpoints), and groups operations by tag into a `dict[str, list[Operation]]`. Each operation carries: HTTP method, path, operationId, path params, query params, whether it has a request body, and whether it's a streaming endpoint (detected via `text/event-stream` content type or `operationId` ending in `_stream`).
+Funkcja `load_ops` czyta `openapi.json`, filtruje ścieżki zaczynające się od `/api/`, pomija tag `openai` (punkty końcowe kompatybilności OpenAI) i grupuje operacje po tagach w `dict[str, list[Operation]]`. Każda operacja niesie: metodę HTTP, ścieżkę, operationId, parametry ścieżki, parametry zapytania, czy ma ciało żądania i czy jest punktem końcowym strumieniowym (wykryte przez typ zawartości `text/event-stream` lub `operationId` kończący się na `_stream`).
 
-### Output files
+### Pliki wyjściowe
 
-| Language | Output path | Naming convention |
-|----------|-------------|-------------------|
-| Python | `sdk/python/librefang/librefang_client.py` | snake_case methods, `_TagPascalResource` classes |
-| JavaScript | `sdk/javascript/index.js` | camelCase methods, `TagPascalResource` classes |
-| Go | `sdk/go/librefang.go` | PascalCase methods, `TagPascalResource` structs |
-| Rust | `sdk/rust/src/lib.rs` | snake_case methods, `TagPascalResource` structs, `Arc`-shared |
+| Język | Ścieżka wyjścia | Konwencja nazewnictwa |
+|--------|-----------------|------------------------|
+| Python | `sdk/python/librefang/librefang_client.py` | metody snake_case, klasy `_TagPascalResource` |
+| JavaScript | `sdk/javascript/index.js` | metody camelCase, klasy `TagPascalResource` |
+| Go | `sdk/go/librefang.go` | metody PascalCase, struktury `TagPascalResource` |
+| Rust | `sdk/rust/src/lib.rs` | metody snake_case, struktury `TagPascalResource`, współdzielone przez `Arc` |
 
-Each SDK provides:
-- Synchronous request methods (Go/Python) or async (JS/Rust)
-- SSE streaming via generators (Python `yield`), async iterators (JS `yield*`), channels (Go), or `tokio::sync::mpsc::UnboundedReceiver` (Rust)
-- SSE line accumulation with `MAX_SSE_LINE` / `maxSSELine` cap (8 MiB) to prevent unbounded memory on misbehaving streams
-- Rust specifically accumulates raw bytes before UTF-8 decode to avoid splitting multi-byte codepoints at chunk boundaries
+Każdy SDK dostarcza:
+- Metody żądań synchronicznych (Go/Python) lub asynchronicznych (JS/Rust)
+- Strumieniowanie SSE przez generatory (Python `yield`), iteratory asynchroniczne (JS `yield*`), kanały (Go) lub `tokio::sync::mpsc::UnboundedReceiver` (Rust)
+- Akumulację linii SSE z limitem `MAX_SSE_LINE` / `maxSSELine` (8 MiB) aby zapobiec nieograniczonej alokacji pamięci na nieregularnych strumieniach
+- Rust dodatkowo akumuluje surowe bajty przed dekodowaniem UTF-8, aby uniknąć rozdzielania wielobajtowych codepointów na granicach fragmentów
 
-After writing, the script removes old hand-written Rust module files (`agents.rs`, `models.rs`, `providers.rs`, `skills.rs`, `tools.rs`) and runs `rustfmt` on the generated output. Use `--dry-run` to preview without writing.
+Po zapisaniu skrypt usuwa stare ręcznie pisane pliki modułów Rust (`agents.rs`, `models.rs`, `providers.rs`, `skills.rs`, `tools.rs`) i uruchamia `rustfmt` na wygenerowanym wyjściu. Użyj `--dry-run`, aby podejrzeć bez zapisywania.
 
-### Reserved word handling
+### Obsługa słów zastrzeżonych
 
-Python and Rust generators append `_` to identifiers matching reserved word sets (`_PY_RESERVED`, `_RUST_RESERVED`). This prevents collisions like `type` becoming a Rust field name.
+Generatory Pythona i Rusta dołączają `_` do identyfikatorów pasujących do zbiorów słów zastrzeżonych (`_PY_RESERVED`, `_RUST_RESERVED`). Zapobiega to kolizjom takim jak `type` stając się nazwą pola w Rust.
 
-## Conventions
+## Konwencje
 
-All scripts share these patterns:
+Wszystkie skrypty współdzielą te wzorce:
 
-- **Repo root resolution:** Either `git rev-parse --show-toplevel` or `cd "$(dirname "$0")/.."` — scripts work from any working directory.
-- **Tool fallback:** Bash scripts prefer `rg` (ripgrep) when available, falling back to `grep -R` for CI containers that don't bundle it.
-- **Error format:** `::error file=path::message` syntax for GitHub Actions annotation rendering.
-- **Exit codes:** 0 = pass, 1 = check failed, 2 = invocation/usage error.
-- **`set -euo pipefail`** on Bash scripts (except `check-no-empty-string-sentinels.sh` which omits `-e` to scan everything before reporting).
+- **Rozpoznawanie katalogu głównego repozytorium:** Albo `git rev-parse --show-toplevel`, albo `cd "$(dirname "$0")/.."` — skrypty działają z dowolnego katalogu roboczego.
+- **Awaryjne narzędzia:** Skrypty Bash preferują `rg` (ripgrep), gdy dostępny, z awaryjnym powrotem do `grep -R` dla kontenerów CI, które go nie dołączają.
+- **Format błędów:** Składnia `::error file=ścieżka::wiadomość` dla renderowania adnotacji GitHub Actions.
+- **Kody wyjścia:** 0 = powodzenie, 1 = sprawdzenie niepowodzenie, 2 = błąd wywołania/użycia.
+- **`set -euo pipefail`** w skryptach Bash (z wyjątkiem `check-no-empty-string-sentinels.sh`, który pomija `-e`, aby przeskanować wszystko przed raportowaniem).

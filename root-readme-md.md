@@ -1,24 +1,24 @@
 # Root — README.md
 
-# LibreFang — Project Overview
+# LibreFang — Przegląd projektu
 
-LibreFang is an **Agent Operating System** written in Rust. Unlike traditional chatbot frameworks or Python agent wrappers, LibreFang runs autonomous agents ("Hands") that operate on schedules, monitor targets, and report to a dashboard — without requiring continuous user prompts.
+LibreFang to **System Operacyjny Agentów** napisany w Rust. W przeciwieństwie do tradycyjnych frameworków chatbotów czy Pythonowych wrapperów agentów, LibreFang uruchamia autonomiczne agenty („Ręce"), które działają według harmonogramu, monitorują cele i raportują do panelu — bez konieczności ciągłych poleceń użytkownika.
 
-This document is the developer reference for the root README, covering project structure, crate relationships, the Hands system, installation, and development workflow.
-
----
-
-## Project Identity
-
-LibreFang is a community fork of [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) with open governance and a merge-first PR policy. Governance details are in [`GOVERNANCE.md`](GOVERNANCE.md). The project is MIT-licensed and organized as a Cargo workspace with **24 crates** plus an `xtask` build automation crate.
-
-Key scale metrics: 2,100+ tests, zero clippy warnings, 45 channel adapters, 28 LLM providers, 60 bundled skills.
+Ten dokument to podręcznik referencyjny dla deweloperów opisujący root README, obejmujący strukturę projektu, relacje między crate'ami, system Rąk, instalację i przepływ pracy deweloperskiej.
 
 ---
 
-## Crate Architecture
+## Tożsamość projektu
 
-The workspace follows a layered kernel design. The diagram below shows the primary dependency relationships — runtime sits at the core, kernel orchestrates above it, and the user-facing layers (CLI, API, desktop) sit on top.
+LibreFang to fork społecznościowy projektu [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) z otwartym zarządzaniem i polityką PR „merge-first". Szczegóły zarządzania znajdują się w [`GOVERNANCE.md`](GOVERNANCE.md). Projekt jest licencjonowany na licencji MIT i zorganizowany jako workspace Cargo z **24 crate'ami** plus crate automatyzacji budowania `xtask`.
+
+Kluczowe wskaźniki skali: ponad 2100 testów, zero ostrzeżeń clippy, 45 adapterów kanałów, 28 dostawców LLM, 60 wbudowanych umiejętności.
+
+---
+
+## Architektura crate'ów
+
+Workspace opiera się na warstwowym projekcie jądra. Poniższy diagram przedstawia główne relacje zależności — runtime znajduje się w centrum, kernel orkiestruje nad nim, a warstwy użytkownika (CLI, API, desktop) leżą na górze.
 
 ```mermaid
 graph TD
@@ -46,115 +46,115 @@ graph TD
     KERNEL --> EXT
 ```
 
-### Core Crates
+### Główne crate'y
 
-| Crate | Responsibility |
+| Crate | Odpowiedzialność |
 |---|---|
-| `librefang-kernel` | Top-level orchestration: workflows, metering, RBAC, scheduler, budget enforcement |
-| `librefang-runtime` | Agent loop, tool execution, WASM sandbox, MCP client, A2A protocol |
-| `librefang-api` | 140+ REST/WS/SSE endpoints, OpenAI-compatible API, serves the web dashboard |
-| `librefang-types` | Core types, taint tracking, Ed25519 signing, model catalog — the shared type foundation |
+| `librefang-kernel` | Orkiestracja najwyższego poziomu: przepływy pracy, metering, RBAC, scheduler, egzekwowanie budżetu |
+| `librefang-runtime` | Pętla agenta, wykonywanie narzędzi, piaskownica WASM, klient MCP, protokół A2A |
+| `librefang-api` | Ponad 140 punktów końcowych REST/WS/SSE, API kompatybilne z OpenAI, serwuje panel webowy |
+| `librefang-types` | Typy podstawowe, śledzenie zanieczyszczeń, podpisywanie Ed25519, katalog modeli — wspólne fundamenty typów |
 
-### Capability Crates
+### Crate'y funkcjonalności
 
-| Crate | Responsibility |
+| Crate | Odpowiedzialność |
 |---|---|
-| `librefang-channels` | 45 messaging adapters (Telegram, Discord, Slack, etc.) with rate limiting and DM/group policies |
-| `librefang-memory` | SQLite persistence, vector embeddings, session management, memory compaction |
-| `librefang-skills` | 60 bundled skills, `SKILL.md` parser, FangHub marketplace integration |
-| `librefang-hands` | `HAND.toml` parser, Hand registry, lifecycle management |
-| `librefang-extensions` | 25 MCP templates, AES-256-GCM vault, OAuth2 PKCE |
+| `librefang-channels` | 45 adapterów wiadomości (Telegram, Discord, Slack itd.) z limitowaniem szybkości i politykami DM/grup |
+| `librefang-memory` | Persystencja SQLite, wektorowe osadzenia, zarządzanie sesjami, kompaktowanie pamięci |
+| `librefang-skills` | 60 wbudowanych umiejętności, parser `SKILL.md`, integracja z marketplace FangHub |
+| `librefang-hands` | Parser `HAND.toml`, rejestr Rąk, zarządzanie cyklem życia |
+| `librefang-extensions` | 25 szablonów MCP, skarbiec AES-256-GCM, OAuth2 PKCE |
 
-### Kernel Sub-Crates
+### Sub-crate'y jądra
 
-The kernel is split into focused sub-crates for maintainability:
+Jądro jest podzielone na wyspecjalizowane sub-crate'y dla lepszej utrzymywalności:
 
-- `librefang-kernel-handle` — `KernelHandle` trait for in-process callers
-- `librefang-kernel-router` — Hand/Template routing engine
-- `librefang-kernel-metering` — Cost metering and quota enforcement
+- `librefang-kernel-handle` — cecha `KernelHandle` dla wywołań wewnątrzprocesowych
+- `librefang-kernel-router` — silnik routingu Rąk/Szablonów
+- `librefang-kernel-metering` — metering kosztów i egzekwowanie limitów
 
-### LLM Driver Layer
+### Warstwa sterowników LLM
 
-- `librefang-llm-driver` — LLM driver trait and shared types
-- `librefang-llm-drivers` — Concrete provider implementations (Anthropic, OpenAI, Gemini, Groq, DeepSeek, OpenRouter, Ollama, etc.)
+- `librefang-llm-driver` — cecha sterownika LLM i wspólne typy
+- `librefang-llm-drivers` — Konkretne implementacje dostawców (Anthropic, OpenAI, Gemini, Groq, DeepSeek, OpenRouter, Ollama itd.)
 
-### Protocol & Infrastructure Crates
+### Crate'y protokołów i infrastruktury
 
-| Crate | Responsibility |
+| Crate | Odpowiedzialność |
 |---|---|
-| `librefang-wire` | OFP P2P protocol with HMAC-SHA256 mutual auth (see security note below) |
-| `librefang-http` | Shared HTTP client builder, proxy support, TLS fallback |
-| `librefang-runtime-mcp` | MCP (Model Context Protocol) client for the runtime |
-| `librefang-telemetry` | OpenTelemetry + Prometheus instrumentation |
-| `librefang-testing` | Test infrastructure: mock kernel, mock LLM driver, API route test utilities |
+| `librefang-wire` | Protokół P2P OFP z wzajemnym uwierzytelnianiem HMAC-SHA256 (patrz uwaga o bezpieczeństwie poniżej) |
+| `librefang-http` | Współdzielony budowniczy klienta HTTP, obsługa proxy, powrót TLS |
+| `librefang-runtime-mcp` | Klient MCP (Model Context Protocol) dla runtime'u |
+| `librefang-telemetry` | Instrumentacja OpenTelemetry + Prometheus |
+| `librefang-testing` | Infrastruktura testowa: jądro mockowe, mockowy sterownik LLM, narzędzia testowe dla tras API |
 
-### User-Facing Crates
+### Crate'y użytkownika
 
-| Crate | Responsibility |
+| Crate | Odpowiedzialność |
 |---|---|
-| `librefang-cli` | CLI interface, daemon management, TUI dashboard, MCP server mode |
-| `librefang-desktop` | Tauri 2.0 native app with system tray, notifications, global shortcuts |
-| `librefang-import` | OpenClaw, LangChain, AutoGPT import/migration engine |
+| `librefang-cli` | Interfejs CLI, zarządzanie demonem, panel TUI, tryb serwera MCP |
+| `librefang-desktop` | Natywna aplikacja Tauri 2.0 z ikoną zasobnika, powiadomieniami, globalnymi skrótami |
+| `librefang-import` | Silnik importu/migracji z OpenClaw, LangChain, AutoGPT |
 
 ---
 
-## The Hands System
+## System Rąk
 
-**Hands** are LibreFang's autonomous agent packages. Unlike traditional agents that wait for user input, Hands run independently on schedules — monitoring, generating leads, managing social media, and reporting to the dashboard.
+**Ręce** to autonomiczne pakiety agentów LibreFang. W przeciwieństwie do tradycyjnych agentów czekających na wejście użytkownika, Ręce działają niezależnie według harmonogramu — monitorując, generując kontakty, zarządzając mediami społecznościowymi i raportując do panelu.
 
-### Hand Anatomy
+### Anatomia Ręki
 
-A Hand consists of:
+Ręka składa się z:
 
-1. **`HAND.toml`** — manifest defining the Hand's configuration, schedule, and capabilities
-2. **System prompt** — defines the agent's behavior and role
-3. **Optional `SKILL.md` files** — loaded from the configured `hands_dir`, parsed by `librefang-skills`
+1. **`HAND.toml`** — manifest definiujący konfigurację, harmonogram i możliwości Ręki
+2. **Prompt systemowy** — definiuje zachowanie i rolę agenta
+3. **Opcjonalne pliki `SKILL.md`** — ładowane ze skonfigurowanego `hands_dir`, parsowane przez `librefang-skills`
 
-### Hand Lifecycle Commands
+### Polecenia cyklu życia Ręki
 
 ```bash
-librefang hand activate researcher   # Starts working immediately
-librefang hand status researcher     # Check progress
-librefang hand list                  # See all installed Hands
+librefang hand activate researcher   # Rozpoczyna pracę natychmiast
+librefang hand status researcher     # Sprawdza postęp
+librefang hand list                  # Wyświetla wszystkie zainstalowane Ręce
 ```
 
-### Community Hands
+### Ręce społeczności
 
-Example Hands (Researcher, Collector, Predictor, Strategist, Analytics, Trader, Lead, Twitter, Reddit, LinkedIn, Clip, Browser, API Tester, DevOps) are available in the [community hands repository](https://github.com/librefang-registry/hands).
+Przykładowe Ręce (Researcher, Collector, Predictor, Strategist, Analytics, Trader, Lead, Twitter, Reddit, LinkedIn, Clip, Browser, API Tester, DevOps) są dostępne w [społecznościowym repozytorium Rąk](https://github.com/librefang-registry/hands).
 
-To build your own Hand, define a `HAND.toml` plus system prompt plus `SKILL.md` file. The [skills guide](https://docs.librefang.ai/agent/skills) covers this in detail.
+Aby zbudować własną Rękę, zdefiniuj `HAND.toml` plus prompt systemowy plus plik `SKILL.md`. [Przewodnik umiejętności](https://docs.librefang.ai/agent/skills) opisuje to szczegółowo.
 
 ---
 
-## Installation
+## Instalacja
 
-### Quick Start
+### Szybki start
 
-The dashboard auto-initializes on first run and is available at `http://localhost:4545`:
+Panel automatycznie inicjalizuje się przy pierwszym uruchomieniu i jest dostępny pod adresem `http://localhost:4545`:
 
 ```bash
 curl -fsSL https://librefang.ai/install.sh | sh
 librefang start
 
-# Or run the interactive setup wizard for provider selection:
+# Lub uruchom interaktywnego kreatora konfiguracji do wyboru dostawcy:
 librefang init
 ```
 
-### Platform-Specific Notes
+### Uwagi dotyczące platform
 
-**Homebrew**: The CLI is in `homebrew-core` (accepted 2026-07-08). Install with `brew install librefang`. The desktop app and pre-release channels use a separate tap: `brew tap librefang/tap`, then `brew install --cask librefang`.
+**Homebrew**: CLI jest w `homebrew-core` (zaakceptowane 2026-07-08). Zainstaluj przez `brew install librefang`. Aplikacja desktopowa i kanały pre-release używają osobnego tap'a: `brew tap librefang/tap`, następnie `brew install --cask librefang`.
 
-**Arch Linux**: Signed packages are published through LibreFang's own pacman repository (AUR registration was unavailable). Import the GPG key (`2C325B0F88706ED99C45E216DD09DC7D3E70E1E9`) and add the `[librefang]` repository to `/etc/pacman.conf`. Two independent packages exist: `librefang-bin` (CLI/daemon/web dashboard) and `librefang-desktop-bin` (desktop app, x86_64 only). See `packaging/arch-repo/README.md` for details.
+**Arch Linux**: Sygnowane pakiety są publikowane przez własne repozytorium pacman LibreFang (rejestracja w AUR była niedostępna). Zaimportuj klucz GPG (`2C325B0F88706ED99C45E216DD09DC7D3E70E1E9`) i dodaj repozytorium `[librefang]` do `/etc/pacman.conf`. Istnieją dwa niezależne pakiety: `librefang-bin` (CLI/daemon/panel webowy) oraz `librefang-desktop-bin` (aplikacja desktopowa, tylko x86_64). Szczegóły w `packaging/arch-repo/README.md`.
 
-**NixOS**: The flake exposes two scoped packages. `librefang-cli` builds `--package librefang-cli` only, deliberately excluding the Tauri/GTK webview stack so it builds on headless machines. `librefang-desktop` links the full GTK/webview closure (`gtk3`, `libsoup_3`, `webkitgtk_4_1`) and takes significantly longer to build. For declarative setup, import `librefang.nixosModules.default` and set `services.librefang.enable = true`. Full NixOS documentation is in `docs/operations/nixos.md`.
+**NixOS**: Flaka eksponuje dwa pakietu z określonym zakresem. `librefang-cli` buduje tylko `--package librefang-cli`, celowo wykluczając stos Tauri/GTK webview, aby kompilować się na maszynach headless. `librefang-desktop` linkuje pełną domkniętość GTK/webview (`gtk3`, `libsoup_3`, `webkitgtk_4_1`) i wymaga znacznie więcej czasu na kompilację. Dla konfiguracji deklaratywnej zaimportuj `librefang.nixosModules.default` i ustaw `services.librefang.enable = true`. Pełna dokumentacja NixOS znajduje się w `docs/operations/nixos.md`.
 
-**Debian/Ubuntu/deepin**: No apt repository is published. The install script fetches a fully static musl build (`x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`) — release CI hard-fails if `file` does not report the binary as statically linked. The desktop `.deb` declares an empty dependency list, so you must manually install the webview stack:
+**Debian/Ubuntu/deepin**: Repozytorium apt nie jest publikowane. Skrypt instalacyjny pobiera w pełni statyczną kompilację musl (`x86_64-unknown-linux-musl` lub `aarch64-unknown-linux-musl`) — CI wersji twarde awarii, jeśli `file` nie zgłasza binarium jako statycznie linkowanego. Pakiet `.deb` desktopowy deklaruje pustą listę zależności, więc musisz ręcznie zainstalować stos webview:
 
 ```bash
 sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libdbus-1-dev
 ```
 
-deepin's webkit2gtk version is **not verified** by this project — run `librefang doctor` to audit your environment.
+Wersja webkit2gtk deepin **nie jest weryfikowana** przez ten projekt — uruchom `librefang doctor`, aby przeprowadzić audyt środowiska.
 
 **Docker**:
 
@@ -164,62 +164,62 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 ---
 
-## Security Architecture
+## Architektura bezpieczeństwa
 
-LibreFang implements 16 security layers in a defense-in-depth strategy. Key mechanisms include:
+LibreFang implementuje 16 warstw bezpieczeństwa w strategii obrony w głąb. Kluczowe mechanizmy obejmują:
 
-- **WASM sandbox** — tool execution isolation
-- **Merkle audit trail** — tamper-evident activity logs
-- **Taint tracking** — data flow security, implemented in `librefang-types`
-- **Ed25519 signing** — cryptographic identity verification
-- **SSRF protection** — network request validation
-- **Secret zeroization** — sensitive data wiped from memory on drop
-- **AES-256-GCM vault** — credential storage in `librefang-extensions`
+- **Piaskownica WASM** — izolacja wykonywania narzędzi
+- **Ślad audytowy Merkle** — dzienniki aktywności odporne na manipulację
+- **Śledzenie zanieczyszczeń** — bezpieczeństwo przepływu danych, zaimplementowane w `librefang-types`
+- **Podpisywanie Ed25519** — weryfikacja tożsamości kryptograficznej
+- **Ochrona SSRF** — walidacja żądań sieciowych
+- **Zerowanie sekretów** — dane wrażliwe usuwane z pamięci przy drop
+- **Skarbiec AES-256-GCM** — przechowywanie poświadczeń w `librefang-extensions`
 
-### OFP Wire Protocol Note
+### Uwaga dotycząca protokołu OFP Wire
 
-The `librefang-wire` crate implements the OFP P2P protocol with **plaintext-by-design** framing. Security is provided through HMAC-SHA256 mutual authentication, per-message HMAC, and nonce replay protection — but frame contents are **not encrypted**. For cross-network federation, run OFP behind a private overlay (WireGuard, Tailscale, SSH tunnel) or a service-mesh mTLS layer.
+Crate `librefang-wire` implementuje protokół P2P OFP z ramowaniem **z założenia jawnym**. Bezpieczeństwo jest zapewnione przez wzajemne uwierzytelnianie HMAC-SHA256, HMAC na każdą wiadomość i ochronę przed powtórzeniem nonce — ale treść ramek **nie jest szyfrowana**. Dla federacji między sieciami, uruchom OFP za prywatną nakładką (WireGuard, Tailscale, tunel SSH) lub warstwą mTLS service-mesh.
 
-Details: [docs.librefang.ai/architecture/ofp-wire](https://docs.librefang.ai/architecture/ofp-wire)
+Szczegóły: [docs.librefang.ai/architecture/ofp-wire](https://docs.librefang.ai/architecture/ofp-wire)
 
 ---
 
-## Development
+## Rozwój
 
-### Build & Test
+### Budowanie i testowanie
 
 ```bash
-cargo build --workspace --lib                            # Build all libraries
-cargo test --workspace                                   # Run 2,100+ tests
-cargo clippy --workspace --all-targets -- -D warnings    # Lint (zero warnings enforced)
-cargo fmt --all -- --check                               # Format check
+cargo build --workspace --lib                            # Budowanie wszystkich bibliotek
+cargo test --workspace                                   # Uruchomienie ponad 2100 testów
+cargo clippy --workspace --all-targets -- -D warnings    # Lint (zero ostrzeżeń wymuszonych)
+cargo fmt --all -- --check                               # Sprawdzenie formatowania
 ```
 
-### Committing Changes
+### Zatwierdzanie zmian
 
-Use `scripts/commit.sh` instead of `git commit` directly. The wrapper:
+Używaj `scripts/commit.sh` zamiast bezpośredniego `git commit`. Wrapper:
 
-1. Runs `cargo fmt` on staged `*.rs` files
-2. Re-stages the formatted files
-3. Holds a soft lock against parallel commits in the same worktree
-4. Forwards all flags to `git commit` unchanged
+1. Uruchamia `cargo fmt` na zgłoszonych plikach `*.rs`
+2. Ponownie zgłasza sformatowane pliki
+3. Utrzymuje blokadę miękką przed równoległymi commitami w tym samym worktree
+4. Przekazuje wszystkie flagi do `git commit` bez zmian
 
 ```bash
 scripts/commit.sh -m "feat: add foo"
 scripts/commit.sh -F .git/COMMIT_EDITMSG
 ```
 
-If `cargo` is unavailable, the script skips formatting and warns. The pre-commit hook still gates the commit regardless.
+Jeśli `cargo` jest niedostępny, skrypt pomija formatowanie i ostrzega. Hook pre-commit nadal blokuje commit niezależnie od tego.
 
-### Build Automation
+### Automatyzacja budowania
 
-The `xtask` crate provides build automation tasks beyond standard Cargo commands.
+Crate `xtask` dostarcza zadania automatyzacji budowania wykraczające poza standardowe polecenia Cargo.
 
 ---
 
-## Client SDKs
+## SDK klienta
 
-LibreFang ships client SDKs for four languages, all targeting the REST API at port 4545:
+LibreFang dostarcza SDK klienta dla czterech języków, wszystkie celujące w REST API na porcie 4545:
 
 **JavaScript/TypeScript** — `npm install @librefang/sdk`
 
@@ -257,38 +257,38 @@ agent, _ := client.Agents.Create(map[string]interface{}{"template": "assistant"}
 
 ---
 
-## Migration
+## Migracja
 
-The `librefang-import` crate handles migration from other agent frameworks:
+Crate `librefang-import` obsługuje migrację z innych frameworków agentów:
 
 ```bash
 librefang migrate --from openclaw
 ```
 
-Supported sources: OpenClaw, LangChain, AutoGPT. The engine imports agents, history, skills, and configuration.
+Obsługiwane źródła: OpenClaw, LangChain, AutoGPT. Silnik importuje agentów, historię, umiejętności i konfigurację.
 
 ---
 
-## Integration Points
+## Punkty integracji
 
-| Feature | Details |
+| Funkcja | Szczegóły |
 |---|---|
-| **MCP** | Built-in MCP client and server. Connect to IDEs, extend with custom tools, compose agent pipelines. Runtime support via `librefang-runtime-mcp`. |
-| **A2A Protocol** | Google Agent-to-Agent protocol support for cross-system delegation. |
-| **OpenAI-Compatible API** | Drop-in `/v1/chat/completions` endpoint for existing tooling. |
-| **EveryAPI** | Official integration partner — Agent OS + unified AI infrastructure. |
+| **MCP** | Wbudowany klient i serwer MCP. Łączenie z IDE, rozszerzanie własnymi narzędziami, komponowanie potoków agentów. Wsparcie runtime'u przez `librefang-runtime-mcp`. |
+| **Protokół A2A** | Wsparcie dla protokołu Google Agent-to-Agent do delegacji między systemami. |
+| **API kompatybilne z OpenAI** | Zastępczy punkt końcowy `/v1/chat/completions` dla istniejących narzędzi. |
+| **EveryAPI** | Oficjalny partner integracji — Agent OS + zunifikowana infrastruktura AI. |
 
 ---
 
-## Key Resources
+## Kluczowe zasoby
 
-- **Documentation**: [docs.librefang.ai](https://docs.librefang.ai)
-- **API Reference**: [docs.librefang.ai/integrations/api](https://docs.librefang.ai/integrations/api)
-- **Getting Started**: [docs.librefang.ai/getting-started](https://docs.librefang.ai/getting-started)
-- **Troubleshooting**: [docs.librefang.ai/operations/troubleshooting](https://docs.librefang.ai/operations/troubleshooting)
-- **Contributing**: [`CONTRIBUTING.md`](CONTRIBUTING.md)
-- **Governance**: [`GOVERNANCE.md`](GOVERNANCE.md)
-- **Security**: [`SECURITY.md`](SECURITY.md)
+- **Dokumentacja**: [docs.librefang.ai](https://docs.librefang.ai)
+- **Referencja API**: [docs.librefang.ai/integrations/api](https://docs.librefang.ai/integrations/api)
+- **Wprowadzenie**: [docs.librefang.ai/getting-started](https://docs.librefang.ai/getting-started)
+- **Rozwiązywanie problemów**: [docs.librefang.ai/operations/troubleshooting](https://docs.librefang.ai/operations/troubleshooting)
+- **Wkład w projekt**: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- **Zarządzanie**: [`GOVERNANCE.md`](GOVERNANCE.md)
+- **Bezpieczeństwo**: [`SECURITY.md`](SECURITY.md)
 - **Discord**: [discord.gg/DzTYqAZZmc](https://discord.gg/DzTYqAZZmc)
 
-The [unofficial wiki](https://leszek3737.github.io/librefang-WIki/) contains additional contributor-maintained information.
+[Nieoficjalne wiki](https://leszek3737.github.io/librefang-WIki/) zawiera dodatkowe informacje utrzymywane przez współtwórców.

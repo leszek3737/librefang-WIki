@@ -2,130 +2,130 @@
 
 # scripts/hooks — Git Hooks
 
-Local Git hooks that gate commits and pushes before they leave the developer's machine. Installed once per clone via `just setup` (or `cargo xtask setup`), which runs:
+Lokalne hooki Git, które bramkują commity i pushy zanim opuszczą maszynę dewelopera. Instalowane raz na klon przez `just setup` (lub `cargo xtask setup`), które uruchamia:
 
 ```
 git config core.hooksPath scripts/hooks
 ```
 
-After that, every `git commit` and `git push` in the working copy is intercepted automatically.
+Po tym każdy `git commit` i `git push` w roboczej kopii jest przechwytywany automatycznie.
 
 ---
 
-## Design Philosophy
+## Filozofia projektowania
 
-Two principles shape every hook here:
+Dwie zasady kształtują każdy hook tutaj:
 
-1. **Pre-commit stays fast.** The `pre-commit` hook targets an average runtime under 2 seconds. It runs only checks that are (a) quick and (b) scoped to the staged diff. Anything heavier—clippy, codegen drift, full test suites—belongs to `pre-push` or CI.
+1. **Pre-commit pozostaje szybki.** Hook `pre-commit` celuje w średni czas działania poniżej 2 sekund. Uruchamia tylko sprawdzenia, które są (a) szybkie i (b) zasięgowane do przygotowanego diffa. Wszystko cięższe — clippy, dryf kodu generowanego, pełne suite testowe — należy do `pre-push` lub CI.
 
-2. **Pre-push is not CI.** The previous `pre-push` hook ran `cargo clippy --workspace --all-targets` on every push, making typical pushes wait 5–25 minutes. The current version exits in milliseconds and refuses only obviously dangerous operations (direct pushes to protected branches). CI (`.github/workflows/ci.yml`) is the authoritative gate.
+2. **Pre-push to nie CI.** Poprzedni hook `pre-push` uruchamiał `cargo clippy --workspace --all-targets` przy każdym pushu, zmuszając typowe pushy do czekania 5–25 minut. Obecna wersja kończy działanie w milisekundach i odrzuca jedynie ewidentnie niebezpieczne operacje (bezpośrednie pushy na chronione gałęzie). CI (`.github/workflows/ci.yml`) jest autorytatywną bramką.
 
 ```mermaid
 flowchart LR
-    A[git commit] --> B[pre-commit hook]
-    A --> C[commit-msg hook]
-    B -->|"< 2s"| P{pass?}
-    C --> Q{attribution-free?}
-    P -->|yes| D[commit created]
-    Q -->|yes| D
-    P -->|no| X[blocked]
-    Q -->|no| X
-    E[git push] --> F[pre-push hook]
-    F -->|milliseconds| G{protected branch?}
-    G -->|no| H[push proceeds]
-    G -->|yes| X
+    A[git commit] --> B[hook pre-commit]
+    A --> C[hook commit-msg]
+    B -->|"< 2s"| P{zaliczono?}
+    C --> Q{bez atrybucji?}
+    P -->|tak| D[commit utworzony]
+    Q -->|tak| D
+    P -->|nie| X[zablokowany]
+    Q -->|nie| X
+    E[git push] --> F[hook pre-push]
+    F -->|milisekundy| G{chroniona gałąź?}
+    G -->|nie| H[push kontynuowany]
+    G -->|tak| X
 ```
 
 ---
 
-## Hook Reference
+## Odniesienie do hooków
 
-### `pre-commit` — Staged-only checks
+### `pre-commit` — Sprawdzenia tylko przygotowanych plików
 
-Runs five staged-scoped checks in sequence. Each is designed to fail fast with an actionable message.
+Uruchamia pięć sprawdzeń zasięgowanych na przygotowanych plikach po kolei. Każde jest zaprojektowane tak, aby szybko kończyć się niepowodzeniem z informacją nadającą się do działania.
 
-| # | Check | Scope | Soft-skip when |
-|---|-------|-------|----------------|
-| 1 | `rustfmt --check` on staged `*.rs` | Added/copied/modified/renamed files | `rustfmt` not on PATH |
-| 2 | CHANGELOG duplicate `## [Unreleased]` guard | `CHANGELOG.md` when staged | — |
-| 2b | `(@username)` attribution on changelog entries and `changelog.d/` fragments | `CHANGELOG.md` or `changelog.d/` when staged | `python3` not available |
-| 3 | gitleaks secret scan of staged diff | All staged files | `gitleaks` not installed (see below) |
-| 4 | `openapi.sha256` baseline auto-sync | When `openapi.json` is staged | Neither `sha256sum` nor `shasum` available |
-| 5 | Sidecar-first channel adapter policy | Staged files under `crates/librefang-channels/src/` | — |
+| # | Sprawdzenie | Zakres | Pominięcie miękkie gdy |
+|---|-------------|--------|------------------------|
+| 1 | `rustfmt --check` na przygotowanych `*.rs` | Dodane/skopiowane/zmodyfikowane/przemianowane pliki | `rustfmt` nie jest w PATH |
+| 2 | Strażnik duplikatu `## [Unreleased]` w CHANGELOG | `CHANGELOG.md` gdy jest przygotowany | — |
+| 2b | Atrybucja `(@username)` w wpisach changeloga i fragmentach `changelog.d/` | `CHANGELOG.md` lub `changelog.d/` gdy są przygotowane | `python3` niedostępny |
+| 3 | Skan sekretów gitleaks przygotowanego diffa | Wszystkie przygotowane pliki | `gitleaks` nie zainstalowany (patrz poniżej) |
+| 4 | Auto-synchronizacja linii bazowej `openapi.sha256` | Gdy `openapi.json` jest przygotowany | Ani `sha256sum`, ani `shasum` niedostępne |
+| 5 | Polityka adaptera kanału z priorytetem sidecar | Przygotowane pliki w `crates/librefang-channels/src/` | — |
 
-**Key implementation details:**
+**Kluczowe szczegóły implementacji:**
 
-- **Format check** invokes `rustfmt` directly (not `cargo fmt`) because `cargo fmt --check -- <paths>` silently ignores path arguments and rescans the whole workspace. Edition is hardcoded to `2021` to match `workspace.package.edition`. Paths are passed NUL-delimited through `xargs -0` so filenames with spaces or shell metacharacters survive intact.
+- **Sprawdzenie formatowania** wywołuje `rustfmt` bezpośrednio (nie `cargo fmt`), ponieważ `cargo fmt --check -- <ścieżki>` cicho ignoruje argumenty ścieżek i ponownie skanuje cały obszar roboczy. Edycja jest zakodowana na sztywno jako `2021`, aby pasować do `workspace.package.edition`. Ścieżki są przekazywane z rozgraniczeniem NUL przez `xargs -0`, aby nazwy plików ze spacjami lub metaznakami powłoki przetrwały nienaruszone.
 
-- **CHANGELOG guard** prevents duplicate `## [Unreleased]` sections. Release tooling (the `release.yml` awk extractor and `xtask/src/changelog.rs`) silently picks the first match and drops the rest.
+- **Strażnik CHANGELOG** zapobiega duplikatom sekcji `## [Unreleased]`. Narzędzia wydawnicze (ekstraktor awk `release.yml` oraz `xtask/src/changelog.rs`) cicho wybierają pierwsze dopasowanie i odrzucają resztę.
 
-- **Attribution check** delegates to `scripts/check-changelog-attribution.py --staged`. It enforces `(@your-github-login)` suffixes on both `CHANGELOG.md` [Unreleased] bullets and `changelog.d/` fragments. To audit all pending entries: `python3 scripts/check-changelog-attribution.py --all-unreleased`.
+- **Sprawdzenie atrybucji** deleguje do `scripts/check-changelog-attribution.py --staged`. Wymusza sufiksy `(@twój-login-github)` zarówno w punktach [Unreleased] w `CHANGELOG.md`, jak i w fragmentach `changelog.d/`. Aby zweryfikować wszystkie oczekujące wpisy: `python3 scripts/check-changelog-attribution.py --all-unreleased`.
 
-- **gitleaks** scans against rules in `.gitleaks.toml` (path/regex allowlists live there). A missing `gitleaks` binary produces a warning, not a hard error—CI's `secrets` job is the real gate. Set `LIBREFANG_SKIP_SECRETS_SCAN=1` to silence the warning on a deliberately tool-less host.
+- **gitleaks** skanuje wg reguł w `.gitleaks.toml` (listy dozwolonych dla ścieżek/regexów znajdują się tam). Brakujący plik binarny `gitleaks` generuje ostrzeżenie, a nie twardy błąd — zadanie `secrets` w CI jest prawdziwą bramką. Ustaw `LIBREFANG_SKIP_SECRETS_SCAN=1`, aby wyciszyć ostrzeżenie na celowo pozbawionym narzędzi hoście.
 
-- **openapi baseline sync** recomputes `openapi.json`'s sha256 and auto-stages the updated line in `xtask/baselines/openapi.sha256`. This prevents the CI openapi-drift gate from rejecting version bumps and direct `openapi.json` edits. The hook uses a portable `sha256` shim that prefers `sha256sum` (Linux coreutils) and falls back to `shasum -a 256` (macOS).
+- **Synchronizacja linii bazowej openapi** przelicza sha256 `openapi.json` i automatycznie przygotowuje zaktualizowaną linię w `xtask/baselines/openapi.sha256`. Zapobiega to odrzuceniu podbijania wersji i bezpośrednich edycji `openapi.json` przez bramkę dryfu openapi w CI. Hook używa przenośnego shimu `sha256`, który preferuje `sha256sum` (Linux coreutils) i wraca do `shasum -a 256` (macOS).
 
-- **Sidecar-first policy** blocks new in-process `ChannelAdapter` implementations that aren't in the allowlist at `crates/librefang-channels/src/channels-allowlist.txt`. It checks both added and modified files to prevent a stub-plus-impl split from slipping through. Grandfathering requires maintainer approval via a separate reviewed commit adding the basename. A soft note is emitted if `channel_bridge.rs` adds an `*Adapter::new` call. The authoritative tree-wide check runs in CI via `cargo xtask channel-policy`.
+- **Polityka priorytetu sidecar** blokuje nowe implementacje `ChannelAdapter` w procesie, które nie znajdują się na liście dozwolonych w `crates/librefang-channels/src/channels-allowlist.txt`. Sprawdza zarówno dodane, jak i zmodyfikowane pliki, aby zapobiec prześlizgnięciu się podziału stub-plus-impl. Wyłączenie wymaga zatwierdzenia przez opiekuna poprzez osobny zrecenzowany commit dodający basename. Uwaga miękka jest emitowana, jeśli `channel_bridge.rs` dodaje wywołanie `*Adapter::new`. Autorytatywne sprawdzenie całego drzewa uruchamia się w CI przez `cargo xtask channel-policy`.
 
-### `commit-msg` — Attribution guard
+### `commit-msg` — Strażnik atrybucji
 
-Rejects Claude/Anthropic attribution in two places the `.claude/hooks/guard-bash-safety.sh` hook cannot reach:
+Odrzuca atrybucję Claude/Anthropic w dwóch miejscach, których hook `.claude/hooks/guard-bash-safety.sh` nie może osiągnąć:
 
-**1. Commit message body** — matches these patterns (case-insensitive):
+**1. Treść komunikatu commita** — dopasowuje te wzorce (bez uwzględniania wielkości liter):
 
-- `Co-Authored-By:` lines mentioning Claude, Anthropic, or `noreply@anthropic.com`
-- `Generated with ... Claude` (within 40 characters)
-- `🤖 Claude Code` style attribution
+- Linie `Co-Authored-By:` wspominające Claude, Anthropic lub `noreply@anthropic.com`
+- `Generated with ... Claude` (w obrębie 40 znaków)
+- Atrybucja w stylu `🤖 Claude Code`
 
-**2. Author identity** — checked via `git var GIT_AUTHOR_IDENT` (not `git config user.*`) so `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` environment overrides are covered. Name matching:
+**2. Tożsamość autora** — sprawdzana przez `git var GIT_AUTHOR_IDENT` (nie `git config user.*`), więc nadpisania środowiskowe `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` są objęte. Dopasowywanie nazwy:
 
-- Separators are stripped before comparison, so `Claude Code`, `Claude-Code`, `claude_code`, and `ClaudeCode` collapse to one case.
-- Matched as whole names only (not substrings) to avoid blocking contributors named Claudia, Claudio, or Claude Dubois.
-- Model-name identities (`claude*opus*`, `claude*sonnet*`, `claude*haiku*`) are caught regardless of version/family ordering.
+- Separatory są usuwane przed porównaniem, więc `Claude Code`, `Claude-Code`, `claude_code` i `ClaudeCode` są redukowane do jednego przypadku.
+- Dopasowywane jako całe nazwy (nie podciągi), aby uniknąć blokowania współtwórców o imionach Claudia, Claudio lub Claude Dubois.
+- Tożsamości nazw modeli (`claude*opus*`, `claude*sonnet*`, `claude*haiku*`) są wyłapywane niezależnie od kolejności wersji/rodziny.
 
-Email matching is pinned to the bot mailboxes (`noreply@anthropic.com`, `claude@anthropic.com`) only—an Anthropic employee using their own `@anthropic.com` address is not blocked.
+Dopasowywanie adresu email jest przypięte wyłącznie do skrzynek botów (`noreply@anthropic.com`, `claude@anthropic.com`) — pracownik Anthropic używający własnego adresu `@anthropic.com` nie jest blokowany.
 
-Recovery commands are printed in the error message, including `git commit --amend --no-edit --reset-author` for already-committed cases.
+Polecenia odzyskiwania są drukowane w komunikacie błędu, w tym `git commit --amend --no-edit --reset-author` dla przypadków już zcommitowanych.
 
-### `pre-push` — Protected branch guard
+### `pre-push` — Strażnik chronionej gałęzi
 
-The only check: refuse direct pushes to `main` or `master`. GitHub branch protection enforces this server-side too, but the local rejection saves the round-trip and the confusing post-clippy "branch is protected" error.
+Jedyna kontrola: odmowa bezpośrednich pushów na `main` lub `master`. Ochrona gałęzi GitHub egzekwuje to również po stronie serwera, ale lokalne odrzucenie oszczędza round-trip i mylący błąd „gałąź jest chroniona” po clippy.
 
-Branch deletions (all-zeros SHA sentinel) are allowed through; GitHub will refuse if the branch is protected.
+Usunięcia gałęzi (wartość sentinela SHA ze wszystkimi zerami) są przepuszczane; GitHub odrzuci, jeśli gałąź jest chroniona.
 
-**Skip mechanism:** `LIBREFANG_PREPUSH_SKIP=1 git push` or `git push --no-verify`. Use only for agreed-upon release/hotfix scenarios.
+**Mechanizm pomijania:** `LIBREFANG_PREPUSH_SKIP=1 git push` lub `git push --no-verify`. Używaj tylko dla uzgodnionych scenariuszy wydania/hotfixa.
 
-### `cargo-fmt-staged.sh` — Pre-commit framework helper
+### `cargo-fmt-staged.sh` — Pomocnik frameworka pre-commit
 
-Not a Git hook itself—invoked by `.pre-commit-config.yaml`'s `cargo-fmt-staged` hook entry. Collects staged `.rs` files that still exist on disk (deletions are skipped), then `exec`s `cargo fmt --check -- <files>`. Exits immediately with code 0 if no Rust files are staged.
-
----
-
-## Environment Variables
-
-| Variable | Hook | Effect |
-|----------|------|--------|
-| `LIBREFANG_SKIP_SECRETS_SCAN=1` | `pre-commit` | Silences the "gitleaks not installed" warning |
-| `LIBREFANG_PREPUSH_SKIP=1` | `pre-push` | Skips the entire hook (equivalent to `--no-verify`) |
+Nie jest samym hookiem Git — wywoływany przez wpis hooka `cargo-fmt-staged` w `.pre-commit-config.yaml`. Zbiera przygotowane pliki `.rs`, które nadal istnieją na dysku (usunięcia są pomijane), następnie wykonuje `exec` `cargo fmt --check -- <pliki>`. Natychmiast kończy z kodem 0, jeśli nie ma przygotowanych plików Rust.
 
 ---
 
-## Relationship to CI
+## Zmienne środowiskowe
 
-The hooks are fast-feedback guards, not enforcement boundaries. `--no-verify`, an unset `core.hooksPath`, or a missing tool can bypass any of them. The authoritative gates run in CI:
-
-- **`quality` job:** `cargo fmt` + `cargo clippy` (selective on PRs, full on pushes to main)
-- **`openapi-drift` job:** regenerates `openapi.json` + SDKs, fails on uncommitted diff
-- **`security` job:** `cargo audit` + `npm audit` + license check
-- **`test-*` jobs:** nextest matrix across Linux/macOS/Windows
-
-The `channel-policy` check has an additional authoritative gate: `cargo xtask channel-policy` runs tree-wide in CI on every PR.
+| Zmienna | Hook | Efekt |
+|---------|------|-------|
+| `LIBREFANG_SKIP_SECRETS_SCAN=1` | `pre-commit` | Wycisza ostrzeżenie „gitleaks nie zainstalowany” |
+| `LIBREFANG_PREPUSH_SKIP=1` | `pre-push` | Pomija cały hook (równoważne z `--no-verify`) |
 
 ---
 
-## Portability Notes
+## Relacja z CI
 
-- `pre-commit`, `pre-push`, and `commit-msg` use `#!/bin/sh` (POSIX), not bash.
-- The `sha256` shim in `pre-commit` handles the `sha256sum` (Linux) vs `shasum -a 256` (macOS) split.
-- `pre-commit` uses NUL-delimited pipelines (`git diff -z`, `xargs -0`, `grep -zq`) throughout to handle paths with spaces or shell metacharacters.
-- Soft-skip behavior is consistent: a missing optional tool (`rustfmt`, `gitleaks`, `python3`) produces a warning and continues, never a hard failure.
+Hooki to strażnicy szybkiego sprzężenia zwrotnego, nie granice egzekwowania. `--no-verify`, nieustawiony `core.hooksPath` lub brakujące narzędzie może obejść każdy z nich. Autorytatywne bramki uruchamiają się w CI:
+
+- **Zadanie `quality`:** `cargo fmt` + `cargo clippy` (selektywnie na PR-ach, pełne na pushach na main)
+- **Zadanie `openapi-drift`:** regeneruje `openapi.json` + SDK-je, kończy się niepowodzeniem na niecommitowanym diffie
+- **Zadanie `security`:** `cargo audit` + `npm audit` + sprawdzenie licencji
+- **Zadania `test-*`:** macierz nextest na Linux/macOS/Windows
+
+Sprawdzenie `channel-policy` ma dodatkową autorytatywną bramkę: `cargo xtask channel-policy` uruchamia się na całym drzewie w CI przy każdym PR.
+
+---
+
+## Uwagi o przenośności
+
+- `pre-commit`, `pre-push` i `commit-msg` używają `#!/bin/sh` (POSIX), nie bash.
+- Shim `sha256` w `pre-commit` obsługuje podział `sha256sum` (Linux) vs `shasum -a 256` (macOS).
+- `pre-commit` używa potoków z rozgraniczeniem NUL (`git diff -z`, `xargs -0`, `grep -zq`) wszędzie, aby obsługiwać ścieżki ze spacjami lub metaznakami powłoki.
+- Zachowanie miękkiego pomijania jest spójne: brakujące opcjonalne narzędzie (`rustfmt`, `gitleaks`, `python3`) generuje ostrzeżenie i kontynuuje, nigdy twardy błąd.

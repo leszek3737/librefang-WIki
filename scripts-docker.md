@@ -1,85 +1,85 @@
-# scripts — docker
+# skrypty — docker
 
-# scripts/docker — Install Smoke Test
+# scripts/docker — Test dymny instalatora
 
-## Purpose
+## Cel
 
-This module contains a single Dockerfile (`install-smoke.Dockerfile`) that validates `web/public/install.sh` — the user-facing installer script — in a clean, reproducible environment. It serves as the CI gate for changes to the installer, ensuring the script is syntactically valid, produces a correct platform target, and (optionally) installs a working binary end-to-end.
+Ten moduł zawiera pojedynczy plik Dockerfile (`install-smoke.Dockerfile`), który weryfikuje `web/public/install.sh` — skrypt instalacyjny przeznaczony dla użytkownika — w czystym, powtarzalnym środowisku. Pełni rolę bramki CI dla zmian w instalatorze, zapewniając poprawność składniową skryptu, prawidłowe wygenerowanie docelowej platformy oraz (opcjonalnie) zakończenie pełnej instalacji działającego pliku binarnego.
 
-## File Inventory
+## Spis plików
 
-| File | Role |
+| Plik | Rola |
 |------|------|
-| `install-smoke.Dockerfile` | Build definition for the smoke-test container |
+| `install-smoke.Dockerfile` | Definicja budowy kontenera testu dymnego |
 
-## Usage
+## Użycie
 
-### Quick Check (default, CI gate)
+### Szybka weryfikacja (domyślna, bramka CI)
 
-Runs syntax validation and platform detection against the installer source. No network access required, no release artifact needed.
+Uruchamia weryfikację składni i wykrywanie platformy względem źródła instalatora. Nie wymaga dostępu do sieci ani artefaktu wydania.
 
 ```bash
 docker build -f scripts/docker/install-smoke.Dockerfile .
 ```
 
-### Full End-to-End Install
+### Pełna instalacja end-to-end
 
-Performs a real install by downloading a published release. Requires that a release exists for the current repository state.
+Przeprowadza rzeczywistą instalację, pobierając opublikowane wydanie. Wymaga, aby wydanie istniało dla bieżącego stanu repozytorium.
 
 ```bash
 docker build -f scripts/docker/install-smoke.Dockerfile \
   --build-arg LIBREFANG_SMOKE_FULL=1 .
 ```
 
-## Test Modes
+## Tryby testów
 
-The build argument `LIBREFANG_SMOKE_FULL` selects between two execution paths:
+Argument budowy `LIBREFANG_SMOKE_FULL` wybiera między dwiema ścieżkami wykonania:
 
 ```mermaid
 flowchart TD
     A[docker build] --> B{LIBREFANG_SMOKE_FULL?}
-    B -->|0 / unset| C[Syntax check sh -n]
-    C --> D[Extract & run detect_platform]
-    D --> E[Validate target: linux-musl or linux-gnu]
-    B -->|1| F[Run install.sh]
-    F --> G[Verify librefang --version]
+    B -->|0 / niezdefiniowany| C[Sprawdzenie składni sh -n]
+    C --> D[Wydobycie i uruchomienie detect_platform]
+    D --> E[Weryfikacja celu: linux-musl lub linux-gnu]
+    B -->|1| F[Uruchomienie install.sh]
+    F --> G[Weryfikacja librefang --version]
 ```
 
-### Default Mode (`LIBREFANG_SMOKE_FULL=0`)
+### Tryb domyślny (`LIBREFANG_SMOKE_FULL=0`)
 
-Three lightweight checks that run without network or release artifacts:
+Trzy lekkie weryfikacje uruchamiane bez dostępu do sieci lub artefaktów wydania:
 
-1. **Syntax validation** — `sh -n` parses the script without executing it, catching shell syntax errors.
-2. **Platform detection** — The `detect_platform` function is extracted from the script via `sed`, evaluated, and invoked. Success confirms the function is self-contained and runnable.
-3. **Target conformance** — The detected `$PLATFORM` value is checked against the regex `linux-(musl|gnu)`, confirming it matches the release naming convention (musl preferred, gnu fallback).
+1. **Weryfikacja składni** — `sh -n` analizuje skrypt bez jego wykonywania, wyłapując błędy składni powłoki.
+2. **Wykrywanie platformy** — Funkcja `detect_platform` jest wydobywana ze skryptu za pomocą `sed`, ewaluowana i wywoływana. Powodzenie potwierdza, że funkcja jest samowystarczalna i uruchamialna.
+3. **Zgodność celu** — Wykryta wartość `$PLATFORM` jest sprawdzana względem wyrażenia regularnego `linux-(musl|gnu)`, co potwierdza zgodność z konwencją nazewnictwa wydań (preferowany musl, alternatywa gnu).
 
-Each check emits a `PASS:` line on success, making failures easy to locate in CI logs.
+Każda weryfikacja emituje linię `PASS:` w przypadku powodzenia, co ułatwia lokalizację błędów w logach CI.
 
-### Full Mode (`LIBREFANG_SMOKE_FULL=1`)
+### Tryb pełny (`LIBREFANG_SMOKE_FULL=1`)
 
-Runs the installer for real, then verifies the installed binary:
+Uruchamia instalator rzeczywiście, a następnie weryfikuje zainstalowany plik binarny:
 
-1. Executes `sh /tmp/install.sh`, which downloads and installs a release into `$HOME/.librefang/`.
-2. If the binary exists at `~/.librefang/bin/librefang`, runs `--version` to confirm it executes correctly.
+1. Wykonuje `sh /tmp/install.sh`, który pobiera i instaluje wydanie do `$HOME/.librefang/`.
+2. Jeśli plik binarny istnieje w `~/.librefang/bin/librefang`, uruchamia `--version`, aby potwierdzić poprawne wykonanie.
 
-If no full install occurred, the verification step prints `SKIP:` rather than failing — this keeps the build from erroring on environments where the install silently no-ops.
+Jeśli pełna instalacja się nie odbyła, krok weryfikacji wyświetla `SKIP:` zamiast kończyć się błędem — zapobiega to błędowi budowy w środowiskach, w których instalacja po cichu nic nie robi.
 
-## Environment
+## Środowisko
 
-- **Base image:** `debian:bookworm-slim` — chosen to represent a minimal, common user environment.
-- **User:** Runs as a non-root `testuser` to simulate a real user install and catch permission assumptions in the installer.
-- **Dependencies:** Only `curl` and `ca-certificates` are pre-installed, matching what the installer expects to find on a target system.
+- **Obraz bazowy:** `debian:bookworm-slim` — wybrany jako reprezentatywny, minimalne i powszechnie spotykane środowisko użytkownika.
+- **Użytkownik:** Uruchamiany jako nieuprzywilejowany `testuser`, aby symulować rzeczywistą instalację użytkownika i wyłapać założenia dotyczące uprawnień w instalatorze.
+- **Zależności:** Tylko `curl` i `ca-certificates` są wstępnie zainstalowane, co odpowiada temu, czego instalator oczekuje na docelowym systemie.
 
-## Relationship to the Codebase
+## Relacja z bazą kodu
 
-This Dockerfile is a **consumer** of `web/public/install.sh`. It does not import or call any other module in the repository. The installer script is the sole artifact under test.
+Ten plik Dockerfile jest **konsumentem** `web/public/install.sh`. Nie importuje ani nie wywołuje żadnego innego modułu w repozytorium. Skrypt instalacyjny jest jedynym artefaktem podlegającym testom.
 
-- **Input:** `web/public/install.sh` (copied into the image at build time via `COPY`).
-- **Output:** Build success/failure in CI. No artifacts are produced.
-- **Downstream expectation:** The `$PLATFORM` value produced by `detect_platform` must align with release artifact naming (`librefang-linux-musl-*`, `librefang-linux-gnu-*`) defined by the release pipeline.
+- **Wejście:** `web/public/install.sh` (skopiowany do obrazu w czasie budowy za pomocą `COPY`).
+- **Wyjście:** Powodzenie/niepowodzenie budowy w CI. Nie są generowane żadne artefakty.
+- **Oczekiwanie nadrzędne:** Wartość `$PLATFORM` wygenerowana przez `detect_platform` musi być zgodna z nazewnictwem artefaktów wydania (`librefang-linux-musl-*`, `librefang-linux-gnu-*`) określonym przez potok wydawniczy.
 
-## CI Integration Notes
+## Uwagi dotyczące integracji z CI
 
-- The default (non-full) mode is safe to run on every commit and PR — it requires no release and no network egress from the build step beyond `apt-get`.
-- The full mode should be gated on release events or manually triggered, since it depends on a published release being available for download.
-- Because the container runs as a non-root user, any installer path that assumes write access to system directories will fail here — this is intentional.
+- Tryb domyślny (niepełny) jest bezpieczny do uruchamiania przy każdym commicie i PR — nie wymaga wydania ani wyjścia sieciowego z kroku budowy poza `apt-get`.
+- Tryb pełny powinien być powiązany ze zdarzeniami wydania lub uruchamiany ręcznie, ponieważ zależy od dostępności opublikowanego wydania do pobrania.
+- Ponieważ kontener uruchamia się jako nieuprzywilejowany użytkownik, każda ścieżka w instalatorze zakładająca dostęp do zapisu w katalogach systemowych zakończy się tutaj niepowodzeniem — jest to zamierzone.

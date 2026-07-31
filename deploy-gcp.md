@@ -2,41 +2,41 @@
 
 # deploy — gcp
 
-Terraform module that provisions a single GCP `e2-micro` instance running LibreFang, fully within GCP's always-free tier. The deployment is self-contained: Terraform creates the network, firewall, and compute instance, then hands off to a cloud-init template that installs the LibreFang binary and starts a hardened systemd service.
+Moduł Terraform, który udostępnia pojedynczą instancję GCP `e2-micro` uruchamiającą LibreFang, w pełni w ramach bezpłatnego warstwy GCP. Wdrożenie jest samowystarczalne: Terraform tworzy sieć, zaporę sieciową i instancję obliczeniową, a następnie przekazuje sterowanie szablonowi cloud-init, który instaluje binarium LibreFang i uruchamia utwardzoną usługę systemd.
 
-## What Gets Created
+## Co zostaje utworzone
 
-| Resource | Purpose |
+| Zasób | Przeznaczenie |
 |----------|---------|
-| `google_compute_network.librefang` | Dedicated VPC (`10.0.1.0/24` subnet) |
-| `google_compute_firewall.allow_ssh` | Inbound TCP 22 from `0.0.0.0/0` |
-| `google_compute_firewall.allow_http` | Inbound TCP 4545 from `0.0.0.0/0` |
-| `google_compute_instance.librefang` | `e2-micro` VM, Ubuntu 24.04 LTS, 30 GB standard disk |
+| `google_compute_network.librefang` | Dedykowana sieć VPC (`10.0.1.0/24` podsieć) |
+| `google_compute_firewall.allow_ssh` | Ruch przychodzący TCP 22 z `0.0.0.0/0` |
+| `google_compute_firewall.allow_http` | Ruch przychodzący TCP 4545 z `0.0.0.0/0` |
+| `google_compute_instance.librefang` | Maszyna wirtualna `e2-micro`, Ubuntu 24.04 LTS, 30 GB standardowy dysk |
 
-The instance receives an ephemeral public IP via its `access_config` block. No load balancer or Cloud DNS is provisioned — access is by IP directly.
+Instancja otrzymuje tymczasowy publiczny adres IP poprzez blok `access_config`. Nie jest udostępniany żaden load balancer ani Cloud DNS — dostęp odbywa się bezpośrednio po adresie IP.
 
-## Deployment Flow
+## Przebieg wdrożenia
 
 ```mermaid
 flowchart TD
-    A[terraform apply] --> B[Create VPC + subnet]
-    B --> C[Create firewall rules]
-    C --> D[Create e2-micro instance]
-    D --> E[Render cloud-init.yml.tpl<br/>with API keys + version]
-    E --> F[GCP metadata injects user-data]
-    F --> G[cloud-init runs on boot]
-    G --> H[Download librefang binary<br/>from GitHub Releases]
-    H --> I[Enable + start<br/>librefang.service]
-    I --> J[/dashboard_url accessible/]
+    A[terraform apply] --> B[Utworzenie VPC + podsieci]
+    B --> C[Utworzenie reguł zapory sieciowej]
+    C --> D[Utworzenie instancji e2-micro]
+    D --> E[Renderowanie cloud-init.yml.tpl<br/>z kluczami API + wersją]
+    E --> F[Metadane GCP wstrzykują user-data]
+    F --> G[cloud-init uruchamia się przy starcie]
+    G --> H[Pobranie binarium librefang<br/>z GitHub Releases]
+    H --> I[Włączenie + uruchomienie<br/>librefang.service]
+    I --> J[/dashboard_url dostępny/]
 ```
 
-## Key Files
+## Kluczowe pliki
 
-### `main.tf` — Infrastructure definition
+### `main.tf` — Definicja infrastruktury
 
-Contains the four resources listed above plus the provider configuration. The provider is pinned to `~> 5.0` of the Google Terraform provider and uses `var.project_id`, `var.region`, and `var.zone` for project scoping.
+Zawiera cztery zasoby wymienione powyżej oraz konfigurację dostawcy. Dostawca jest przypięty do wersji `~> 5.0` dostawcy Google Terraform i używa `var.project_id`, `var.region` oraz `var.zone` do określenia zakresu projektu.
 
-The instance metadata block is the integration point between Terraform and cloud-init:
+Blok metadanych instancji jest punktem integracji między Terraform a cloud-init:
 
 ```hcl
 metadata = {
@@ -50,118 +50,118 @@ metadata = {
 }
 ```
 
-The `templatefile()` call substitutes four variables into the cloud-init template at apply time. API keys are passed as environment variables into the systemd unit — they are never written to disk in plaintext files.
+Wywołanie `templatefile()` podstawia cztery zmienne w szablon cloud-init w momencie apply. Klucze API są przekazywane jako zmienne środowiskowe do jednostki systemd — nigdy nie są zapisywane na dysku w plikach czystotekstowych.
 
-### `cloud-init.yml.tpl` — VM provisioning
+### `cloud-init.yml.tpl` — Inicjalizacja maszyny wirtualnej
 
-Runs on first boot and performs four phases:
+Uruchamia się przy pierwszym uruchomieniu i wykonuje cztery fazy:
 
-1. **User setup** — Creates the `librefang` user with passwordless sudo.
-2. **Package install** — Installs `curl`, `jq`, `htop`, `fail2ban`.
-3. **Systemd unit** — Writes `/etc/systemd/system/librefang.service` with:
-   - `LIBREFANG_HOME=/data` as the data directory
-   - `LIBREFANG_BIND=0.0.0.0:4545` to listen on all interfaces
-   - API keys injected as `Environment=` entries
-   - Hardening directives: `ProtectSystem=strict`, `PrivateTmp`, `NoNewPrivileges`, write access only to `/data`
-4. **Binary install** — Downloads the release tarball from GitHub, extracting the correct architecture (`x86_64` or `aarch64`), then enables and starts the service.
+1. **Konfiguracja użytkownika** — Tworzy użytkownika `librefang` z sudo bez hasła.
+2. **Instalacja pakietów** — Instaluje `curl`, `jq`, `htop`, `fail2ban`.
+3. **Jednostka systemd** — Zapisuje `/etc/systemd/system/librefang.service` z:
+   - `LIBREFANG_HOME=/data` jako katalogiem danych
+   - `LIBREFANG_BIND=0.0.0.0:4545` nasłuchującym na wszystkich interfejsach
+   - Kluczami API wstrzykniętymi jako wpisy `Environment=`
+   - Dyrektywami utwardzającymi: `ProtectSystem=strict`, `PrivateTmp`, `NoNewPrivileges`, dostęp do zapisu tylko w `/data`
+4. **Instalacja binarium** — Pobiera archiwum wydania z GitHub, wypakowując odpowiednią architekturę (`x86_64` lub `aarch64`), następnie włącza i uruchamia usługę.
 
-The version resolution logic supports two modes:
+Logika rozpoznawania wersji obsługuje dwa tryby:
 
-- **`latest`** (default) — Queries the GitHub API to find the newest release asset matching the detected architecture.
-- **Pinned version** (e.g., `v0.4.2-20260314`) — Constructs a direct download URL, bypassing the API call entirely.
+- **`latest`** (domyślna) — Odpytuje API GitHub w celu znalezienia najnowszego wydania pasującego do wykrytej architektury.
+- **Przypięta wersja** (np. `v0.4.2-20260314`) — Konstruuje bezpośredni URL pobierania, pomijając wywołanie API całkowicie.
 
-### `variables.tf` — Configuration inputs
+### `variables.tf` — Wejścia konfiguracyjne
 
-| Variable | Type | Default | Notes |
+| Zmienna | Typ | Domyślna | Uwagi |
 |----------|------|---------|-------|
-| `project_id` | `string` | *(required)* | Target GCP project |
-| `region` | `string` | `us-central1` | Must be a free-tier-eligible region |
+| `project_id` | `string` | *(wymagana)* | Docelowy projekt GCP |
+| `region` | `string` | `us-central1` | Musi być regionem kwalifikującym się do warstwy bezpłatnej |
 | `zone` | `string` | `us-central1-a` | |
-| `ssh_pub_key_path` | `string` | `~/.ssh/id_rsa.pub` | Path expanded via `pathexpand()` |
-| `librefang_version` | `string` | `latest` | Release tag or `latest` |
-| `groq_api_key` | `string` | `""` | Marked `sensitive` |
-| `openai_api_key` | `string` | `""` | Marked `sensitive` |
-| `anthropic_api_key` | `string` | `""` | Marked `sensitive` |
+| `ssh_pub_key_path` | `string` | `~/.ssh/id_rsa.pub` | Ścieżka rozszerzana przez `pathexpand()` |
+| `librefang_version` | `string` | `latest` | Tag wydania lub `latest` |
+| `groq_api_key` | `string` | `""` | Oznaczona jako `sensitive` |
+| `openai_api_key` | `string` | `""` | Oznaczona jako `sensitive` |
+| `anthropic_api_key` | `string` | `""` | Oznaczona jako `sensitive` |
 
-At least one API key must be non-empty for LibreFang to function. All three are passed through to cloud-init regardless of whether they're set — empty values simply result in empty environment variables, which LibreFang ignores.
+Przynajmniej jeden klucz API musi być niepusty, aby LibreFang mógł działać. Wszystkie trzy są przekazywane do cloud-init niezależnie od tego, czy są ustawione — puste wartości po prostu skutkują pustymi zmiennymi środowiskowymi, które LibreFang ignoruje.
 
-### `outputs.tf` — Post-deploy access points
+### `outputs.tf` — Punkty dostępu po wdrożeniu
 
-Three outputs are emitted after `terraform apply`:
+Po wykonaniu `terraform apply` emitowane są trzy wyjścia:
 
-- **`external_ip`** — Raw public IP of the instance.
-- **`ssh_command`** — Ready-to-run SSH command (`ssh librefang@<ip>`).
-- **`dashboard_url`** — Full URL to the dashboard/API (`http://<ip>:4545`).
+- **`external_ip`** — Surowy publiczny adres IP instancji.
+- **`ssh_command`** — Gotowa do uruchomienia komenda SSH (`ssh librefang@<ip>`).
+- **`dashboard_url`** — Pełny URL do dashboardu/API (`http://<ip>:4545`).
 
-All three derive from `google_compute_instance.librefang.network_interface[0].access_config[0].nat_ip`.
+Wszystkie trzy pochodzą z `google_compute_instance.librefang.network_interface[0].access_config[0].nat_ip`.
 
-## Usage
+## Użycie
 
 ```bash
 cd deploy/gcp
 
-# Authenticate GCP provider
+# Uwierzytelnienie dostawcy GCP
 gcloud auth application-default login
 
-# Configure
+# Konfiguracja
 cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars: set project_id and at least one API key
+# Edytuj terraform.tfvars: ustaw project_id i przynajmniej jeden klucz API
 
-# Deploy
+# Wdrożenie
 terraform init
 terraform apply
 ```
 
-The apply takes approximately 2 minutes for infrastructure creation. Cloud-init runs asynchronously on first boot and requires an additional ~60 seconds before the service is reachable. Verify with:
+Zastosowanie apply trwa około 2 minut na utworzenie infrastruktury. Cloud-init uruchamia się asynchronicznie przy pierwszym starcie i wymaga dodatkowych ~60 sekund, zanim usługa staje się osiągalna. Weryfikacja:
 
 ```bash
 curl http://<external_ip>:4545/api/health
 ```
 
-To destroy all resources:
+Aby zniszczyć wszystkie zasoby:
 
 ```bash
 terraform destroy
 ```
 
-## Free Tier Constraints
+## Ograniczenia warstwy bezpłatnej
 
-This module is designed to stay within GCP's always-free tier limits:
+Ten moduł jest zaprojektowany tak, aby mieścić się w limitach bezpłatnej warstwy GCP:
 
-| Resource | Free Tier Limit | This Deployment |
+| Zasób | Limit warstwy bezpłatnej | To wdrożenie |
 |----------|----------------|-----------------|
-| `e2-micro` instance | 1 per month (in `us-central1`, `us-east1`, `us-west1`) | 1 |
-| `pd-standard` disk | 30 GB/month | 30 GB |
-| Egress | 1 GB/month (North America) | Minimal (API responses only) |
+| instancja `e2-micro` | 1 na miesiąc (w `us-central1`, `us-east1`, `us-west1`) | 1 |
+| dysk `pd-standard` | 30 GB/miesiąc | 30 GB |
+| Ruch wychodzący | 1 GB/miesiąc (Ameryka Północna) | Minimalny (tylko odpowiedzi API) |
 
-Deploying to a non-eligible region or scaling beyond a single instance will incur charges. Egress is the main variable cost — heavy LLM response traffic exceeding 1 GB/month will be billed.
+Wdrożenie do regionu niew kwalifikującego się do warstwy bezpłatnej lub skalowanie powyżej pojedynczej instancji spowoduje naliczenie opłat. Ruch wychodzący jest głównym kosztem zmiennym — intensywny ruch odpowiedzi LLM przekraczający 1 GB/miesiąc będzie płatny.
 
-## Security Posture
+## Postawa bezpieczeństwa
 
-- **Network exposure** — SSH (22) and HTTP (4545) are open to `0.0.0.0/0`. For production, restrict `source_ranges` to known CIDRs.
-- **SSH access** — Key-based only, injected via metadata. Password authentication is not configured.
-- **fail2ban** — Installed by cloud-init to brute-force-protect SSH.
-- **Service isolation** — The `librefang.service` unit runs with `ProtectSystem=strict`, `NoNewPrivileges=true`, and `PrivateTmp=true`. The process can only write to `/data`.
-- **Secret handling** — API keys flow through Terraform sensitive variables → cloud-init template → systemd `Environment=` directives. They are visible in the instance metadata API to anyone with project access, and in the rendered systemd unit on the VM. For stronger isolation, consider GCP Secret Manager.
+- **Ekspozycja sieciowa** — SSH (22) i HTTP (4545) są otwarte dla `0.0.0.0/0`. W środowisku produkcyjnym ogranicz `source_ranges` do znanych CIDR.
+- **Dostęp SSH** — Tylko oparty na kluczach, wstrzykiwany przez metadane. Uwierzytelnianie hasłem nie jest skonfigurowane.
+- **fail2ban** — Zainstalowany przez cloud-init w celu ochrony SSH przed atakami brute-force.
+- **Izolacja usługi** — Jednostka `librefang.service` działa z `ProtectSystem=strict`, `NoNewPrivileges=true` i `PrivateTmp=true`. Proces może zapisywać tylko do `/data`.
+- **Obsługa sekretów** — Klucze API przepływają przez zmienne sensitive Terraform → szablon cloud-init → dyrektywy `Environment=` systemd. Są widoczne w API metadanych instancji dla każdego z dostępem do projektu oraz w renderowanej jednostce systemd na maszynie wirtualnej. Dla silniejszej izolacji rozważ GCP Secret Manager.
 
-## How This Connects to LibreFang
+## Jak to łączy się z LibreFang
 
-This module has no direct code dependencies on the LibreFang application codebase. It deploys a pre-built binary from GitHub Releases (`librefang/librefang`). The only contract is:
+Ten moduł nie ma bezpośrednich zależności kodowych od bazy kodu aplikacji LibreFang. Wdraża prekompilowane binarium z GitHub Releases (`librefang/librefang`). Jedyną umową jest:
 
-1. The release artifact must be a `.tar.gz` containing a single `librefang` binary at the root.
-2. The binary must accept `LIBREFANG_HOME` and `LIBREFANG_BIND` environment variables.
-3. `librefang start` must be the command to launch the server.
+1. Artefakt wydania musi być `.tar.gz` zawierającym pojedyncze binarium `librefang` w katalogu głównym.
+2. Binarium musi akceptować zmienne środowiskowe `LIBREFANG_HOME` i `LIBREFANG_BIND`.
+3. `librefang start` musi być komendą uruchamiającą serwer.
 
-Pin `librefang_version` to a specific tag when deploying against a known-good release rather than tracking `latest`.
+Przypnij `librefang_version` do konkretnego tagu podczas wdrażania wobec sprawdzonego wydania zamiast śledzenia `latest`.
 
-## Customization Points
+## Punkty dostosowania
 
-**Different region/zone** — Set `region` and `zone` in `terraform.tfvars`. Must be free-tier-eligible for zero-cost operation.
+**Inny region/strefa** — Ustaw `region` i `zone` w `terraform.tfvars`. Musi być kwalifikujący się do warstwy bezpłatnej dla operacji bezkosztowych.
 
-**Larger disk** — Modify `boot_disk.initialize_params.size` in `main.tf`. Anything above 30 GB exits the free tier.
+**Większy dysk** — Zmień `boot_disk.initialize_params.size` w `main.tf`. Powyżej 30 GB opuszcza warstwę bezpłatną.
 
-**Multiple API keys** — Set any combination of the three key variables. LibreFang will use whichever providers have non-empty keys.
+**Wiele kluczy API** — Ustaw dowolną kombinację trzech zmiennych kluczy. LibreFang użyje tych dostawców, które mają niepuste klucze.
 
-**Custom SSH key path** — Set `ssh_pub_key_path` to any local public key file.
+**Niestandardowa ścieżka klucza SSH** — Ustaw `ssh_pub_key_path` na dowolny lokalny plik klucza publicznego.
 
-**Service port** — Not currently parameterized. To change the port, update `LIBREFANG_BIND` in `cloud-init.yml.tpl`, the firewall port in `main.tf`, and the health check URL in your verification step.
+**Port usługi** — Obecnie nie sparametryzowany. Aby zmienić port, zaktualizuj `LIBREFANG_BIND` w `cloud-init.yml.tpl`, port zapory w `main.tf` oraz URL sprawdzenia zdrowia w kroku weryfikacji.

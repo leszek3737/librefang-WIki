@@ -1,41 +1,41 @@
 # Root — openapi.json
 
-# LibreFang API — OpenAPI Specification
+# API LibreFang — Specyfikacja OpenAPI
 
-## Overview
+## Przegląd
 
-`openapi.json` is the canonical machine-readable contract for the **LibreFang Agent Operating System** REST API (version `2026.7.31`, OpenAPI 3.1.0). It defines every HTTP endpoint the kernel exposes for managing AI agents, their tools, sessions, memories, inter-agent communication, authentication, and audit trails.
+`openapi.json` to kanoniczny kontrakt czytelny maszynowo dla REST API **Systemu Operacyjnego Agentów LibreFang** (wersja `2026.7.31`, OpenAPI 3.1.0). Definiuje każdy punkt końcowy HTTP, jaki jądro udostępnia do zarządzania agentami AI, ich narzędziami, sesjami, pamięcią, komunikacją międzyagentową, uwierzytelnianiem i śladami audytu.
 
-The specification is organized into six functional domains via OpenAPI tags:
+Specyfikacja jest zorganizowana w sześć domen funkcjonalnych za pomocą tagów OpenAPI:
 
-| Tag | Domain |
+| Tag | Domena |
 |------|--------|
-| `agents` | Agent lifecycle, configuration, sessions, tools, metrics, files |
-| `a2a` | Agent-to-Agent protocol (local cards, external discovery, task routing) |
-| `approvals` | Human-in-the-loop approval workflow for tool execution |
-| `auth` | OAuth2/OIDC, dashboard credentials, passkey (WebAuthn), token introspection |
-| `memory` | KV memory import/export per agent |
-| `system` | Audit log query, export, chain verification |
+| `agents` | Cykl życia agenta, konfiguracja, sesje, narzędzia, metryki, pliki |
+| `a2a` | Protokół Agent-to-Agent (lokalne karty, zewnętrzne odkrywanie, routing zadań) |
+| `approvals` | Obieg zatwierdzania z udziałem człowieka do wykonywania narzędzi |
+| `auth` | OAuth2/OIDC, poświadczenia dashboardu, passkey (WebAuthn), introspekcja tokenów |
+| `memory` | Import/eksport pamięci KV na agenta |
+| `system` | Zapytania dziennika audytu, eksport, weryfikacja łańcucha |
 
 ---
 
-## Architecture at a Glance
+## Architektura w pigułce
 
 ```mermaid
 graph TB
-    Client["Client / Dashboard / CLI"]
+    Client["Klient / Dashboard / CLI"]
     
-    subgraph Kernel["LibreFang Kernel"]
-        Agents["Agent Manager"]
-        A2A["A2A Protocol Layer"]
-        Approvals["Approval Gateway"]
-        Auth["Auth Middleware"]
-        Audit["Audit Ledger"]
+    subgraph Kernel["Jądro LibreFang"]
+        Agents["Menedżer Agentów"]
+        A2A["Warstwa Protokołu A2A"]
+        Approvals["Brama Zatwierdzania"]
+        Auth["Oprogramowanie pośrednie Auth"]
+        Audit["Księga Audytu"]
     end
 
-    subgraph External["External Systems"]
-        IdP["OAuth/OIDC Provider"]
-        ExtA2A["External A2A Agents"]
+    subgraph External["Systemy Zewnętrzne"]
+        IdP["Dostawca OAuth/OIDC"]
+        ExtA2A["Zewnętrzni Agenci A2A"]
     end
 
     Client -->|REST| Auth
@@ -49,312 +49,312 @@ graph TB
 
 ---
 
-## Agent Lifecycle Management
+## Zarządzanie cyklem życia agenta
 
-The `/api/agents` surface is the largest functional area. It follows a resource-oriented design where each agent is addressable by UUID and supports nested sub-resources.
+Przestrzeń `/api/agents` jest największym obszarem funkcjonalnym. Opiera się na zorientowanym na zasoby projekcie, w którym każdy agent jest adresowalny przez UUID i obsługuje zagnieżdżone podzasoby.
 
-### Core CRUD
+### Podstawowe operacje CRUD
 
-- **`POST /api/agents`** (`spawn_agent`) — Spawns a new agent from a `SpawnRequest` manifest. Returns `SpawnResponse`.
-- **`GET /api/agents`** (`list_agents`) — Paginated listing with filtering (`q`, `status`), sorting (`sort`, `order`), and pagination (`limit`, `offset`).
-- **`GET /api/agents/{id}`** (`get_agent`) — Single agent detail.
-- **`PATCH /api/agents/{id}`** (`patch_agent`) — Partial update of name, description, model, system prompt.
-- **`DELETE /api/agents/{id}`** (`kill_agent`) — Kills the agent **and** purges its canonical UUID binding. Requires explicit `confirm=true`.
+- **`POST /api/agents`** (`spawn_agent`) — Uruchamia nowego agenta z manifestu `SpawnRequest`. Zwraca `SpawnResponse`.
+- **`GET /api/agents`** (`list_agents`) — Paginacyjna lista z filtrowaniem (`q`, `status`), sortowaniem (`sort`, `order`) i paginacją (`limit`, `offset`).
+- **`GET /api/agents/{id}`** (`get_agent`) — Szczegóły pojedynczego agenta.
+- **`PATCH /api/agents/{id}`** (`patch_agent`) — Częściowa aktualizacja nazwy, opisu, modelu, podpowiedzi systemowej.
+- **`DELETE /api/agents/{id}`** (`kill_agent`) — Zabija agenta **i** usuwa jego kanoniczne powiązanie UUID. Wymaga jawnego `confirm=true`.
 
-### Canonical UUID Registry (#4614)
+### Rejestr kanonicznych UUID (#4614)
 
-Agent identity is backed by a persistent `name → canonical_uuid` mapping stored in `<home_dir>/agent_identities.toml`. This ensures that re-spawning an agent under the same name lands on the same UUID. Key endpoints:
+Tożsamość agenta opiera się na trwałym mapowaniu `name → canonical_uuid` przechowywanym w `<home_dir>/agent_identities.toml`. Zapewnia to, że ponowne uruchomienie agenta pod tą samą nazwą trafia na ten sam UUID. Kluczowe punkty końcowe:
 
-- **`GET /api/agents/identities`** — Returns the full registry, sorted by name for deterministic output.
-- **`POST /api/agents/identities/{name}/reset`** — Drops the UUID binding for a name. Requires `confirm=true`; the agent itself is **not** killed (operators must call `DELETE /api/agents/{id}` separately if a runtime kill is also needed).
-- **`DELETE /api/agents/{id}`** — The destructive path: with `confirm=true`, kills the agent **and** purges the canonical UUID. Internal lifecycle resets (hot reload, panic restart) bypass this and preserve the binding by calling `kill_agent` directly.
+- **`GET /api/agents/identities`** — Zwraca pełny rejestr, posortowany po nazwie dla deterministycznego wyniku.
+- **`POST /api/agents/identities/{name}/reset`** — Usuwa powiązanie UUID dla nazwy. Wymaga `confirm=true`; sam agent **nie jest** zabijany (operatorzy muszą osobno wywołać `DELETE /api/agents/{id}`, jeśli wymagane jest też zabicie w czasie wykonywania).
+- **`DELETE /api/agents/{id}`** — Ścieżka destrukcyjna: z `confirm=true`, zabija agenta **i** usuwa kanoniczny UUID. Wewnętrzne resetowania cyklu życia (hot reload, restart po panice) pomijają to i zachowują powiązanie, wywołując `kill_agent` bezpośrednio.
 
-> **Important:** `404` on DELETE is reserved exclusively for malformed UUIDs. Deleting an already-gone agent returns `200 OK` with `{"status": "already-deleted"}`, making retries safe per RFC 9110 §9.2.2.
+> **Ważne:** `404` przy DELETE jest zarezerwowane wyłącznie dla nieprawidłowo sformułowanych UUID. Usunięcie już nieistniejącego agenta zwraca `200 OK` z `{"status": "already-deleted"}`, co pozwala na bezpieczne ponowienia zgodnie z RFC 9110 §9.2.2.
 
-### Bulk Operations
+### Operacje zbiorcze
 
-| Endpoint | Operation |
+| Punkt końcowy | Operacja |
 |----------|-----------|
-| `POST /api/agents/bulk` | Create multiple agents (`BulkCreateRequest`) |
-| `DELETE /api/agents/bulk` | Delete multiple agents (`BulkAgentIdsRequest`) |
-| `POST /api/agents/bulk/start` | Set multiple agents to Full mode |
-| `POST /api/agents/bulk/stop` | Stop multiple agents' current runs |
+| `POST /api/agents/bulk` | Utworzenie wielu agentów (`BulkCreateRequest`) |
+| `DELETE /api/agents/bulk` | Usunięcie wielu agentów (`BulkAgentIdsRequest`) |
+| `POST /api/agents/bulk/start` | Ustawienie wielu agentów w tryb Full |
+| `POST /api/agents/bulk/stop` | Zatrzymanie bieżących uruchomień wielu agentów |
 
-### Messaging and Sessions
+### Obsługa wiadomości i sesji
 
-Agents support both synchronous and streaming communication:
+Agenty obsługują zarówno komunikację synchroniczną, jak i strumieniową:
 
-- **`POST /api/agents/{id}/message`** — Synchronous message round-trip (`MessageRequest` → `MessageResponse`).
-- **`POST /api/agents/{id}/message/stream`** — SSE streaming response.
-- **`POST /api/agents/{id}/inject`** — Interrupts an active tool loop to inject a message between tool calls. Returns `{"injected": true/false}`. Can return `503` when injection channels are full (#3575).
-- **`POST /api/agents/{id}/push`** — Sends a proactive outbound message to a channel recipient (Telegram, Slack, email) without going through the agent loop.
+- **`POST /api/agents/{id}/message`** — Synchroniczna wymiana wiadomości (`MessageRequest` → `MessageResponse`).
+- **`POST /api/agents/{id}/message/stream`** — Strumieniowa odpowiedź SSE.
+- **`POST /api/agents/{id}/inject`** — Przerywa aktywną pętlę narzędzi, aby wstrzyknąć wiadomość między wywołaniami narzędzi. Zwraca `{"injected": true/false}`. Może zwrócić `503`, gdy kanały wstrzykiwania są pełne (#3575).
+- **`POST /api/agents/{id}/push`** — Wysyła proaktywną wiadomość wychodzącą do odbiorcy na kanale (Telegram, Slack, e-mail) bez przechodzenia przez pętlę agenta.
 
-Sessions are first-class resources:
+Sesje są pełnoprawnymi zasobami:
 
-| Endpoint | Purpose |
+| Punkt końcowy | Przeznaczenie |
 |----------|---------|
-| `GET /api/agents/{id}/sessions` | List all sessions |
-| `POST /api/agents/{id}/sessions` | Create new session with optional label |
-| `GET /api/agents/{id}/session` | Get current/active session history |
-| `POST /api/agents/{id}/sessions/{session_id}/switch` | Switch active session |
-| `POST /api/agents/{id}/sessions/{session_id}/stop` | Cancel a single `(agent, session)` loop without affecting concurrent sessions |
-| `GET /api/agents/{id}/sessions/{session_id}/stream` | **Multi-client SSE attach** — any number of clients can subscribe to an in-flight turn's events |
-| `GET /api/agents/{id}/sessions/{session_id}/export` | Export session for hibernation |
-| `POST /api/agents/{id}/sessions/import` | Import a previously exported session |
-| `GET /api/agents/{id}/sessions/{session_id}/trajectory` | Privacy-redacted audit trail (`format=json` or `format=jsonl`) |
-| `POST /api/agents/{id}/session/compact` | Trigger LLM context compaction |
-| `POST /api/agents/{id}/session/reboot` | Hard-reboot (full clear, no summary) |
-| `POST /api/agents/{id}/session/reset` | Reset current session |
-| `GET /api/agents/{id}/session/context` | Context-window usage indicator (`SessionContextResponse`) |
+| `GET /api/agents/{id}/sessions` | Lista wszystkich sesji |
+| `POST /api/agents/{id}/sessions` | Utworzenie nowej sesji z opcjonalną etykietą |
+| `GET /api/agents/{id}/session` | Historia bieżącej/aktywnej sesji |
+| `POST /api/agents/{id}/sessions/{session_id}/switch` | Przełączenie aktywnej sesji |
+| `POST /api/agents/{id}/sessions/{session_id}/stop` | Anulowanie pojedynczej pętli `(agent, sesja)` bez wpływu na współbieżne sesje |
+| `GET /api/agents/{id}/sessions/{session_id}/stream` | **Multi-klientowe podłączenie SSE** — dowolna liczba klientów może subskrybować zdarzenia aktywnej tury |
+| `GET /api/agents/{id}/sessions/{session_id}/export` | Eksport sesji do hibernacji |
+| `POST /api/agents/{id}/sessions/import` | Import wcześniej eksportowanej sesji |
+| `GET /api/agents/{id}/sessions/{session_id}/trajectory` | Ślad audytu z ograniczeniami prywatności (`format=json` lub `format=jsonl`) |
+| `POST /api/agents/{id}/session/compact` | Wyzwolenie kompakcji kontekstu LLM |
+| `POST /api/agents/{id}/session/reboot` | Twardy restart (pełne czyszczenie, bez podsumowania) |
+| `POST /api/agents/{id}/session/reset` | Reset bieżącej sesji |
+| `GET /api/agents/{id}/session/context` | Wskaźnik wykorzystania okna kontekstu (`SessionContextResponse`) |
 
-### Configuration and Tool Management
+### Konfiguracja i zarządzanie narzędziami
 
-- **`PATCH /api/agents/{id}/config`** — Hot-updates name, description, system prompt, identity, and model via `PatchAgentConfigRequest`.
-- **`PATCH /api/agents/{id}/identity`** — Updates visual identity fields (`UpdateIdentityRequest`). Uses PATCH semantics where `null` means "not provided" and omitted fields preserve existing values.
-- **`PUT /api/agents/{id}/tools`** — Updates the tool grant surface. See [Tool Capability Model](#tool-capability-model-6609) below.
-- **`PUT /api/agents/{id}/mode`** — Changes operational mode (`SetModeRequest`).
-- **`PUT /api/agents/{id}/model`** — Changes the LLM model/provider.
-- **`PUT /api/agents/{id}/skills`** / **`PUT /api/agents/{id}/channels`** / **`PUT /api/agents/{id}/mcp_servers`** — Manage allowlists for skills, channels, and MCP servers respectively.
-- **`POST /api/agents/{id}/reload`** — Re-reads `agent.toml` from disk to pick up manual edits without restarting the daemon.
-- **`POST /api/agents/{id}/clone`** — Clones an agent with its workspace files (`CloneAgentRequest`).
+- **`PATCH /api/agents/{id}/config`** — Aktualizuje w locie nazwę, opis, podpowiedź systemową, tożsamość i model za pomocą `PatchAgentConfigRequest`.
+- **`PATCH /api/agents/{id}/identity`** — Aktualizuje pola wizualnej tożsamości (`UpdateIdentityRequest`). Używa semantyki PATCH, gdzie `null` oznacza „nie podano", a pominięte pola zachowują istniejące wartości.
+- **`PUT /api/agents/{id}/tools`** — Aktualizuje przestrzeń przyznanych narzędzi. Zobacz [Model Możliwości Narzędzi](#tool-capability-model-6609) poniżej.
+- **`PUT /api/agents/{id}/mode`** — Zmienia tryb operacyjny (`SetModeRequest`).
+- **`PUT /api/agents/{id}/model`** — Zmienia model/dostawcę LLM.
+- **`PUT /api/agents/{id}/skills`** / **`PUT /api/agents/{id}/channels`** / **`PUT /api/agents/{id}/mcp_servers`** — Zarządzanie listami dozwolonych dla umiejętności, kanałów i serwerów MCP odpowiednio.
+- **`POST /api/agents/{id}/reload`** — Ponowne odczytanie `agent.toml` z dysku w celu podjęcia ręcznych edycji bez restartu demona.
+- **`POST /api/agents/{id}/clone`** — Klonowanie agenta z jego plikami obszaru roboczego (`CloneAgentRequest`).
 
-#### Tool Capability Model (#6609)
+#### Model Możliwości Narzędzi (#6609)
 
-Tool access follows a two-layer model:
+Dostęp do narzędzi opiera się na dwuwarstwowym modelu:
 
-1. **`capabilities_tools`** — The grant surface. This defines what tools the agent *can* use.
-2. **`tool_allowlist` / `tool_blocklist`** — Applied *after* the grant surface as a narrowing retain. An allowlist entry naming a tool absent from `capabilities_tools` grants nothing. **MCP tools are the exception** — they are not filtered by `capabilities_tools`, so an `mcp_*` allowlist entry directly selects among them.
+1. **`capabilities_tools`** — Przestrzeń przyznań. Definiuje, jakich narzędzi agent *może* używać.
+2. **`tool_allowlist` / `tool_blocklist`** — Stosowane *po* przestrzeni przyznań jako zawężenie retencji. Wpis na liście dozwolonych, który nazywa narzędzie nieobecne w `capabilities_tools`, niczego nie przyznaje. **Narzędzia MCP są wyjątkiem** — nie są filtrowane przez `capabilities_tools`, więc wpis `mcp_*` na liście dozwolonych bezpośrednio wybiera spośród nich.
 
-The `PUT /api/agents/{id}/tools` response (`SetAgentToolsRequest`) includes a `warnings` array naming stored `tool_allowlist` entries that provably cannot admit any tool, helping operators catch inert configuration.
+Odpowiedź `PUT /api/agents/{id}/tools` (`SetAgentToolsRequest`) zawiera tablicę `warnings` wymieniającą zapisane wpisy `tool_allowlist`, które udowodnialnie nie mogą dopuścić żadnego narzędzia, pomagając operatorom wykryć bezużyteczną konfigurację.
 
-### Observability
+### Obserwowalność
 
-| Endpoint | Returns |
+| Punkt końcowy | Zwraca |
 |----------|---------|
-| `GET /api/agents/{id}/metrics` | Aggregated metrics: message count, token usage, tool execution count, errors, avg response time, cost |
-| `GET /api/agents/{id}/stats` | 24-hour KPI rollup (`AgentStats24hView`): sessions, cost, P95 latency, active-now |
-| `GET /api/agents/{id}/events` | Turn-level events from `usage_events` (model dispatch, latency, tokens, cost) — backs the dashboard Logs tab (`AgentEventsResponse`) |
-| `GET /api/agents/{id}/logs` | Structured execution logs with `n`, `level`, `offset` filtering |
-| `GET /api/agents/{id}/traces` | Decision traces showing why each tool was selected in the most recent loop |
-| `GET /api/agents/{id}/runtime` | Snapshot of in-flight `(agent, session)` loops |
-| `GET /api/agents/{id}/deliveries` | Recent delivery receipts |
+| `GET /api/agents/{id}/metrics` | Zagregowane metryki: liczba wiadomości, użycie tokenów, liczba wykonanych narzędzi, błędy, średni czas odpowiedzi, koszt |
+| `GET /api/agents/{id}/stats` | 24-godzinna konsolidacja KPI (`AgentStats24hView`): sesje, koszt, opóźnienie P95, aktywne teraz |
+| `GET /api/agents/{id}/events` | Zdarzenia na poziomie tury z `usage_events` (wysyłka modelu, opóźnienie, tokeny, koszt) — zasila zakładkę Dzienniki w dashboardzie (`AgentEventsResponse`) |
+| `GET /api/agents/{id}/logs` | Strukturalne dzienniki wykonania z filtrowaniem `n`, `level`, `offset` |
+| `GET /api/agents/{id}/traces` | Ślady decyzyjne pokazujące, dlaczego każde narzędzie zostało wybrane w najnowszej pętli |
+| `GET /api/agents/{id}/runtime` | Migawka aktywnych pętli `(agent, sesja)` |
+| `GET /api/agents/{id}/deliveries` | Ostatnie potwierdzenia doręczenia |
 
-### Hand Agent Runtime Config
+### Konfiguracja czasu wykonania agenta Hand
 
-Special endpoints for agents managed by the "hand" subsystem:
+Specjalne punkty końcowe dla agentów zarządzanych przez podsystem „hand":
 
-- **`PATCH /api/agents/{id}/hand-runtime-config`** — Runtime-only override for hand agents. Applies to the live manifest and persists to `hand_state.json`. Whitespace trimming on all string fields; empty strings on `model`/`provider` mean "leave unchanged"; empty strings on nullable secrets (`api_key_env`, `base_url`) clear the override.
-- **`DELETE /api/agents/{id}/hand-runtime-config`** — Drops all runtime overrides, restoring `HAND.toml` defaults. Idempotent (returns `204`).
+- **`PATCH /api/agents/{id}/hand-runtime-config`** — Nadpisanie tylko w czasie wykonania dla agentów hand. Stosuje się do aktywnego manifestu i jest utrwalane w `hand_state.json`. Trimowanie białych znaków na wszystkich polach tekstowych; puste ciągi w `model`/`provider` oznaczają „pozostaw bez zmian"; puste ciągi na dopuszczających wartość null sekretach (`api_key_env`, `base_url`) czyszczą nadpisanie.
+- **`DELETE /api/agents/{id}/hand-runtime-config`** — Usuwa wszystkie nadpisania czasu wykonania, przywracając domyślne z `HAND.toml`. Idempotentne (zwraca `204`).
 
 ---
 
-## Agent-to-Agent (A2A) Protocol
+## Protokół Agent-to-Agent (A2A)
 
-The A2A surface enables both local agent-card discovery and communication with external A2A-compatible agents.
+Przestrzeń A2A umożliwia zarówno lokalne odkrywanie kart agentów, jak i komunikację z zewnętrznymi agentami zgodnymi z A2A.
 
-### Local A2A
+### Lokalne A2A
 
-| Endpoint | Purpose |
+| Punkt końcowy | Przeznaczenie |
 |----------|---------|
-| `GET /.well-known/agent.json` | Standard A2A agent card |
-| `GET /a2a/agents` | List all local A2A agent cards |
-| `POST /a2a/tasks/send` | Submit a task to a local agent via A2A |
-| `GET /a2a/tasks/{id}` | Get task status from the task store |
-| `POST /a2a/tasks/{id}/cancel` | Cancel a tracked task |
+| `GET /.well-known/agent.json` | Standardowa karta agenta A2A |
+| `GET /a2a/agents` | Lista wszystkich lokalnych kart agentów A2A |
+| `POST /a2a/tasks/send` | Przesłanie zadania do lokalnego agenta przez A2A |
+| `GET /a2a/tasks/{id}` | Pobranie statusu zadania z magazynu zadań |
+| `POST /a2a/tasks/{id}/cancel` | Anulowanie śledzonego zadania |
 
-### External A2A Discovery and Approval (#3786)
+### Zewnętrzne odkrywanie A2A i zatwierdzanie (#3786)
 
-External agent communication follows a discover → approve → send flow:
+Komunikacja z zewnętrznymi agentami następuje według przepływu odkryj → zatwierdź → wyślij:
 
 ```mermaid
 sequenceDiagram
     participant Op as Operator
-    participant API as LibreFang API
-    participant Store as Agent Store
+    participant API as API LibreFang
+    participant Store as Magazyn Agentów
 
     Op->>API: POST /api/a2a/discover {url}
-    API->>Store: Fetch agent card from URL
-    Store-->>API: Agent card
-    API->>Store: Add to pending list
-    API-->>Op: Agent card (pending)
+    API->>Store: Pobierz kartę agenta z URL
+    Store-->>API: Karta agenta
+    API->>Store: Dodaj do listy oczekujących
+    API-->>Op: Karta agenta (oczekująca)
 
     Op->>API: POST /api/a2a/agents/{id}/approve
-    API->>Store: Promote pending → trusted
+    API->>Store: Promuj oczekujący → zaufany
     API-->>Op: 200 OK
 
     Op->>API: POST /api/a2a/send {task}
-    API-->>Op: Task result
+    API-->>Op: Wynik zadania
 ```
 
-Discovered agents enter a **pending** state and cannot receive tasks until an operator explicitly approves them. The `{id}` for approval is the URL-encoded discovery URL.
+Odkryci agenci wchodzą w stan **oczekujący** i nie mogą odbierać zadań, dopóki operator ich jawnie nie zatwierdzi. `{id}` do zatwierdzenia jest URL-zakodowanym adresem odkrycia.
 
-- **`GET /api/a2a/agents`** — Returns `{trusted: [...], pending: [...]}`.
-- **`GET /api/a2a/agents/{id}`** — Lookup by index, URL, or name.
-- **`POST /api/a2a/send`** — Sends a task to a trusted external agent. Honours `Idempotency-Key` (#3637): same key + same body replays the cached response; different body under the same key returns `409 Conflict`.
-- **`GET /api/a2a/tasks/{id}/status`** — Query external task status (requires `?url=` of the external agent).
+- **`GET /api/a2a/agents`** — Zwraca `{trusted: [...], pending: [...]}`.
+- **`GET /api/a2a/agents/{id}`** — Wyszukiwanie po indeksie, URL lub nazwie.
+- **`POST /api/a2a/send`** — Wysyła zadanie do zaufanego zewnętrznego agenta. Uznaje `Idempotency-Key` (#3637): ten sam klucz + to samo ciało odtwarza buforowaną odpowiedź; inne ciało pod tym samym kluczem zwraca `409 Conflict`.
+- **`GET /api/a2a/tasks/{id}/status`** — Zapytanie o status zewnętrznego zadania (wymaga `?url=` zewnętrznego agenta).
 
 ---
 
-## Approval Gateway
+## Brama zatwierdzania
 
-The approval system provides human-in-the-loop oversight for agent tool execution.
+System zatwierdzania zapewnia nadzór z udziałem człowieka nad wykonywaniem narzędzi przez agentów.
 
-### Core Operations
+### Podstawowe operacje
 
-| Endpoint | Operation |
+| Punkt końcowy | Operacja |
 |----------|-----------|
-| `GET /api/approvals` | List pending/recent approvals (field names transformed for dashboard: `action_summary → action`, `agent_id → agent_name`, `requested_at → created_at`) |
-| `GET /api/approvals/count` | Lightweight pending count for notification badges |
-| `POST /api/approvals/{id}/approve` | Approve a single request |
-| `POST /api/approvals/{id}/reject` | Reject a single request |
-| `POST /api/approvals/{id}/modify` | Modify a pending request |
-| `POST /api/approvals/batch` | Batch resolve multiple requests |
+| `GET /api/approvals` | Lista oczekujących/ostatnich zatwierdzeń (nazwy pól przekształcone dla dashboardu: `action_summary → action`, `agent_id → agent_name`, `requested_at → created_at`) |
+| `GET /api/approvals/count` | Lekka liczba oczekujących dla odznak powiadomień |
+| `POST /api/approvals/{id}/approve` | Zatwierdzenie pojedynczego żądania |
+| `POST /api/approvals/{id}/reject` | Odrzucenie pojedynczego żądania |
+| `POST /api/approvals/{id}/modify` | Modyfikacja oczekującego żądania |
+| `POST /api/approvals/batch` | Zbiorcze rozstrzygnięcie wielu żądań |
 
-### Session-Scoped Operations
+### Operacje w zakresie sesji
 
-| Endpoint | Behavior |
+| Punkt końcowy | Zachowanie |
 |----------|----------|
-| `GET /api/approvals/session/{session_id}` | List all pending approvals for a session (mirrors `has_blocking_approval(session_key)`) |
-| `POST /api/approvals/session/{session_id}/approve_all` | Atomically approve all pending session approvals. Can return `400` if TOTP is required, or `409` if the pending set changed since issuance (`ApproveAllForSessionRequest`) |
-| `POST /api/approvals/session/{session_id}/reject_all` | Atomically reject all (mirrors `resolve_gateway_approval(session_key, "deny", resolve_all=True)`) |
+| `GET /api/approvals/session/{session_id}` | Lista wszystkich oczekujących zatwierdzeń dla sesji (odzwierciedla `has_blocking_approval(session_key)`) |
+| `POST /api/approvals/session/{session_id}/approve_all` | Atomowe zatwierdzenie wszystkich oczekujących zatwierdzeń sesji. Może zwrócić `400`, jeśli wymagany jest TOTP, lub `409`, jeśli zestaw oczekujących uległ zmianie od momentu wydania (`ApproveAllForSessionRequest`) |
+| `POST /api/approvals/session/{session_id}/reject_all` | Atomowe odrzucenie wszystkich (odzwierciedla `resolve_gateway_approval(session_key, "deny", resolve_all=True)`) |
 
-### Audit
+### Audyt
 
-- **`GET /api/approvals/audit`** — Filtered audit log with `agent_id`, `tool_name`, pagination.
+- **`GET /api/approvals/audit`** — Filtrowany dziennik audytu z `agent_id`, `tool_name`, paginacją.
 
-Approval resolution is idempotent: resolving an already-resolved request returns `409 Conflict`.
+Rozstrzygnięcie zatwierdzenia jest idempotentne: rozstrzygnięcie już rozstrzygniętego żądania zwraca `409 Conflict`.
 
 ---
 
-## Authentication
+## Uwierzytelnianie
 
-LibreFang supports multiple authentication modes, determined dynamically by **`GET /api/auth/dashboard-check`** which returns one of: `none`, `api_key`, `credentials`, or `hybrid`.
+LibreFang obsługuje wiele trybów uwierzytelniania, określanych dynamicznie przez **`GET /api/auth/dashboard-check`**, który zwraca jedną z wartości: `none`, `api_key`, `credentials` lub `hybrid`.
 
-### OAuth2/OIDC Flow
+### Przepływ OAuth2/OIDC
 
-1. **`GET /api/auth/login/{provider}`** — Redirects to the named OAuth provider.
-2. **`GET /api/auth/callback`** (browser) / **`POST /api/auth/callback`** (`CallbackBody`) — Handles the authorization code callback.
-3. **`GET /api/auth/providers`** — Lists configured providers. Returns only `id` + `display_name` — OAuth scopes are never exposed through this endpoint, regardless of caller privilege.
-4. **`POST /api/auth/introspect`** — RFC 7662 token validation returning `{"active": true/false, ...}`.
+1. **`GET /api/auth/login/{provider}`** — Przekierowuje do nazwanego dostawcy OAuth.
+2. **`GET /api/auth/callback`** (przeglądarka) / **`POST /api/auth/callback`** (`CallbackBody`) — Obsługuje wywołanie zwrotne kodu autoryzacji.
+3. **`GET /api/auth/providers`** — Wyświetla skonfigurowanych dostawców. Zwraca tylko `id` + `display_name` — zakresy OAuth nigdy nie są ujawniane przez ten punkt końcowy, niezależnie od uprawnień wywołującego.
+4. **`POST /api/auth/introspect`** — Walidacja tokena RFC 7662 zwracająca `{"active": true/false, ...}`.
 
-### Dashboard Credential Auth
+### Uwierzytelnianie poświadczeniami dashboardu
 
-- **`POST /api/auth/dashboard-login`** — Validates credentials using Argon2id (with transparent fallback from legacy plaintext). Returns a session token or signals `requires_totp` for 2FA.
-- **`POST /api/auth/change-password`** (`ChangePasswordRequest`) — Updates password and/or username. Invalidates all existing sessions on success.
-- **`POST /api/auth/logout`** — Invalidates session and clears the `librefang_session` cookie. Accepts token via cookie, `Authorization: Bearer`, or `X-API-Key`.
+- **`POST /api/auth/dashboard-login`** — Waliduje poświadczenia przy użyciu Argon2id (z przezroczystym powrotem do starszego czystego tekstu). Zwraca token sesji lub sygnalizuje `requires_totp` dla 2FA.
+- **`POST /api/auth/change-password`** (`ChangePasswordRequest`) — Aktualizuje hasło i/lub nazwę użytkownika. Unieważnia wszystkie istniejące sesje po sukcesie.
+- **`POST /api/auth/logout`** — Unieważnia sesję i czyści plik cookie `librefang_session`. Akceptuje token przez cookie, `Authorization: Bearer` lub `X-API-Key`.
 
 ### Passkey (WebAuthn)
 
-Full WebAuthn ceremony support with registration and authentication flows:
+Pełna obsługa ceremonii WebAuthn z przepływami rejestracji i uwierzytelniania:
 
-| Endpoint | Phase |
+| Punkt końcowy | Faza |
 |----------|-------|
-| `POST /api/auth/passkey/registration-options` | Begin: returns `ceremony_id` + `PublicKeyCredentialCreationOptions` |
-| `POST /api/auth/passkey/registration-verify` | Finish: verify attestation, persist credential |
-| `POST /api/auth/passkey/authentication-options` | Begin login: returns `PublicKeyCredentialRequestOptions` |
-| `POST /api/auth/passkey/authentication-verify` | Finish login: verify assertion, mint session |
-| `GET /api/auth/passkey/credentials` | List registered passkeys (metadata only) |
-| `DELETE /api/auth/passkey/credentials/{id}` | Revoke a passkey by base64url credential id |
+| `POST /api/auth/passkey/registration-options` | Start: zwraca `ceremony_id` + `PublicKeyCredentialCreationOptions` |
+| `POST /api/auth/passkey/registration-verify` | Zakończenie: weryfikacja atestacji, utrwalenie poświadczenia |
+| `POST /api/auth/passkey/authentication-options` | Start logowania: zwraca `PublicKeyCredentialRequestOptions` |
+| `POST /api/auth/passkey/authentication-verify` | Zakończenie logowania: weryfikacja asercji, wytworzenie sesji |
+| `GET /api/auth/passkey/credentials` | Lista zarejestrowanych passkey (tylko metadane) |
+| `DELETE /api/auth/passkey/credentials/{id}` | Odwołanie passkey po base64url id poświadczenia |
 
-All passkey operations are scoped to the authenticated principal. The credential blob is never exposed. Returns `503` when passkey login is not enabled.
+Wszystkie operacje passkey są ograniczone do uwierzytelnionej strony. Blob poświadczenia nigdy nie jest ujawniany. Zwraca `503`, gdy logowanie passkey nie jest włączone.
 
 ---
 
-## Memory Management
+## Zarządzanie pamięcią
 
-- **`GET /api/agents/{id}/memory/export`** — Exports all KV memory as JSON.
-- **`POST /api/agents/{id}/memory/import`** — Imports KV memory from a JSON body with a `kv` object. Optionally accepts `clear_existing: true`.
+- **`GET /api/agents/{id}/memory/export`** — Eksportuje całą pamięć KV jako JSON.
+- **`POST /api/agents/{id}/memory/import`** — Importuje pamięć KV z ciała JSON z obiektem `kv`. Opcjonalnie akceptuje `clear_existing: true`.
 
-> **Response contract:** Clients **must** inspect `body.status`, not just the HTTP status code. A `200` response can indicate either:
-> - `{"status": "imported", "keys_imported": N}` — full success
-> - `{"status": "partial", "keys_imported": N, "failed_keys": [...]}` — substrate-layer failure on some keys
+> **Kontrakt odpowiedzi:** Klienci **muszą** badać `body.status`, nie tylko kod statusu HTTP. Odpowiedź `200` może wskazywać na:
+> - `{"status": "imported", "keys_imported": N}` — pełny sukces
+> - `{"status": "partial", "keys_imported": N, "failed_keys": [...]}` — błąd warstwy podłoża dla niektórych kluczy
 >
-> The endpoint deliberately avoids `207 Multi-Status` to avoid breaking callers that gate on `status == 200`. Treat any non-`"imported"` body status as a soft failure requiring retry of the listed keys.
+> Punkt końcowy celowo unika `207 Multi-Status`, aby nie łamać wywołujących, którzy warunkują na `status == 200`. Traktuj każdy nie-`"imported"` status ciała jako miękką awarię wymagającą ponowienia dla wymienionych kluczy.
 
 ---
 
-## Audit System
+## System audytu
 
-| Endpoint | Purpose |
+| Punkt końcowy | Przeznaczenie |
 |----------|---------|
-| `GET /api/audit/query` | Admin-only filtered query (user, action, agent, channel, date range, limit up to 5000) |
-| `GET /api/audit/export` | Export as JSON or CSV (hard cap 50,000 rows) |
-| `GET /api/audit/recent` | Recent entries (array) |
-| `GET /api/audit/verify` | Verify audit chain integrity |
+| `GET /api/audit/query` | Filtrowane zapytanie tylko dla administratorów (użytkownik, akcja, agent, kanał, zakres dat, limit do 5000) |
+| `GET /api/audit/export` | Eksport jako JSON lub CSV (twardy limit 50 000 wierszy) |
+| `GET /api/audit/recent` | Ostatnie wpisy (tablica) |
+| `GET /api/audit/verify` | Weryfikacja integralności łańcucha audytu |
 
 ---
 
-## Cross-Cutting Patterns
+## Wzorce przekrojowe
 
-### Idempotency-Key Support (#3637)
+### Obsługa Idempotency-Key (#3637)
 
-Several mutating endpoints honor the `Idempotency-Key` header:
+Kilka mutujących punktów końcowych uznaje nagłówek `Idempotency-Key`:
 
-- `POST /api/agents` (spawn)
-- `POST /api/a2a/send` (external task dispatch)
+- `POST /api/agents` (uruchomienie)
+- `POST /api/a2a/send` (wysyłka zewnętrznego zadania)
 
-**Semantics:** A duplicate request with the same key and identical body replays the cached response. A different body under the same key is rejected with `409 Conflict`.
+**Semantyka:** Zduplikowane żądanie z tym samym kluczem i identycznym ciałem odtwarza buforowaną odpowiedź. Inne ciało pod tym samym kluczem jest odrzucane z `409 Conflict`.
 
-### Confirmation Requirements
+### Wymagania potwierdzenia
 
-Destructive operations require explicit `confirm=true` (accepted as either a query parameter or JSON body field):
+Operacje destrukcyjne wymagają jawnego `confirm=true` (akceptowane jako parametr zapytania lub pole ciała JSON):
 
-| Operation | Without confirm | With confirm |
+| Operacja | Bez potwierdzenia | Z potwierdzeniem |
 |-----------|----------------|---------------|
-| `DELETE /api/agents/{id}` | `409 Conflict` + data-loss warning | Kills agent + purges canonical UUID |
-| `POST /api/agents/identities/{name}/reset` | `409 Conflict` + data-loss warning | Purges UUID binding |
+| `DELETE /api/agents/{id}` | `409 Conflict` + ostrzeżenie o utracie danych | Zabija agenta + usuwa kanoniczny UUID |
+| `POST /api/agents/identities/{name}/reset` | `409 Conflict` + ostrzeżenie o utracie danych | Usuwa powiązanie UUID |
 
-### Workspace Files
+### Pliki obszaru roboczego
 
-Agents have an identity-file workspace accessible via:
+Agenty mają przestrzeń roboczą plików tożsamości dostępną przez:
 
-- `GET /api/agents/{id}/files` — List files
-- `GET /api/agents/{id}/files/{filename}` — Read file
-- `PUT /api/agents/{id}/files/{filename}` — Write file (`SetAgentFileRequest`)
-- `DELETE /api/agents/{id}/files/{filename}` — Delete file
+- `GET /api/agents/{id}/files` — Lista plików
+- `GET /api/agents/{id}/files/{filename}` — Odczyt pliku
+- `PUT /api/agents/{id}/files/{filename}` — Zapis pliku (`SetAgentFileRequest`)
+- `DELETE /api/agents/{id}/files/{filename}` — Usunięcie pliku
 
-### File Upload
+### Przesyłanie pliku
 
-`POST /api/agents/{id}/upload` accepts raw body bytes with two required headers:
-- `Content-Type` — the MIME type of the attachment
-- `X-Filename` — the original filename
+`POST /api/agents/{id}/upload` akceptuje surowe bajty ciała z dwoma wymaganymi nagłówkami:
+- `Content-Type` — typ MIME załącznika
+- `X-Filename` — oryginalna nazwa pliku
 
-### Session Stream Multi-Client Attach
+### Multi-klientowe podłączenie strumienia sesji
 
-`GET /api/agents/{id}/sessions/{session_id}/stream` allows any number of clients to subscribe to SSE events from an active turn. Late attachers begin receiving events from the point of subscription — partial-turn snapshots are not replayed. This enables the dashboard, CLI, and desktop clients to all observe the same agent turn simultaneously.
+`GET /api/agents/{id}/sessions/{session_id}/stream` pozwala dowolnej liczbie klientów subskrybować zdarzenia SSE z aktywnej tury. Późni subskrybenci zaczynają odbierać zdarzenia od momentu subskrypcji — migawki częściowych tur nie są odtwarzane. Umożliwia to dashboardowi, CLI i klientom desktopowym jednoczesne obserwowanie tej samej tury agenta.
 
 ---
 
-## Key Schema References
+## Kluczowe odniesienia schematów
 
-The specification defines these named schemas (beyond the generic `JsonObject`/`JsonArray` pass-throughs used for loosely-typed endpoints):
+Specyfikacja definiuje następujące nazwane schematy (poza ogólnymi przejściami `JsonObject`/`JsonArray` używanymi dla luźno typowanych punktów końcowych):
 
-| Schema | Used By |
+| Schemat | Używany przez |
 |--------|---------|
-| `SpawnRequest` / `SpawnResponse` | Agent creation |
-| `BulkCreateRequest` / `BulkAgentIdsRequest` | Bulk operations |
-| `MessageRequest` / `MessageResponse` | Agent messaging |
-| `InjectMessageRequest` / `InjectMessageResponse` | Tool-loop injection |
-| `PushMessageRequest` | Proactive channel push |
-| `SetModeRequest` | Operational mode change |
-| `PatchAgentConfigRequest` | Agent config / hand runtime config |
-| `UpdateIdentityRequest` | Visual identity update |
-| `SetAgentToolsRequest` | Tool allowlist/blocklist |
-| `CloneAgentRequest` | Agent cloning |
-| `SetAgentFileRequest` | Workspace file write |
-| `AgentIdentityRow` | UUID registry listing |
-| `AgentStats24hView` | 24-hour KPI rollup |
-| `AgentEventsResponse` | Turn-level event log |
-| `SessionContextResponse` | Context-window usage |
-| `ApproveAllForSessionRequest` | Bulk session approval |
-| `ChangePasswordRequest` | Credential update |
-| `CallbackBody` | OAuth callback (POST) |
+| `SpawnRequest` / `SpawnResponse` | Tworzenie agenta |
+| `BulkCreateRequest` / `BulkAgentIdsRequest` | Operacje zbiorcze |
+| `MessageRequest` / `MessageResponse` | Obsługa wiadomości agenta |
+| `InjectMessageRequest` / `InjectMessageResponse` | Wstrzykiwanie do pętli narzędzi |
+| `PushMessageRequest` | Proaktywne wysyłanie na kanał |
+| `SetModeRequest` | Zmiana trybu operacyjnego |
+| `PatchAgentConfigRequest` | Konfiguracja agenta / konfiguracja czasu wykonania hand |
+| `UpdateIdentityRequest` | Aktualizacja wizualnej tożsamości |
+| `SetAgentToolsRequest` | Lista dozwolonych/zablokowanych narzędzi |
+| `CloneAgentRequest` | Klonowanie agenta |
+| `SetAgentFileRequest` | Zapis pliku obszaru roboczego |
+| `AgentIdentityRow` | Wykaz rejestru UUID |
+| `AgentStats24hView` | 24-godzinna konsolidacja KPI |
+| `AgentEventsResponse` | Dziennik zdarzeń na poziomie tury |
+| `SessionContextResponse` | Wykorzystanie okna kontekstu |
+| `ApproveAllForSessionRequest` | Zbiorcze zatwierdzenie sesji |
+| `ChangePasswordRequest` | Aktualizacja poświadczeń |
+| `CallbackBody` | Wywołanie zwrotne OAuth (POST) |
 
 ---
 
-## Conventions
+## Konwencje
 
-- **Content type:** All JSON endpoints use `application/json`. The trajectory export supports `format=jsonl` (NDJSON with `Content-Type: application/x-ndjson`). File upload uses `application/octet-stream`.
-- **Error model:** HTTP status codes are authoritative for transport-level errors. Some endpoints (notably memory import) embed a secondary `status` field in the response body for application-level partial failures.
-- **Pagination:** `limit` + `offset` query parameters throughout, with endpoint-specific maximums documented per-operation.
-- **Agent ID format:** UUIDs. Malformed UUIDs return `400`; missing agents return `404`.
+- **Typ zawartości:** Wszystkie punkty końcowe JSON używają `application/json`. Eksport trajectory obsługuje `format=jsonl` (NDJSON z `Content-Type: application/x-ndjson`). Przesyłanie pliku używa `application/octet-stream`.
+- **Model błędów:** Kody statusu HTTP są autorytatywne dla błędów na poziomie transportu. Niektóre punkty końcowe (zwłaszcza import pamięci) osadzają wtórne pole `status` w ciele odpowiedzi dla częściowych awarii na poziomie aplikacji.
+- **Paginacja:** Parametry zapytania `limit` + `offset` wszędzie, z maksimum specyficznymi dla punktu końcowego udokumentowanymi dla każdej operacji.
+- **Format ID agenta:** UUID. Nieprawidłowo sformułowane UUID zwracają `400`; brakujące agenty zwracają `404`.

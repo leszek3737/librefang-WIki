@@ -1,29 +1,29 @@
 # xtask
 
-# xtask — Build Automation
+# xtask — Automatyzacja budowania
 
-## Purpose
+## Cel
 
-`xtask` is the workspace's single task runner — a non-published Rust binary invoked as `cargo xtask <command>`. It replaces ad-hoc shell scripts with type-checked, discoverable CLI subcommands covering everything from benchmarking to release cutting. Every contributor and CI pipeline goes through the same entry point.
+`xtask` to jedyny runner zadań w przestrzeni roboczej — niepublikowany binarium Rust wywoływany jako `cargo xtask <command>`. Zastępuje doraźne skrypty powłoki typowanymi, odkrywalnymi podkomendami CLI obejmującymi wszystko od benchmarków po tworzenie wydań. Każdy współtwórca i potok CI przechodzi przez ten sam punkt wejścia.
 
-## Module Layout
+## Układ modułów
 
-| Sub-module | Role |
+| Podmoduł | Rola |
 |---|---|
-| [xtask](xtask.md) | Design principles, invocation model, and the fail-fast CI philosophy. |
-| [src](src.md) | One file per subcommand — the actual implementations (`bench`, `ci`, `release`, `changelog`, `schema_check`, etc.). |
-| [baselines](baselines.md) | Pinned SHA-256 digests for human-authored artifacts (`agent.toml`, `librefang.toml.example`, `openapi.json`). |
+| [xtask](xtask.md) | Zasady projektowania, model wywołań i filozofia fail-fast w CI. |
+| [src](src.md) | Jeden plik na podkomendę — rzeczywiste implementacje (`bench`, `ci`, `release`, `changelog`, `schema_check` itd.). |
+| [baselines](baselines.md) | Przypięte skróty SHA-256 dla artefaktów tworzonych ręcznie (`agent.toml`, `librefang.toml.example`, `openapi.json`). |
 
-The [src](src.md) module contains the code; the [baselines](baselines.md) directory holds the checksum data that commands like `schema_check` read and verify at runtime. The top-level [xtask](xtask.md) document defines the conventions both follow.
+Moduł [src](src.md) zawiera kod; katalog [baselines](baselines.md) przechowuje dane sum kontrolnych, które komendy takie jak `schema_check` odczytują i weryfikują w czasie wykonywania. Dokument najwyższego poziomu [xtask](xtask.md) określa konwencje, które oba przestrzegają.
 
-## Key Workflows
+## Kluczowe przepływy pracy
 
-Several development workflows chain across sub-modules:
+Kilka przepływów pracy deweloperskich łączy się między podmodułami:
 
-- **CI checks** — [`ci`](src.md) runs [`check_changed`](src.md) to determine which lanes (crates, docs, web) are affected, then conditionally executes formatting, clippy, tests, and baseline verification.
-- **Release cutting** — [`release`](src.md) orchestrates tag discovery, changelog folding via [`changelog`](src.md), PR body generation, and ensures baseline files stay consistent.
-- **Baseline integrity** — Any commit touching a tracked artifact must also update its corresponding `.sha256` in [baselines](baselines.md); [`schema_check`](src.md) enforces this in CI.
-- **Dependency updates** — [`update_deps`](src.md) refreshes both Rust and web dependencies, while [`deps`](src.md) runs audit checks.
+- **Kontrole CI** — [`ci`](src.md) uruchamia [`check_changed`](src.md), aby określić, które ścieżki (crates, docs, web) są dotknięte, a następnie warunkowo wykonuje formatowanie, clippy, testy i weryfikację linii bazowych.
+- **Tworzenie wydań** — [`release`](src.md) koordynuje wykrywanie tagów, składanie changeloga przez [`changelog`](src.md), generowanie treści PR i dba o spójność plików linii bazowych.
+- **Integralność linii bazowych** — Każdy commit dotykający śledzonego artefaktu musi również zaktualizować odpowiadający mu `.sha256` w [baselines](baselines.md); [`schema_check`](src.md) wymusza to w CI.
+- **Aktualizacje zależności** — [`update_deps`](src.md) odświeża zarówno zależności Rust, jak i web, podczas gdy [`deps`](src.md) przeprowadza kontrole audytowe.
 
 ```mermaid
 graph TD
@@ -36,4 +36,4 @@ graph TD
     Release -->|tag + PR body| CI
 ```
 
-The unifying principle: one typed CLI surface, fail-fast semantics, and baseline-protected artifacts — so that every automation path is reproducible locally and in CI.
+Nadrzędna zasada: jedna typowana powierzchnia CLI, semantyka fail-fast i artefakty chronione przez linie bazowe — dzięki czemu każda ścieżka automatyzacji jest powtarzalna lokalnie i w CI.

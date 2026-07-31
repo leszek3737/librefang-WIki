@@ -1,23 +1,23 @@
 # deploy — deploy
 
-# deploy — Deployment & Observability
+# deploy — Wdrażanie i Obserwowalność
 
-Container definitions, service files, and telemetry infrastructure for running LibreFang in production and development environments.
+Definicje kontenerów, pliki usług i infrastruktura telemetrii do uruchamiania LibreFang w środowiskach produkcyjnych i deweloperskich.
 
-## Overview
+## Przegląd
 
-The `deploy/` directory provides everything needed to run the LibreFang daemon outside of a bare-metal cargo build:
+Katalog `deploy/` zawiera wszystko, co potrzebne do uruchomienia demona LibreFang poza kompilacją cargo na gołym metalu:
 
-| Artifact | Target |
+| Artefakt | Przeznaczenie |
 |---|---|
-| `docker-compose.yml` | Single-container daemon deployment via Docker |
-| `docker-entrypoint.sh` | Dual-mode (root / rootless) container entrypoint with security hardening |
-| `librefang.service` | systemd unit for host-level installs |
-| `render.yaml` | Render PaaS Blueprint (free tier) |
-| `docker-compose.observability.yml` | Full local telemetry stack (metrics, traces, logs) |
-| `OBSERVABILITY.md` | Operator-facing observability quick-start and reference |
+| `docker-compose.yml` | Wdrożenie demona w pojedynczym kontenerze przez Docker |
+| `docker-entrypoint.sh` | Dwumodalowy (root / bez uprawnień roota) punkt wejścia kontenera z utwardzeniem bezpieczeństwa |
+| `librefang.service` | Jednostka systemd dla instalacji na poziomie hosta |
+| `render.yaml` | Blueprint Render PaaS (warstwa bezpłatna) |
+| `docker-compose.observability.yml` | Pełny lokalny stos telemetrii (metryki, ślady, logi) |
+| `OBSERVABILITY.md` | Szybki start i dokumentacja obserwowalności dla operatorów |
 
-## Deployment Topology
+## Topologia Wdrożenia
 
 ```mermaid
 graph TD
@@ -31,24 +31,24 @@ graph TD
         LOGS[logs/*.log]
         DB[(SQLite)]
     end
-    DC -->|mounts librefang-data:/data| ES
+    DC -->|montuje librefang-data:/data| ES
     ES -->|librefang init| CONFIG
-    ES -->|rewrites api_listen / model| CONFIG
+    ES -->|nadpisuje api_listen / model| CONFIG
     ES -->|gosu librefang| DAEMON
     DAEMON --> CONFIG
     DAEMON --> LOGS
     DAEMON --> DB
-    DAEMON -->|OTLP traces :4317| OTEL
+    DAEMON -->|ślady OTLP :4317| OTEL
     DAEMON -->|/api/metrics :4545| PROM
 ```
 
 ---
 
-## docker-compose.yml — Daemon Deployment
+## docker-compose.yml — Wdrożenie Demona
 
-The simplest path to a running daemon. Pulls the published image from `ghcr.io/librefang/librefang:latest`, exposes port `4545`, and mounts a named volume at `/data` for persistent state (config, SQLite database, logs).
+Najprostsza droga do uruchomienia działającego demona. Pobiera opublikowany obraz z `ghcr.io/librefang/librefang:latest`, wystawia port `4545` i montuje nazwany wolumen w `/data` dla stanu trwałego (konfiguracja, baza SQLite, logi).
 
-API keys and bot tokens are passed through from the host environment with safe defaults (`:-` empty fallback) so the compose file does not hardcode secrets:
+Klucze API i tokeny bota są przekazywane ze środowiska hosta z bezpiecznymi domyślnymi wartościami (`:-` puste zastąpienie), dzięki czemu plik compose nie koduje na stałe sekretów:
 
 ```yaml
 environment:
@@ -57,17 +57,17 @@ environment:
   - GROQ_API_KEY=${GROQ_API_KEY:-}
 ```
 
-The `LIBREFANG_LISTEN=0.0.0.0:4545` environment variable forces a wildcard bind so the daemon is reachable from the host network, not just the container loopback.
+Zmienna środowiskowa `LIBREFANG_LISTEN=0.0.0.0:4545` wymusza powiązanie z all-addresses (wildcard), aby demon był osiągalny z sieci hosta, a nie tylko z pętli zwrotnej kontenera.
 
 ---
 
-## docker-entrypoint.sh — Container Entrypoint
+## docker-entrypoint.sh — Punkt Wejścia Kontenera
 
-The most security-sensitive piece in this module. It runs before the daemon and handles first-boot initialization, config rewriting, and privilege management.
+Najbardziej wrażliwy element tego modułu. Uruchamia się przed demonem i obsługuje inicjalizację pierwszego uruchomienia, nadpisywanie konfiguracji i zarządzanie uprawnieniami.
 
-### Dual-Mode Operation
+### Działanie Dwumodalowe
 
-The script auto-detects whether it is running as root (Docker/Compose) or as uid 1001 (Kubernetes restricted Pod Security) and adapts accordingly:
+Skrypt automatycznie wykrywa, czy działa jako root (Docker/Compose) czy jako uid 1001 (Kubernetes z ograniczonym bezpieczeństwem Pod) i dostosowuje się odpowiednio:
 
 ```sh
 if [ "$(id -u)" = "0" ]; then
@@ -77,133 +77,133 @@ else
 fi
 ```
 
-Two helper functions abstract the difference:
+Dwie funkcje pomocnicze abstrahują tę różnicę:
 
-- **`as_app`** — Drops to the `librefang` service account via `gosu` under root; passes through directly under rootless (privilege drop is impossible and unnecessary when already uid 1001).
-- **`own_as_app`** — Re-asserts file ownership after config rewrites under root; no-ops under rootless.
+- **`as_app`** — Przechodzi na konto usługowe `librefang` przez `gosu` w trybie root; w trybie bez uprawnień roota przekazuje bezpośrednio (zrzucenie uprawnień jest niemożliwe i niepotrzebne, gdy jest się już uid 1001).
+- **`own_as_app`** — Ponownie ustanawia własność plików po nadpisaniu konfiguracji w trybie root; brak operacji w trybie bez uprawnień roota.
 
-This lets a single image satisfy both Docker (which starts as root) and Kubernetes (which enforces `runAsNonRoot: true`) without shipping two images.
+Dzięki temu jeden obraz obsługuje zarówno Docker (który startuje jako root), jak i Kubernetes (który wymusza `runAsNonRoot: true`) bez konieczności budowania dwóch obrazów.
 
-### TOML Injection Guard
+### Zabezpieczenie przed Wstrzykiwaniem TOML
 
-**Critical security control (GH #3556).** The entrypoint splices `$PORT` and `$LIBREFANG_MODEL` directly into `config.toml` via `sed`. Without validation, an attacker controlling those environment variables could break out of the TOML string and inject arbitrary keys — for example, exfiltrating or overwriting provider API keys:
+**Krytyczna kontrola bezpieczeństwa (GH #3556).** Punkt wejścia wstawia `$PORT` i `$LIBREFANG_MODEL` bezpośrednio do `config.toml` przez `sed`. Bez walidacji atakujący kontrolujący te zmienne środowiskowe mógłby wydostać się z ciągu TOML i wstrzyknąć dowolne klucze — na przykład eksfiltrując lub nadpisując klucze API dostawców:
 
 ```
 LIBREFANG_MODEL='gpt-5"\n[provider]\napi_key = "stolen'
 ```
 
-The guard rejects offending values before any rewrite occurs:
+Zabezpieczenie odrzuca nieprawidłowe wartości przed jakimkolwiek nadpisaniem:
 
-| Variable | Validation | Rejection trigger |
+| Zmienna | Walidacja | Wyzwalacz odrzucenia |
 |---|---|---|
-| `PORT` | `grep -qE '^[0-9]+$'` | Non-numeric or empty |
-| `LIBREFANG_MODEL` | Shell `case` glob | Contains `"`, `\`, `[`, or `]` |
-| `LIBREFANG_MODEL` | `wc -l` count | Embedded newlines |
-| `LIBREFANG_MODEL` | `case` with `\r` | Carriage returns |
+| `PORT` | `grep -qE '^[0-9]+$'` | Niecyfrowa lub pusta |
+| `LIBREFANG_MODEL` | Shell `case` glob | Zawiera `"`, `\`, `[` lub `]` |
+| `LIBREFANG_MODEL` | `wc -l` count | Osadzone znaki nowej linii |
+| `LIBREFANG_MODEL` | `case` z `\r` | Znaki powrotu karetki |
 
-`case` is deliberately used instead of `grep -E` for character matching to avoid backslash-quoting surprises in regex bracket expressions.
+`case` jest celowo używane zamiast `grep -E` do dopasowywania znaków, aby uniknąć niespodzianek z cytowaniem ukośników w wyrażeniach regularnych z nawiasami kwadratowymi.
 
-A bad value crashes the container immediately (`exit 1`) with a diagnostic message rather than silently producing a poisoned config.
+Nieprawidłowa wartość natychmiast zatrzymuje kontener (`exit 1`) z komunikatem diagnostycznym, zamiast po cichu tworzyć zatruconą konfigurację.
 
-### Initialization Sequence
+### Sekwencja Inicjalizacji
 
-1. **Resolve data directory** — `$LIBREFANG_HOME` defaults to `/data`.
-2. **Validate environment** — TOML injection guard runs on `PORT` and `LIBREFANG_MODEL`.
-3. **Ensure directory exists** — `mkdir -p "$DATA_DIR"`.
-4. **Ownership** (root mode only) — `chown -R librefang:librefang` if the volume isn't already owned by the service account.
-5. **Writability probe** (rootless mode only) — Creates and removes a temp file in `$DATA_DIR`. Fails with an actionable message pointing to `fsGroup: 1001` or pre-ownership if the volume is not writable. Prevents an opaque "permission denied" from the daemon's SQLite open later.
-6. **Create logs directory** — `as_app mkdir -p "$DATA_DIR/logs"` (defense in depth against GH #3058, where a missing logs dir caused a silent panic with exit 101).
-7. **First-boot init** — Runs `librefang init` only if `config.toml` does not exist. Subsequent boots skip this to avoid accumulating timestamped config backups.
-8. **Config rewrites** — Three `sed` rewrites, each followed by `own_as_app`:
-   - Force `0.0.0.0` wildcard bind if config contains `127.0.0.1` (container loopback is unreachable from host).
-   - Apply `$PORT` if set (PaaS port injection).
-   - Apply `$LIBREFANG_MODEL` if set.
-9. **Exec daemon** — `exec gosu librefang "$@"` (root) or `exec "$@"` (rootless).
+1. **Ustalenie katalogu danych** — `$LIBREFANG_HOME` domyślnie przyjmuje `/data`.
+2. **Walidacja środowiska** — Zabezpieczenie przed wstrzykiwaniem TOML uruchamia się na `PORT` i `LIBREFANG_MODEL`.
+3. **Zapewnienie istnienia katalogu** — `mkdir -p "$DATA_DIR"`.
+4. **Własność** (tylko tryb root) — `chown -R librefang:librefang`, jeśli wolumen nie jest już własnością konta usługowego.
+5. **Test zapisu** (tylko tryb bez uprawnień roota) — Tworzy i usuwa plik tymczasowy w `$DATA_DIR`. Kończy się niepowodzeniem z komunikatem naprawczym wskazującym na `fsGroup: 1001` lub wcześniejsze ustanowienie własności, jeśli wolumen nie jest zapisywalny. Zapobiega niejasnemu „permission denied" przy późniejszym otwarciu SQLite przez demona.
+6. **Utworzenie katalogu logów** — `as_app mkdir -p "$DATA_DIR/logs"` (obrona w głąb przeciwko GH #3058, gdzie brakujący katalog logów powodował cichy panic z exit 101).
+7. **Inicjalizacja pierwszego uruchomienia** — Uruchamia `librefang init` tylko jeśli `config.toml` nie istnieje. Kolejne uruchomienia pomijają ten krok, aby uniknąć kumulacji kopii zapasowych konfiguracji z sygnaturami czasowymi.
+8. **Nadpisywanie konfiguracji** — Trzy operacje `sed`, każda z następującym po niej `own_as_app`:
+   - Wymusza powiązanie wildcard `0.0.0.0`, jeśli konfiguracja zawiera `127.0.0.1` (pętla zwrotna kontenera jest nieosiągalna z hosta).
+   - Aplikuje `$PORT`, jeśli ustawiony (wstrzyknięcie portu PaaS).
+   - Aplikuje `$LIBREFANG_MODEL`, jeśli ustawiony.
+9. **Uruchomienie demona** — `exec gosu librefang "$@"` (root) lub `exec "$@"` (bez uprawnień roota).
 
-### Rootless Writability Failure
+### Niepowodzenie Zapisu w Trybie bez Uprawnień Roota
 
-When rootless mode detects an unwritable volume, the error message is intentionally prescriptive:
+Gdy tryb bez uprawnień roota wykryje niezapisywalny wolumen, komunikat błędu jest celowo instruktażowy:
 
 ```
-ERROR: running rootless as uid 1001 but /data is not writable.
-       Set 'fsGroup: 1001' in the pod securityContext, or pre-own the
-       volume as 1001:1001 if your CSI driver ignores fsGroup.
-       See deploy/kubernetes/README.md ('Volume ownership').
+ERROR: działanie bez uprawnień roota jako uid 1001, ale /data nie jest zapisywalne.
+       Ustaw 'fsGroup: 1001' w securityContext poda, lub nadaj uprawnienia
+       do wolumenu jako 1001:1001, jeśli Twój sterownik CSI ignoruje fsGroup.
+       Zobacz deploy/kubernetes/README.md ('Volume ownership').
 ```
 
-This anticipates the common failure mode where CSI drivers (NFS, CIFS, or any driver reporting `fsGroupPolicy: None`) ignore the kubelet's `fsGroup` chgrp.
+To przewiduje typowy tryb awarii, w którym sterowniki CSI (NFS, CIFS lub jakikolwiek sterownik zgłaszający `fsGroupPolicy: None`) ignorują `chgrp fsGroup` wykonywany przez kubelet.
 
 ---
 
-## librefang.service — systemd Unit
+## librefang.service — Jednostka systemd
 
-For host-level installs (bare metal, VM, LXC). Runs the daemon in foreground mode under a dedicated `librefang` system user.
+Do instalacji na poziomie hosta (goły metal, VM, LXC). Uruchamia demona w trybie first-plane pod dedykowanym użytkownikiem systemowym `librefang`.
 
-**Key characteristics:**
+**Kluczowe cechy:**
 
-- **`ExecStart=/usr/local/bin/librefang start --foreground`** — Foreground mode keeps the process attached to journald; systemd handles lifecycle.
-- **`EnvironmentFile=-/etc/librefang/env`** and **`-/var/lib/librefang/secrets.env`** — Two-file split: config in `/etc`, secrets in `/var/lib`. The leading `-` makes absence non-fatal.
-- **`Restart=on-failure`** with `RestartSec=5` — Automatic recovery from crashes without thrashing.
-- **`ReadWritePaths=/var/lib/librefang`** — Combined with `ProtectSystem=strict`, this is the only writable path the daemon can touch.
-- **`NoNewPrivileges=true`** — Blocks setuid escalation.
-- **`ProtectHome=true`** — Hides `/home`, `/root`, `/run/user` from the process.
-- **`LimitNOFILE=65536`** — Raised file descriptor ceiling for connection-heavy workloads.
-- **`MemoryDenyWriteExecute=false`** — Explicitly noted because the daemon likely uses JIT-compiled regex or a runtime that needs W^X relaxation.
-
----
-
-## render.yaml — Render PaaS Blueprint
-
-Targets Render's free tier. Notable constraints:
-
-- **No persistent disk on free tier** — Data (config, conversation history, SQLite DB) is ephemeral. The YAML documents the paid-tier disk mount path for persistence.
-- **`healthCheckPath: /api/health`** — Render polls this to determine service readiness.
-- **Secret keys** use `sync: false` so they are managed in the Render dashboard, not checked into the blueprint.
+- **`ExecStart=/usr/local/bin/librefang start --foreground`** — Tryb first-plane utrzymuje proces podłączony do journald; systemd obsługuje cykl życia.
+- **`EnvironmentFile=-/etc/librefang/env`** i **`-/var/lib/librefang/secrets.env`** — Podział na dwa pliki: konfiguracja w `/etc`, sekrety w `/var/lib`. Prowadzący `-` sprawia, że brak nie jest błędem krytycznym.
+- **`Restart=on-failure`** z `RestartSec=5` — Automatyczne odzyskiwanie po awariach bez nadmiernego obciążania.
+- **`ReadWritePaths=/var/lib/librefang`** — W połączeniu z `ProtectSystem=strict`, to jedyna ścieżka zapisywalna, którą demon może modyfikować.
+- **`NoNewPrivileges=true`** — Blokuje eskalację setuid.
+- **`ProtectHome=true`** — Ukrywa `/home`, `/root`, `/run/user` przed procesem.
+- **`LimitNOFILE=65536`** — Podniesiony limit deskryptorów plików dla obciążeń z dużą liczbą połączeń.
+- **`MemoryDenyWriteExecute=false`** — Jawnie odnotowane, ponieważ demon prawdopodobnie używa JIT-kompilowanych wyrażeń regularnych lub środowiska uruchomieniowego wymagającego poluzowania W^X.
 
 ---
 
-## Observability Stack
+## render.yaml — Blueprint Render PaaS
 
-### Architecture
+Celuje w bezpłatną warstwę Render. Istotne ograniczenia:
+
+- **Brak trwałego dysku na warstwie bezpłatnej** — Dane (konfiguracja, historia konwersacji, baza SQLite) są ulotne. YAML dokumentuje ścieżkę montowania dysku z warstwy płatnej dla trwałości.
+- **`healthCheckPath: /api/health`** — Render odpytuje ten endpoint, aby ustalić gotowość usługi.
+- **Klucze tajne** używają `sync: false`, więc są zarządzane w panelu Render, a nie sprawdzane do blueprintu.
+
+---
+
+## Stos Obserwowalności
+
+### Architektura
 
 ```mermaid
 graph LR
     DAEMON[librefang daemon]
     DAEMON -->|/api/metrics :4545| PROM[Prometheus :9090]
-    DAEMON -->|OTLP traces :4317| OTEL[OTel Collector :4317/:4318]
-    DAEMON -->|writes log files| LOGS[~/.librefang/logs/*.log]
+    DAEMON -->|ślady OTLP :4317| OTEL[OTel Collector :4317/:4318]
+    DAEMON -->|zapisuje pliki logów| LOGS[~/.librefang/logs/*.log]
     LOGS -->|tail + push| ALLOY[Alloy :12345]
     ALLOY --> LOKI[Loki :3100]
     OTEL -->|otlp| TEMPO[Tempo :3200]
     OTEL -->|otlp| JAEGER[Jaeger :16686]
-    OTEL -->|prometheus exporter :8889| PROM
+    OTEL -->|eksporter prometheus :8889| PROM
     GRAF[Grafana :3000] --> PROM
     GRAF --> TEMPO
     GRAF --> JAEGER
     GRAF --> LOKI
 ```
 
-### Services
+### Usługi
 
-Seven containers orchestrated by `docker-compose.observability.yml`:
+Siedem kontenerów orkiestrowanych przez `docker-compose.observability.yml`:
 
-| Service | Image | Ports | Role |
+| Usługa | Obraz | Porty | Rola |
 |---|---|---|---|
-| `otel-collector` | `otel/opentelemetry-collector-contrib` | 4317, 4318, 8889, 13133 | Receives OTLP from daemon; fans out to Tempo, Jaeger, Prometheus |
-| `jaeger` | `jaegertracing/all-in-one` | 16686 | Standalone trace-debug UI (waterfall, diff, dependency graph) |
-| `tempo` | `grafana/tempo` | 3200 | Trace store; Grafana correlation backend |
-| `loki` | `grafana/loki` | 3100 | Log store |
-| `alloy` | `grafana/alloy` | 12345 | Tails daemon log files; pushes to Loki |
-| `prometheus` | `prom/prometheus` | 9090 | Metrics store |
-| `grafana` | `grafana/grafana` | 3000 | Unified UI; auto-provisioned datasources and dashboards |
+| `otel-collector` | `otel/opentelemetry-collector-contrib` | 4317, 4318, 8889, 13133 | Odbiera OTLP z demona; rozsyła do Tempo, Jaeger, Prometheus |
+| `jaeger` | `jaegertracing/all-in-one` | 16686 | Samodzielny UI debugowania śladów (waterfall, diff, graf zależności) |
+| `tempo` | `grafana/tempo` | 3200 | Magazyn śladów; backend korelacji w Grafanie |
+| `loki` | `grafana/loki` | 3100 | Magazyn logów |
+| `alloy` | `grafana/alloy` | 12345 | Tailsuje pliki logów demona; wysyła do Loki |
+| `prometheus` | `prom/prometheus` | 9090 | Magazyn metryk |
+| `grafana` | `grafana/grafana` | 3000 | Zunifikowany UI; auto-provisionowane źródła danych i panele |
 
-### Startup Ordering
+### Kolejność Uruchamiania
 
-Every `depends_on` uses `condition: service_healthy` with explicit healthchecks. This was a deliberate fix for a boot-time race where the daemon's `BatchSpanProcessor` would log `ConnectionRefused` against `127.0.0.1:4317` while the collector was still starting.
+Każdy `depends_on` używa `condition: service_healthy` z jawnymi kontrolami zdrowia. Było to celowe naprawienie warunku wyścigu przy starcie, gdzie `BatchSpanProcessor` demona logował `ConnectionRefused` do `127.0.0.1:4317`, podczas gdy kolektor jeszcze się uruchamiał.
 
-Healthcheck endpoints:
+Endpointy kontroli zdrowia:
 
-| Service | Check URL | `start_period` |
+| Usługa | Adres sprawdzania | `start_period` |
 |---|---|---|
 | otel-collector | `http://localhost:13133/` | 5s |
 | jaeger | `http://localhost:16686/` | 5s |
@@ -213,48 +213,48 @@ Healthcheck endpoints:
 | prometheus | `http://localhost:9090/-/ready` | 5s |
 | grafana | `http://localhost:3000/api/health` | 5s |
 
-Tempo's longer `start_period` accounts for WAL and block list loading before `/ready` returns 200.
+Dłuższy `start_period` Tempo uwzględnia ładowanie WAL i listy bloków, zanim `/ready` zwróci 200.
 
-### Jaeger Is Not Optional
+### Jaeger Nie Jest Opcjonalny
 
-The collector's `traces` pipeline includes `otlp/jaeger` as an exporter. Starting the stack without Jaeger will cause the collector to log `ConnectionRefused` on every batch. To run Tempo-only:
+Potok `traces` w kolektorze zawiera `otlp/jaeger` jako eksporter. Uruchomienie stosu bez Jaeger spowoduje, że kolektor będzie logował `ConnectionRefused` przy każdej partii. Aby uruchomić tylko Tempo:
 
-1. Comment out `otlp/jaeger` in `otel-collector/config.yaml`.
-2. Remove `jaeger` from `service.pipelines.traces.exporters`.
-3. Drop the `jaeger` service from the compose file.
+1. Skomentuj `otlp/jaeger` w `otel-collector/config.yaml`.
+2. Usuń `jaeger` z `service.pipelines.traces.exporters`.
+3. Usuń usługę `jaeger` z pliku compose.
 
-### Cross-Linking
+### Wzajemne Powiązania
 
-- **Trace ↔ Trace**: Same `trace_id` flows to both Tempo and Jaeger. Both are auto-provisioned as Grafana datasources (`librefang-tempo`, `librefang-jaeger`).
-- **Log ↔ Trace**: The Loki datasource (`librefang-loki`) has `derivedFields` configured to extract `trace_id="<32-hex>"` from log lines and generate clickable links to Tempo/Jaeger. This wiring is in place but requires daemon log lines to carry the `trace_id` field — a pending Rust-side change.
-- **Metric ↔ Trace**: Prometheus and the OTel collector's Prometheus exporter (`:8889`) are both provisioned as Grafana datasources.
+- **Ślad ↔ Ślad**: Ten sam `trace_id` płynie do Tempo i Jaeger. Oba są auto-provisionowane jako źródła danych Grafany (`librefang-tempo`, `librefang-jaeger`).
+- **Log ↔ Ślad**: Źródło danych Loki (`librefang-loki`) ma skonfigurowane `derivedFields` do wyciągania `trace_id="<32-hex>"` z linii logów i generowania klikalnych linków do Tempo/Jaeger. To powiązanie jest na miejscu, ale wymaga, aby linie logów demona zawierały pole `trace_id` — oczekująca zmiana po stronie Rust.
+- **Metryka ↔ Ślad**: Prometheus i eksporter Prometheus kolektora OTel (`:8889`) są oba provisionowane jako źródła danych Grafany.
 
-### Data Flow Details
+### Szczegóły Przepływu Danych
 
-**Metrics path**: Prometheus scrapes `http://host.docker.internal:4545/api/metrics` every 15 seconds. The compose file uses `extra_hosts: ["host.docker.internal:host-gateway"]` on both `otel-collector` and `prometheus` to ensure the Docker-internal alias resolves to the host gateway.
+**Ścieżka metryk**: Prometheus scrapuje `http://host.docker.internal:4545/api/metrics` co 15 sekund. Plik compose używa `extra_hosts: ["host.docker.internal:host-gateway"]` na zarówno `otel-collector`, jak i `prometheus`, aby upewnić się, że wewnętrzny alias Dockera wskazuje na bramę hosta.
 
-**Logs path**: Alloy mounts `${HOME}/.librefang/logs` read-only at `/var/log/librefang` inside the container. This fixed mount path means the Alloy config does not need to know the operator's `$HOME`.
+**Ścieżka logów**: Alloy montuje `${HOME}/.librefang/logs` w trybie tylko do odczytu w `/var/log/librefang` wewnątrz kontenera. Ten stały punkt montowania oznacza, że konfiguracja Alloy nie musi znać `$HOME` operatora.
 
-**Traces path**: The daemon sends OTLP to `127.0.0.1:4317` (host port mapped to the collector). The collector forwards internally to `tempo:4317` and `jaeger:4317` over the Docker bridge network. Tempo and Jaeger do not expose their 4317 ports to the host — only the collector's 4317 is host-mapped, avoiding port conflicts.
+**Ścieżka śladów**: Demon wysyła OTLP do `127.0.0.1:4317` (port hosta zmapowany do kolektora). Kolektor przekazuje wewnętrznie do `tempo:4317` i `jaeger:4317` przez sieć bridge Dockera. Tempo i Jaeger nie wystawiają swoich portów 4317 do hosta — tylko 4317 kolektora jest zmapowane do hosta, co unika konfliktów portów.
 
-### Metric Reference
+### Odniesienie Metryk
 
-**System metrics:**
+**Metryki systemowe:**
 
-| Metric | Type | Labels | Description |
+| Metryka | Typ | Etykiety | Opis |
 |---|---|---|---|
-| `librefang_info` | gauge | `version` | Build version info |
-| `librefang_uptime_seconds` | gauge | — | Seconds since daemon started |
-| `librefang_agents_active` | gauge | — | Running agents |
-| `librefang_agents_total` | gauge | — | Registered agents |
-| `librefang_panics_total` | counter | — | Supervisor panic count |
-| `librefang_restarts_total` | counter | — | Supervisor restart count |
-| `librefang_active_sessions` | gauge | — | Active dashboard sessions |
-| `librefang_cost_usd_today` | gauge | — | Estimated daily cost (USD) |
+| `librefang_info` | gauge | `version` | Informacja o wersji kompilacji |
+| `librefang_uptime_seconds` | gauge | — | Sekundy od uruchomienia demona |
+| `librefang_agents_active` | gauge | — | Aktywne agenty |
+| `librefang_agents_total` | gauge | — | Zarejestrowane agenty |
+| `librefang_panics_total` | counter | — | Licznik panik supervisora |
+| `librefang_restarts_total` | counter | — | Licznik restartów supervisora |
+| `librefang_active_sessions` | gauge | — | Aktywne sesje dashboardu |
+| `librefang_cost_usd_today` | gauge | — | Szacowany koszt dzienny (USD) |
 
-**LLM & token metrics** (rolling 1h window, per agent):
+**Metryki LLM i tokenów** (przesuwane okno 1h, na agenta):
 
-| Metric | Type | Labels |
+| Metryka | Typ | Etykiety |
 |---|---|---|
 | `librefang_tokens` | gauge | `agent, provider, model` |
 | `librefang_tokens_input` | gauge | `agent, provider, model` |
@@ -262,29 +262,29 @@ The collector's `traces` pipeline includes `otlp/jaeger` as an exporter. Startin
 | `librefang_tool_calls` | gauge | `agent, provider, model` |
 | `librefang_llm_calls` | gauge | `agent, provider, model` |
 
-**HTTP metrics** (requires `telemetry` feature):
+**Metryki HTTP** (wymagają flagi `telemetry`):
 
-| Metric | Type | Labels |
+| Metryka | Typ | Etykiety |
 |---|---|---|
 | `librefang_http_requests_total` | counter | `method, path, status` |
 | `librefang_http_request_duration_seconds` | histogram | `method, path` |
 
-### Bundled Dashboards
+### Dołączone Panele
 
-Four dashboards in `grafana/dashboards/`, auto-provisioned via `grafana/provisioning/`. Each includes cross-navigation links to the other three:
+Cztery panele w `grafana/dashboards/`, auto-provisionowane przez `grafana/provisioning/`. Każdy zawiera linki nawigacji wzajemnej do pozostałych trzech:
 
-| Dashboard | File | Focus |
+| Panel | Plik | Zestawienie |
 |---|---|---|
-| LibreFang Overview | `librefang.json` | System health: version, uptime, agent counts, sessions, cost, panics/restarts |
-| LLM & Token Usage | `librefang-llm.json` | Per-agent token consumption with Agent/Provider/Model template variables |
-| HTTP & API | `librefang-http.json` | Request rate, latency percentiles (p50/p90/p99), status distribution, slowest endpoints |
-| Cost & Budget | `librefang-cost.json` | Spending drill-down with template variables; output token ranking (output tokens cost 3–5× input) |
+| LibreFang Overview | `librefang.json` | Zdrowie systemu: wersja, uptime, liczba agentów, sesje, koszty, paniki/restarty |
+| LLM & Token Usage | `librefang-llm.json` | Konsumpcja tokenów na agenta ze zmiennymi szablonowymi Agent/Provider/Model |
+| HTTP & API | `librefang-http.json` | Szybkość żądań, percentyle opóźnień (p50/p90/p99), rozkład statusów, najwolniejsze endpointy |
+| Cost & Budget | `librefang-cost.json` | Analiza wydatków ze zmiennymi szablonowymi; ranking tokenów wyjściowych (tokeny wyjściowe kosztują 3–5× więcej niż wejściowe) |
 
-### Volumes
+### Wolumeny
 
-Named volumes for persistent state across container restarts:
+Nazwane wolumeny dla stanu trwałego między restartami kontenerów:
 
-- `prometheus-data` — Metric retention
-- `tempo-data` — Trace blocks
-- `loki-data` — Log chunks
-- `grafana-data` — Dashboard edits (UI changes persist here even though dashboard JSON is mounted read-only from the host)
+- `prometheus-data` — Retencja metryk
+- `tempo-data` — Bloki śladów
+- `loki-data` — Fragmenty logów
+- `grafana-data` — Edycje paneli (zmiany w UI są tu utrwalane, mimo że JSON paneli jest montowany w trybie tylko do odczytu z hosta)

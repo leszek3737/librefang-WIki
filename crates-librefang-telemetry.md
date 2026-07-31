@@ -2,19 +2,19 @@
 
 # librefang-telemetry
 
-Centralized OpenTelemetry + Prometheus metrics instrumentation for the LibreFang Agent OS. This crate provides a thin, focused wrapper around the `metrics` crate's recording macros, exposing a small public API that the rest of the codebase—primarily `librefang-api`—uses to record HTTP request telemetry and register metric descriptions for the Prometheus exporter.
+Centralizowana instrumentacja metryk OpenTelemetry + Prometheus dla LibreFang Agent OS. Ten crate dostarcza cienki, ukierunkowany wrapper wokół makr rejestrujących z crate'u `metrics`, eksponując małe publiczne API, którego reszta kodu — przede wszystkim `librefang-api` — używa do rejestrowania telemetrii żądań HTTP i deklarowania opisów metryk dla eksportera Prometheus.
 
-## Purpose and Scope
+## Cel i zakres
 
-The crate has three responsibilities:
+Crate ma trzy odpowiedzialności:
 
-1. **Path normalization** — collapse dynamic path segments (UUIDs, hex hashes) into `{id}` to prevent unbounded label cardinality in Prometheus.
-2. **HTTP request recording** — emit counter and histogram metrics for every API request.
-3. **Metric description registration** — declare `# HELP` / `# TYPE` metadata for all observability metrics so the Prometheus exporter produces self-documenting output.
+1. **Normalizacja ścieżek** — zwijanie dynamicznych segmentów ścieżki (UUID-e, hasze hex) do `{id}` w celu zapobieżenia nieograniczonej kardynalności etykiet w Prometheusie.
+2. **Rejestrowanie żądań HTTP** — emisja metryk licznikowych i histogramowych dla każdego żądania API.
+3. **Rejestracja opisów metryk** — deklarowanie metadanych `# HELP` / `# TYPE` dla wszystkich metryk obserwowalności, aby eksporter Prometheus generował samodokumentujący wynik.
 
-The crate is intentionally minimal. It does **not** install a recorder or own the `PrometheusHandle`. Recorder installation and rendering live in `crates/librefang-api/src/telemetry.rs`.
+Crate jest celowo minimalistyczny. **Nie** instaluje rejestratora ani nie posiada `PrometheusHandle`. Instalacja rejestratora i renderowanie odbywają się w `crates/librefang-api/src/telemetry.rs`.
 
-## Architecture
+## Architektura
 
 ```mermaid
 flowchart LR
@@ -23,7 +23,7 @@ flowchart LR
     NORM["normalize_path"]
     INIT["init_prometheus<br/>(librefang-api::telemetry)"]
     DESC["describe_observability_metrics"]
-    METRICS["metrics crate macros<br/>(counter!, histogram!, describe_*!)"]
+    METRICS["makra crate'u metrics<br/>(counter!, histogram!, describe_*!)"]
     PROM["PrometheusHandle<br/>/ /api/metrics endpoint"]
 
     MW -->|"path, method, status, duration"| REC
@@ -31,59 +31,59 @@ flowchart LR
     REC --> METRICS
     INIT --> DESC
     DESC --> METRICS
-    METRICS -.->|"recorded by"| PROM
+    METRICS -.->|"rejestrowane przez"| PROM
 ```
 
-The `metrics` crate acts as a facade. Both `record_http_request` and `describe_observability_metrics` delegate to its macros, and the data flows through whichever recorder `init_prometheus` has installed globally.
+Crate `metrics` pełni rolę fasady. Zarówno `record_http_request`, jak i `describe_observability_metrics` delegują do jego makr, a dane przepływają przez dowolny rejestrator, który `init_prometheus` zainstalował globalnie.
 
-## Module Structure
+## Struktura modułów
 
-| Module | Contents |
+| Moduł | Zawartość |
 |---|---|
-| `config` | Re-exports `TelemetryConfig` from `librefang-types::config` for import convenience. |
-| `metrics` | All public telemetry functions: path normalization, request recording, metric descriptions. |
+| `config` | Re-eksportuje `TelemetryConfig` z `librefang-types::config` dla wygody importu. |
+| `metrics` | Wszystkie publiczne funkcje telemetrii: normalizacja ścieżek, rejestrowanie żądań, opisy metryk. |
 
-## Public API
+## Publiczne API
 
 ### `normalize_path(path: &str) -> String`
 
-Normalizes an HTTP path by replacing dynamic segments with `{id}`. This is the cardinality-control mechanism that keeps Prometheus label sets bounded.
+Normalizuje ścieżkę HTTP, zastępując segmenty dynamiczne ciągiem `{id}`. Jest to mechanizm kontrolujący kardynalność, który utrzymuje zbiór etykiet Prometheus w granicach.
 
-The function splits the path on `/` and walks the segments left-to-right. For each non-structural segment (`api`, `v1`, `v2`, `a2a` are preserved as-is), it checks whether the *following* segment is a dynamic identifier. If so, that following segment is replaced with `{id}`.
+Funkcja dzieli ścieżkę po `/` i przechodzi po segmentach od lewej do prawej. Dla każdego nie-strukturalnego segmentu (`api`, `v1`, `v2`, `a2a` są zachowywane bez zmian) sprawdza, czy *następujący* segment jest dynamicznym identyfikatorem. Jeśli tak, następujący segment jest zastępowany ciągiem `{id}`.
 
-**What gets collapsed:**
-- Standard UUIDs (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
-- Pure hex strings between 8 and 64 characters (SHA-256 hashes, short hex IDs)
+**Co jest zwijane:**
+- Standardowe UUID-e (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
+- Czyste ciągi hex o długości od 8 do 64 znaków (hasze SHA-256, krótkie identyfikatory hex)
 
-**What is NOT collapsed:**
-- Hyphenated words like `well-known` or `my-agent`
-- Short strings (`abc`)
-- Free-text route parameters (`my-fancy-alias`)
+**Co NIE jest zwijane:**
+- Słowa z myślnikami, takie jak `well-known` lub `my-agent`
+- Krótkie ciągi (`abc`)
+- Parametry tras typu free-text (`my-fancy-alias`)
 
-This last point is a known design constraint: `normalize_path` cannot detect free-text parameters. The middleware must normalize against the matched route **template** (e.g., `/api/models/aliases/{alias}`) rather than the concrete URI to avoid unbounded label cardinality. The function is a no-op on paths that already contain `{...}` placeholders.
+Ten ostatni punkt jest znanym ograniczeniem projektowym: `normalize_path` nie może wykryć parametrów free-text. Middleware musi normalizować względem **szablonu** dopasowanej trasy (np. `/api/models/aliases/{alias}`), a nie względem konkretnego URI, aby uniknąć nieograniczonej kardynalności etykiet. Funkcja jest operacją no-op na ścieżkach, które już zawierają symbole zastępcze `{...}`.
 
 ```rust
 use librefang_telemetry::normalize_path;
 
-// UUID collapsed
+// UUID zwinięty
 assert_eq!(
     normalize_path("/api/agents/550e8400-e29b-41d4-a716-446655440000/message"),
     "/api/agents/{id}/message"
 );
 
-// Hex hash collapsed
+// Hash hex zwinięty
 assert_eq!(
     normalize_path("/api/agents/deadbeef01234567/message"),
     "/api/agents/{id}/message"
 );
 
-// Hyphenated word preserved
+// Słowo z myślnikami zachowane
 assert_eq!(
     normalize_path("/api/my-agent/status"),
     "/api/my-agent/status"
 );
 
-// Existing template passes through unchanged
+// Istniejący szablon przechodzi bez zmian
 assert_eq!(
     normalize_path("/api/memory/agents/{id}/kv/{key}"),
     "/api/memory/agents/{id}/kv/{key}"
@@ -92,55 +92,55 @@ assert_eq!(
 
 ### `record_http_request(path: &str, method: &str, status: u16, duration: Duration)`
 
-Main entry point for HTTP telemetry. Called by the request-logging middleware in `librefang-api` after every request completes. It:
+Główny punkt wejścia dla telemetrii HTTP. Wywoływany przez middleware logowania żądań w `librefang-api` po zakończeniu każdego żądania. Funkcja:
 
-1. Normalizes the path via `normalize_path`.
-2. Increments the `librefang_http_requests_total` counter with labels `method`, `path`, and `status`.
-3. Records `duration` into the `librefang_http_request_duration_seconds` histogram with labels `method` and `path`.
+1. Normalizuje ścieżkę za pomocą `normalize_path`.
+2. Zwiększa licznik `librefang_http_requests_total` z etykietami `method`, `path` i `status`.
+3. Zapisuje `duration` w histogramie `librefang_http_request_duration_seconds` z etykietami `method` i `path`.
 
-Both calls go through the `metrics` crate's `counter!` and `histogram!` macros, so the data reaches whichever recorder is installed globally.
+Oba wywołania przechodzą przez makra `counter!` i `histogram!` z crate'u `metrics`, więc dane trafiają do dowolnego zainstalowanego globalnie rejestratora.
 
 ### `describe_observability_metrics()`
 
-Registers `# HELP` and `# TYPE` descriptions for all observability metrics. Called once by `init_prometheus` in `librefang-api::telemetry` after the recorder is installed. The function is idempotent—the recorder dedupes repeated registrations.
+Rejestruje opisy `# HELP` i `# TYPE` dla wszystkich metryk obserwowalności. Wywoływane raz przez `init_prometheus` w `librefang-api::telemetry` po zainstalowaniu rejestratora. Funkcja jest idempotentna — rejestrator deduplikuje powtórzone rejestracje.
 
-Metrics covered:
+Obsługiwane metryki:
 
-| Metric | Type | Labels | Purpose |
+| Metryka | Typ | Etykiety | Przeznaczenie |
 |---|---|---|---|
-| `librefang_http_requests_total` | counter | method, path, status | Total API requests |
-| `librefang_http_request_duration_seconds` | histogram (seconds) | method, path | Request wall-clock latency |
-| `librefang_queue_wait_seconds` | histogram (seconds) | — | CommandQueue lane permit wait time |
-| `librefang_mcp_reconnect_total` | counter | server id, outcome | MCP server reconnect attempts |
-| `librefang_llm_provider_errors_total` | counter | provider, status | LLM provider error responses |
-| `librefang_tool_call_total` | counter | agent, tool, outcome | Tool invocations from agent loop |
-| `librefang_cron_fires_total` | counter | agent, outcome | Cron job execution outcomes |
-| `librefang_cron_auto_disabled_total` | counter | agent | Jobs auto-disabled after failure thresholds |
-| `librefang_media_understanding_failures_total` | counter | kind, provider, model | Vision/STT failures by provider/model |
+| `librefang_http_requests_total` | licznik | method, path, status | Łączna liczba żądań API |
+| `librefang_http_request_duration_seconds` | histogram (sekundy) | method, path | Opóźnienie czasowe żądania |
+| `librefang_queue_wait_seconds` | histogram (sekundy) | — | Czas oczekiwania na permit w pasie CommandQueue |
+| `librefang_mcp_reconnect_total` | licznik | server id, outcome | Próby ponownego połączenia z serwerem MCP |
+| `librefang_llm_provider_errors_total` | licznik | provider, status | Błędy odpowiedzi dostawcy LLM |
+| `librefang_tool_call_total` | licznik | agent, tool, outcome | Wywołania narzędzi z pętli agenta |
+| `librefang_cron_fires_total` | licznik | agent, outcome | Wyniki wykonania zadań cron |
+| `librefang_cron_auto_disabled_total` | licznik | agent | Zadania automatycznie wyłączone po przekroczeniu progów awarii |
+| `librefang_media_understanding_failures_total` | licznik | kind, provider, model | Awarie Vision/STT wg dostawcy/modelu |
 
 ### `get_http_metrics_summary() -> String`
 
-Legacy compatibility shim. The Prometheus output is now rendered directly from the `PrometheusHandle` in the `/api/metrics` route handler. This function returns a comment string explaining where to find the real output. New code should use the `PrometheusHandle` directly.
+Warstwa zgodności wstecznej (legacy shim). Wynik Prometheus jest teraz renderowany bezpośrednio z `PrometheusHandle` w obsłudze trasy `/api/metrics`. Ta funkcja zwraca ciąg komentarza wyjaśniający, gdzie znaleźć właściwy wynik. Nowy kod powinien używać `PrometheusHandle` bezpośrednio.
 
-## Cardinality Control: Why Path Normalization Matters
+## Kontrola kardynalności: dlaczego normalizacja ścieżek ma znaczenie
 
-Unbounded label cardinality is the most common way to silently degrade a Prometheus deployment. If every unique UUID or hash in a path becomes its own label value, the metrics store grows without limit and queries become slow or useless.
+Nieograniczona kardynalność etykiet to najczęstszy sposób cichego pogorszenia wydajności wdrożenia Prometheus. Jeśli każdy unikalny UUID lub hash w ścieżce staje się osobną wartością etykiety, magazyn metryk rośnie bez granic, a zapytania stają się wolne lub bezużyteczne.
 
-`normalize_path` addresses this for structured identifiers (UUIDs and hex hashes). However, it is deliberately conservative: it does not attempt to detect free-text parameters. The test suite explicitly guards this behavior—the `normalize_path` function will produce different labels for `/api/models/aliases/alias-a` and `/api/models/aliases/alias-b`.
+`normalize_path` rozwiązuje ten problem dla identyfikatorów strukturalnych (UUID-e i hasze hex). Funkcja jest jednak celowo konserwatywna: nie próbuje wykrywać parametrów free-text. Pakiet testowy jawnie pilnuje tego zachowania — funkcja `normalize_path` wygeneruje różne etykiety dla `/api/models/aliases/alias-a` i `/api/models/aliases/alias-b`.
 
-The correct pattern is for the middleware to pass the **matched route template** (e.g., Axum's `MatchedPath`) to `record_http_request`, not the concrete request URI. When a template like `/api/models/aliases/{alias}` is passed, `normalize_path` is a no-op and the label set stays bounded regardless of how many distinct aliases exist.
+Prawidłowym wzorcem jest przekazywanie przez middleware **dopasowanego szablonu trasy** (np. `MatchedPath` z Axuma) do `record_http_request`, a nie konkretnego URI żądania. Gdy przekazany jest szablon taki jak `/api/models/aliases/{alias}`, `normalize_path` jest operacją no-op, a zbiór etykiet pozostaje ograniczony niezależnie od tego, ile różnych aliasów istnieje.
 
-## Integration Points
+## Punkty integracji
 
-- **`librefang-api::middleware::request_logging`** — Calls `record_http_request` after every request completes.
-- **`librefang-api::telemetry::init_prometheus`** — Installs the global recorder, then calls `describe_observability_metrics` to register metric descriptions.
-- **`librefang-types::config::TelemetryConfig`** — The canonical configuration struct, re-exported from this crate's `config` module for convenience.
+- **`librefang-api::middleware::request_logging`** — wywołuje `record_http_request` po zakończeniu każdego żądania.
+- **`librefang-api::telemetry::init_prometheus`** — instaluje globalny rejestrator, a następnie wywołuje `describe_observability_metrics` w celu rejestracji opisów metryk.
+- **`librefang-types::config::TelemetryConfig`** — kanoniczna struktura konfiguracyjna, re-eksportowana z modułu `config` tego crate'u dla wygody.
 
-## Dependencies
+## Zależności
 
-| Dependency | Relationship |
+| Zależność | Relacja |
 |---|---|
-| `metrics` | Facade crate providing `counter!`, `histogram!`, and `describe_*!` macros. |
-| `librefang-types` | Provides `TelemetryConfig` and other shared type definitions. |
+| `metrics` | Crate fasady dostarczający makra `counter!`, `histogram!` i `describe_*!`. |
+| `librefang-types` | Dostarcza `TelemetryConfig` i inne wspólne definicje typów. |
 
-No external HTTP or Prometheus client libraries are pulled in directly—those concerns are handled by `librefang-api`.
+Żadne zewnętrzne biblioteki klienta HTTP lub Prometheus nie są bezpośrednio dołączane — te zagadnienia są obsługiwane przez `librefang-api`.

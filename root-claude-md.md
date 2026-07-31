@@ -1,77 +1,77 @@
 # Root — CLAUDE.md
 
-# CLAUDE.md — Root Agent Instructions
+# CLAUDE.md — Instrukcje dla agenta głównego
 
-## Purpose
+## Cel
 
-`CLAUDE.md` is the top-level instruction file that governs how AI agents — primarily Claude Code — interact with the LibreFang repository. It is not application code; it is an operational charter that encodes safety hooks, build constraints, testing obligations, architectural invariants, and collaboration etiquette. Every agent session is expected to read and follow it before touching files.
+`CLAUDE.md` to najwyższy poziomowy plik instrukcji określający sposób interakcji agentów AI — przede wszystkim Claude Code — z repozytorium LibreFang. Nie jest to kod aplikacji; to operacyjna karta zasad, która koduje haki bezpieczeństwa, ograniczenia kompilacji, obowiązki testowe, niezmienniki architektoniczne i zasady współpracy. Każda sesja agenta ma za zadanie przeczytać i stosować się do niej przed dotykaniem plików.
 
-The file is consumed both by the agent runtime (Claude Code loads it automatically) and by human contributors who need to understand the same guardrails. Its authority is enforced at three layers: Claude Code PreToolUse hooks, version-controlled git hooks in `scripts/hooks/`, and CI checks.
+Plik jest wykorzystywany zarówno przez środowisko uruchomieniowe agenta (Claude Code ładuje go automatycznie), jak i przez ludzkich współtwórców, którzy muszą rozumieć te same ograniczenia. Jego autorytet jest egzekwowany na trzech warstwach: hakach Claude Code PreToolUse, hooksach git pod kontrolą wersji w `scripts/hooks/` oraz kontrolach CI.
 
 ---
 
-## Pre-Edit Safety Gate: Worktree Verification
+## Bramka bezpieczeństwa przed edycją: Weryfikacja worktree
 
-The single most important rule in the file: **no edits in the main worktree.** Before any file-modifying task, the agent must run:
+Najważniejsza zasada w pliku: **żadnych edycji w głównym worktree.** Przed każdym zadaniem modyfikującym pliki, agent musi uruchomić:
 
 ```bash
 test -d "$(git rev-parse --show-toplevel)/.git" && echo main || echo linked
 ```
 
-The distinction is mechanical: the main worktree stores `.git` as a directory; linked worktrees store it as a text file pointing into the main worktree's `.git/worktrees/` tree. The test differentiates these shapes reliably, unlike `git rev-parse --git-dir` (whose output varies with cwd) or path-matching against `pwd` (which differs per developer clone).
+Rozróżnienie jest mechaniczne: główny worktree przechowuje `.git` jako katalog; połączone worktrees przechowują je jako plik tekstowy wskazujący na drzewo `.git/worktrees/` głównego worktree. Test niezawodnie różnicuje te kształty, w przeciwieństwie do `git rev-parse --git-dir` (którego wynik zależy od cwd) lub dopasowywania ścieżek do `pwd` (które różni się w zależności od klonu programisty).
 
-If the check returns `main`, the agent must create a linked worktree before proceeding:
+Jeśli sprawdzenie zwraca `main`, agent musi utworzyć połączone worktree przed kontynuowaniem:
 
 ```bash
 git worktree add /tmp/librefang-<feature> -b <feature-branch> origin/main
 ```
 
-A defense-in-depth hook (`.claude/hooks/forbid-main-worktree.sh`) blocks edits to the main tree if this gate is forgotten.
+Hak obrony w głąb (`.claude/hooks/forbid-main-worktree.sh`) blokuje edycje w głównym drzewie, jeśli ta bramka zostanie pominięta.
 
 ---
 
-## Hook Architecture
+## Architektura haków
 
-Two hook layers provide overlapping enforcement. Understanding both is necessary when debugging why a command was blocked.
+Dwie warstwy haków zapewniają nakładające się mechanizmy egzekwowania. Zrozumienie obu jest konieczne podczas diagnozowania, dlaczego polecenie zostało zablokowane.
 
-### Claude Code PreToolUse Hooks (`.claude/hooks/`)
+### Hak Claude Code PreToolUse (`.claude/hooks/`)
 
-| Hook | Trigger | Purpose |
+| Haki | Wyzwalacz | Cel |
 |---|---|---|
-| `forbid-main-worktree.sh` | PreToolUse (Edit/Write) | Blocks all edits and mutating git commands targeting the main worktree. |
-| `guard-bash-safety.sh` | PreToolUse (Bash) | Blocks force-push to main, `--no-verify`/`--no-gpg-sign` flags, staging sensitive files, broad `git add -A`/`.`, AI attribution in commit messages, dangerous `rm -rf` targets, and daemon launches (`librefang start`) that contend on port 4545. |
-| `session-start-worktree-check.sh` | SessionStart | Emits a banner indicating main vs. linked worktree and whether `core.hooksPath` is configured. |
+| `forbid-main-worktree.sh` | PreToolUse (Edit/Write) | Blokuje wszystkie edycje i mutujące polecenia git celujące w główny worktree. |
+| `guard-bash-safety.sh` | PreToolUse (Bash) | Blokuje force-push do main, flagi `--no-verify`/`--no-gpg-sign`, indeksowanie wrażliwych plików, szerokie `git add -A`/`.`, atrybucję AI w wiadomościach commit, niebezpieczne cele `rm -rf` i uruchamianie daemonów (`librefang start`) konkurujących na porcie 4545. |
+| `session-start-worktree-check.sh` | SessionStart | Wyświetla baner wskazujący główny vs połączony worktree oraz czy `core.hooksPath` jest skonfigurowany. |
 
 ### Git Hooks (`scripts/hooks/`)
 
-These run inside git itself, regardless of which tool invoked the operation:
+Te uruchamiają się wewnątrz gita, niezależnie od tego, które narzędzie wywołało operację:
 
-- **`pre-commit`**: Runs `cargo fmt --check` on staged Rust files, guards against duplicate `[Unreleased]` in CHANGELOG, validates `(@user)` attribution on `changelog.d/` fragments, and runs `gitleaks protect --staged` (soft-warns if gitleaks is not installed). Target: under 2 seconds.
-- **`pre-push`**: Refuses direct pushes to `main`/`master`. Exits in under 100ms. Heavy verification (clippy, openapi drift) is intentionally deferred to CI. Maintainer override: `LIBREFANG_PREPUSH_SKIP=1`.
-- **`commit-msg`**: Rejects commit messages with Claude/Anthropic attribution (catches heredocs and `-F file` that the PreToolUse hook cannot see). Also rejects commits whose author identity resolves to Claude/Anthropic via `git var GIT_AUTHOR_IDENT`.
+- **`pre-commit`**: Uruchamia `cargo fmt --check` na indeksowanych plikach Rust, chroni przed duplikatem `[Unreleased]` w CHANGELOG, weryfikuje atrybucję `(@user)` we fragmentach `changelog.d/` i uruchamia `gitleaks protect --staged` (miękko ostrzega, jeśli gitleaks nie jest zainstalowany). Cel: poniżej 2 sekund.
+- **`pre-push`**: Odrzuca bezpośrednie pushy do `main`/`master`. Kończy się w poniżej 100ms. Ciężka weryfikacja (clippy, dryf openapi) jest celowo odroczona do CI. Nadpisanie maintainera: `LIBREFANG_PREPUSH_SKIP=1`.
+- **`commit-msg`**: Odrzuca wiadomości commit z atrybucją Claude/Anthropic (wyłapuje heredocs i `-F file`, których hak PreToolUse nie widzi). Odrzuca również commity, których tożsamość autora rozwiązuje się do Claude/Anthropic przez `git var GIT_AUTHOR_IDENT`.
 
-Activation requires a one-time setup per clone:
+Aktywacja wymaga jednorazowej konfiguracji na klonie:
 
 ```bash
-just setup   # or: cargo xtask setup
+just setup   # lub: cargo xtask setup
 ```
 
-This sets `git config core.hooksPath scripts/hooks`.
+To ustawia `git config core.hooksPath scripts/hooks`.
 
 ---
 
-## Build and Verification Constraints
+## Ograniczenia kompilacji i weryfikacji
 
-### Local Commands
+### Lokalne komendy
 
-The file enforces a strict separation between what an agent may run locally and what CI handles:
+Plik egzekwuje ścisłe rozdzielenie między tym, co agent może uruchomić lokalnie, a tym, co CI obsługuje:
 
-- **Forbidden**: `cargo build`, `cargo run`, and unscoped `cargo test` (contends with the user's sessions on the shared `target/` directory).
-- **Allowed**: `cargo check --workspace --lib`, `cargo clippy --workspace --all-targets -- -D warnings`, and scoped `cargo test -p <crate>`.
+- **Zabronione**: `cargo build`, `cargo run` i nieograniczony `cargo test` (konkuruje z sesjami użytkownika na współdzielonym katalogu `target/`).
+- **Dozwolone**: `cargo check --workspace --lib`, `cargo clippy --workspace --all-targets -- -D warnings` oraz ograniczony `cargo test -p <crate>`.
 
-### CI Test Lanes
+### Tor testowy CI
 
-CI splits tests into two jobs so unit failures surface quickly without waiting on slower integration suites:
+CI dzieli testy na dwa zadania, aby błędy jednostkowe pojawiały się szybko bez czekania na wolniejsze suite integracyjne:
 
 ```mermaid
 flowchart LR
@@ -81,152 +81,152 @@ flowchart LR
     INT --> INTRES[4 Ubuntu shards<br/>+ macOS + Windows]
 ```
 
-- **Unit-fast** filters with `cargo nextest run --workspace -E 'kind(lib) | kind(bin)'` rather than `--lib --bins`, because the latter errors on binary-only crates like `librefang-cli`.
-- **Integration** runs sharded across 4 Ubuntu runners via `--partition hash:N/4`, plus single macOS and Windows jobs.
+- **Unit-fast** filtruje z `cargo nextest run --workspace -E 'kind(lib) | kind(bin)'` zamiast `--lib --bins`, ponieważ ten drugi błędnie działa na binarnych crate'ach takich jak `librefang-cli`.
+- **Integration** uruchamia się partycjonowane na 4 runnerach Ubuntu przez `--partition hash:N/4`, plus pojedyncze zadania macOS i Windows.
 
-Local equivalents:
+Lokalne odpowiedniki:
 
 ```bash
-# Fast lane
+# Szybki tor
 cargo nextest run --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast
 
-# Full integration
+# Pełna integracja
 cargo nextest run --workspace --no-fail-fast
 ```
 
-### Docker-Based Verification
+### Weryfikacja oparta na Dockerze
 
-When no native toolchain is available, the sanctioned dev image (`Dockerfile.rust-dev`) provides isolation. Key rules for this path:
+Gdy brak natywnego toolchain'a, sankcjonowany obraz dev (`Dockerfile.rust-dev`) zapewnia izolację. Kluczowe zasady dla tej ścieżki:
 
-- Use a **per-worktree target volume** (`librefang-target-<worktree-name>`), not a shared one — different branches corrupt each other's incremental cache.
-- The cargo download cache (`librefang-cargo`) is safe to share.
-- Prefix link-producing commands with `mold -run` (the image ships the mold linker); `cargo check` has no link step.
-- Scope is still mandatory (`-p <crate>`), and the container is Linux-only — it cannot reproduce Windows/macOS failures.
-
----
-
-## Integration Testing Requirements
-
-Any change to a route or wiring must include a `#[tokio::test]` against `TestServer`. The pattern:
-
-1. Spawn a real axum router via `start_test_server()`.
-2. Hit the endpoint with `reqwest`.
-3. Assert status code and response shape; for write endpoints, follow up with a read to verify the side effect.
-
-Tests live in `crates/librefang-api/tests/` — the directory listing is the canonical enumeration. Reviewers gate PRs on the presence of integration tests for new or modified endpoints.
-
-Live LLM verification (real daemon, real provider keys) is human-only. The agent prepares commands and payloads; the user executes and pastes output back.
+- Używaj **wolumenu target per worktree** (`librefang-target-<worktree-name>`), a nie współdzielonego — różne gałęzie psują sobie nawzajem incremental cache.
+- Cache pobierania cargo (`librefang-cargo`) jest bezpieczny do współdzielenia.
+- Prefiksuj komendy generujące linki z `mold -run` (obraz zawiera linker mold); `cargo check` nie ma etapu linkowania.
+- Zakres jest nadal obowiązkowy (`-p <crate>`), a kontener jest tylko dla Linuksa — nie może odtworzyć błędów Windows/macOS.
 
 ---
 
-## Architectural Invariants
+## Wymagania testów integracyjnych
 
-The file documents several invariants that are easy to violate accidentally. These are not suggestions — they are load-bearing design decisions with regression tests.
+Każda zmiana trasy lub okablowania musi zawierać `#[tokio::test]` przeciwko `TestServer`. Wzorzec:
 
-### Deterministic Prompt Ordering
+1. Uruchom prawdziwy router axum przez `start_test_server()`.
+2. Uderz w endpoint za pomocą `reqwest`.
+3. Zweryfikuj kod statusu i kształt odpowiedzi; dla endpointów zapisu, wykonaj odczyt, aby zweryfikować skutek uboczny.
 
-Anything that reaches an LLM prompt — tool definitions, MCP summaries, skill/hand registries, capability lists, env passthrough lists — must be deterministically ordered before stringifying. Non-deterministic ordering (e.g., `HashMap` iteration) silently invalidates provider prompt caches across processes. Prefer `BTreeMap`/`BTreeSet` for these types.
+Testy znajdują się w `crates/librefang-api/tests/` — lista katalogów jest kanonicznym wyliczeniem. Recenzenci warunkują PR na obecności testów integracyjnych dla nowych lub modyfikowanych endpointów.
 
-### Session Mode Resolution
-
-`session_mode` in `AgentManifest` controls whether invocations reuse a persistent session (`"persistent"`, default) or create a fresh one (`"new"`). Resolution order: per-trigger/per-job override > agent manifest default. Channel messages and forks ignore this setting (they derive session IDs deterministically from the channel or fork context).
-
-For cron jobs specifically, the `cron_fire_session_override` helper resolves the effective mode: `Persistent` shares a single `(agent, "cron")` session across all fires; `New` gives each fire an isolated `SessionId::for_cron_run(agent, "<job_id>:<rfc3339>")`.
-
-### Config Location Discipline
-
-Per-agent overrides for `proactive_memory`, `skill_workshop`, and `compaction` live in `agent.toml` (or `HAND.toml`), **not** `config.toml`. `KernelConfig` has no `agents` field, so blocks like `[agents.my-agent.proactive_memory]` in `config.toml` parse but are silently ignored. The kernel emits a targeted `WARN` at boot for misplaced overrides via `detect_misplaced_per_agent_overrides`.
-
-### Route Registration
-
-There is no `routes.rs`. Route handlers live in `crates/librefang-api/src/routes/` as per-domain modules, each exporting a `router()`. `server.rs::api_v1_routes()` composes them with `.merge()`. Auth is applied globally via middleware — unauthenticated endpoints must be added to the `is_public` allowlist in `middleware.rs`, not reordered in `server.rs`.
-
-### Trigger Dispatch Concurrency
-
-Three layered caps apply to the trigger dispatcher only: a global `Lane::Trigger` semaphore, a per-agent semaphore, and a per-session mutex (only when `session_mode = "new"`). The resolver clamps `persistent + cap > 1` to 1 with a `WARN` because concurrent writes to a single session's history are undefined. Per-agent caps are **not** hot-reloaded — changing `max_concurrent_invocations` requires killing the agent and letting it respawn.
+Weryfikacja z live LLM (prawdziwy daemon, prawdziwe klucze dostawcy) jest wyłącznie dla ludzi. Agent przygotowuje komendy i ładunki; użytkownik wykonuje i wkleja wynik z powrotem.
 
 ---
 
-## Git Conventions
+## Niezmienniki architektoniczne
 
-### Commits
+Plik dokumentuje kilka niezmienników, które łatwo jest przypadkowo naruszyć. To nie są sugestie — to nośne decyzje projektowe z testami regresji.
 
-Conventional commit prefixes (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`). No AI/Claude/Anthropic attribution anywhere — enforced by both the PreToolUse Bash hook and the `commit-msg` git hook.
+### Deterministyczne porządkowanie promptów
 
-### Changelog Fragments
+Wszystko, co trafia do prompta LLM — definicje narzędzi, podsumowania MCP, rejestry skilli/hands, listy możliwości, listy przekazywania env — musi być deterministycznie uporządkowane przed serializacją do stringa. Niedeterministyczne porządkowanie (np. iteracja `HashMap`) cicho unieważnia cache promptów dostawcy między procesami. Preferuj `BTreeMap`/`BTreeSet` dla tych typów.
 
-Changelog entries are **new files under `changelog.d/`**, not edits to `CHANGELOG.md`. The single `## [Unreleased]` section creates merge conflicts with every open PR. Each fragment:
+### Rozwiązywanie trybu sesji
 
-- Lives in a section directory (`added/`, `fixed/`, `changed/`, `security/`, `documentation/`).
-- Is named after the PR/issue number: `changelog.d/fixed/6623-wire-max-content-chars.md`.
-- Contains the bullet body without the leading `- `, one sentence per line.
-- Ends with `(#PR) (@your-github-login)`.
-- Ends up in the GitHub release body verbatim.
+`session_mode` w `AgentManifest` kontroluje, czy wywołania ponownie wykorzystują trwałą sesję (`"persistent"`, domyślnie), czy tworzą nową (`"new"`). Kolejność rozwiązywania: nadpisanie per-trigger/per-job > domyślny manifest agenta. Wiadomości kanałowe i forki ignorują to ustawienie (pochodzą IDs sesji deterministycznie z kontekstu kanału lub forka).
 
-Fragments are folded into `CHANGELOG.md` by `cargo xtask collect-fragments`.
+Dla zadań cron specjalnie, helper `cron_fire_session_override` rozwiązuje tryb efektywny: `Persistent` współdzieli jedną sesję `(agent, "cron")` między wszystkimi odpaleniami; `New` daje każdemu odpaleniu odizolowany `SessionId::for_cron_run(agent, "<job_id>:<rfc3339>")`.
 
-### Worktree Continuation
+### Dyscyplina lokalizacji konfiguracji
 
-Continuing half-done work in an existing worktree means **commit → push → open or update PR**. Anything left in the worktree (including a regenerated `Cargo.lock`) counts as real work and should be committed, not checked out.
+Nadpisania per-agent dla `proactive_memory`, `skill_workshop` i `compaction` znajdują się w `agent.toml` (lub `HAND.toml`), **nie** w `config.toml`. `KernelConfig` nie ma pola `agents`, więc bloki takie jak `[agents.my-agent.proactive_memory]` w `config.toml` są parsowane, ale cicho ignorowane. Kernel emituje celowane `WARN` przy starcie dla źle umieszczonych nadpisań przez `detect_misplaced_per_agent_overrides`.
 
-When re-creating a worktree for an existing remote branch, always `git fetch` and compare against `origin/<branch>` before editing — the remote tip may have moved due to collaborator pushes, auto-update crons, or openapi-drift auto-codegen commits.
+### Rejestracja tras
 
----
+Nie ma `routes.rs`. Handlery tras znajdują się w `crates/librefang-api/src/routes/` jako moduły per-domena, każdy eksportujący `router()`. `server.rs::api_v1_routes()` komponuje je za pomocą `.merge()`. Autoryzacja jest aplikowana globalnie przez middleware — nieautoryzowane endpointy muszą być dodane do allowlisty `is_public` w `middleware.rs`, a nie reorganizowane w `server.rs`.
 
-## Prose Formatting Rule
+### Współbieżność dispatchera wyzwalaczy
 
-No column-width limit for prose anywhere in the repo. Line breaks occur only at sentence boundaries (after `.`, `?`, `!`). This applies to:
-
-- Markdown documentation (`docs/`, READMEs, `AGENTS.md`, `CLAUDE.md`)
-- CHANGELOG bullets
-- PR titles, bodies, comments
-- Source code doc-comments (`//!`, `///`, JSDoc)
-- Commit message bodies (subject lines still follow git's ~72-char display convention)
-
-Pre-existing files written under the old column-wrap convention are not retroactively rewrapped.
+Trzy warstwowe limity stosują się tylko do dispatchera wyzwalaczy: globalny semafor `Lane::Trigger`, semafor per-agent i muteks per-sesja (tylko gdy `session_mode = "new"`). Resolver ogranicza `persistent + cap > 1` do 1 z `WARN`, ponieważ współbieżne zapisy do historii pojedynczej sesji są niezdefiniowane. Limity per-agent **nie** są hot-reloadowane — zmiana `max_concurrent_invocations` wymaga zabicia agenta i pozwolenia mu na ponowne uruchomienie.
 
 ---
 
-## Collaboration Boundaries
+## Konwencje git
 
-The file codifies strict rules for AI agent interaction with the open-source project:
+### Commity
 
-- **Don't close PRs/issues opened by others** unless explicitly instructed. Post a comment recommending closure with evidence instead.
-- **Force-push only to your own branches, only before review.** Once a reviewer loads the diff, use fixup commits.
-- **Fix what you found — don't punt.** Review nits, mismatched status codes, stale comments, and type inconsistencies encountered while working on a PR are in-scope by definition. The bar to defer: would fixing it require touching a different crate or domain?
-- **CI polling budget: ~5 minutes total**, in 60-270 second chunks (within Anthropic's prompt cache TTL). After that, push and stop.
-- **At most two follow-up comments** on any thread without human input.
-- **Latest maintainer intent wins** during conflict resolution. Preserve both sides' intent; surface genuine disagreements in the PR body.
+Prefiksy conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`). Żadnej atrybucji AI/Claude/Anthropic w jakimkolwiek miejscu — egzekwowane zarówno przez hak PreToolUse Bash, jak i hook git `commit-msg`.
+
+### Fragmenty changeloga
+
+Wpisy changeloga to **nowe pliki w `changelog.d/`**, a nie edycje `CHANGELOG.md`. Pojedyncza sekcja `## [Unreleased]` tworzy konflikty scalania z każdym otwartym PR. Każdy fragment:
+
+- Znajduje się w katalogu sekcji (`added/`, `fixed/`, `changed/`, `security/`, `documentation/`).
+- Jest nazwany od numeru PR/issue: `changelog.d/fixed/6623-wire-max-content-chars.md`.
+- Zawiera treść punktu bez wiodącego `- `, jedno zdanie na linię.
+- Kończy się `(#PR) (@twój-github-login)`.
+- Trafia do treści release na GitHubie dosłownie.
+
+Fragmenty są składane do `CHANGELOG.md` przez `cargo xtask collect-fragments`.
+
+### Kontynuacja worktree
+
+Kontynuowanie niedokończonej pracy w istniejącym worktree oznacza **commit → push → otwórz lub zaktualizuj PR**. Wszystko pozostawione w worktree (w tym zregenerowany `Cargo.lock`) liczy się jako faktyczna praca i powinno zostać commitnięte, nie checkoutnięte.
+
+Podczas ponownego tworzenia worktree dla istniejącej gałęzi zdalnej, zawsze wykonaj `git fetch` i porównaj z `origin/<branch>` przed edycją — zdalne tip może się przesunąć z powodu pushy współtwórców, auto-update crons lub commitów auto-codegen dryfu openapi.
 
 ---
 
-## Common Gotchas Reference
+## Reguła formatowania prozy
 
-A condensed reference of the failure modes documented in the file:
+Brak limitu szerokości kolumn dla prozy w jakimkolwiek miejscu repozytorium. Podziały linii występują tylko na granicach zdań (po `.`, `?`, `!`). Dotyczy to:
 
-| Gotcha | Impact |
+- Dokumentacji markdown (`docs/`, README, `AGENTS.md`, `CLAUDE.md`)
+- Punktów changeloga
+- Tytułów, treści i komentarzy PR
+- Doc-commentów w kodzie źródłowym (`//!`, `///`, JSDoc)
+- Treści wiadomości commit (linie tytułowe nadal podążają za konwencją wyświetlania ~72 znaków gita)
+
+Istniejące pliki napisane pod starą konwencją zawijania kolumn nie są retroaktywnie reformatowane.
+
+---
+
+## Granice współpracy
+
+Plik koduje ścisłe zasady interakcji agentów AI z projektem open-source:
+
+- **Nie zamykaj PR/issue otwartych przez innych**, chyba że wyraźnie poproszono. Zamiast tego dodaj komentarz rekomendujący zamknięcie z dowodami.
+- **Force-push tylko na własne gałęzie i tylko przed recenzją.** Gdy recenzent załaduje diff, używaj commitów fixup.
+- **Napraw, co znalazłeś — nie odkładaj.** Drobnostki recenzji, niedopasowane kody statusów, przestarzałe komentarze i niezgodności typów napotkane podczas pracy nad PR są z definicji w zakresie. Próg odroczenia: czy naprawienie wymagałoby dotknięcia innego crate'a lub domeny?
+- **Budżet odpytywania CI: ~5 minut łącznie**, w porcjach 60-270 sekund (w ramach prompt cache TTL Anthropic). Po tym, push i stop.
+- **Co najwyżej dwa komentarze następcze** w jakimkolwiek wątku bez ludzkiego wejścia.
+- **Najnowsza intencja maintainera wygrywa** podczas rozwiązywania konfliktów. Zachowaj intencję obu stron; ujawnij prawdziwe nieporozumienia w treści PR.
+
+---
+
+## Odniesienie typowych pułapek
+
+Skondensowane odniesienie trybów awarii udokumentowanych w pliku:
+
+| Pułapka | Skutek |
 |---|---|
-| Windows: `librefang.exe` locked by running daemon | Use `cargo check --lib` or kill daemon first |
-| `PeerRegistry` type mismatch (`Option<PeerRegistry>` vs `Option<Arc<PeerRegistry>>`) | Wrap with `.as_ref().map(\|r\| Arc::new(r.clone()))` |
-| New `KernelConfig` fields missing from `Default` impl | Build fails |
-| `AgentLoopResult.response` vs `.response_text` | Field is `.response` |
-| Daemon start command is `start`, not `daemon` | Wrong command does nothing |
-| `Option<Arc<dyn Trait>>` on serde-deriving structs | Must `#[serde(skip)]` and implement traits manually |
-| `ErrorTranslator` is `!Send` | Any `.await` must happen after `drop(t)` or axum handler fails |
-| `LIBREFANG_VAULT_KEY` must be 32 bytes base64 | 32 ASCII chars ≠ 32 bytes; use `openssl rand -base64 32` |
-| `CLAUDE_CODE_HOME` is LibreFang-private | The Anthropic CLI itself does not read this env var |
-| Parallel agents adding `Option::None` defaults | Silently compiles but disables features; test at injection site |
+| Windows: `librefang.exe` zablokowany przez uruchomiony daemon | Użyj `cargo check --lib` lub najpierw zabij daemon |
+| Niedopasowanie typu `PeerRegistry` (`Option<PeerRegistry>` vs `Option<Arc<PeerRegistry>>`) | Owij z `.as_ref().map(\|r\| Arc::new(r.clone()))` |
+| Brak nowych pól `KernelConfig` w impl `Default` | Kompilacja kończy się niepowodzeniem |
+| `AgentLoopResult.response` vs `.response_text` | Pole to `.response` |
+| Komenda startu daemon to `start`, nie `daemon` | Zła komenda nic nie robi |
+| `Option<Arc<dyn Trait>>` na strukturach serde-deriving | Musi `#[serde(skip)]` i ręczna implementacja traitów |
+| `ErrorTranslator` jest `!Send` | Każde `.await` musi wystąpić po `drop(t)` lub handler axum zawiedzie |
+| `LIBREFANG_VAULT_KEY` musi być 32 bajty base64 | 32 znaki ASCII ≠ 32 bajty; użyj `openssl rand -base64 32` |
+| `CLAUDE_CODE_HOME` jest prywatne dla LibreFang | CLI Anthropic sam nie czyta tej zmiennej env |
+| Równolegli agenci dodający domyślne `Option::None` | Cicho się kompiluje, ale wyłącza funkcje; testuj w miejscu wstrzyknięcia |
 
 ---
 
-## How This File Relates to the Codebase
+## Jak ten plik odnosi się do bazy kodu
 
-`CLAUDE.md` is the entry point in a hierarchy of instruction files:
+`CLAUDE.md` jest punktem wejścia w hierarchii plików instrukcji:
 
-- **`AGENTS.md`** (referenced for "AI Agent Collaboration") contains the broader collaboration philosophy.
-- **`crates/librefang-api/dashboard/AGENTS.md`** contains dashboard-specific rules (data layer, query keys, mutation invalidation).
-- **`changelog.d/README.md`** documents the fragment format with a worked example.
-- **`docs/architecture/`** holds deeper design docs referenced from here (message-history-trimming, trigger-dispatch-concurrency, skill-workshop).
-- **`docs/operations/config-reload.md`** is the canonical hot-reload classification table derived from `build_reload_plan`.
+- **`AGENTS.md`** (wskazany dla "Współpracy agentów AI") zawiera szerszą filozofię współpracy.
+- **`crates/librefang-api/dashboard/AGENTS.md`** zawiera zasady specyficzne dla dashboardu (warstwa danych, klucze zapytań, unieważnienie mutacji).
+- **`changelog.d/README.md`** dokumentuje format fragmentu z przykładem roboczym.
+- **`docs/architecture/`** przechowuje głębsze dokumenty projektowe, na które tu się powołujemy (trimming historii wiadomości, współbieżność dispatchera wyzwalaczy, warsztat skilli).
+- **`docs/operations/config-reload.md`** to kanoniczna tabela klasyfikacji hot-reload pochodząca z `build_reload_plan`.
 
-When a rule in `CLAUDE.md` references a specific function or test (e.g., `KernelConfig::detect_misplaced_per_agent_overrides`, `kernel::tests::mcp_summary_is_byte_identical_across_input_orders`), that reference is the source of truth — the file's prose is a navigational summary, not a substitute for the code.
+Gdy zasada w `CLAUDE.md` odwołuje się do konkretnej funkcji lub testu (np. `KernelConfig::detect_misplaced_per_agent_overrides`, `kernel::tests::mcp_summary_is_byte_identical_across_input_orders`), to odwołanie jest źródłem prawdy — proza pliku jest nawigacyjnym podsumowaniem, a nie zastępstwem dla kodu.

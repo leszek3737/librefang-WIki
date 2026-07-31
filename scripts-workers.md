@@ -1,47 +1,47 @@
-# scripts — workers
+# skrypty — workers
 
-# scripts/workers
+# skrypty/workers
 
-Cloudflare Pages Functions that resolve user-friendly install URLs to the matching release artifact on GitHub. Each file maps a single route to a redirect based on the latest published release of the `librefang/librefang` repository.
+Funkcje Cloudflare Pages, które tłumaczą przyjazne dla użytkownika adresy instalacyjne na pasujący artefakt wydania w GitHubie. Każdy plik mapuje pojedynczą trasę na przekierowanie na podstawie najnowszego opublikowanego wydania repozytorium `librefang/librefang`.
 
-## Routes
+## Trasy
 
-| File | Route | Target Asset |
+| Plik | Trasa | Artefakt docelowy |
 |------|-------|-------------|
 | `install-ps1.ts` | `/install.ps1` | `*x86_64-pc-windows-msvc.zip` |
 | `install-sh.ts` | `/install.sh` | `*x86_64-unknown-linux-gnu.tar.gz` |
 
-Cloudflare Pages routes each file based on its name, so these handlers automatically serve `/install.ps1` and `/install.sh`.
+Cloudflare Pages kieruje do każdego pliku na podstawie jego nazwy, więc te handlery automatycznie obsługują `/install.ps1` i `/install.sh`.
 
-## How It Works
+## Jak to działa
 
-Both functions follow the same three-step pattern:
+Obie funkcje działają według tego samego trójetapowego schematu:
 
-1. **Fetch latest release metadata** from the GitHub REST API (`/repos/librefang/librefang/releases/latest`), passing a `User-Agent` header (required by GitHub) and the standard JSON `Accept` header.
-2. **Locate the asset** by substring-matching its filename against the expected target triple (e.g., `x86_64-pc-windows-msvc.zip`). The match is done via `Array.find` on `data.assets`.
-3. **Redirect** the client with a `302 Found` to the asset's `browser_download_url`. If no matching asset exists, the function responds with `404 No release found`.
+1. **Pobierz metadane najnowszego wydania** z REST API GitHuba (`/repos/librefang/librefang/releases/latest`), przekazując nagłówek `User-Agent` (wymagany przez GitHuba) oraz standardowy nagłówek JSON `Accept`.
+2. **Znajdź artefakt** poprzez dopasowanie podciągu w nazwie pliku do oczekiwanego tripletu docelowego (np. `x86_64-pc-windows-msvc.zip`). Dopasowanie odbywa się za pomocą `Array.find` na `data.assets`.
+3. **Przekieruj** klienta z kodem `302 Found` na `browser_download_url` artefaktu. Jeśli żaden pasujący artefakt nie istnieje, funkcja odpowiada kodem `404 No release found`.
 
 ```mermaid
 sequenceDiagram
-    participant Client
+    participant Klient
     participant Worker
     participant GitHub API
-    Client->>Worker: GET /install.sh
+    Klient->>Worker: GET /install.sh
     Worker->>GitHub API: GET /releases/latest
     GitHub API-->>Worker: release JSON (assets[])
-    Worker->>Worker: find linux tar.gz asset
-    Worker-->>Client: 302 redirect to asset URL
+    Worker->>Worker: znajdź linux tar.gz asset
+    Worker-->>Klient: 302 przekierowanie na URL artefaktu
 ```
 
-## Implementation Notes
+## Uwagi implementacyjne
 
-- **No caching layer.** Each request triggers a live GitHub API call. GitHub's unauthenticated rate limit (60 requests/hour per IP) applies. If traffic grows, consider caching the release lookup in Cloudflare's Cache API or KV.
-- **Substring matching, not exact filenames.** The matcher only checks that the asset name *contains* the target triple, so it tolerates version prefixes (e.g., `librefang-1.2.3-x86_64-unknown-linux-gnu.tar.gz`). If multiple assets ever match the substring, the first one in the array wins.
-- **`tag_name` is fetched but unused.** Both handlers extract `data.tag_name` into a local `tag` variable but never reference it. This is harmless dead code and safe to remove.
-- **No error handling on the upstream fetch.** A non-2xx response from GitHub will cause `.json()` to either throw or return unexpected data, ultimately yielding the `404 No release found` fallback rather than a distinct error.
+- **Brak warstwy pamięci podręcznej.** Każde żądanie wywołuje bezpośrednie zapytanie do API GitHuba. Ma zastosowanie limit niezautentyfikowanych zapytań GitHuba (60 zapytań/godzinę na adres IP). Jeśli ruch wzrośnie, warto rozważyć cachowanie wyszukiwania wydania w Cache API lub KV Cloudflare.
+- **Dopasowanie podciągu, a nie dokładnych nazw plików.** Matcher sprawdza tylko, czy nazwa artefaktu *zawiera* docelowy triplet, więc toleruje prefiksy wersji (np. `librefang-1.2.3-x86_64-unknown-linux-gnu.tar.gz`). Jeśli wiele artefaktów dopasuje podciąg, wygrywa pierwszy z tablicy.
+- **`tag_name` jest pobierany, ale nieużywany.** Oba handlery wyciągają `data.tag_name` do lokalnej zmiennej `tag`, ale nigdy jej nie używają. Jest to nieszkodliwy martwy kod i można go bezpiecznie usunąć.
+- **Brak obsługi błędów pobierania z backendu.** Odpowiedź z GitHuba z kodem innym niż 2xx spowoduje, że `.json()` rzuci wyjątek lub zwróci nieoczekiwane dane, co ostatecznie skutkuje odpowiedzią `404 No release found` zamiast odrębnego błędu.
 
-## Extending
+## Rozszerzanie
 
-To support a new platform (e.g., macOS), copy either file, rename it to match the desired route (e.g., `install-macos.sh`), and change the substring in the `assets.find` call to the relevant target triple (`aarch64-apple-darwin`, `x86_64-apple-darwin`, etc.). The rest of the handler is reusable as-is.
+Aby dodać obsługę nowej platformy (np. macOS), skopiuj dowolny z plików, zmień jego nazwę tak, aby pasowała do żądanej trasy (np. `install-macos.sh`) i zmień podciąg w wywołaniu `assets.find` na odpowiedni triplet docelowy (`aarch64-apple-darwin`, `x86_64-apple-darwin` itd.). Reszta handlera jest gotowa do ponownego użycia bez zmian.
 
-Because the two current files are near-identical, a future refactor could extract a shared `redirectLatestAsset(substr: string)` helper to reduce duplication if more platform variants are added.
+Ponieważ dwa obecne pliki są niemal identyczne, przyszły refaktoring mógłby wyodrębnić współdzielony helper `redirectLatestAsset(substr: string)`, aby zredukować duplikację, jeśli zostaną dodane kolejne warianty platform.

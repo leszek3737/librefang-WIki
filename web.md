@@ -1,67 +1,67 @@
 # web
 
-# web — LibreFang Marketing Site & Web Infrastructure
+# web — Witryna marketingowa i infrastruktura webowa LibreFang
 
-## Purpose
+## Przeznaczenie
 
-This module group is the public-facing web presence for LibreFang. It is **not** the core Rust codebase — it consumes the core project's GitHub APIs and release artifacts to deliver:
+Ta grupa modułów stanowi publiczną stronę internetową LibreFang. **Nie** jest to podstawowy kod w języku Rust — korzysta z API GitHuba i artefaktów wydań podstawowego projektu, aby dostarczać:
 
-- A localized single-page marketing site at `librefang.ai` (9 locales)
-- CLI installers with content-negotiated `/install` endpoint
-- A plugin registry browser and FangHub marketplace API
-- GitHub stats collection, visit counting, and an RSS/Atom feed
+- Lokalizowaną witrynę jednostronicową (SPA) pod adresem `librefang.ai` (9 wersji językowych)
+- Instalatory CLI z punktem końcowym `/install` obsługującym negocjację treści
+- Przeglądarkę rejestru wtyczek i API marketplace FangHub
+- Zbieranie statystyk GitHuba, licznik odwiedzin oraz kanały RSS/Atom
 
-## Sub-Modules at a Glance
+## Moduły podrzędne w skrócie
 
-| Sub-module | Role |
+| Moduł podrzędny | Rola |
 |---|---|
-| [src](src.md) | React SPA — homepage, registry browser, deploy/changelog/metrics pages. Routing via `pathname`, state via Zustand + TanStack Query, i18n via custom merge system. |
-| [public](public.md) | Cloudflare Pages edge worker (`_worker.js`), install scripts, static assets. Handles SPA fallback, security headers, URL canonicalization, CLI content negotiation, and the registry TOFU public key. |
-| [workers](workers.md) | Four Cloudflare Workers (marketplace, registry proxy, stats, visit counter) sharing a single D1 SQLite database. |
-| [scripts](scripts.md) | Build-time tooling: registry data fetching, OG image generation, RSS feed generation, locale completeness auditing, worker tests. |
-| [e2e](e2e.md) | Playwright test suite validating rendering, navigation, i18n, and registry data flows against the fully built app. |
+| [src](src.md) | SPA w React — strona główna, przeglądarka rejestru, strony wdrożenia/changelog/metryk. Routing przez `pathname`, stan przez Zustand + TanStack Query, i18n przez własny system scalania. |
+| [public](public.md) | Edge worker Cloudflare Pages (`_worker.js`), skrypty instalacyjne, zasoby statyczne. Obsługuje rezerwę SPA, nagłówki bezpieczeństwa, kanonizację URL, negocjację treści CLI i klucz publiczny TOFU rejestru. |
+| [workers](workers.md) | Cztery workery Cloudflare (marketplace, proxy rejestru, statystyki, licznik odwiedzin) współdzielące jedną bazę danych SQLite D1. |
+| [scripts](scripts.md) | Narzędzia kompilacji: pobieranie danych rejestru, generowanie obrazów OG, generowanie kanału RSS, audyt kompletności lokalizacji, testy workerów. |
+| [e2e](e2e.md) | Pakiet testów Playwright sprawdzający renderowanie, nawigację, i18n i przepływ danych rejestru względem pełnej skompilowanej aplikacji. |
 
-## How They Fit Together
+## Jak to wszystko ze sobą współdziała
 
 ```mermaid
 flowchart TD
-    subgraph Build["Build Pipeline"]
-        SC[scripts<br/>fetch-registry, gen-og, gen-rss] -->|"public/registry.json, feed.xml, OG images"| PB[public/]
-        SC -->|"prebuild hooks"| SR[src/<br/>React SPA bundle]
+    subgraph Build["Potok kompilacji"]
+        SC[scripts<br/>fetch-registry, gen-og, gen-rss] -->|"public/registry.json, feed.xml, obrazy OG"| PB[public/]
+        SC -->|"hooki prebuild"| SR[src/<br/>paczka SPA React]
     end
 
-    SR -->|"build output"| PB
+    SR -->|"wynik kompilacji"| PB
 
-    subgraph Edge["Cloudflare Pages Edge"]
-        PB --> WK["_worker.js<br/>routing, headers, SPA fallback"]
+    subgraph Edge["Krawędź Cloudflare Pages"]
+        PB --> WK["_worker.js<br/>routing, nagłówki, rezerwa SPA"]
     end
 
-    WK -->|"API calls"| WRK[workers/<br/>marketplace, stats, visit-counter]
-    WK -->|"release artifacts"| GH[api.github.com]
+    WK -->|"wywołania API"| WRK[workers/<br/>marketplace, stats, visit-counter]
+    WK -->|"artefakty wydań"| GH[api.github.com]
 
-    E2E[e2e<br/>Playwright] -->|"tests against"| WK
+    E2E[e2e<br/>Playwright] -->|"testy względem"| WK
 ```
 
-## Key Cross-Module Workflows
+## Kluczowe przepływy między modułami
 
-### Build → Deploy
+### Kompilacja → Wdrożenie
 
-[scripts](scripts.md) runs as `prebuild` hooks: `fetch-registry.ts` pulls TOML from the GitHub registry repo and emits `public/registry.json`; `gen-rss.ts` converts `CHANGELOG.md` into `public/feed.xml`; `gen-og-images.ts` produces SVG cards. The [src](src.md) SPA then bundles, with all output landing in [public](public.md) for Cloudflare Pages deployment.
+[scripts](scripts.md) uruchamia się jako hooki `prebuild`: `fetch-registry.ts` pobiera TOML z repozytorium GitHuba rejestru i generuje `public/registry.json`; `gen-rss.ts` konwertuje `CHANGELOG.md` na `public/feed.xml`; `gen-og-images.ts` tworzy karty SVG. Następnie SPA [src](src.md) się kompiluje, a cały wynik trafia do [public](public.md) pod wdrożenie Cloudflare Pages.
 
-### Edge Request Handling
+### Obsługa żądań na krawędzi
 
-Every request hits [public](public.md)'s `_worker.js` first. It checks for the well-known registry pubkey, canonicalizes URLs, negotiates CLI installer content type (rewriting `/install` to `.sh` or `.ps1` based on User-Agent), serves static assets with immutable caching, and falls back to `index.html` for client-side routes. Security headers are applied universally.
+Każde żądanie trafia najpierw do `_worker.js` w [public](public.md). Sprawdza on znany publiczny klucz rejestru, kanonizuje adresy URL, negocjuje typ treści instalatora CLI (przekierowując `/install` na `.sh` lub `.ps1` na podstawie User-Agent), serwuje zasoby statyczne z niezmienialnym cache'owaniem i wraca do `index.html` dla tras po stronie klienta. Nagłówki bezpieczeństwa są stosowane uniwersalnie.
 
-### Runtime Data Flow
+### Przepływ danych w czasie wykonywania
 
-The [src](src.md) SPA fetches from three sources at runtime: `api.github.com` for release data, the [workers](workers.md) for marketplace listings and visit counting, and the pre-built `registry.json` for plugin browsing. The [workers](workers.md) backend aggregates GitHub metrics on a schedule, proxies registry commits with Ed25519 signing, and serves the FangHub marketplace API — all backed by a shared D1 database.
+SPA [src](src.md) pobiera dane w czasie wykonywania z trzech źródeł: `api.github.com` dla danych wydań, [workers](workers.md) dla list marketplace i liczenia odwiedzin oraz wstępnie skompilowanego `registry.json` dla przeglądania wtyczek. Backend [workers](workers.md) agreguje metryki GitHuba według harmonogramu, proxy'uje commity rejestru z podpisami Ed25519 i obsługuje API marketplace FangHub — wszystko oparte na wspólnej bazie danych D1.
 
-### Testing
+### Testowanie
 
-[e2e](e2e.md) runs Playwright against the fully built and served site, validating that the [src](src.md) SPA hydrates correctly, registry data from [scripts](scripts.md) populates the UI, i18n works across all locales, and TOML syntax highlighting renders expected token classes.
+[e2e](e2e.md) uruchamia Playwright względem pełnej skompilowanej i serwowanej witryny, sprawdzając, że SPA [src](src.md) poprawnie się hydratuje, dane rejestru z [scripts](scripts.md) wypełniają interfejs, i18n działa we wszystkich wersjach językowych, a podświetlanie składni TOML renderuje oczekiwane klasy tokenów.
 
-## Critical Cross-Module Contracts
+## Krytyczne kontrakty między modułami
 
-- **Registry public key**: The `REGISTRY_PUBLIC_KEY` in [workers](workers.md) `wrangler.toml` files must stay in sync with the hardcoded constant in [public](public.md)'s `_worker.js`. Rotation requires updating both via `workers/keygen.mjs`.
-- **Install manifest**: [public](public.md)'s `install-manifest.json` is auto-generated by the release workflow and consumed by both install scripts and the SPA's install UI in [src](src.md).
-- **CSP allowlist**: The security headers in [public](public.md)'s `_worker.js` must include all worker origins and API hosts referenced by [src](src.md).
+- **Klucz publiczny rejestru**: `REGISTRY_PUBLIC_KEY` w plikach `wrangler.toml` w [workers](workers.md) musi być zsynchronizowany z zakodowaną na sztywno stałą w `_worker.js` w [public](public.md). Rotacja wymaga aktualizacji obu za pomocą `workers/keygen.mjs`.
+- **Manifest instalacyjny**: `install-manifest.json` w [public](public.md) jest generowany automatycznie przez przepływ wydań i konsumowany zarówno przez skrypty instalacyjne, jak i przez interfejs instalacyjny SPA w [src](src.md).
+- **Lista dozwolonych CSP**: Nagłówki bezpieczeństwa w `_worker.js` w [public](public.md) muszą zawierać wszystkie originy workerów i hosty API, do których odwołuje się [src](src.md).

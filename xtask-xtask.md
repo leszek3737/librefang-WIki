@@ -1,21 +1,21 @@
 # xtask — xtask
 
-# xtask — LibreFang Build Automation
+# xtask — Automatyzacja budowania LibreFang
 
-## Overview
+## Przegląd
 
-`xtask` is a standalone Rust binary that provides cross-platform build automation for the LibreFang workspace. It replaces a collection of scattered shell scripts (`scripts/release.sh`, `scripts/sync-versions.sh`, `scripts/generate-changelog.sh`, and several manual workflows) with a single, typed CLI built on `clap`.
+`xtask` to samodzielny binarny program w Rust, który zapewnia wieloplatformową automatyzację budowania dla obszaru roboczego LibreFang. Zastępuje kolekcję rozproszonych skryptów powłoki (`scripts/release.sh`, `scripts/sync-versions.sh`, `scripts/generate-changelog.sh` i kilka ręcznych przepływów pracy) jednym, typowanym interfejsem CLI zbudowanym na `clap`.
 
-The binary lives at `xtask/` and is invoked via `cargo xtask <command>`. It is not published to any registry — it exists solely as a developer and CI tool within this workspace.
+Plik binarny znajduje się w `xtask/` i jest wywoływany za pomocą `cargo xtask <polecenie>`. Nie jest publikowany w żadnym rejestrze — istnieje wyłącznie jako narzędzie dla deweloperów i CI w tym obszarze roboczym.
 
-## Design Principles
+## Zasady projektowe
 
-- **Single entry point**: every automation task is a subcommand of `cargo xtask`, so contributors only need to remember one command namespace.
-- **Fail-fast**: CI-style commands (`ci`, `release`, `pre-commit`) abort on the first failing step rather than masking partial failures.
-- **Dependency-aware**: commands that need external tools (`gh`, `pnpm`, `lychee`, `cargo-llvm-cov`) either auto-install them or degrade gracefully with a clear message.
-- **Non-interactive by default in CI**: key commands accept flags (`--no-confirm`, `--no-push`, `--dry-run`) that make them safe for automated pipelines.
+- **Pojedynczy punkt wejścia**: każde zadanie automatyzacji jest podpoleceniem `cargo xtask`, więc współtwórcy muszą pamiętać tylko jedną przestrzeń nazw poleceń.
+- **Fail-fast**: polecenia w stylu CI (`ci`, `release`, `pre-commit`) przerywają działanie przy pierwszym nieudanym kroku, zamiast maskować częściowe błędy.
+- **Świadome zależności**: polecenia wymagające zewnętrznych narzędzi (`gh`, `pnpm`, `lychee`, `cargo-llvm-cov`) albo instalują je automatycznie, albo degradują się z wyraźnym komunikatem.
+- **Niejinteraktywne domyślnie w CI**: kluczowe polecenia akceptują flagi (`--no-confirm`, `--no-push`, `--dry-run`), co czyni je bezpiecznymi dla zautomatyzowanych potoków.
 
-## Architecture
+## Architektura
 
 ```mermaid
 graph TD
@@ -33,7 +33,7 @@ graph TD
     Release --> Build
     Changelog --> CollectFragments[collect-fragments]
 
-    subgraph "External Tools"
+    subgraph "Zewnętrzne narzędzia"
         Cargo[cargo / cargo-*]
         Pnpm[pnpm / npm]
         GH[gh CLI]
@@ -46,45 +46,45 @@ graph TD
     Build -.-> Pnpm
 ```
 
-## Dependencies
+## Zależności
 
-| Crate | Purpose |
-|-------|---------|
-| `clap` | CLI argument parsing with derive macros and env var support |
-| `serde_json` | JSON parsing for `package.json`, `tauri.conf.json` |
-| `toml_edit` | Loss-preserving TOML editing for `Cargo.toml`, config files |
-| `regex` | Pattern matching for version strings, PR classification |
-| `chrono` | Date/version stamping for CalVer releases |
-| `base64` / `sha2` | Checksum and encoding utilities |
-| `sysinfo` | RAM/CPU probing for auto-throttle heuristics (`LIBREFANG_LOCAL_CHECK_MODE`, issue #3301) |
-| `librefang-import` | Local workspace crate, used by the `migrate` command |
+| Crate | Przeznaczenie |
+|-------|--------------|
+| `clap` | Analiza argumentów CLI z makrami derive i obsługą zmiennych środowiskowych |
+| `serde_json` | Analiza JSON dla `package.json`, `tauri.conf.json` |
+| `toml_edit` | Edycja TOML zachowująca format dla `Cargo.toml`, plików konfiguracyjnych |
+| `regex` | Dopasowywanie wzorców dla ciągów wersji, klasyfikacji PR-ów |
+| `chrono` | Datowanie/nadawanie znaczników wersji dla wydań CalVer |
+| `base64` / `sha2` | Narzędzia sum kontrolnych i kodowania |
+| `sysinfo` | Badanie RAM/CPU dla heurystyk autothrottle (`LIBREFANG_LOCAL_CHECK_MODE`, issue #3301) |
+| `librefang-import` | Lokalny crate obszaru roboczego, używany przez polecenie `migrate` |
 
-**Note on `sysinfo`**: pinned at `0.39` with default features disabled. Only the `system` probe is needed (not disks/networks/processes). The `0.39.x` line is the newest compatible with the workspace MSRV of `rustc 1.94.1`; `sysinfo 0.40+` requires `rustc 1.95`.
+**Uwaga o `sysinfo`**: przypięty do wersji `0.39` z domyślnymi funkcjami wyłączonymi. Potrzebna jest tylko sonda `system` (nie dyski/sieci/procesy). Linia `0.39.x` jest najnowszą kompatybilną z MSRV obszaru roboczego (`rustc 1.94.1`); `sysinfo 0.40+` wymaga `rustc 1.95`.
 
-## Command Reference
+## Odniesienie do poleceń
 
-### Release Workflow
+### Przepływ wydania
 
-The `release` command is the most complex orchestration. It chains multiple subcommands together:
+Polecenie `release` to najbardziej złożona orkiestracja. Łańcuchuje wiele podpoleceń:
 
-1. **`collect-fragments`** — folds `changelog.d/` entries into `## [Unreleased]`
-2. **`changelog`** — generates a new dated section from merged PRs
-3. **`sync-versions`** — bumps CalVer across all package manifests
-4. **`build-web`** — builds all frontend targets
-5. **Commit + tag** — creates a version commit and git tag
-6. **Push + PR** — pushes the branch and creates a PR via `gh`
+1. **`collect-fragments`** — składa wpisy z `changelog.d/` w `## [Unreleased]`
+2. **`changelog`** — generuje nową sekcję z datą ze scalonych PR-ów
+3. **`sync-versions`** — aktualizuje CalVer we wszystkich manifeście pakietów
+4. **`build-web`** — buduje wszystkie cele frontendowe
+5. **Commit + tag** — tworzy commit wersji i tag git
+6. **Push + PR** — wypycha gałąź i tworzy PR przez `gh`
 
-Preconditions: must be on `main`, clean worktree, `gh` CLI available.
+Warunki wstępne: musisz być na `main`, czyste drzewo robocze, dostępne CLI `gh`.
 
 ```bash
 cargo xtask release --version 2026.3.2214 --no-confirm   # CI
-cargo xtask release                                      # interactive
-cargo xtask release --no-push                            # local dry run
+cargo xtask release                                      # interaktywny
+cargo xtask release --no-push                            # lokalny dry run
 ```
 
-### Local CI (`ci`)
+### Lokalne CI (`ci`)
 
-Replicates the CI pipeline locally with ordered, fail-fast steps:
+Replikuje potok CI lokalnie z uporządkowanymi krokami fail-fast:
 
 ```mermaid
 graph LR
@@ -93,116 +93,116 @@ graph LR
     C --> D[pnpm run lint in web/]
 ```
 
-Flags `--no-test`, `--no-web`, and `--release` allow scoping the run.
+Flagi `--no-test`, `--no-web` i `--release` pozwalają zawęzić zakres uruchomienia.
 
-### Changelog Fragment System
+### System fragmentów changeloga
 
-Contributors write individual markdown files under `changelog.d/<section>/` rather than editing the shared `## [Unreleased]` block. This eliminates merge conflicts on `CHANGELOG.md`.
+Współtwórcy piszą indywidualne pliki markdown w katalogu `changelog.d/<sekcja>/` zamiast edytować wspólny blok `## [Unreleased]`. To eliminuje konflikty scalania w `CHANGELOG.md`.
 
-**Sections** (ordered as they appear): Added, Fixed, Changed, Security, Documentation.
+**Sekcje** (uporządkowane tak, jak się pojawiają): Dodano, Naprawiono, Zmieniono, Bezpieczeństwo, Dokumentacja.
 
-**Assembly rules** (`collect-fragments`):
-- Bullets within a section are ordered by filename — deterministic regardless of filesystem read order.
-- Existing `### ` subsections are appended to, never replaced.
-- Fragments in unrecognized directories are left in place with a warning; the gate `scripts/check-changelog-attribution.py` enforces this per-PR.
-- If a fragment file cannot be deleted after folding, remaining deletions still proceed, then the command fails naming survivors. `CHANGELOG.md` is already written at that point, so re-running requires manual cleanup to avoid duplicate entries.
+**Zasady składania** (`collect-fragments`):
+- Punktory w ramach sekcji są uporządkowane wg nazwy pliku — deterministycznie niezależnie od kolejności odczytu systemu plików.
+- Istniejące podsekcje `### ` są dołączane, nigdy nie zastępowane.
+- Fragmenty w nierozpoznanych katalogach pozostają na swoim miejscu z ostrzeżeniem; bramka `scripts/check-changelog-attribution.py` wymusza to per-PR.
+- Jeśli nie można usunąć pliku fragmentu po złożeniu, pozostałe usunięcia nadal trwają, a następnie polecenie kończy się niepowodzeniem, wymieniając ocalałe. `CHANGELOG.md` jest w tym momencie już zapisany, więc ponowne uruchomienie wymaga ręcznego czyszczenia w celu uniknięcia duplikatów.
 
-No-op (exit 0) when `changelog.d/` is absent or empty.
+No-op (exit 0), gdy `changelog.d/` nie istnieje lub jest pusty.
 
-### Version Sync (`sync-versions`)
+### Synchronizacja wersji (`sync-versions`)
 
-Updates CalVer across heterogeneous package ecosystems:
+Aktualizuje CalVer w różnych ekosystemach pakietów:
 
-| Target | Format Notes |
-|--------|-------------|
-| `Cargo.toml` (workspace) | Direct edit via `toml_edit` |
+| Cel | Uwagi o formacie |
+|-----|-----------------|
+| `Cargo.toml` (workspace) | Bezpośrednia edycja przez `toml_edit` |
 | `sdk/javascript/package.json` | `serde_json` |
-| `sdk/python/setup.py` | PEP 440 conversion: `-beta1` → `b1` |
-| `sdk/rust/Cargo.toml` + `README.md` | Version string in two files |
+| `sdk/python/setup.py` | Konwersja PEP 440: `-beta1` → `b1` |
+| `sdk/rust/Cargo.toml` + `README.md` | Ciąg wersji w dwóch plikach |
 | `packages/whatsapp-gateway/package.json` | `serde_json` |
-| `crates/librefang-desktop/tauri.conf.json` | MSI-compatible encoding |
+| `crates/librefang-desktop/tauri.conf.json` | Kodowanie kompatybilne z MSI |
 
-### Frontend Builds (`build-web`)
+### Budowanie frontendu (`build-web`)
 
-Builds one or all of three frontend targets via `pnpm`:
+Buduje jeden lub wszystkie z trzech celów frontendowych przez `pnpm`:
 
 - **Dashboard**: `crates/librefang-api/dashboard/` (React)
 - **Web**: `web/` (Vite + React)
 - **Docs**: `docs/` (Next.js)
 
-Skips targets without a `package.json`.
+Pomija cele bez `package.json`.
 
-### Integration Testing (`integration-test`)
+### Testy integracyjne (`integration-test`)
 
-Boots the daemon, probes API endpoints, optionally exercises the LLM path, then cleans up the process.
+Uruchamia demona, odpytuje endpointy API, opcjonalnie testuje ścieżkę LLM, a następnie czyści proces.
 
-Test sequence:
+Sekwencja testów:
 1. `GET /api/health`
 2. `GET /api/agents`
 3. `GET /api/budget`
 4. `GET /api/network/status`
-5. `POST /api/agents/{id}/message` (skipped with `--skip-llm`)
-6. Budget delta verification after LLM call
+5. `POST /api/agents/{id}/message` (pomijane z `--skip-llm`)
+6. Weryfikacja delty budżetu po wywołaniu LLM
 
-Default binary: `target/release/librefang`.
+Domyślny binarny: `target/release/librefang`.
 
-### Distribution (`dist`, `docker`, `publish-sdks`)
+### Dystrybucja (`dist`, `docker`, `publish-sdks`)
 
-- **`dist`**: Cross-compiles release binaries for linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64). Produces `.tar.gz` (unix) and `.zip` (Windows) archives. Supports `--cross` for `cross` toolchain.
-- **`docker`**: Builds `ghcr.io/librefang/librefang` from `./Dockerfile`. Optional `--push` to GHCR, `--latest` tagging, platform-specific builds.
-- **`publish-sdks`**: Publishes to npm, PyPI, and crates.io. `--dry-run` validates credentials and manifests without uploading.
+- **`dist`**: Cross-kompiluje binaria wydania dla linux (x86_64, aarch64), macOS (x86_64, aarch64) i Windows (x86_64). Tworzy archiwa `.tar.gz` (unix) i `.zip` (Windows). Obsługuje `--cross` dla toolchainu `cross`.
+- **`docker`**: Buduje `ghcr.io/librefang/librefang` z `./Dockerfile`. Opcjonalnie `--push` do GHCR, tagowanie `--latest`, budowanie per platforma.
+- **`publish-sdks`**: Publikuje do npm, PyPI i crates.io. `--dry-run` weryfikuje poświadczenia i manifesty bez przesyłania.
 
-### Migration (`migrate`)
+### Migracja (`migrate`)
 
-Imports agents from external frameworks using the workspace crate `librefang-import`.
+Importuje agentów z zewnętrznych frameworków przy użyciu crate'u obszaru roboczego `librefang-import`.
 
-Supported sources: `openclaw`, `openfang`.
+Obsługiwane źródła: `openclaw`, `openfang`.
 
 ```bash
 cargo xtask migrate --source openclaw --source-dir ./data --dry-run
 ```
 
-### Developer Environment
+### Środowisko deweloperskie
 
-| Command | Purpose |
-|---------|---------|
-| `setup` | First-time contributor setup: checks tools, installs hooks, fetches deps, runs `pnpm install` |
-| `dev` | Starts daemon + dashboard dev server together; Ctrl+C stops both |
-| `doctor` | Deep diagnostics: toolchain, ports, daemon health, config, API keys |
-| `db` | Database inspection, backup, or reset (daemon must be stopped for reset) |
-| `validate-config` | Parses and validates `~/.librefang/config.toml` |
+| Polecenie | Przeznaczenie |
+|-----------|--------------|
+| `setup` | Pierwsze uruchomienie dla nowych współtwórców: sprawdza narzędzia, instaluje hooki, pobiera zależności, uruchamia `pnpm install` |
+| `dev` | Uruchamia demona + serwer deweloperski dashboardu razem; Ctrl+C zatrzymuje oba |
+| `doctor` | Głęboka diagnostyka: toolchain, porty, stan demona, konfiguracja, klucze API |
+| `db` | Inspekcja, kopia zapasowa lub reset bazy danych (demon musi być zatrzymany do resetu) |
+| `validate-config` | Analizuje i weryfikuje `~/.librefang/config.toml` |
 
-### Code Quality
+### Jakość kodu
 
-| Command | What it does |
-|---------|-------------|
-| `fmt` | Unified format check (`cargo fmt` + `prettier`); `--fix` auto-fixes |
-| `pre-commit` | Runs fmt + clippy + test as a pre-commit gate |
-| `coverage` | Generates reports via `cargo-llvm-cov`; auto-installs the tool |
-| `deps` | Security audit + outdated check; auto-installs `cargo-audit` and `cargo-outdated` |
-| `license-check` | License compliance via `cargo-deny` or `cargo metadata` fallback |
-| `check-links` | Link validation via `lychee` or built-in relative-link checker |
-| `bench` | Criterion benchmark runner with baseline comparison |
-| `loc` | Code statistics and per-crate breakdown |
-| `update-deps` | Batch dependency updates (Rust + web) |
-| `codegen` | Regenerates `openapi.json` from utoipa annotations |
-| `api-docs` | Generates standalone Swagger UI HTML from the OpenAPI spec |
-| `clean-all` | Deep clean of `target/`, `node_modules/`, `.next/`, `dist/` |
+| Polecenie | Co robi |
+|-----------|---------|
+| `fmt` | Zunifikowany check formatowania (`cargo fmt` + `prettier`); `--fix` automatycznie naprawia |
+| `pre-commit` | Uruchamia fmt + clippy + test jako bramkę pre-commit |
+| `coverage` | Generuje raporty przez `cargo-llvm-cov`; automatycznie instaluje narzędzie |
+| `deps` | Audyt bezpieczeństwa + sprawdzenie nieaktualnych; automatycznie instaluje `cargo-audit` i `cargo-outdated` |
+| `license-check` | Zgodność licencyjna przez `cargo-deny` lub rezerwę `cargo metadata` |
+| `check-links` | Weryfikacja linków przez `lychee` lub wbudowany sprawdzacz linków względnych |
+| `bench` | Runner benchmarków Criterion z porównaniem do linii bazowej |
+| `loc` | Statystyki kodu i rozkład per crate |
+| `update-deps` | Partchowa aktualizacja zależności (Rust + web) |
+| `codegen` | Regeneruje `openapi.json` z adnotacji utoipa |
+| `api-docs` | Generuje samodzielny HTML Swagger UI ze specyfikacji OpenAPI |
+| `clean-all` | Głębokie czyszczenie `target/`, `node_modules/`, `.next/`, `dist/` |
 
-## Relationship to the Rest of the Workspace
+## Relacja z resztą obszaru roboczego
 
-`xtask` is a leaf node in the dependency graph — it depends on workspace crates but nothing depends on it. Its connection points are:
+`xtask` to liść w grafie zależności — zależy od crate'ów obszaru roboczego, ale nic od niego nie zależy. Jego punkty połączenia to:
 
-- **`librefang-import`** (path dependency): powers the `migrate` command.
-- **Workspace `Cargo.toml`**: reads and writes the workspace version via `toml_edit`.
-- **`web/`, `docs/`, `crates/librefang-api/dashboard/`**: invoked via `pnpm` subprocess calls.
-- **`scripts/check-changelog-attribution.py`**: complementary gate that runs per-PR; `xtask` does not duplicate this check but respects its constraints during fragment assembly.
-- **CI pipelines**: call `cargo xtask ci`, `cargo xtask dist`, `cargo xtask docker`, etc. as the canonical build steps.
+- **`librefang-import`** (zależność ścieżkowa): napędza polecenie `migrate`.
+- **Workspace `Cargo.toml`**: odczytuje i zapisuje wersję obszaru roboczego przez `toml_edit`.
+- **`web/`, `docs/`, `crates/librefang-api/dashboard/`**: wywoływane przez podprocesy `pnpm`.
+- **`scripts/check-changelog-attribution.py`**: uzupełniająca bramka uruchamiana per-PR; `xtask` nie duplikuje tego sprawdzenia, ale szanuje jego ograniczenia podczas składania fragmentów.
+- **Potoki CI**: wywołują `cargo xtask ci`, `cargo xtask dist`, `cargo xtask docker` itd. jako kanoniczne kroki budowania.
 
-## Auto-Throttle Integration
+## Integracja autothrottle
 
-The `sysinfo` dependency powers an auto-throttle for `LIBREFANG_LOCAL_CHECK_MODE` (issue #3301). When running CI-like checks locally, the tool probes available RAM and CPU to decide whether to parallelize or serialize steps. This is xtask-local behavior — no production crate uses `sysinfo`.
+Zależność `sysinfo` napędza autothrottle dla `LIBREFANG_LOCAL_CHECK_MODE` (issue #3301). Podczas lokalnego uruchamiania sprawdzan w stylu CI narzędzie bada dostępny RAM i CPU, aby zdecydować, czy równoleglić, czy szeregowac kroki. To zachowanie lokalne xtask — żaden produkcyjny crate nie używa `sysinfo`.
 
-## MSRV Considerations
+## Uwagi o MSRV
 
-`sysinfo` is the binding constraint on the workspace's minimum supported Rust version. The workspace pins `rust-version = "1.94.1"` in the root `Cargo.toml`. Any future bump of `sysinfo` beyond `0.39.x` must be coordinated with an MSRV bump, since `sysinfo 0.40+` requires `rustc 1.95`.
+`sysinfo` jest wiążącym ograniczeniem dla minimalnej obsługiwanej wersji Rust obszaru roboczego. Obszar roboczy przypina `rust-version = "1.94.1"` w głównym `Cargo.toml`. Każda przyszła aktualizacja `sysinfo` powyżej `0.39.x` musi być skoordynowana z podwyższeniem MSRV, ponieważ `sysinfo 0.40+` wymaga `rustc 1.95`.

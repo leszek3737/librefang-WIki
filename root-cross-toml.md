@@ -2,52 +2,52 @@
 
 # Cross.toml
 
-## Overview
+## Przegląd
 
-`Cross.toml` is the configuration file for [`cross`](https://github.com/cross-rs/cross), a zero-setup cross-compilation tool for Rust. This file defines build environment customization for two ARM64 targets: native Linux (GNU) and Android. It ensures that the correct system libraries and Docker images are used when producing binaries for these architectures.
+`Cross.toml` to plik konfiguracyjny narzędzia [`cross`](https://github.com/cross-rs/cross) — narzędzia do cross-kompilacji w języku Rust bez konieczności dodatkowej konfiguracji. Plik ten definiuje dostosowania środowiska kompilacji dla dwóch celów ARM64: natywnego systemu Linux (GNU) oraz Androida. Zapewnia, że przy tworzeniu binariów dla tych architektur używane są poprawne biblioteki systemowe i obrazy Docker.
 
-This file is consumed at build time by `cross` (invoked via `cross build --target <triple>`) and does not contain executable Rust code. It lives at the repository root alongside `Cargo.toml`.
+Ten plik jest odczytywany w czasie kompilacji przez narzędzie `cross` (wywoływane za pomocą `cross build --target <triple>`) i nie zawiera wykonywalnego kodu Rust. Znajduje się w katalogu głównym repozytorium obok pliku `Cargo.toml`.
 
 ---
 
-## Target Configuration
+## Konfiguracja celów
 
 ### `aarch64-unknown-linux-gnu`
 
-This target produces standard Linux GNU binaries for ARM64 (e.g., for Raspberry Pi 4/5, ARM servers, or ARM CI runners).
+Ten cel tworzy standardowe binaria Linux GNU dla architektury ARM64 (np. dla Raspberry Pi 4/5, serwerów ARM lub runnerów CI opartych na ARM).
 
-The `pre-build` hook runs shell commands inside the cross Docker container **before** the Rust compilation step begins:
+Hook `pre-build` wykonuje polecenia powłoki wewnątrz kontenera Docker narzędzia cross **przed** rozpoczęciem etapu kompilacji Rust:
 
-| Step | Command | Purpose |
-|------|---------|---------|
-| 1 | `dpkg --add-architecture $CROSS_DEB_ARCH` | Enables package installation for the target architecture (e.g., `arm64`) |
-| 2 | `apt-get update` | Refreshes the package index |
-| 3 | `apt-get install --assume-yes libssl-dev:$CROSS_DEB_ARCH` | Installs OpenSSL development headers/libs for the target arch |
-| 4 | `apt-get install --assume-yes libdbus-1-dev:$CROSS_DEB_ARCH` | Installs D-Bus development headers/libs for the target arch |
+| Krok | Polecenie | Cel |
+|------|-----------|-----|
+| 1 | `dpkg --add-architecture $CROSS_DEB_ARCH` | Włącza instalację pakietów dla architektury docelowej (np. `arm64`) |
+| 2 | `apt-get update` | Odświeża indeks pakietów |
+| 3 | `apt-get install --assume-yes libssl-dev:$CROSS_DEB_ARCH` | Instaluje nagłówki/biblioteki deweloperskie OpenSSL dla architektury docelowej |
+| 4 | `apt-get install --assume-yes libdbus-1-dev:$CROSS_DEB_ARCH` | Instaluje nagłówki/biblioteki deweloperskie D-Bus dla architektury docelowej |
 
-The `$CROSS_DEB_ARCH` environment variable is provided by `cross` and resolves to the correct Debian architecture string for the target triple (e.g., `arm64`). This multiarch approach allows both host and target architecture libraries to coexist in the same container.
+Zmienna środowiskowa `$CROSS_DEB_ARCH` jest udostępniana przez narzędzie `cross` i przyjmuje wartość poprawnego ciągu architektury Debiana dla danej trójki docelowej (np. `arm64`). Podejście multiarch pozwala bibliotekom architektur hosta i docelowej współistnieć w tym samym kontenerze.
 
-**Why these libraries are needed:**
-- **libssl-dev** — Required by Rust crates that link against OpenSSL (e.g., `openssl-sys`, `native-tls`, `reqwest` with default features).
-- **libdbus-1-dev** — Required by crates that interface with the system D-Bus daemon (e.g., `dbus`, `zbus`).
+**Dlaczego te biblioteki są potrzebne:**
+- **libssl-dev** — Wymagana przez skrzynki Rust łączące się z OpenSSL (np. `openssl-sys`, `native-tls`, `reqwest` z domyślnymi funkcjonalnościami).
+- **libdbus-1-dev** — Wymagana przez skrzynki współpracujące z demonem systemowym D-Bus (np. `dbus`, `zbus`).
 
 ### `aarch64-linux-android`
 
-This target produces Android NDK-compatible binaries for ARM64 devices and emulators.
+Ten cel tworzy binaria kompatybilne z Android NDK dla urządzeń i emulatorów ARM64.
 
-Rather than running pre-build hooks, it overrides the default Docker image:
+Zamiast wykonywania hooków pre-build, nadpisuje domyślny obraz Docker:
 
 ```
 ghcr.io/cross-rs/aarch64-linux-android:main
 ```
 
-This pins the image to the `main` tag of the official `cross-rs` Android image, which includes the Android NDK and toolchain pre-configured. Using `:main` ensures the latest maintained image is pulled, but may introduce non-reproducible builds if the image changes upstream. If reproducibility is critical, consider pinning to a specific digest or tag.
+To przypina obraz do tagu `main` oficjalnego obrazu Androida `cross-rs`, który zawiera wstępnie skonfigurowane Android NDK i łańcuch narzędzi. Użycie `:main` zapewnia pobranie najnowszego utrzymywanego obrazu, ale może wprowadzić niepowtarzalne kompilacje, jeśli obraz zmieni się w repozytorium źródłowym. Jeśli powtarzalność jest krytyczna, rozważ przypięcie do konkretnego skrótu (digest) lub tagu.
 
 ---
 
-## Usage
+## Użycie
 
-To build for the configured targets:
+Aby kompilować dla skonfigurowanych celów:
 
 ```bash
 # ARM64 Linux (GNU)
@@ -57,12 +57,12 @@ cross build --target aarch64-unknown-linux-gnu
 cross build --target aarch64-linux-android
 ```
 
-No additional flags are required — `cross` reads this file automatically when it is present at the workspace root.
+Nie są wymagane żadne dodatkowe flagi — narzędzie `cross` odczytuje ten plik automatycznie, gdy znajduje się on w katalogu głównym przestrzeni roboczej.
 
 ---
 
-## Relationship to the Codebase
+## Powiązanie z bazą kodu
 
-This configuration supports cross-compilation scenarios where the project depends on native C libraries (OpenSSL, D-Bus). Without these pre-build hooks, the linker would fail with unresolved symbol errors when targeting `aarch64-unknown-linux-gnu`. The Android target override exists because the default `cross` image may lag behind or differ from what the project expects for NDK compatibility.
+Ta konfiguracja obsługuje scenariusze cross-kompilacji, w których projekt zależy od natywnych bibliotek C (OpenSSL, D-Bus). Bez tych hooków pre-build linker zgłosiłby błąd nierozwiązanych symboli podczas celowania w `aarch64-unknown-linux-gnu`. Nadpisanie obrazu dla celu Android istnieje, ponieważ domyślny obraz `cross` może nie nadążać za wymaganiami projektu w zakresie kompatybilności z NDK lub się od nich różnić.
 
-The file has no runtime effect and no direct connections to other source modules — it is purely a build-infra concern.
+Plik nie ma wpływu na działanie w czasie rzeczywistym ani bezpośrednich połączeń z innymi modułami źródłowymi — jest to wyłącznie kwestia infrastruktury kompilacji.

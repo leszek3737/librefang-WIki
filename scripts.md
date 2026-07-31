@@ -1,43 +1,43 @@
-# scripts
+# skrypty
 
 # scripts/
 
-Repository automation: Git hooks, CI lint gates, release tooling, SDK code generation, and install-serving infrastructure. Every script is designed to run identically on a contributor's laptop and in CI.
+Automatyzacja repozytorium: hooki Gita, bramki lintowania CI, narzędzia wydawnicze, generowanie kodu SDK oraz infrastruktura serwowania instalatora. Każdy skrypt jest zaprojektowany tak, aby działać identycznie na laptopie współtwórcy i w CI.
 
-## Sub-modules at a glance
+## Moduły podrzędne w pigułce
 
-| Sub-module | Scope |
+| Moduł podrzędny | Zakres |
 |---|---|
-| [scripts](scripts.md) | Top-level Python and shell scripts — changelog attribution checks, architectural invariant enforcement, SDK codegen, release article scaffolding |
-| [docker](docker.md) | Dockerfile that smoke-tests the user-facing installer in a clean container |
-| [hooks](hooks.md) | Git hooks (`pre-commit`, `pre-push`, `commit-msg`) wired via `core.hooksPath` |
-| [tests](tests.md) | Bash/POSIX regression tests for hooks, installer logic, and daemon progress markers |
-| [workers](workers.md) | Cloudflare Pages Functions that redirect `/install.sh` and `/install.ps1` to the latest GitHub release asset |
+| [scripts](scripts.md) | Skrypty Pythona i powłoki najwyższego poziomu — sprawdzenia atrybucji w changelogu, wymuszanie niezmienników architektonicznych, generowanie kodu SDK, rusztowanie artykułów wydawniczych |
+| [docker](docker.md) | Dockerfile sprawdzający instalator (smoke-test) w czystym kontenerze |
+| [hooks](hooks.md) | Hooki Gita (`pre-commit`, `pre-push`, `commit-msg`) podłączone przez `core.hooksPath` |
+| [tests](tests.md) | Testy regresyjne Bash/POSIX dla hooków, logiki instalatora i znaczników postępu demona |
+| [workers](workers.md) | Funkcje Cloudflare Pages przekierowujące `/install.sh` i `/install.ps1` do najnowszego zasobu wydania na GitHubie |
 
-## How they fit together
+## Jak ze sobą współpracują
 
-### Commit lifecycle
+### Cykl życia commita
 
-The [hooks](hooks.md) module gates every commit and push locally. `pre-commit` stays fast (sub-2 s) by running only staged-diff-scoped checks; heavier validation deferred to `pre-push` or CI. The `commit-msg` hook enforces AI-attribution rules, and `check-changelog-attribution.py` (in the [root scripts](scripts.md)) validates `(@user)` attribution on CHANGELOG bullets and `changelog.d/` fragments — it runs both inside the hook path (on staged fragments) and in CI (on the full file).
+Moduł [hooks](hooks.md) pilnuje każdego commita i pusha lokalnie. `pre-commit` pozostaje szybki (poniżej 2 s), uruchamiając tylko sprawdzenia w zakresie zdiffowanego indeksu; cięższe weryfikacje są odkładane do `pre-push` lub CI. Hook `commit-msg` wymusza zasady atrybucji AI, a `check-changelog-attribution.py` (w [głównych skryptach](scripts.md)) weryfikuje atrybucję `(@user)` na wpisach changeloga i fragmentach `changelog.d/` — uruchamia się zarówno w ścieżce hooków (na zindeksowanych fragmentach), jak i w CI (na pełnym pliku).
 
-The [tests](tests.md) module closes the loop: `commit-msg-attribution.sh` exercises the `commit-msg` hook, and `pre-commit-sha-fallback.sh` validates the `pre-commit` hook's SHA-baseline sync logic. These tests exist because Git-invoked shell scripts are invisible to Cargo's test runner.
+Moduł [tests](tests.md) zamyka pętlę: `commit-msg-attribution.sh` testuje hook `commit-msg`, a `pre-commit-sha-fallback.sh` weryfikuje logikę synchronizacji linii bazowej SHA hooka `pre-commit`. Te testy istnieją, ponieważ skrypty powłoki wywoływane przez Gita są niewidoczne dla test runnera Cargo.
 
-### Installer and release pipeline
+### Instalator i potok wydawniczy
 
-Three sub-modules cooperate to keep the installer trustworthy end-to-end:
+Trzy moduły podrzędne współpracują, aby instalator był godny zaufania od końca do końca:
 
-1. **[workers](workers.md)** serves friendly URLs (`/install.sh`, `/install.ps1`) by fetching the latest release metadata from GitHub and redirecting to the matching platform asset.
-2. **[docker](docker.md)** smoke-tests `web/public/install.sh` itself — syntax validation and platform detection by default, optional full binary install — acting as the CI gate on installer changes.
-3. **[tests](tests.md)** provides `install_sh_test.sh`, a POSIX sh suite that exercises installer logic without Docker.
+1. **[workers](workers.md)** serwuje przyjazne URL-e (`/install.sh`, `/install.ps1`), pobierając najnowsze metadane wydania z GitHuba i przekierowując do pasującego zasobu dla danej platformy.
+2. **[docker](docker.md)** przeprowadza smoke-test `web/public/install.sh` — weryfikacja składni i wykrywanie platformy domyślnie, opcjonalnie pełna instalacja binariów — pełniąc rolę bramki CI dla zmian w instalatorze.
+3. **[tests](tests.md)** dostarcza `install_sh_test.sh` — zestaw POSIX sh testujący logikę instalatora bez Dockera.
 
-On the release side, `changelog-to-article.sh` (root) scaffolds a release article from a CHANGELOG section, complementing the attribution checks that already validated the changelog content.
+Po stronie wydawniczej `changelog-to-article.sh` (główny) tworzy rusztowanie artykułu wydawniczego z sekcji changeloga, uzupełniając sprawdzenia atrybucji, które już zweryfikowały treść changeloga.
 
-### Code generation
+### Generowanie kodu
 
-`codegen-sdks.py` (root) generates JavaScript, Python, and Rust SDK bindings from the API kernel. It is driven by `_tag_pascal` / `_tag_attr` helpers for consistent naming across all three targets. Changes to generated output are checked for drift in `pre-push` and CI.
+`codegen-sdks.py` (główny) generuje powiązania SDK w JavaScript, Pythonie i Ruście na podstawie jądra API. Jest napędzany przez helpery `_tag_pascal` / `_tag_attr` dla spójnej nazewnictwa we wszystkich trzech celach. Zmiany w generowanym wyniku są sprawdzane pod kątem rozjazdu w `pre-push` i CI.
 
-## Shared conventions
+## Wspólne konwencje
 
-- **No source-code reading required at runtime** — hooks and checks operate on Git diffs, staged content, or API metadata, keeping them portable across environments.
-- **Attribution is mandatory** — every CHANGELOG bullet, changelog fragment, and AI-assisted commit must carry `(@user)` attribution, enforced at hook-time and CI-time by the same underlying logic (`has_attribution`, `bullet_block_has_attribution`).
-- **Tests live next to what they test** — when behavior can't be reached by Cargo, a shell test in [tests](tests.md) covers it instead.
+- **Brak konieczności czytania kodu źródłowego w czasie wykonania** — hooki i sprawdzenia operują na diffach Gita, zindeksowanej zawartości lub metadanych API, co zapewnia ich przenośność między środowiskami.
+- **Atrybucja jest obowiązkowa** — każdy wpis changeloga, fragment changeloga i commit z asystą AI musi zawierać atrybucję `(@user)`, wymuszaną w czasie hooka i w CI przez tę samą logikę bazową (`has_attribution`, `bullet_block_has_attribution`).
+- **Testy leżą obok tego, co testują** — gdy zachowanie nie jest osiągalne przez Cargo, test powłoki w module [tests](tests.md) je pokrywa.

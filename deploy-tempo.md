@@ -2,40 +2,40 @@
 
 # deploy/tempo
 
-Grafana Tempo configuration for the LibreFang local development stack. This module provides a distributed tracing backend that stores and queries OpenTelemetry traces emitted by application services during development.
+Konfiguracja Grafana Tempo dla lokalnego stosu deweloperskiego LibreFang. Ten moduł udostępnia backend rozproszonego śledzenia (distributed tracing), który przechowuje i odpytuje ślady OpenTelemetry emitowane przez usługi aplikacyjne podczas dewelopmentu.
 
-## Purpose
+## Cel
 
-This config defines a minimal Tempo deployment in **single-binary mode** with **local filesystem storage**. It exists to give developers a working trace pipeline in the local Docker stack — services emit spans, Tempo stores them, and Grafana queries them for visualization.
+Ta konfiguracja definiuje minimalne wdrożenie Tempo w **trybie pojedynczego binary** z **lokalnym przechowywaniem na systemie plików**. Istnieje, aby zapewnić deweloperom działający potok śledzenia (trace pipeline) w lokalnym stosie Docker — usługi emitują spany, Tempo je przechowuje, a Grafana je odpytuje w celu wizualizacji.
 
-There is no executable code in this module; it is a static configuration file consumed by the Tempo container at startup.
+W tym module nie ma kodu wykonywalnego; jest to statyczny plik konfiguracyjny zużywany przez kontener Tempo przy starcie.
 
-## Architecture
+## Architektura
 
-Tempo sits downstream of the OpenTelemetry collector and upstream of Grafana in the trace pipeline:
+Tempo znajduje się za kolektorem OpenTelemetry i przed Grafaną w potoku śledzenia:
 
 ```mermaid
 flowchart LR
-    App[Application Services] -->|OTLP spans| Coll[OTel Collector]
+    App[Usługi aplikacyjne] -->|spany OTLP| Coll[Kolektor OTel]
     Coll -->|OTLP/gRPC :4317| Tempo[Tempo]
-    Tempo -->|Query API :3200| Grafana
-    Tempo -->|write| FS[(Local FS<br/>/var/tempo)]
+    Tempo -->|API zapytań :3200| Grafana
+    Tempo -->|zapis| FS[(Lokalny FS<br/>/var/tempo)]
 ```
 
-Key networking detail: Tempo listens for OTLP/gRPC on port **4317** *inside the Docker network*. The host machine's port 4317 is bound to the collector, not Tempo — so traces flow app → collector → Tempo without Tempo ever being exposed directly to the host.
+Kluczowy szczegół sieciowy: Tempo nasłuchuje OTLP/gRPC na porcie **4317** *wewnątrz sieci Docker*. Port 4317 maszyny hosta jest przypisany do kolektora, nie do Tempo — więc ślady przepływają app → kolektor → Tempo bez bezpośredniego wystawienia Tempo na hosta.
 
-## Configuration Reference
+## Odniesienie do konfiguracji
 
-### Server
+### Serwer
 
 ```yaml
 server:
   http_listen_port: 3200
 ```
 
-Port `3200` is Tempo's HTTP query API. Grafana's Tempo datasource points at this port to execute trace queries (e.g., `Search`, `TraceQL`).
+Port `3200` to HTTP API zapytań Tempo. Datasource Tempo w Grafanie wskazuje na ten port, aby wykonywać zapytania o ślady (np. `Search`, `TraceQL`).
 
-### Distributor / Ingestion
+### Dystrybutor / Pozyskiwanie
 
 ```yaml
 distributor:
@@ -46,9 +46,9 @@ distributor:
           endpoint: 0.0.0.0:4317
 ```
 
-Tempo accepts OTLP/gRPC traces on `0.0.0.0:4317`. The collector is configured to forward to this endpoint over the Docker network.
+Tempo przyjmuje ślady OTLP/gRPC na `0.0.0.0:4317`. Kolektor jest skonfigurowany do przekazywania na ten endpoint przez sieć Docker.
 
-### Storage
+### Przechowywanie danych
 
 ```yaml
 storage:
@@ -60,27 +60,27 @@ storage:
       path: /var/tempo/blocks
 ```
 
-Uses the local filesystem backend — no S3, GCS, or Azure configuration required. Two directories are used:
+Używa backendu lokalnego systemu plików — nie wymaga konfiguracji S3, GCS ani Azure. Używane są dwa katalogi:
 
-- **`/var/tempo/wal`** — Write-ahead log for incoming traces before they are flushed to blocks.
-- **`/var/tempo/blocks`** — Compacted, queryable trace storage.
+- **`/var/tempo/wal`** — Dziennik zapisu wyprzedzającego (write-ahead log) dla przychodzących śladów, zanim zostaną zapisane w blokach.
+- **`/var/tempo/blocks`** — Skompaktowane, odpytywalne przechowywanie śladów.
 
-Both paths are internal to the container and should be backed by a Docker volume if persistence across container restarts is desired.
+Obie ścieżki są wewnętrzne dla kontenera i powinny być wspierane przez wolumen Docker, jeśli pożądane jest zachowanie danych pomiędzy restartami kontenera.
 
-## Operational Notes
+## Uwagi operacyjne
 
-### Defaults
+### Wartości domyślne
 
-Ingester flush cadence and compactor retention use Tempo's built-in defaults. No `ingester:` or `compactor:` sections are defined.
+Kadencja zapisu (flush) ingestera i retencja kompaktora używają wbudowanych wartości domyślnych Tempo. Nie zdefiniowano sekcji `ingester:` ani `compactor:`.
 
-### Customizing Retention and Flush
+### Dostosowywanie retencji i zapisu
 
-To change flush behavior or trace retention, add `ingester:` or `compactor:` top-level sections. These blocks use **strict decoding** — invalid or misspelled keys will cause Tempo to fail to start. Always consult the Tempo documentation for the exact schema matching your image version before editing.
+Aby zmienić zachowanie zapisu lub retencji śladów, dodaj sekcje najwyższego poziomu `ingester:` lub `compactor:`. Te bloki używają **ścisłego dekodowania** — nieprawidłowe lub błędnie zapisane klucze spowodują niepowodzenie startu Tempo. Zawsze konsultuj dokumentację Tempo pod kątem dokładnego schematu dopasowanego do wersji obrazu przed edycją.
 
-### Relationship to the Collector
+### Relacja z kolektorem
 
-Tempo does not receive traces directly from application processes in this stack. The OpenTelemetry collector (listening on the host's `4317`) is the single ingestion point, and it forwards to Tempo internally. This means:
+Tempo nie odbiera śladów bezpośrednio od procesów aplikacyjnych w tym stosie. Kolektor OpenTelemetry (nasłuchujący na porcie `4317` hosta) jest jedynym punktem pozyskiwania, a on przekazuje do Tempo wewnętrznie. Oznacza to:
 
-- Application instrumentation only needs to know about the collector's endpoint.
-- Tempo can remain unexposed to the host, simplifying port management.
-- Batch processing, retries, and attribute enrichment happen in the collector before traces reach Tempo.
+- Instrumentacja aplikacji musi znać tylko endpoint kolektora.
+- Tempo może pozostać niewystawione na hosta, co upraszcza zarządzanie portami.
+- Przetwarzanie wsadowe, ponowne próby i wzbogacanie atrybutów odbywają się w kolektorze, zanim ślady dotrą do Tempo.

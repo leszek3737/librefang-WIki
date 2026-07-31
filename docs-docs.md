@@ -1,25 +1,25 @@
 # docs — docs
 
-# docs — LibreFang Documentation Site
+# docs — Witryna dokumentacji LibreFang
 
-## Overview
+## Przegląd
 
-The `docs` module is the source for [docs.librefang.io](https://docs.librefang.io) — a statically generated Next.js site that serves the LibreFang Agent OS documentation. It is written in MDX, styled with Tailwind CSS v4 and the `@tailwindcss/typography` plugin, and deployed to Cloudflare Pages as a fully static export (no server runtime).
+Moduł `docs` jest źródłem witryny [docs.librefang.io](https://docs.librefang.io) — statycznie generowanej witryny Next.js, która udostępnia dokumentację LibreFang Agent OS. Jest napisana w MDX, stylizowana za pomocą Tailwind CSS v4 oraz wtyczki `@tailwindcss/typography`, a wdrażana na Cloudflare Pages jako pełny eksport statyczny (bez środowiska serwerowego).
 
-The site lives at the `docs/` root in the monorepo and consumes shared design tokens and UI primitives from sibling packages under `packages/`.
+Witryna znajduje się w katalogu głównym `docs/` w monorepo i korzysta ze współdzielonych tokenów projektowych oraz prymitywów UI z pakietów równorzędnych w katalogu `packages/`.
 
 ---
 
-## Architecture
+## Architektura
 
 ```mermaid
 flowchart TD
-    A[MDX pages<br/>src/app/**/*.mdx] --> B[remark plugins<br/>src/mdx/remark.mjs]
-    B --> C[rehype plugins<br/>src/mdx/rehype.mjs]
-    C --> D[recma plugins<br/>src/mdx/recma.mjs]
-    D --> E[Next.js build<br/>next.config.mjs]
+    A[Strony MDX<br/>src/app/**/*.mdx] --> B[wtyczki remark<br/>src/mdx/remark.mjs]
+    B --> C[wtyczki rehype<br/>src/mdx/rehype.mjs]
+    C --> D[wtyczki recma<br/>src/mdx/recma.mjs]
+    D --> E[Budowa Next.js<br/>next.config.mjs]
     E --> F[withSearch<br/>src/mdx/search.mjs]
-    F --> G[Static HTML export<br/>out/]
+    F --> G[Eksport statyczny HTML<br/>out/]
 
     H[mdx-components.tsx] -.-> A
     I[typography.ts] -.-> E
@@ -27,41 +27,41 @@ flowchart TD
     K[packages/shared<br/>@web/shared] -.-> A
 ```
 
-The build is a pipeline of composable wrappers:
+Budowa to potok kompozycyjnych otoków:
 
-1. **`withSearch(nextConfig)`** — injects search-index generation by scanning all MDX files.
-2. **`nextMDX(...)`** — registers the MDX loader with the custom remark/rehype/recma plugin chain.
-3. **`next build --webpack`** — produces a static export to `out/`.
+1. **`withSearch(nextConfig)`** — wstrzykuje generowanie indeksu wyszukiwania poprzez skanowanie wszystkich plików MDX.
+2. **`nextMDX(...)`** — rejestruje loader MDX z niestandardowym łańcuchem wtyczek remark/rehype/recma.
+3. **`next build --webpack`** — generuje eksport statyczny do katalogu `out/`.
 
-The application order in `next.config.mjs` is deliberate: `withMDX(withSearch(nextConfig))`. Search is applied first so the MDX processor can see the search-enhanced config.
+Kolejność zastosowań w `next.config.mjs` jest celowa: `withMDX(withSearch(nextConfig))`. Wyszukiwanie jest aplikowane jako pierwsze, aby procesor MDX mógł zobaczyć konfigurację rozszerzoną o wyszukiwanie.
 
 ---
 
-## MDX Content Pipeline
+## Potok treści MDX
 
-Content is authored as `page.mdx` files inside `src/app/`. Each route corresponds to a directory:
+Treść jest tworzona jako pliki `page.mdx` w katalogu `src/app/`. Każda ścieżka odpowiada katalogowi:
 
 ```
 src/app/
-├── page.mdx                    # / (Chinese, default)
+├── page.mdx                    # / (chiński, domyślny)
 ├── en/
-│   └── page.mdx                # /en/ (English)
+│   └── page.mdx                # /en/ (angielski)
 ├── cli-profile-rotation/
 │   └── page.mdx
 └── ...
 ```
 
-### Plugin chain
+### Łańcuch wtyczek
 
-| Stage | File | Responsibility |
+| Etap | Plik | Odpowiedzialność |
 |-------|------|----------------|
-| **remark** (Markdown → mdast) | `src/mdx/remark.mjs` | GFM tables, heading slugs, table-of-contents extraction, frontmatter parsing |
-| **rehype** (mdast → hast) | `src/mdx/rehype.mjs` | HTML transformation, syntax highlighting wiring |
-| **recma** (hast → JS AST) | `src/mdx/recma.mjs` | Final JS-level transforms before code generation |
+| **remark** (Markdown → mdast) | `src/mdx/remark.mjs` | Tabele GFM, kotwice nagłówków, ekstrakcja spisu treści, parsowanie frontmatter |
+| **rehype** (mdast → hast) | `src/mdx/rehype.mjs` | Transformacja HTML, podłączenie podświetlania składni |
+| **recma** (hast → AST JS) | `src/mdx/recma.mjs` | Końcowe transformacje na poziomie JS przed generowaniem kodu |
 
-### Component mapping
+### Mapowanie komponentów
 
-`mdx-components.tsx` is the entry point Next.js looks for. It merges default MDX components with custom overrides from `@/components/mdx`:
+`mdx-components.tsx` to punkt wejścia, którego szuka Next.js. Łączy domyślne komponenty MDX z niestandardowymi nadpisami z `@/components/mdx`:
 
 ```tsx
 export function useMDXComponents(components: MDXComponents) {
@@ -72,41 +72,41 @@ export function useMDXComponents(components: MDXComponents) {
 }
 ```
 
-This means every heading, code block, table, and link rendered from MDX passes through the custom component layer, enabling features like anchored headings, Shiki syntax highlighting, and styled callouts.
+Oznacza to, że każdy nagłówek, blok kodu, tabela i link renderowany z MDX przechodzi przez warstwę niestandardowych komponentów, umożliwiając takie funkcje jak zakotwiczone nagłówki, podświetlanie składni Shiki i stylizowane callouty.
 
-### Page frontmatter
+### Frontmatter strony
 
-Each MDX page exports a `sections` array used for sidebar navigation:
+Każda strona MDX eksportuje tablicę `sections` używaną do nawigacji w panelu bocznym:
 
 ```mdx
 ---
-title: Some Page
+title: Niektóra Strona
 ---
 
-Content here...
+Treść tutaj...
 
 export const sections = [];
 ```
 
 ---
 
-## Configuration
+## Konfiguracja
 
 ### `next.config.mjs`
 
-Key settings:
+Kluczowe ustawienia:
 
-| Setting | Value | Rationale |
+| Ustawienie | Wartość | Uzasadnienie |
 |---------|-------|-----------|
-| `output` | `"export"` | Fully static HTML — no Node.js server needed |
-| `pageExtensions` | `js, jsx, ts, tsx, mdx` | MDX files are first-class pages |
-| `images.unoptimized` | `true` | Required for static export (no image optimization server) |
-| `outputFileTracingIncludes` | `src/app/**/*.mdx` | Ensures MDX files are bundled for static generation |
-| `serverExternalPackages` | `['shiki']` | Shiki uses native WASM; must be externalized from the bundle |
+| `output` | `"export"` | Całkowicie statyczny HTML — nie wymaga serwera Node.js |
+| `pageExtensions` | `js, jsx, ts, tsx, mdx` | Pliki MDX są pełnoprawnymi stronami |
+| `images.unoptimized` | `true` | Wymagane dla eksportu statycznego (brak serwera optymalizacji obrazów) |
+| `outputFileTracingIncludes` | `src/app/**/*.mdx` | Zapewnia dołączenie plików MDX do generowania statycznego |
+| `serverExternalPackages` | `['shiki']` | Shiki używa natywnego WASM; musi być wyłączone z pakietu |
 
 ### `tsconfig.json`
 
-Path aliases connect the docs site to both local source and monorepo packages:
+Aliasy ścieżek łączą witrynę dokumentacji zarówno z lokalnym źródłem, jak i pakietami monorepo:
 
 ```
 @/*              → ./src/*
@@ -119,11 +119,11 @@ Path aliases connect the docs site to both local source and monorepo packages:
 @web/config      → ../../packages/config/src/index.ts
 ```
 
-This means documentation pages can import shared React components (`@web/ui`), shared utilities (`@web/shared`), and configuration (`@web/config`) directly from the monorepo — keeping the docs UI in sync with the product UI.
+Oznacza to, że strony dokumentacji mogą importować współdzielone komponenty React (`@web/ui`), współdzielone narzędzia (`@web/shared`) oraz konfigurację (`@web/config`) bezpośrednio z monorepo — utrzymując spójność interfejsu dokumentacji z interfejsem produktu.
 
 ### `postcss.config.js`
 
-Minimal — delegates everything to Tailwind CSS v4:
+Minimalny — deleguje wszystko do Tailwind CSS v4:
 
 ```js
 export default {
@@ -135,135 +135,135 @@ export default {
 
 ---
 
-## Styling & Typography System
+## System stylów i typografii
 
-`typography.ts` defines the complete prose theme for rendered MDX content. It is consumed by `@tailwindcss/typography` and provides:
+`typography.ts` definiuje kompletną tematykę prose dla renderowanej treści MDX. Jest konsumowany przez `@tailwindcss/typography` i dostarcza:
 
-- **Light and dark mode** via CSS custom properties (`--tw-prose-*` for light, `--tw-prose-invert-*` for dark). The `invert` modifier swaps all variables in one block, enabling `dark:prose-invert` usage.
-- **Brand colors**: Emerald (`emerald-500`/`600`) for links and code accents, zinc scale for body text, headings, and borders.
-- **Element-level overrides** for spacing, font sizes, list styles, table layouts, blockquote formatting, and code block presentation (inset box-shadow ring + background).
-- **Responsive horizontal rules** that extend beyond the prose container padding at different breakpoints.
+- **Tryb jasny i ciemny** za pomocą właściwości niestandardowych CSS (`--tw-prose-*` dla trybu jasnego, `--tw-prose-invert-*` dla trybu ciemnego). Modyfikator `invert` zamienia wszystkie zmienne w jednym bloku, umożliwiając użycie `dark:prose-invert`.
+- **Kolory marki**: Szmaragdowy (`emerald-500`/`600`) dla linków i akcentów kodu, skala zinc dla tekstu głównego, nagłówków i obramowań.
+- **Nadpisania na poziomie elementów** dla odstępów, rozmiarów fontów, stylów list, układów tabel, formatowania bloków cytatu i prezentacji bloków kodu (wewnętrzny box-shadow ring + tło).
+- **Responsywne poziome linie** rozciągające się poza padding kontenera prose na różnych breakpointach.
 
-The config is a plain object exported as `default export` and imported wherever the typography plugin is registered.
+Konfiguracja to zwykły obiekt eksportowany jako `default export` i importowany tam, gdzie zarejestrowana jest wtyczka typografii.
 
 ---
 
-## Search
+## Wyszukiwanie
 
-The search system is built at build time, not runtime:
+System wyszukiwania jest budowany w czasie budowy, a nie w czasie działania:
 
-| Component | Package | Role |
+| Komponent | Pakiet | Rola |
 |-----------|---------|------|
-| `src/mdx/search.mjs` | — | `withSearch` wrapper; scans MDX files, generates a search index at build time |
-| `flexsearch` | `^0.8.205` | Client-side full-text search engine over the prebuilt index |
-| `@algolia/autocomplete-core` | `1.19.9` | Headless autocomplete UI logic for the search bar |
-| `react-highlight-words` | `^0.21.0` | Highlights matching terms in search results |
+| `src/mdx/search.mjs` | — | Otok `withSearch`; skanuje pliki MDX, generuje indeks wyszukiwania w czasie budowy |
+| `flexsearch` | `^0.8.205` | Kliencki silnik wyszukiwania pełnotekstowego nad wstępnie zbudowanym indeksem |
+| `@algolia/autocomplete-core` | `1.19.9` | Bezgłówna logika UI autouzupełniania dla paska wyszukiwania |
+| `react-highlight-words` | `^0.21.0` | Podświetla pasujące terminy w wynikach wyszukiwania |
 
-Because the site is statically exported, the entire search index is serialized into static JSON and loaded client-side.
+Ponieważ witryna jest eksportowana statycznie, cały indeks wyszukiwania jest serializowany do statycznego JSON i ładowany po stronie klienta.
 
 ---
 
-## Multi-Language
+## Wielojęzyczność
 
-The site supports two locales with a directory-based routing strategy:
+Witryna obsługuje dwie lokalizacje z katalogową strategią routingu:
 
-| Route | Language | Source |
+| Ścieżka | Język | Źródło |
 |-------|----------|--------|
-| `/` | Chinese (default) | Authored directly in `src/app/` |
-| `/en/` | English | Synced from the LibreFang repository |
+| `/` | Chiński (domyślny) | Tworzony bezpośrednio w `src/app/` |
+| `/en/` | Angielski | Synchronizowany z repozytorium LibreFang |
 
-English content lives under `src/app/en/` and mirrors the Chinese route structure.
+Treść angielska znajduje się w `src/app/en/` i odzwierciedla chińską strukturę ścieżek.
 
 ---
 
-## Content Authoring
+## Tworzenie treści
 
-### Adding a new documentation page
+### Dodawanie nowej strony dokumentacji
 
-1. Create a directory under `src/app/`, e.g. `src/app/new-feature/`.
-2. Add `page.mdx` with frontmatter and content.
-3. Export `sections` at the end of the file for sidebar navigation.
+1. Utwórz katalog w `src/app/`, np. `src/app/new-feature/`.
+2. Dodaj `page.mdx` z frontmatter i treścią.
+3. Wyeksportuj `sections` na końcu pliku dla nawigacji w panelu bocznym.
 
 ```mdx
 ---
-title: New Feature
-description: What this feature does and how to use it.
+title: Nowa Funkcjonalność
+description: Co ta funkcja robi i jak jej używać.
 ---
 
-# New Feature
+# Nowa Funkcjonalność
 
-Content written in MDX — full GFM and JSX support.
+Treść napisana w MDX — pełna obsługa GFM i JSX.
 
 export const sections = [
-  { title: 'Installation', id: 'installation' },
-  { title: 'Configuration', id: 'configuration' },
+  { title: 'Instalacja', id: 'installation' },
+  { title: 'Konfiguracja', id: 'configuration' },
 ];
 ```
 
-### Markdown files at the docs root
+### Pliki Markdown w katalogu głównym docs
 
-Standalone reference documents (not rendered as site pages) live at the `docs/` root:
+Samodzielne dokumenty referencyjne (nierenderowane jako strony witryny) znajdują się w katalogu głównym `docs/`:
 
-- **`docs/releases.md`** — Release versioning policy (CALVER format, pre-release tag conventions, CI dist-tag behavior). Referenced by the `xtask release` tooling and PR reviewers.
-- **`docs/cli-profile-rotation.md`** — User-facing guide for Claude Code CLI account rotation via `TokenRotationDriver`.
+- **`docs/releases.md`** — Polityka wersjonowania wydań (format CALVER, konwencje tagów pre-release, zachowanie CI dist-tag). Wspierany przez narzędzia `xtask release` i recenzentów PR.
+- **`docs/cli-profile-rotation.md`** — Przewodnik użytkownika dotyczący rotacji kont CLI Claude Code za pomocą `TokenRotationDriver`.
 
 ---
 
-## Key Dependencies
+## Kluczowe zależności
 
-| Dependency | Version | Purpose |
+| Zależność | Wersja | Przeznaczenie |
 |------------|---------|---------|
-| `next` | `16.2.12` | Static site framework |
-| `react` / `react-dom` | `19.2.8` | UI runtime |
-| `@mdx-js/loader` + `@mdx-js/react` | `3.1.1` | MDX compilation and component provider |
-| `remark` + `remark-gfm` + `remark-mdx` | latest | Markdown processing plugins |
-| `shiki` | `^4.3.1` | Server-side syntax highlighting (WASM-based) |
-| `prism-react-renderer` | `^2.4.1` | Client-side code rendering |
-| `flexsearch` | `^0.8.205` | Build-time indexed search |
-| `@algolia/autocomplete-core` | `1.19.9` | Search bar autocomplete logic |
-| `@giscus/react` | `^3.1.0` | GitHub Discussions comments |
-| `zustand` | `5.0.14` | Lightweight client state (theme, navigation) |
-| `motion` | `12.42.2` | Animations |
-| `lucide-react` | `^1.27.0` | Icon set |
-| `next-themes` | `^0.4.6` | Dark/light mode switching |
-| `tailwindcss` | `4.3.3` | Utility-first CSS (v4 with PostCSS plugin) |
+| `next` | `16.2.12` | Framework witryny statycznej |
+| `react` / `react-dom` | `19.2.8` | Środowisko uruchomieniowe UI |
+| `@mdx-js/loader` + `@mdx-js/react` | `3.1.1` | Kompilacja MDX i dostawca komponentów |
+| `remark` + `remark-gfm` + `remark-mdx` | latest | Wtyczki przetwarzania Markdown |
+| `shiki` | `^4.3.1` | Podświetlanie składni po stronie serwera (oparte na WASM) |
+| `prism-react-renderer` | `^2.4.1` | Renderowanie kodu po stronie klienta |
+| `flexsearch` | `^0.8.205` | Wyszukiwanie z indeksem budowanym w czasie budowy |
+| `@algolia/autocomplete-core` | `1.19.9` | Logika autouzupełniania paska wyszukiwania |
+| `@giscus/react` | `^3.1.0` | Komentarze z GitHub Discussions |
+| `zustand` | `5.0.14` | Lekki stan klienta (motyw, nawigacja) |
+| `motion` | `12.42.2` | Animacje |
+| `lucide-react` | `^1.27.0` | Zestaw ikon |
+| `next-themes` | `^0.4.6` | Przełączanie trybu ciemnego/jasnego |
+| `tailwindcss` | `4.3.3` | CSS utility-first (v4 z wtyczką PostCSS) |
 
 ---
 
-## Development Workflow
+## Przepływ pracy deweloperskiej
 
-### Prerequisites
+### Wymagania wstępne
 
 - Node.js ≥ 18
-- pnpm ≥ 9 (project pins `pnpm@10.11.1`)
+- pnpm ≥ 9 (projekt fixuje `pnpm@10.11.1`)
 
-### Commands
+### Polecenia
 
 ```bash
-pnpm install          # Install dependencies
-pnpm dev              # Dev server on port 3001
-pnpm build            # Static export to out/
-pnpm start            # Serve built output on port 3001
-pnpm lint             # Biome check
-pnpm lint:fix         # Biome check --write
+pnpm install          # Instalacja zależności
+pnpm dev              # Serwer deweloperski na porcie 3001
+pnpm build            # Eksport statyczny do out/
+pnpm start            # Serwowanie zbudowanego wyniku na porcie 3001
+pnpm lint             # Sprawdzenie Biome
+pnpm lint:fix         # Sprawdzenie Biome --write
 pnpm typecheck        # tsc --noEmit
 pnpm format           # Biome format src --write
 ```
 
-The dev server runs on port **3001** (not the default 3000) to avoid conflicts with other services in the monorepo.
+Serwer deweloperski działa na porcie **3001** (a nie domyślnym 3000), aby uniknąć konfliktów z innymi usługami w monorepo.
 
-### Build note
+### Uwaga dotycząca budowy
 
-The build script uses `next build --webpack` (not the default Turbopack builder) because the MDX plugin chain and `simple-functional-loader` dependencies are webpack-specific.
+Skrypt budowy używa `next build --webpack` (a nie domyślnego buildera Turbopack), ponieważ łańcuch wtyczek MDX i zależności `simple-functional-loader` są specyficzne dla webpacka.
 
 ---
 
-## Connection to the Monorepo
+## Powiązanie z monorepo
 
-The docs site is not isolated — it imports from three sibling packages via `tsconfig.json` path aliases:
+Witryna dokumentacji nie jest odizolowana — importuje z trzech pakietów równorzędnych poprzez aliasy ścieżek w `tsconfig.json`:
 
-- **`@web/ui`** (`packages/react/`) — Shared React component library used across LibreFang's web surfaces. Documentation pages can demo real product components.
-- **`@web/shared`** (`packages/shared/`) — Shared utilities, types, and constants.
-- **`@web/config`** (`packages/config/`) — Shared configuration (site metadata, feature flags, constants).
+- **`@web/ui`** (`packages/react/`) — Współdzielona biblioteka komponentów React używana w interfejsach webowych LibreFang. Strony dokumentacji mogą demonstrować rzeczywiste komponenty produktu.
+- **`@web/shared`** (`packages/shared/`) — Współdzielone narzędzia, typy i stałe.
+- **`@web/config`** (`packages/config/`) — Współdzielona konfiguracja (metadane witryny, flagi funkcji, stałe).
 
-This means changes to shared packages propagate to documentation automatically — there is no separate copy of components or config in the docs module.
+Oznacza to, że zmiany w pakietach współdzielonych propagują się do dokumentacji automatycznie — nie ma osobnej kopii komponentów ani konfiguracji w module docs.

@@ -1,78 +1,78 @@
 # docs
 
-# `docs/` — LibreFang Documentation
+# `docs/` — Dokumentacja LibreFang
 
-## Purpose
+## Przeznaczenie
 
-The `docs/` module is everything documentation: the Next.js website published at [docs.librefang.io](https://docs.librefang.io), the normative architecture and operations references that developers and operators cite in code review, reference implementations of extension points, audit-finding tracking, and planning documents for substantial features. It contains no production runtime code — only the site source tree (`src/`), static hosting config (`public/`), and authored Markdown/MDX content.
+Moduł `docs/` obejmuje całościowo dokumentację: witrynę Next.js opublikowaną pod adresem [docs.librefang.io](https://docs.librefang.io), normatywne odniesienia architektoniczne i operacyjne, które deweloperzy i operatorzy przywołują podczas code review, referencyjne implementacje punktów rozszerzeń, śledzenie ustaleń audytowych oraz dokumenty planistyczne dla istotnych funkcji. Nie zawiera żadnego produkcyjnego kodu uruchomieniowego — wyłącznie źródła witryny (`src/`), konfigurację hostingu statycznego (`public/`) oraz autorskie treści Markdown/MDX.
 
-## How the sub-modules fit together
+## Jak sub-moduły się ze sobą łączą
 
 ```mermaid
 flowchart LR
     subgraph SiteSource
-        SRC["src/<br/>Next.js app — MDX pages,<br/>components, search, MDX pipeline"]
-        PUB["public/<br/>_redirects, static assets"]
+        SRC["src/<br/>Aplikacja Next.js — strony MDX,<br/>komponenty, wyszukiwanie, pipeline MDX"]
+        PUB["public/<br/>_redirects, zasoby statyczne"]
     end
 
     subgraph AuthoredContent
-        ARCH["architecture/<br/>normative design docs"]
-        OPS["operations/<br/>operator runbooks"]
-        EX["examples/<br/>reference sidecar scripts"]
+        ARCH["architecture/<br/>normatywne dokumenty projektowe"]
+        OPS["operations/<br/>instrukcje operacyjne"]
+        EX["examples/<br/>referencyjne skrypty sidecar"]
     end
 
     subgraph Tracking
-        ISSUES["issues/<br/>audit findings index"]
+        ISSUES["issues/<br/>indeks ustaleń audytowych"]
     end
 
     subgraph Planning
-        PLANS["plans/<br/>implementation blueprints"]
-        SP["superpowers/<br/>specs + plans"]
+        PLANS["plans/<br/>plany wdrożenia"]
+        SP["superpowers/<br/>specyfikacje + plany"]
     end
 
-    SRC --> BUILD["Static build → Cloudflare Pages"]
+    SRC --> BUILD["Kompilacja statyczna → Cloudflare Pages"]
     PUB --> BUILD
     ARCH -.-> SRC
     OPS -.-> SRC
     EX -.-> SRC
 ```
 
-### Site engine — [`src`](src.md) & [`public`](public.md)
+### Silnik witryny — [`src`](src.md) i [`public`](public.md)
 
-The **`src/`** tree is a statically exported Next.js App Router application. All user-facing pages are MDX files under `src/app/`, processed through a remark → rehype → recma plugin chain (`src/mdx/`). Shared components — `Layout`, `Header`, `Navigation`, `Search`, `Code`, `Heading` — provide the chrome, while `SectionProvider` and the `search.mjs` pipeline power the in-page section tracking and full-text search index. An `ErrorBoundary` with `classifyMDXError` surfaces build-time MDX failures gracefully.
+Drzewo **`src/`** to statycznie eksportowana aplikacja Next.js App Router. Wszystkie strony dostępne użytkownikowi to pliki MDX w katalogu `src/app/`, przetwarzane przez łańcuch wtyczek remark → rehype → recma (`src/mdx/`). Współdzielone komponenty — `Layout`, `Header`, `Navigation`, `Search`, `Code`, `Heading` — stanowią otoczenie interfejsu, natomiast `SectionProvider` oraz pipeline `search.mjs` napędzają śledzenie sekcji na stronie i indeks pełnotekstowego wyszukiwania. `ErrorBoundary` z funkcją `classifyMDXError` elegancko obsługuje błędy MDX z czasu kompilacji.
 
-The **`public/`** directory holds the `_redirects` file that maps all pre-restructure flat URLs (`/hands`, `/providers/*`) to the current hierarchical structure (`/agent/hands`, `/configuration/providers/:splat`) with permanent 301s for both English and `/zh/` locales.
+Katalog **`public/`** zawiera plik `_redirects`, który mapuje wszystkie płaskie adresy URL sprzed restrukturyzacji (`/hands`, `/providers/*`) na obecną strukturę hierarchiczną (`/agent/hands`, `/configuration/providers/:splat`) za pomocą trwałych przekierowań 301 dla lokaliz angielskiej oraz `/zh/`.
 
-### Normative references — [`architecture`](architecture.md) & [`operations`](operations.md)
+### Odniesienia normatywne — [`architecture`](architecture.md) i [`operations`](operations.md)
 
-These directories hold documents that are **cited in code review**:
+Te katalogi zawierają dokumenty **przywoływane podczas code review**:
 
-- **`architecture/`** — 15 standalone documents covering logging, observability, security boundaries, naming conventions, and migration policies. Each defines contracts that subsystem code must follow.
-- **`operations/`** — Operator-facing runbooks for hot-reload semantics, NixOS deployment, and the release pipeline. These answer questions an operator can't infer from source alone.
+- **`architecture/`** — 15 samodzielnych dokumentów obejmujących logowanie, obserwowalność, granice bezpieczeństwa, konwencje nazewnictwa oraz polityki migracji. Każdy z nich definiuje kontrakty, których kod podsystemów musi przestrzegać.
+- **`operations/`** — instrukcje operacyjne dla operatorów dotyczące semantyki hot-reload, wdrożeń NixOS oraz potoku wydawania. Odpowiadają na pytania, których operator nie może wywnioskować z samego kodu źródłowego.
 
-Content from both directories is surfaced as pages on the documentation site through the `src/` MDX pipeline.
+Treści z obu katalogów są udostępniane jako strony w witrynie dokumentacyjnej za pośrednictwem pipeline'u MDX w `src/`.
 
-### Reference implementations — [`examples`](examples.md)
+### Implementacje referencyjne — [`examples`](examples.md)
 
-Two dependency-free Python 3 scripts (`context_engine_sidecar.py`, `memory_extractor_sidecar.py`) that demonstrate the stdio JSON wire protocol for LibreFang's two sidecar extension points. These are embedded in the site's getting-started examples.
+Dwa niezależne od zależności skrypty Python 3 (`context_engine_sidecar.py`, `memory_extractor_sidecar.py`) demonstrujące protokół łącza stdio JSON dla dwóch punktów rozszerzeń sidecar w LibreFang. Są one osadzone w przykładach typu „pierwsze kroki" w witrynie.
 
-### Audit tracking — [`issues`](issues.md)
+### Śledzenie audytu — [`issues`](issues.md)
 
-A structured index of 119 findings from the automated audit pipeline. `INDEX.md` preserves the full audit scope as a historical record; per-finding Markdown files exist only for issues still under remediation, each linked to its GitHub issue.
+Strukturyzowany indeks 119 ustaleń z automatycznego pipeline'u audytowego. `INDEX.md` zachowuje pełny zakres audytu jako rejestr historyczny; pliki Markdown dla poszczególnych ustaleń istnieją tylko dla problemów nadal podlegających naprawie, a każdy z nich jest powiązany z odpowiednim zgłoszeniem GitHub.
 
-### Feature planning — [`plans`](plans.md) & [`superpowers`](superpowers.md)
+### Planowanie funkcji — [`plans`](plans.md) i [`superpowers`](superpowers.md)
 
-Two parallel planning tracks, both using date-prefixed kebab-case filenames:
+Dwa równoległe ścieżki planistyczne, obie wykorzystujące nazwy plików w formacie kebab-case z prefiksem daty:
 
-- **`plans/`** — Self-contained implementation blueprints: goal, files touched, sequenced tasks, failing-test-first scaffolding. One file per feature, discovered by `ls`.
-- **`superpowers/`** — Pairs **specs** (architectural source of truth) with **plans** (task roadmaps), linked by matching dates and feature-branch keys.
+- **`plans/`** — Samodzielne plany wdrożenia: cel, modyfikowane pliki, ułożone sekwencyjnie zadania, szkieletowanie oparte na testach nieprzechodzących. Jeden plik na funkcję, odkrywany za pomocą `ls`.
+- **`superpowers/`** — Parami łączy **specyfikacje** (architektoniczne źródło prawdy) z **planami** (mapami drogowymi zadań), powiązane poprzez zbieżność dat i kluczy gałęzi funkcyjnych.
 
-## Key workflows spanning sub-modules
+## Kluczowe przepływy pracy obejmujące sub-moduły
 
-| Workflow | Path |
+| Przepływ pracy | Ścieżka |
 |---|---|
-| **Author a doc page** | Write MDX under `src/app/` → components and MDX pipeline in `src/` render it → deployed via Cloudflare Pages |
-| **Add a redirect** | Update `public/_redirects` for both English and `/zh/` rules, wildcards after exact matches |
-| **Plan a feature** | Write a spec in `superpowers/specs/` → matching plan in `superpowers/plans/` or `plans/` → implement against failing-test scaffolding |
-| **Track an audit finding** | Add entry to `issues/INDEX.md` → create per-finding Markdown linked to GitHub issue → delete file on resolution (index preserves the record) |
-| **Cite a design contract** | Reference a document in `architecture/` or `operations/` during code review — these are normative, not advisory |
+| **Tworzenie strony dokumentacji** | Napisz MDX w `src/app/` → komponenty i pipeline MDX w `src/` renderują ją → wdrożona przez Cloudflare Pages |
+| **Dodanie przekierowania** | Zaktualizuj `public/_redirects` dla reguł angielskich i `/zh/`, symbole wieloznaczne po dokładnych dopasowaniach |
+| **Planowanie funkcji** | Napisz specyfikację w `superpowers/specs/` → pasujący plan w `superpowers/plans/` lub `plans/` → implementuj na podstawie szkieletu opartego na testach nieprzechodzących |
+| **Śledzenie ustalenia audytowego** | Dodaj wpis do `issues/INDEX.md` → utwórz plik Markdown dla ustalenia powiązany ze zgłoszeniem GitHub → usuń plik po rozwiązaniu (indeks zachowuje rejestr) |
+| **Przywołanie kontraktu projektowego** | Powołaj się na dokument w `architecture/` lub `operations/` podczas code review — są one normatywne, nie doradcze |

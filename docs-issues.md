@@ -1,22 +1,22 @@
-# docs — issues
+# dokumentacja — problemy
 
-# docs/issues — Audit Findings Tracker
+# docs/issues — Rejestr wyników audytu
 
-## Purpose
+## Cel
 
-`docs/issues/` is the canonical index for all security, reliability, and architecture findings produced by the LibreFang automated audit pipeline. It serves three roles:
+`docs/issues/` to kanoniczny indeks wszystkich ustaleń dotyczących bezpieczeństwa, niezawodności i architektury wygenerowanych przez zautomatyzowany potok audytu LibreFang. Spełnia trzy role:
 
-1. **Active tracking** — per-finding Markdown files for issues still under remediation, each linked to a GitHub issue.
-2. **Historical record** — `INDEX.md` preserves the full audit scope (119 items) even after individual files are deleted on resolution, so the original slug and one-line summary remain searchable.
-3. **Triage guide** — a prioritized remediation order spanning both audit passes.
+1. **Aktywne śledzenie** — pliki Markdown dla poszczególnych ustaleń nadal wymagających naprawy, każdy powiązany z zgłoszeniem na GitHubie.
+2. **Historyczny rejestr** — `INDEX.md` zachowuje pełny zakres audytu (119 pozycji) nawet po usunięciu poszczególnych plików po rozwiązaniu, dzięki czemu oryginalny identyfikator i jednowierszowe podsumowanie pozostają przeszukiwalne.
+3. **Poradnik triażu** — priorytetyzowana kolejność napraw obejmująca obie tury audytu.
 
-This directory contains no executable code. It is consumed by developers, reviewers, and release planners.
+Ten katalog nie zawiera kodu wykonywalnego. Jest wykorzystywany przez programistów, recenzentów i planistów wydań.
 
-## Structure
+## Struktura
 
 ```
 docs/issues/
-├── INDEX.md                              # Master index, rollup, triage order
+├── INDEX.md                              # Indeks główny, zestawienie, kolejność triażu
 ├── audit-log-cap-only-on-trim-interval.md
 ├── data-layer-rule-clean.md
 ├── i18n-escapeValue-false.md
@@ -27,127 +27,127 @@ docs/issues/
 └── workspace-setup-write-all-swallow.md
 ```
 
-Only **8 active finding files** remain. The other 111 items have been resolved via GitHub issues and their files deleted; their entries in `INDEX.md` are retained as a historical breadcrumb.
+Pozostało tylko **8 aktywnych plików ustaleń**. Pozostałe 111 pozycji zostało rozwiązanych za pomocą zgłoszeń na GitHubie, a ich pliki usunięto; wpisy w `INDEX.md` są zachowane jako historyczna ślad.
 
 ## INDEX.md
 
-The master index is the entry point. It contains:
+Indeks główny jest punktem wejścia. Zawiera:
 
-| Section | Content |
+| Sekcja | Treść |
 |---|---|
-| **Status header** | Snapshot date, count of resolved vs. active findings, and instructions for finding resolved items (`gh issue list --state closed` or `git log -- docs/issues/<slug>.md`). |
-| **Active findings table** | The 8 remaining `.md` files with their GitHub issue numbers (#5543–#5668). |
-| **Audit provenance** | Commit hash (`087a0481`), date (2026-05-18), agent configuration (2 independent audits × 10 parallel review agents), and the consolidation pipeline. |
-| **Severity rollup** | Count by severity across all 119 items (Critical 7, High 37, Medium 54, Low 22). |
-| **Finding listings** | All 119 items grouped by severity, then by domain (Auth & secrets, API attack surface, Error handling, Performance, Architecture, Test coverage, CI/hooks, Dashboard, LLM driver & MCP, Sandbox, Concurrency, Data integrity, DoS, Supply chain, Input validation, Kernel orchestration). |
-| **Triage order** | A 14-step priority sequence spanning both audit passes. |
+| **Nagłówek statusu** | Data migawki, liczba rozwiązanych vs aktywnych ustaleń oraz instrukcje wyszukiwania rozwiązanych pozycji (`gh issue list --state closed` lub `git log -- docs/issues/<slug>.md`). |
+| **Tabela aktywnych ustaleń** | 8 pozostałych plików `.md` z ich numerami zgłoszeń na GitHubie (#5543–#5668). |
+| **Pochodzenie audytu** | Hash commita (`087a0481`), data (2026-05-18), konfiguracja agenta (2 niezależne audyty × 10 równoległych agentów recenzji) oraz potok konsolidacji. |
+| **Zestawienie krytyczności** | Liczba wg krytyczności dla wszystkich 119 pozycji (Krytyczne 7, Wysokie 37, Średnie 54, Niskie 22). |
+| **Listy ustaleń** | Wszystkie 119 pozycji pogrupowanych wg krytyczności, a następnie wg domeny (Uwierzytelnianie i sekrety, Powierzchnia ataku API, Obsługa błędów, Wydajność, Architektura, Pokrycie testami, CI/hooks, Dashboard, Sterownik LLM i MCP, Sandbox, Współbieżność, Integralność danych, DoS, Łańcuch dostaw, Walidacja wejścia, Orkiestracja jądra). |
+| **Kolejność triażu** | 14-krokowa sekwencja priorytetów obejmująca obie tury audytu. |
 
-### Consolidation Pipeline
+### Potok konsolidacji
 
-The 119 items are the result of deduplication and thematic clustering across two audit passes:
+119 pozycji to wynik deduplikacji i klasteryzacji tematycznej w obu turach audytu:
 
 ```mermaid
 graph LR
-    P1["Pass 1: 136 findings"] --> DEDUP["9 exact duplicates removed"]
-    P2["Pass 2: 86 findings"] --> DEDUP
-    DEDUP --> R1["Round 1: 10 clusters<br/>34 sub-findings → 10 issues"]
-    R1 --> R2["Round 2: 23 clusters<br/>65 sub-findings → 23 issues"]
-    R2 --> TOTAL["119 tracking items"]
+    P1["Tura 1: 136 ustaleń"] --> DEDUP["Usunięto 9 dokładnych duplikatów"]
+    P2["Tura 2: 86 ustaleń"] --> DEDUP
+    DEDUP --> R1["Runda 1: 10 klastrów<br/>34 podustalenia → 10 zgłoszeń"]
+    R1 --> R2["Runda 2: 23 klastry<br/>65 podustaleń → 23 zgłoszenia"]
+    R2 --> TOTAL["119 pozycji śledzonych"]
 ```
 
-## Per-Finding File Format
+## Format pliku ustalenia
 
-Each active `.md` file follows a consistent structure, though the exact headings vary by finding type:
+Każdy aktywny plik `.md` podąża za spójną strukturą, choć dokładne nagłówki różnią się w zależności od typu ustalenia:
 
-### Standard fields
+### Pola standardowe
 
-- **Title** — Includes severity tag in brackets (e.g., `[Medium]`) and a short domain qualifier.
-- **`Severity:`** — One of `Critical`, `High`, `Medium`, `Low`.
-- **`Category:` / `Domain:`** — The finding's problem area (e.g., DoS / resource exhaustion, Secrets & credential handling, CI / hooks).
-- **`Labels:`** — Space-delimited GitHub-style labels.
-- **`Status:`** — Present on consolidated findings; describes which earlier issues were merged.
+- **Tytuł** — Zawiera tag krytyczności w nawiasach kwadratowych (np. `[Medium]`) i krótki kwalifikator domeny.
+- **`Severity:`** — Jedno z: `Critical`, `High`, `Medium`, `Low`.
+- **`Category:` / `Domain:`** — Obszar problemu ustalenia (np. DoS / wyczerpanie zasobów, Sekrety i obsługa poświadczeń, CI / hooks).
+- **`Labels:`** — Etykiety w stylu GitHuba, oddzielone spacjami.
+- **`Status:`** — Obecne w skonsolidowanych ustaleniach; opisuje, które wcześniejsze zgłoszenia zostały połączone.
 
-### Common sections
+### Typowe sekcje
 
-| Section | Purpose |
+| Sekcja | Cel |
 |---|---|
-| **Affected files** | Exact file paths and line ranges. |
-| **Description** | The bug or design flaw, with code snippets from the actual source. |
-| **Recommendation** | Concrete fix with code examples. |
-| **Sub-findings rollup** | (Consolidated findings only) Table mapping each origin issue to its description and location. |
-| **Why merged** | (Consolidated findings only) Rationale for combining sub-findings. |
-| **Combined fix plan** | (Consolidated findings only) Numbered remediation steps covering all sub-findings. |
-| **Tests** | Verification steps to confirm the fix. |
-| **Verification** | Re-audit results; may mark a finding as `DISPUTED` if the original premise was incorrect. |
+| **Pliki objęte** | Dokładne ścieżki plików i zakresy wierszy. |
+| **Opis** | Błąd lub wada projektowa z fragmentami kodu z rzeczywistego źródła. |
+| **Rekomendacja** | Konkretna naprawa z przykładami kodu. |
+| **Zestawienie podustaleń** | (Tylko skonsolidowane ustalenia) Tabela mapująca każde źródłowe zgłoszenie na jego opis i lokalizację. |
+| **Powód połączenia** | (Tylko skonsolidowane ustalenia) Uzasadnienie połączenia podustaleń. |
+| **Połączony plan naprawy** | (Tylko skonsolidowane ustalenia) Numerowane kroki naprawy obejmujące wszystkie podustalenia. |
+| **Testy** | Kroki weryfikacji potwierdzające naprawę. |
+| **Weryfikacja** | Wyniki ponownego audytu; może oznaczyć ustalenie jako `DISPUTED`, jeśli pierwotna przesłanka była błędna. |
 
-### Filename convention
+### Konwencja nazewnictwa plików
 
-`{slug}.md` — kebab-case, descriptive of the root cause, not the symptom. Slugs are stable identifiers: even after a file is deleted, the slug persists in `INDEX.md` and in `git log`.
+`{slug}.md` — kebab-case, opisujący przyczynę główną, nie objaw. Slugi to stabilne identyfikatory: nawet po usunięciu pliku, slug pozostaje w `INDEX.md` i w `git log`.
 
-## Active Findings
+## Aktywne ustalenia
 
-The 8 remaining files track issues across 5 domains:
+8 pozostałych plików śledzi problemy w 5 domenach:
 
-| Slug | Issue | Severity | Domain | Core problem |
+| Slug | Zgłoszenie | Krytyczność | Domena | Problem główny |
 |---|---|---|---|---|
-| `audit-log-cap-only-on-trim-interval` | #5665 | Low | DoS | `AuditLog::record` capacity checked only at trim interval. **DISPUTED** — hard `MAX_AUDIT_ENTRIES = 10_000` ceiling exists. |
-| `data-layer-rule-clean` | #5666 | Low | Dashboard | Consolidated: data-layer baseline, `commsKeys lists()` gap, raw `localStorage`, modal focus. |
-| `i18n-escapeValue-false` | #5561 | Medium | Dashboard | `escapeValue: false` + `dangerouslySetInnerHTML` = XSS risk; also covers storage key divergence and missing invalidation markers. |
-| `phf-generator-old-rand` | #5667 | Low | Supply chain / Build | Consolidated: `phf_generator 0.8` pins `rand 0.7.3`, `proc-macro-error` via GTK, workspace `tokio = ["full"]`, `pnpm audit` ignores, `build.rs` shims, version sprawl. |
-| `rustfmt-loses-spaced-paths` | #5664 | High | CI / hooks | Consolidated: unquoted `$STAGED_RS` in pre-commit, `sha256sum` fallback gap, missing `pre-push` hook, unconsumed `.secrets.baseline`. |
-| `two-migrate-crates` | #5668 | Low | Architecture | Consolidated: crate rename done (`librefang-import`), stale `CLAUDE.md` files, `xtask` vs `justfile` overlap. |
-| `wechat-bot-token-prefix-debug-log` | #5543 | Medium | Secrets | WeChat `debug!` log emits first 10 chars of bot token + user ID. |
-| `workspace-setup-write-all-swallow` | #5585 | Medium | Error handling | `workspace_setup.rs` silently swallows `write_all` failures; corrupted agent files become permanent. |
+| `audit-log-cap-only-on-trim-interval` | #5665 | Low | DoS | `AuditLog::record` — pojemność sprawdzana tylko w interwale przycinania. **DISPUTED** — istnieje twardy limit `MAX_AUDIT_ENTRIES = 10_000`. |
+| `data-layer-rule-clean` | #5666 | Low | Dashboard | Skonsolidowane: linia bazowa warstwy danych, luka `commsKeys lists()`, surowy `localStorage`, fokus modalu. |
+| `i18n-escapeValue-false` | #5561 | Medium | Dashboard | `escapeValue: false` + `dangerouslySetInnerHTML` = ryzyko XSS; obejmuje też rozbieżność kluczy magazynu i brakujące znaczniki unieważnienia. |
+| `phf-generator-old-rand` | #5667 | Low | Łańcuch dostaw / Build | Skonsolidowane: `phf_generator 0.8` pinuje `rand 0.7.3`, `proc-macro-error` przez GTK, `tokio = ["full"]` w workspace, `pnpm audit` ignoruje, shims w `build.rs`, rozrost wersji. |
+| `rustfmt-loses-spaced-paths` | #5664 | High | CI / hooks | Skonsolidowane: niecytowany `$STAGED_RS` w pre-commit, luka rezerwowa `sha256sum`, brakujący hook `pre-push`, nieużywany `.secrets.baseline`. |
+| `two-migrate-crates` | #5668 | Low | Architektura | Skonsolidowane: zmiana nazwy crate wykonana (`librefang-import`), nieaktualne pliki `CLAUDE.md`, nakładanie się `xtask` vs `justfile`. |
+| `wechat-bot-token-prefix-debug-log` | #5543 | Medium | Sekrety | Log `debug!` WeChat wysyła pierwsze 10 znaków tokena bota + ID użytkownika. |
+| `workspace-setup-write-all-swallow` | #5585 | Medium | Obsługa błędów | `workspace_setup.rs` cicho połyka awarie `write_all`; uszkodzone pliki agenta stają się trwałe. |
 
-## Triage Priority
+## Priorytet triażu
 
-The triage order in `INDEX.md` defines remediation sequence across both passes:
+Kolejność triażu w `INDEX.md` określa sekwencję napraw w obu turach:
 
-**Pass 1 (items 1–6):**
-1. `api-error-generic-missing-fluent-key` — one-liner per locale, restores diagnostics for 41 endpoints.
-2. `ssrf-attachment-urls` + `skill-install-path-traversal` — concrete exploit paths.
-3. `state-secret-default-random` — silently breaks multi-replica.
-4. `list-sessions-decode-on-poll` + `audit-export-401` — single-line fixes, immediate user impact.
-5. `write-secret-env-toctou` + `dashboard-login-logs-phc-hash` — secret hygiene.
-6. `openapi-paths-incomplete` + `config-reload-coverage` — reflection tests block regression classes.
+**Tura 1 (pozycje 1–6):**
+1. `api-error-generic-missing-fluent-key` — jednowierszówka na lokalizację, przywraca diagnostykę dla 41 punktów końcowych.
+2. `ssrf-attachment-urls` + `skill-install-path-traversal` — konkretne ścieżki eksploitacji.
+3. `state-secret-default-random` — cicho psuje wieloreplikowe wdrożenia.
+4. `list-sessions-decode-on-poll` + `audit-export-401` — naprawy jednowierszowe, bezpośredni wpływ na użytkownika.
+5. `write-secret-env-toctou` + `dashboard-login-logs-phc-hash` — higiena sekretów.
+6. `openapi-paths-incomplete` + `config-reload-coverage` — testy odbicia blokują klasy regresji.
 
-**Pass 2 (items 7–14):**
-7. OAuth token plaintext leaks (`oauth-refresh-error-body-token-leak`, `oauth-tokens-derive-debug-serialize`).
-8. `sqlite-file-permissions` — one-line fix, large blast radius.
-9. `agent-cascade-delete-missing-tables` — bearer-token replay against deleted agents.
-10. `comms-send-impersonation` — privilege boundary.
-11. `shell-meta-double-quote-bypass` — allowlist regression.
-12. `channel-bridge-bypasses-lane-semaphore` — DoS amplifier.
-13. `upload-route-bypasses-body-limit` — trivial RAM exhaustion.
-14. `trigger-engine-no-per-agent-cap` — DoS at manifest layer.
+**Tura 2 (pozycje 7–14):**
+7. Wycieki tekstu jawnego tokenów OAuth (`oauth-refresh-error-body-token-leak`, `oauth-tokens-derive-debug-serialize`).
+8. `sqlite-file-permissions` — naprawa jednowierszowa, duży zasięg.
+9. `agent-cascade-delete-missing-tables` — powtórka bearer-tokena wobec usuniętych agentów.
+10. `comms-send-impersonation` — granica uprawnień.
+11. `shell-meta-double-quote-bypass` — regresja allowlisty.
+12. `channel-bridge-bypasses-lane-semaphore` — wzmacniacz DoS.
+13. `upload-route-bypasses-body-limit` — trywialne wyczerpanie RAM.
+14. `trigger-engine-no-per-agent-cap` — DoS na warstwie manifestów.
 
-## Working with This Directory
+## Praca z tym katalogiem
 
-### Finding a resolved issue
+### Znajdowanie rozwiązanych zgłoszeń
 
-Resolved findings have no `.md` file. Use one of:
+Rozwiązane ustalenia nie mają pliku `.md`. Użyj jednej z metod:
 
 ```bash
-# Search closed GitHub issues by slug keyword
+# Wyszukaj zamknięte zgłoszenia na GitHubie wg słowa kluczowego sluga
 gh issue list --state closed --search "<slug-fragment>"
 
-# Find the commit that deleted the file
+# Znajdź commit, który usunął plik
 git log -- docs/issues/<slug>.md
 ```
 
-### Adding a new finding
+### Dodawanie nowego ustalenia
 
-1. Create `{slug}.md` using the standard field set above.
-2. Add an entry to the appropriate severity/domain section in `INDEX.md`.
-3. Update the active findings table and the severity rollup counts.
-4. Open a GitHub issue and cross-reference it in the file and the table.
+1. Utwórz `{slug}.md` używając standardowego zestawu pól opisanego powyżej.
+2. Dodaj wpis do odpowiedniej sekcji krytyczności/domeny w `INDEX.md`.
+3. Zaktualizuj tabelę aktywnych ustaleń oraz zestawienie liczb krytyczności.
+4. Otwórz zgłoszenie na GitHubie i powiąż je w pliku oraz w tabeli.
 
-### Resolving a finding
+### Rozwiązywanie ustalenia
 
-1. Delete the `.md` file.
-2. Move its row from the active findings table to the historical listing (the link will be broken by design — the link text is the record).
-3. Decrement the active count in the status header and the severity rollup.
+1. Usuń plik `.md`.
+2. Przenieś jego wiersz z tabeli aktywnych ustaleń do listy historycznej (link będzie celowo niedziałający — tekst linku jest rekordem).
+3. Zmniejsz liczbę aktywnych w nagłówku statusu oraz w zestawieniu krytyczności.
 
-### Disputing a finding
+### Kwestionowanie ustalenia
 
-If a re-audit shows the original premise is wrong, do not silently delete the file. Add a `**Verification:** DISPUTED.` line at the top with the corrected analysis, and leave the file in place until the team agrees on resolution. The `audit-log-cap-only-on-trim-interval` finding is an example of this state.
+Jeśli ponowny audyt wykaże, że pierwotna przesłanka jest błędna, nie usuwaj pliku po cichu. Dodaj wiersz `**Verification:** DISPUTED.` na górze z poprawioną analizą i zostaw plik na miejscu, dopóki zespół nie zgodzi się na rozwiązanie. Ustalenie `audit-log-cap-only-on-trim-interval` jest przykładem tego stanu.

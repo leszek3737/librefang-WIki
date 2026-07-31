@@ -1,179 +1,179 @@
 # nix
 
-# `services.librefang` — NixOS Module
+# `services.librefang` — Moduł NixOS
 
-The `nixos-module.nix` file defines the `services.librefang` NixOS module for running the LibreFang agent operating system daemon as a systemd service. It covers user/group provisioning, state directory management, systemd unit generation with security hardening, and a set of evaluation-time assertions that catch misconfigurations before they can cause runtime failures.
-
----
-
-## Importing
-
-There are two supported import paths:
-
-**Via the flake (recommended):** Import `nixosModules.default` or `nixosModules.librefang`. The flake wrapper sets `services.librefang.package` to the flake's own `librefang-cli` build with `lib.mkDefault`, so no further package wiring is needed.
-
-**Direct import (vendored / non-flake):** Import this file directly, but ensure `overlays.default` is applied to the package set so that `pkgs.librefang-cli` is in scope. The module's `package` option defaults to `pkgs.librefang-cli`, and without the overlay that attribute does not exist — evaluation will throw an error with guidance on how to fix it.
-
-The package is **not** passed as a `_module.args` argument. This is deliberate: the module system resolves module arguments through `config._module.args` and ignores a Nix-level default on the parameter, so a `librefangPackages ? { }` default would fail outright on the direct-import path rather than falling back silently.
+Plik `nixos-module.nix` definiuje moduł NixOS `services.librefang` do uruchamiania demona systemu operacyjnego agenta LibreFang jako usługi systemd. Obejmuje tworzenie użytkownika/grupy, zarządzanie katalogiem stanu, generowanie jednostki systemd z zabezpieczeniami oraz zestaw asercji w czasie ewaluacji, które wyłapują błędne konfiguracje, zanim mogą spowodować błędy w czasie działania.
 
 ---
 
-## Options
+## Importowanie
 
-| Option | Type | Default | Description |
+Obsługiwane są dwie ścieżki importu:
+
+**Przez flake (zalecane):** Zaimportuj `nixosModules.default` lub `nixosModules.librefang`. Wrapper flake ustawia `services.librefang.package` na własną kompilację `librefang-cli` flake za pomocą `lib.mkDefault`, więc nie jest potrzebne dodatkowe podłączanie pakietu.
+
+**Import bezpośredni (vendored / bez flake):** Zaimportuj ten plik bezpośrednio, ale upewnij się, że `overlays.default` jest zastosowane do zestawu pakietów, aby `pkgs.librefang-cli` było w zasięgu. Opcja `package` modułu domyślnie przyjmuje wartość `pkgs.librefang-cli`, a bez overlaya ten atrybut nie istnieje — ewaluacja rzuci błąd z instrukcją, jak to naprawić.
+
+Pakiet **nie jest** przekazywany jako argument `_module.args`. Jest to celowe: system modułów rozwiązuje argumenty modułów przez `config._module.args` i ignoruje domyślą wartość na poziomie Nix dla parametru, więc domyślna wartość `librefangPackages ? { }` niepotrzebnie zawiesiłaby się na ścieżce importu bezpośredniego zamiast milcząco fallbackować.
+
+---
+
+## Opcje
+
+| Opcja | Typ | Domyślna wartość | Opis |
 |---|---|---|---|
-| `enable` | bool | `false` | Enables the service. |
-| `package` | package | `pkgs.librefang-cli` | Package providing the `librefang` binary. Throws if the attribute is missing. |
-| `port` | port | `4545` | TCP port for the API server and dashboard. Exported as `LIBREFANG_LISTEN=127.0.0.1:<port>`. |
-| `openFirewall` | bool | `false` | Opens `port` in the host firewall. Only useful with a non-loopback bind (see below). |
-| `user` | string | `"librefang"` | Service user. Declared automatically only at the default value. |
-| `group` | string | `"librefang"` | Service group. Declared automatically only at the default value. |
-| `stateDir` | path | `/var/lib/librefang` | Directory holding all daemon state. Exported as `LIBREFANG_HOME`. |
-| `environmentFile` | null or path | `null` | Path to a systemd `EnvironmentFile` for secrets. Must not be a Nix store path. |
-| `extraEnvironment` | attrs of string | `{}` | Extra environment variables for the unit. Not for secrets. |
-| `authConfiguredExternally` | bool | `false` | Escape hatch for asserting auth is configured in `config.toml`. |
+| `enable` | bool | `false` | Włącza usługę. |
+| `package` | package | `pkgs.librefang-cli` | Pakiet dostarczający binarkę `librefang`. Rzuca błąd, jeśli atrybut nie istnieje. |
+| `port` | port | `4545` | Port TCP dla serwera API i dashboardu. Eksportowany jako `LIBREFANG_LISTEN=127.0.0.1:<port>`. |
+| `openFirewall` | bool | `false` | Otwiera `port` w zaporze hosta. Przydatne tylko przy bindowaniu na adresie innym niż loopback (patrz niżej). |
+| `user` | string | `"librefang"` | Użytkownik usługi. Deklarowany automatycznie tylko przy wartości domyślnej. |
+| `group` | string | `"librefang"` | Grupa usługi. Deklarowana automatycznie tylko przy wartości domyślnej. |
+| `stateDir` | path | `/var/lib/librefang` | Katalog przechowujący cały stan demona. Eksportowany jako `LIBREFANG_HOME`. |
+| `environmentFile` | null lub path | `null` | Ścieżka do pliku `EnvironmentFile` systemd dla sekretów. Nie może być ścieżką w sklepie Nix. |
+| `extraEnvironment` | attrs of string | `{}` | Dodatkowe zmienne środowiskowe dla jednostki. Nieprzeznaczone dla sekretów. |
+| `authConfiguredExternally` | bool | `false` | Furtka awaryjna dla asercji, że autoryzacja jest skonfigurowana w `config.toml`. |
 
-### Listen address
+### Adres nasłuchiwania
 
-The module binds the daemon to loopback (`127.0.0.1:<port>`) by default. The bind address is controlled by `LIBREFANG_LISTEN`, not by a generated `config.toml` — the daemon writes that file itself (during MCP migration and through API/dashboard config edits), so the module never manages it. An operator can override the bind to a routable address through `extraEnvironment.LIBREFANG_LISTEN`, but a non-loopback bind requires authentication to be configured or the daemon will refuse to start.
+Moduł bindowuje demona na loopback (`127.0.0.1:<port>`) domyślnie. Adres bindowania jest kontrolowany przez `LIBREFANG_LISTEN`, a nie przez generowany `config.toml` — demon sam zapisuje ten plik (podczas migracji MCP i przez edycje konfiguracji w API/dashboardzie), więc moduł nim nigdy nie zarządza. Operator może nadpisać bindowanie na adres routowalny przez `extraEnvironment.LIBREFANG_LISTEN`, ale bindowanie na adres inny niż loopback wymaga skonfigurowania autoryzacji, w przeciwnym razie demon odmówi uruchomienia.
 
-### State directory
+### Katalog stanu
 
-`stateDir` becomes `LIBREFANG_HOME`, which the daemon reads ahead of the user's home directory. The directory must be dedicated to LibreFang and have no trailing slash.
+`stateDir` staje się `LIBREFANG_HOME`, które demon odczytuje przed katalogiem domowym użytkownika. Katalog musi być dedykowany dla LibreFang i nie może mieć końcowego ukośnika.
 
-- **Under `/var/lib`** (the default): Managed by systemd's `StateDirectory=` directive, which handles creation and ownership.
-- **Anywhere else**: Created by a `systemd.tmpfiles.rules` entry chowned to the service user, and declared in `ReadWritePaths=` since `ProtectSystem=strict` mounts the filesystem read-only outside the declared write set.
+- **Pod `/var/lib`** (domyślnie): Zarządzany przez dyrektywę systemd `StateDirectory=`, która obsługuje tworzenie i własność.
+- **Gdzie indziej**: Tworzony przez wpis `systemd.tmpfiles.rules` z chown na użytkownika usługi i zadeklarowany w `ReadWritePaths=`, ponieważ `ProtectSystem=strict` montuje system plików jako tylko-do-odczytu poza zadeklarowanym zbiorem ścieżek do zapisu.
 
-### Secrets
+### Sekrety
 
-Provider API keys and other secrets go in `environmentFile`, pointing at a file produced out-of-band (e.g., `sops-nix`, `agenix`, or a manually installed file under `/run` or `/etc`). The module rejects Nix store paths for this option, because the store is world-readable. systemd reads the file as root before dropping privileges, so it can be mode `0400`.
+Klucze API dostawców i inne sekrety umieszcza się w `environmentFile`, wskazującym plik utworzony poza pasmem (np. `sops-nix`, `agenix` lub ręcznie zainstalowany plik pod `/run` lub `/etc`). Moduł odrzuca ścieżki ze sklepu Nix dla tej opcji, ponieważ sklep jest world-readable. systemd odczytuje plik jako root przed zrzuceniem uprawnień, więc plik może mieć prawa `0400`.
 
-Do **not** put secrets in `extraEnvironment` — unit environment blocks end up in the world-readable Nix store.
+**Nie umieszczaj** sekretów w `extraEnvironment` — bloki środowiskowe jednostek trafiają do world-readable sklepu Nix.
 
 ---
 
-## Systemd Service
+## Usługa systemd
 
-The module generates `systemd.services.librefang` with the following characteristics:
+Moduł generuje `systemd.services.librefang` o następujących cechach:
 
 ```mermaid
 flowchart TD
-    A["systemd starts unit"] --> B["ExecStart: librefang start --foreground"]
-    B --> C{"First start?"}
-    C -->|Yes| D["librefang init<br/>creates config.toml, data/,"]
-    D --> E["init_git_if_missing<br/>spawns git in state dir"]
-    C -->|No| E
-    E --> F["run_daemon<br/>binds API on LIBREFANG_LISTEN"]
-    F --> G["ACP bridge on<br/>stateDir/acp.sock"]
-    F --> H["MCP migrator<br/>rewrites config.toml if needed"]
+    A["systemd uruchamia jednostkę"] --> B["ExecStart: librefang start --foreground"]
+    B --> C{"Pierwsze uruchomienie?"}
+    C -->|Tak| D["librefang init<br/>tworzy config.toml, data/,"]
+    D --> E["init_git_if_missing<br/>uruchamia git w katalogu stanu"]
+    C -->|Nie| E
+    E --> F["run_daemon<br/>bindowanie API na LIBREFANG_LISTEN"]
+    F --> G["ACP bridge na<br/>stateDir/acp.sock"]
+    F --> H["MCP migrator<br/>nadpisuje config.toml jeśli potrzeba"]
 ```
 
-### Key unit properties
+### Kluczowe właściwości jednostki
 
-- **`Type = "exec"`** — systemd reports failure when the binary cannot be executed. Not `notify` (the daemon never calls `sd_notify`), and not `forking` (no PID file).
+- **`Type = "exec"`** — systemd zgłasza błąd, gdy binarki nie można wykonać. Nie `notify` (demon nigdy nie wywołuje `sd_notify`) i nie `forking` (brak pliku PID).
 
-- **`--foreground` flag** — The module invokes `librefang start --foreground` because the bare `librefang start` forks: it re-execs itself with `--spawned`, calls `libc::setsid()`, and the parent exits after a health poll. systemd would see the main process exit and tear down the setsid'd child. `--foreground` keeps the process in the foreground for the unit's lifetime.
+- **Flaga `--foreground`** — Moduł wywołuje `librefang start --foreground`, ponieważ goły `librefang start` forkuje: re-execuje sam siebie z `--spawned`, wywołuje `libc::setsid()`, a proces rodzic kończy się po sondzie zdrowia. systemd zobaczyłby zakończenie głównego procesu i rozebrał dziecko zestid. `--foreground` utrzymuje proces na pierwszym planie przez czas życia jednostki.
 
-- **`path = [ pkgs.git ]`** — On every boot, the daemon's `init_git_if_missing` spawns `git` by bare name to version-control the state directory. systemd units do not inherit the system profile's `PATH`, so `git` must be declared explicitly.
+- **`path = [ pkgs.git ]`** — Przy każdym uruchomieniu, `init_git_if_missing` demona uruchamia `git` po samej nazwie, aby objąć katalog stanu kontrolą wersji. Jednostki systemd nie dziedziczą `PATH` profilu systemowego, więc `git` musi być zadeklarowany jawnie.
 
-- **`EnvironmentFile`** — Only the operator-supplied file. The daemon's foreground path also loads `<home>/secrets.env` into its own process environment before building the tokio runtime, so dashboard-saved keys survive restarts without a second `EnvironmentFile` directive.
+- **`EnvironmentFile`** — Tylko plik dostarczony przez operatora. Ścieżka foreground demona ładuje również `<home>/secrets.env` do własnego środowiska procesu przed budową runtime'u tokio, więc klucze zapisane przez dashboard przetrwają restarty bez drugiej dyrektywy `EnvironmentFile`.
 
-### Environment variables set by the module
+### Zmienne środowiskowe ustawiane przez moduł
 
-| Variable | Value | Rationale |
+| Zmienna | Wartość | Uzasadnienie |
 |---|---|---|
-| `LIBREFANG_HOME` | `stateDir` | The daemon's `librefang_home()` reads this before the user's home directory. Without it, the daemon resolves `<home>/.librefang`. |
-| `HOME` | `stateDir` | `dirs::home_dir()` reads `$HOME` before consulting the passwd entry. The first-start `librefang init` path exits 1 when home is `None`. |
-| `LIBREFANG_LISTEN` | `127.0.0.1:<port>` | The actual bind address the daemon uses. |
+| `LIBREFANG_HOME` | `stateDir` | `librefang_home()` demona odczytuje to przed katalogiem domowym użytkownika. Bez tego demon rozwiązuje `<home>/.librefang`. |
+| `HOME` | `stateDir` | `dirs::home_dir()` odczytuje `$HOME` przed konsultacją wpisu passwd. Ścieżka pierwszego uruchomienia `librefang init` kończy się kodem 1, gdy home to `None`. |
+| `LIBREFANG_LISTEN` | `127.0.0.1:<port>` | Faktyczny adres bindowania używany przez demona. |
 
-These are merged **before** `extraEnvironment`, so operator overrides take precedence (except `LIBREFANG_HOME`, which has a dedicated assertion preventing override).
+Są one scalane **przed** `extraEnvironment`, więc nadpisania operatora mają priorytet (z wyjątkiem `LIBREFANG_HOME`, które ma dedykowaną asercję zapobiegającą nadpisaniu).
 
 ---
 
-## Security Hardening
+## Zabezpieczenia
 
-The unit applies the following systemd security directives:
+Jednostka stosuje następujące dyrektywy bezpieczeństwa systemd:
 
-| Directive | Value | Notes |
+| Dyrektywa | Wartość | Uwagi |
 |---|---|---|
 | `NoNewPrivileges` | `true` | |
-| `ProtectSystem` | `strict` | Filesystem is read-only except declared write paths. |
-| `ProtectHome` | `true` | Makes `/home`, `/root`, `/run/user` inaccessible. This forecloses BYO-CLI credential discovery (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.qwen`) — those provider keys must come through `environmentFile` instead. |
+| `ProtectSystem` | `strict` | System plików jest tylko-do-odczytu z wyjątkiem zadeklarowanych ścieżek zapisu. |
+| `ProtectHome` | `true` | Uczyń `/home`, `/root`, `/run/user` niedostępnymi. To uniemożliwia odkrywanie danych logowania BYO-CLI (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.qwen`) — te klucze dostawców muszą pochodzić z `environmentFile`. |
 | `PrivateTmp` | `true` | |
 | `ProtectKernelTunables` | `true` | |
 | `ProtectKernelModules` | `true` | |
 | `ProtectControlGroups` | `true` | |
 | `RestrictSUIDSGID` | `true` | |
 | `RestrictRealtime` | `true` | |
-| `MemoryDenyWriteExecute` | `false` | Deliberately off — the WASM plugin sandbox needs writable-executable pages. |
-| `RestrictAddressFamilies` | `AF_INET AF_INET6 AF_UNIX` | The API server binds TCP; the ACP bridge binds a unix socket at `<home>/acp.sock`. All three families are load-bearing. |
+| `MemoryDenyWriteExecute` | `false` | Celowo wyłączone — sandbox wtyczek WASM potrzebuje stron zapisywalnych i wykonywalnych. |
+| `RestrictAddressFamilies` | `AF_INET AF_INET6 AF_UNIX` | Serwer API bindowanie TCP; ACP bridge bindowanie gniazda unixa na `<home>/acp.sock`. Wszystkie trzy rodziny są niezbędne. |
 | `LimitNOFILE` | `65536` | |
 | `LimitNPROC` | `4096` | |
 
-Most of these mirror the hand-written reference unit at `deploy/librefang.service`, keeping the two comparable.
+Większość z nich odzwierciedla ręcznie napisaną jednostkę referencyjną w `deploy/librefang.service`, utrzymując porównywalność obu.
 
 ---
 
-## Assertions
+## Asercje
 
-The module performs five evaluation-time checks:
+Moduł wykonuje pięć sprawdzeń w czasie ewaluacji:
 
-### 1. Environment file not in the Nix store
-Rejects `environmentFile` paths under `builtins.storeDir`. The store is world-readable; secrets must come from outside it.
+### 1. Plik środowiskowy nie w sklepie Nix
+Odrzuca ścieżki `environmentFile` pod `builtins.storeDir`. Sklep jest world-readable; sekrety muszą pochodzić spoza niego.
 
-### 2. Non-loopback bind requires authentication
-A non-loopback `LIBREFANG_LISTEN` must be paired with one of:
-- An `environmentFile` (dashboard credentials: `LIBREFANG_DASHBOARD_USER` / `LIBREFANG_DASHBOARD_PASS`)
-- `authConfiguredExternally = true` (auth pre-existing in `config.toml`)
-- `LIBREFANG_ALLOW_NO_AUTH` set to one of `"1"`, `"true"`, `"TRUE"`, `"yes"`, `"on"`
+### 2. Bindowanie non-loopback wymaga autoryzacji
+Non-loopback `LIBREFANG_LISTEN` musi być sparowane z jednym z:
+- Plik `environmentFile` (dane logowania dashboardu: `LIBREFANG_DASHBOARD_USER` / `LIBREFANG_DASHBOARD_PASS`)
+- `authConfiguredExternally = true` (autoryzacja pre-istniejąca w `config.toml`)
+- `LIBREFANG_ALLOW_NO_AUTH` ustawione na jedną z wartości `"1"`, `"true"`, `"TRUE"`, `"yes"`, `"on"`
 
-This mirrors the daemon's own `check_bind_auth_safety` / `any_auth_configured` check at boot. Note that no environment variable feeds `api_key` — it is read from `config.toml` only — so provider-only environment files do not satisfy the auth requirement.
+To odzwierciedla własne sprawdzenie demona `check_bind_auth_safety` / `any_auth_configured` przy starcie. Zauważ, że żadna zmienna środowiskowa nie dostarcza `api_key` — jest on odczytywany tylko z `config.toml` — więc pliki środowiskowe z samymi kluczami dostawców nie spełniają wymogu autoryzacji.
 
-### 3. State directory must be dedicated and have a real name
-Rejects trailing slashes (which would make `StateDirectory=` empty and cause systemd to refuse unit load) and shared FHS parents (`/var`, `/var/lib`, `/srv`, `/opt`, `/etc`, `/usr`, `/home`) that would be chowned to the service user by the tmpfiles rule.
+### 3. Katalog stanu musi być dedykowany i mieć prawdziwą nazwę
+Odrzuca końcowe ukośniki (które uczyniłyby `StateDirectory=` pustym i spowodowałyby odmowę załadowania jednostki przez systemd) oraz współdzielonych rodziców FHS (`/var`, `/var/lib`, `/srv`, `/opt`, `/etc`, `/usr`, `/home`), którzy zostaliby chownowani na użytkownika usługi przez regułę tmpfiles.
 
-### 4. State directory not under `ProtectHome` trees
-Rejects paths under `/home`, `/root`, and `/run/user` — `ProtectHome = true` makes these inaccessible and empty for the unit's processes.
+### 4. Katalog stanu nie pod drzewami `ProtectHome`
+Odrzuca ścieżki pod `/home`, `/root` i `/run/user` — `ProtectHome = true` czyni je niedostępnymi i pustymi dla procesów jednostki.
 
-### 5. No `LIBREFANG_HOME` in `extraEnvironment`
-Prevents desynchronization between `LIBREFANG_HOME`, `StateDirectory`, and `ReadWritePaths`.
-
----
-
-## Warnings
-
-The module emits warnings for:
-
-- **`openFirewall` with loopback bind**: The firewall hole reaches nothing because the daemon is bound to loopback. Suggests overriding `LIBREFANG_LISTEN` or disabling `openFirewall`.
-
-- **Non-default `user`**: The module does not declare the account. The operator must define `users.users.<name>` with `home` set to `stateDir`, because the first-start `librefang init` path exits 1 when `dirs::home_dir()` resolves to `None`.
-
-- **Non-default `group`**: The module does not declare the group. The operator must define `users.groups.<name>`.
-
-- **`LIBREFANG_ALLOW_NO_AUTH` with loopback bind**: The opt-out has no effect on loopback. Removing it keeps a later bind change failing loudly rather than silently running open.
+### 5. Brak `LIBREFANG_HOME` w `extraEnvironment`
+Zapobiega desynchronizacji między `LIBREFANG_HOME`, `StateDirectory` i `ReadWritePaths`.
 
 ---
 
-## User and Group Provisioning
+## Ostrzeżenia
 
-The module declares `users.users.librefang` and `users.groups.librefang` **only** when `user` and `group` are left at their defaults. The system user has:
+Moduł emituje ostrzeżenia dla:
+
+- **`openFirewall` przy bindowaniu loopback**: Otwór w zaporze niczego nie osiąga, ponieważ demon jest zbindowany na loopback. Sugeruje nadpisanie `LIBREFANG_LISTEN` lub wyłączenie `openFirewall`.
+
+- **Niedomyślny `user`**: Moduł nie deklaruje konta. Operator musi zdefiniować `users.users.<name>` z `home` ustawionym na `stateDir`, ponieważ ścieżka pierwszego uruchomienia `librefang init` kończy się kodem 1, gdy `dirs::home_dir()` rozwiązuje się do `None`.
+
+- **Niedomyślny `group`**: Moduł nie deklaruje grupy. Operator musi zdefiniować `users.groups.<name>`.
+
+- **`LIBREFANG_ALLOW_NO_AUTH` przy bindowaniu loopback**: Wyłączenie nie ma efektu przy loopback. Usunięcie go sprawia, że późniejsza zmiana bindowania zawiedzie głośno zamiast milcząco działać otwarcie.
+
+---
+
+## Tworzenie użytkownika i grupy
+
+Moduł deklaruje `users.users.librefang` i `users.groups.librefang` **tylko** gdy `user` i `group` pozostają przy wartościach domyślnych. Użytkownik systemowy ma:
 
 - `isSystemUser = true`
-- `home = stateDir` (critical for `librefang init`, which resolves `dirs::home_dir()`)
-- `createHome = false` (the state directory is managed by `StateDirectory=` or tmpfiles)
+- `home = stateDir` (krytyczne dla `librefang init`, które rozwiązuje `dirs::home_dir()`)
+- `createHome = false` (katalog stanu jest zarządzany przez `StateDirectory=` lub tmpfiles)
 
-Changing `user` or `group` to any other value shifts full responsibility for account/group declaration to the operator.
+Zmiana `user` lub `group` na inną wartość przenosi pełną odpowiedzialność za deklarację konta/grupy na operatora.
 
 ---
 
-## Relationship to Daemon Internals
+## Relacja z wewnętrznymi mechanizmami demona
 
-The module is designed around the daemon's actual runtime behavior, not around generating config files:
+Moduł jest zaprojektowany wokół rzeczywistego zachowania demona w czasie działania, a nie wokół generowania plików konfiguracji:
 
-- **No `config.toml` management**: The daemon writes `config.toml` itself during MCP migration (`mcp_migrate.rs`, reached from `kernel/boot.rs`) and through atomic writes in several API handlers (config management, budget, providers). A read-only store path would break both paths.
+- **Brak zarządzania `config.toml`**: Demon sam zapisuje `config.toml` podczas migracji MCP (`mcp_migrate.rs`, osiągalnej z `kernel/boot.rs`) oraz poprzez atomowe zapisy w kilku handlerach API (zarządzanie konfiguracją, budżet, dostawcy). Ścieżka only-do-odczytu w sklepie Nix zepsułaby obie ścieżki.
 
-- **`LIBREFANG_LISTEN` as the bind interface**: `KernelConfig::default()` starts from `DEFAULT_API_LISTEN = "127.0.0.1:4545"`, and `Kernel::boot_with_config` overrides `config.api_listen` from `LIBREFANG_LISTEN` when set. `cmd_start` passes the booted kernel's `api_listen` to `run_daemon`. The environment variable — not a config file — is the supported way for a unit to pin the port.
+- **`LIBREFANG_LISTEN` jako interfejs bindowania**: `KernelConfig::default()` zaczyna od `DEFAULT_API_LISTEN = "127.0.0.1:4545"`, a `Kernel::boot_with_config` nadpisuje `config.api_listen` z `LIBREFANG_LISTEN` gdy jest ustawione. `cmd_start` przekazuje `api_listen` uruchomionego kernela do `run_daemon`. Zmienna środowiskowa — a nie plik konfiguracji — jest obsługiwanym sposobem przypięcia portu przez jednostkę.
 
-- **Graceful shutdown**: `run_daemon` installs a shutdown future listening for `SIGTERM`/`SIGINT`, so systemd's default `KillSignal=SIGTERM` is correct without explicit configuration.
+- **Graceful shutdown**: `run_daemon` instaluje future zamykania nasłuchujące `SIGTERM`/`SIGINT`, więc domyślne `KillSignal=SIGTERM` systemd jest poprawne bez jawnej konfiguracji.
 
-- **Git in the state dir**: `init_git_if_missing` spawns `git` on every boot to version-control the state directory, hence `path = [ pkgs.git ]` on the unit.
+- **Git w katalogu stanu**: `init_git_if_missing` uruchamia `git` przy każdym starcie, aby objąć katalog stanu kontrolą wersji, stąd `path = [ pkgs.git ]` na jednostce.

@@ -1,69 +1,67 @@
 # docs — public
 
-# docs — public
+Moduł `docs/public` zawiera konfigurację hostingu statycznego dla witryny dokumentacji. Głównym artefaktem jest plik `_redirects`, który wymusza wstecznie kompatybilne routowanie URL po reorganizacji dokumentacji z kwietnia 2026 r., kiedy to wszystkie strony zostały przeniesione z płaskich ścieżek URL do hierarchicznej struktury opartej na grupach.
 
-The `docs/public` module contains static hosting configuration for the documentation site. Its primary artifact is the `_redirects` file, which enforces backward-compatible URL routing after the 2026-04 documentation restructure that migrated all pages from flat URL paths to a hierarchical, group-based hierarchy.
+## Przeznaczenie
 
-## Purpose
+Przed reorganizacją strony dokumentacji znajdowały się pod płaskimi ścieżkami najwyższego poziomu (np. `/hands`, `/memory`, `/providers`). Nowa architektura informacyjna organizuje treść w grupy tematyczne:
 
-Before the restructure, documentation pages lived at flat top-level paths (e.g. `/hands`, `/memory`, `/providers`). The new information architecture organizes content into thematic groups:
+- **Getting Started** — materiały wprowadzające i onboardingowe
+- **Configuration** — konfiguracja i ustawienia dostawców
+- **Architecture** — projekt systemu i bezpieczeństwo
+- **Agent** — wnętrzności agenta: hands, pamięć, umiejętności, wtyczki, szablony, prompt intelligence, workflows
+- **Integrations** — kanały, API, SDK, CLI, MCP/A2A, desktop, migracja, narzędzia deweloperskie
+- **Operations** — rozwiązywanie problemów, wytyczne produkcyjne, FAQ
 
-- **Getting Started** — introductory and onboarding material
-- **Configuration** — provider setup and configuration
-- **Architecture** — system design and security
-- **Agent** — agent internals: hands, memory, skills, plugins, templates, prompt intelligence, workflows
-- **Integrations** — channels, API, SDK, CLI, MCP/A2A, desktop, migration, development tooling
-- **Operations** — troubleshooting, production guidance, FAQ
+Plik `_redirects` zapewnia, że każdy URL sprzed reorganizacji — w tym ścieżki z symbolami wieloznacznymi — przekierowuje do nowej lokalizacji za pomocą stałego przekierowania `301`, zachowując linki przychodzące, indeksowanie w wyszukiwarkach oraz zakładki.
 
-The `_redirects` file ensures that every pre-restructure URL — including deep wildcard paths — resolves to its new location with a permanent `301` redirect, preserving inbound links, search indexing, and bookmarks.
+## Jak to działa
 
-## How It Works
-
-The file follows the standard `_redirects` syntax used by static-site hosts (Netlify, Cloudflare Pages, etc.):
+Plik korzysta ze standardowej składni `_redirects` używanej przez hosty stron statycznych (Netlify, Cloudflare Pages itd.):
 
 ```
-/source-path    /destination-path    status-code
+/ścieżka-źródłowa    /ścieżka-docelowa    kod-statusu
 ```
 
-### Redirect rules
+### Reguły przekierowań
 
-| Rule type | Syntax | Behavior |
+| Typ reguły | Składnia | Zachowanie |
 |---|---|---|
-| Exact match | `/hands  /agent/hands  301` | Redirects the single specified path |
-| Wildcard (splat) | `/providers/*  /configuration/providers/:splat  301` | Captures the trailing path segment(s) and appends them to the destination |
+| Dopasowanie dokładne | `/hands  /agent/hands  301` | Przekierowuje pojedynczą, wskazaną ścieżkę |
+| Symbol wieloznaczny (splat) | `/providers/*  /configuration/providers/:splat  301` | Przechwytuje końcowy segment(y) ścieżki i dołącza je do celu |
 
-### Ordering constraint
+### Kolejność reguł
 
-Wildcard splat rules **must** appear after their exact-match counterparts. For example:
+Reguły ze splatem wieloznacznym **muszą** znajdować się po ich dokładnych odpowiednikach. Na przykład:
 
 ```
 /providers            /configuration/providers         301
 /providers/*          /configuration/providers/:splat  301
 ```
 
-If the wildcard rule came first, it would shadow the exact match and the `/providers` (no trailing slash) request would be caught by the splat pattern, producing incorrect routing. This ordering is enforced throughout the file for every group that has both exact and wildcard paths.
+Gdyby reguła ze splatem była pierwsza, zasłoniłaby dopasowanie dokładne, a żądanie `/providers` (bez ukośnika na końcu) zostałoby przechwycone przez wzorzec splat, co prowadziłoby do błędnego routingu. Ta kolejność jest egzekwowana w całym pliku dla każdej grupy posiadającej zarówno ścieżki dokładne, jak i ze splatem.
 
-### Locale handling
+### Obsługa języków (locale)
 
-The file defines a parallel set of rules prefixed with `/zh/` for the Chinese locale. Every English redirect has a corresponding `/zh/` redirect pointing to the equivalent localized path:
+Plik definiuje równoległy zestaw reguł z prefiksem `/zh/` dla języka chińskiego. Każde przekierowanie angielskie ma odpowiedni odpowiednik `/zh/` wskazujący na zlokalizowaną ścieżkę:
 
 ```
 /zh/hands    /zh/agent/hands    301
 ```
 
-The group hierarchy is identical between locales.
+Hierarchia grup jest identyczna między językami.
 
-## URL Group Mapping
+## Mapowanie grup URL
 
 ```mermaid
 graph LR
-    subgraph "Flat (legacy)"
+    subgraph "Płaskie (legacy)"
     A["/agents, /hands, /memory<br/>/skills, /plugins, /workflows"]
     P["/providers, /providers/*"]
     C["/channels, /api, /cli, /sdk"]
     end
 
-    subgraph "Hierarchical (current)"
+    subgraph "Hierarchiczne (bieżące)"
     AG["/agent/*"]
     CF["/configuration/*"]
     IG["/integrations/*"]
@@ -74,21 +72,21 @@ graph LR
     C --> IG
 ```
 
-## Adding or Modifying Redirects
+## Dodawanie lub modyfikowanie przekierowań
 
-When updating this file:
+Podczas aktualizacji tego pliku:
 
-1. **Always use `301`** — these are permanent moves. Search engines and caches need to consolidate link equity at the new URL.
-2. **Place wildcard rules after exact matches** for the same path prefix.
-3. **Update both locales** — if you add or change an English redirect, add or change the `/zh/` counterpart in the same commit.
-4. **Comment your group sections** using the existing `# --- Group Name ---` convention so the file remains scannable.
-5. **Do not remove redirects** unless you have confirmed no inbound traffic or indexed URLs remain for the legacy path.
+1. **Zawsze używaj `301`** — to są stałe przeniesienia. Wyszukiwarki i pamięć podręczna muszą skonsolidować wartość linków pod nowym adresem URL.
+2. **Umieszczaj reguły ze splatem po dopasowaniach dokładnych** dla tego samego prefiksu ścieżki.
+3. **Aktualizuj oba języki** — jeśli dodajesz lub zmieniasz przekierowanie angielskie, dodaj lub zmień odpowiednik `/zh/` w tym samym commicie.
+4. **Komentuj sekcje grup** używając istniejącej konwencji `# --- Nazwa grupy ---`, aby plik pozostał łatwy do przeglądania.
+5. **Nie usuwaj przekierowań** chyba że potwierdzono brak ruchu przychodzącego lub zaindeksowanych URL-i dla ścieżki legacy.
 
-## Key Redirect Groups Reference
+## Zestawienie kluczowych grup przekierowań
 
 ### Getting Started
 
-| Legacy | New |
+| Legacy | Nowy |
 |---|---|
 | `/librefang` | `/getting-started` |
 | `/roadmap` | `/getting-started/roadmap` |
@@ -98,20 +96,20 @@ When updating this file:
 
 ### Configuration
 
-| Legacy | New |
+| Legacy | Nowy |
 |---|---|
 | `/providers` | `/configuration/providers` |
 | `/providers/*` | `/configuration/providers/:splat` |
 
 ### Architecture
 
-| Legacy | New |
+| Legacy | Nowy |
 |---|---|
 | `/security` | `/architecture/security` |
 
 ### Agent
 
-| Legacy | New |
+| Legacy | Nowy |
 |---|---|
 | `/agents` | `/agent/templates` |
 | `/hands` | `/agent/hands` |
@@ -121,11 +119,11 @@ When updating this file:
 | `/prompt-intelligence` | `/agent/prompt-intelligence` |
 | `/workflows` | `/agent/workflows` |
 
-> **Note:** `/agents` (plural) redirects specifically to `/agent/templates`, not to `/agent`. This is an intentional consolidation — the legacy agents index page now lives under the templates sub-section.
+> **Uwaga:** `/agents` (liczba mnoga) przekierowuje konkretnie do `/agent/templates`, a nie do `/agent`. To celowa konsolidacja — legacy strona indeksowa agentów znajduje się teraz w podsekcji szablonów.
 
 ### Integrations
 
-| Legacy | New |
+| Legacy | Nowy |
 |---|---|
 | `/channels`, `/channels/*` | `/integrations/channels`, `/integrations/channels/:splat` |
 | `/api`, `/api/*` | `/integrations/api`, `/integrations/api/:splat` |
@@ -139,14 +137,14 @@ When updating this file:
 
 ### Operations
 
-| Legacy | New |
+| Legacy | Nowy |
 |---|---|
 | `/troubleshooting` | `/operations/troubleshooting` |
 | `/production` | `/operations/production` |
 | `/faq` | `/operations/faq` |
 
-## Integration with the Codebase
+## Integracja z kodem źródłowym
 
-This module is deployment-only configuration. It contains no executable code, no imports, and no runtime dependencies. It is consumed by the static-site host at deploy time and has no relationship to application source modules.
+Ten moduł jest konfiguracją wyłącznie wdrożeniową. Nie zawiera kodu wykonywalnego, importów ani zależności uruchomieniowych. Jest konsumowany przez host strony statycznej w momencie wdrożenia i nie ma związku z modułami źródłowymi aplikacji.
 
-The actual content these redirects point to lives elsewhere in the docs tree under the group directories (`getting-started/`, `agent/`, `integrations/`, etc.). If you reorganize content within those directories, update the destination paths in `_redirects` accordingly — but avoid changing source (legacy) paths, since those are the stable contract with external links.
+Rzeczywista treść, do której prowadzą te przekierowania, znajduje się w innym miejscu drzewa dokumentacji w katalogach grup (`getting-started/`, `agent/`, `integrations/` itd.). Jeśli reorganizujesz treść wewnątrz tych katalogów, zaktualizuj odpowiednio ścieżki docelowe w `_redirects` — ale unikaj zmiany ścieżek źródłowych (legacy), ponieważ stanowią one stabilną umowę z linkami zewnętrznymi.

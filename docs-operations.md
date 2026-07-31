@@ -1,113 +1,113 @@
-# docs — operations
+# docs — operacje
 
-# docs — operations
+# docs — operacje
 
-Operator-facing documentation covering three operational concerns: configuration hot-reload semantics, NixOS deployment, and the release pipeline. These documents are the canonical reference for operators running LibreFang in production and for contributors who maintain the subsystems they describe.
+Dokumentacja przeznaczona dla operatorów, obejmująca trzy obszary operacyjne: semantyka gorącego przeładowania konfiguracji, wdrażanie na NixOS oraz potok wydawania wersji. Te dokumenty stanowią kanoniczne źródło referencyjne dla operatorów uruchamiających LibreFang w środowisku produkcyjnym oraz dla współtwórców utrzymujących opisane podsystemy.
 
-## Purpose
+## Cel
 
-The module exists because each topic it covers has enough non-obvious behavior — silent no-ops, boot-captured values, store-path footguns, split-workflow authentication deltas — that an operator cannot reliably infer the right action from the source code alone. Each document is written to answer a specific operational question *before* the operator has to read Rust or Nix:
+Moduł istnieje, ponieważ każdy poruszany w nim temat zawiera na tyle dużo nieoczywistego zachowania — ciche operacje no-op, wartości przechwytywane przy starcie, pułapki ścieżek store'u, różnice w uwierzytelnianiu między rozdzielonymi przepływami pracy — że operator nie może niezawodnie wywnioskować właściwej akcji na podstawie samego kodu źródłowego. Każdy dokument został napisany, aby odpowiedzieć na konkretne pytanie operacyjne *zanim* operator będzie musiał czytać Rust lub Nix:
 
-| Document | Answers | Primary audience |
+| Dokument | Odpowiada na | Główna grupa odbiorców |
 |---|---|---|
-| `config-reload.md` | "I changed a config field and reloaded — did it take effect, or do I need to restart?" | Operators editing `config.toml` or hitting `POST /api/config` |
-| `nixos.md` | "How do I run LibreFang on NixOS, and what will bite me?" | NixOS administrators |
-| `release.md` | "How do releases ship, and how do I re-run a single target that failed?" | Release maintainers |
+| `config-reload.md` | „Zmieniłem pole konfiguracji i przeładowałem — czy zmiana zadziałała, czy muszę zrestartować?" | Operatorzy edytujący `config.toml` lub wysyłający `POST /api/config` |
+| `nixos.md` | „Jak uruchomić LibreFang na NixOS i na co uważać?" | Administratorzy NixOS |
+| `release.md` | „Jak wydawane są wersje i jak ponownie uruchomić pojedynczy cel, który zawiódł?" | Utrzymujący wydawanie wersji |
 
-## Structure
+## Struktura
 
 ### `config-reload.md`
 
-A single field-by-field classification table for every `KernelConfig` field, transcribed from `build_reload_plan` / `build_reload_plan_with_caps` in `crates/librefang-kernel/src/config_reload.rs`.
+Pojedyncza tabela klasyfikacji pola po polu dla każdego pola `KernelConfig`, przepisana z `build_reload_plan` / `build_reload_plan_with_caps` w `crates/librefang-kernel/src/config_reload.rs`.
 
-**Drift guard.** The table is enforced by a compile-time test — `doc_reload_table_matches_classified_reload_fields` — that fails the build if a field is added to the reload planner but not to the doc, or vice-versa. Any PR that changes a field's classification in `build_reload_plan` must update the table in the same commit.
+**Strażnik rozbieżności.** Tabela jest wymuszana przez test w czasie kompilacji — `doc_reload_table_matches_classified_reload_fields` — który przerywa kompilację, jeśli pole zostało dodane do planera przeładowania, ale nie do dokumentu, lub odwrotnie. Każdy PR zmieniający klasyfikację pola w `build_reload_plan` musi zaktualizować tabelę w tym samym commicie.
 
-**Classification system.** Every field falls into one of three buckets:
+**System klasyfikacji.** Każde pole należy do jednej z trzech kategorii:
 
-- **RequiresRestart (R)** — the value is captured once at boot (into a kernel field, the axum router, a background task, or a cached LLM driver). No hot action rebuilds that consumer. A bare config swap silently no-ops; the operator must restart.
-- **HotReload (H)** — the change emits a `HotAction` that re-initialises the affected subsystem in place (reconnect channels, resize semaphores, flush a cache, RCU a snapshot).
-- **Ignore / noop (N)** — the value is read live from `config_ref()` / `self.config.load()` on every message or request. The ArcSwap config swap makes the edit effective on the next use with no extra action.
+- **RequiresRestart (R)** — wartość jest przechwytywana jednokrotnie przy starcie (do pola jądra, routera axum, zadania w tle lub buforowanego sterownika LLM). Żadna gorąca akcja nie odbudowuje tego konsumenta. Sam swap konfiguracji jest cichym no-opem; operator musi zrestartować.
+- **HotReload (H)** — zmiana emituje `HotAction`, która re-inicjalizuje dotknięty podsystem w miejscu (ponowne łączenie kanałów, zmiana rozmiaru semaforów, opróżnienie pamięci podręcznej, zamiana migawki przez RCU).
+- **Ignore / noop (N)** — wartość jest odczytywana na żywo z `config_ref()` / `self.config.load()` przy każdej wiadomości lub żądaniu. Swap konfiguracji ArcSwap sprawia, że edycja staje się skuteczna przy następnym użyciu bez dodatkowych akcji.
 
-The document also documents three operational gotchas that fall outside the table:
+Dokument opisuje także trzy operacyjne pułapki wykraczające poza tabelę:
 
-1. **Per-agent concurrency caps** (`agent.toml: max_concurrent_invocations`) are not a `KernelConfig` field and need an agent respawn, not a reload.
-2. **`vault:` credential rotation** needs a reload because the vault file (`vault.enc`) is not watched by the config-file mtime poller — only `config.toml` is. `POST /api/config/reload` re-runs the env/`vault:` indirection via `server.rs::refresh_master_credential`.
-3. **`log_level`** is conditionally H or R depending on whether the embedding binary installed a `LogLevelReloader` (see `ReloadCapabilities`).
+1. **Limity współbieżności dla agentów** (`agent.toml: max_concurrent_invocations`) nie są polem `KernelConfig` i wymagają ponownego uruchomienia agenta, a nie przeładowania.
+2. **Rotacja poświadczeń `vault:`** wymaga przeładowania, ponieważ plik vaultu (`vault.enc`) nie jest monitorowany przez sondaż mtime pliku konfiguracji — monitorowany jest tylko `config.toml`. `POST /api/config/reload` ponownie wykonuje przekierowanie env/`vault:` poprzez `server.rs::refresh_master_credential`.
+3. **`log_level`** jest warunkowo H lub R w zależności od tego, czy binaria osadzające zainstalowały `LogLevelReloader` (patrz `ReloadCapabilities`).
 
 ### `nixos.md`
 
-Deployment guide for NixOS, covering four consumption levels: `nix run`, `nix profile install`, overlay, and the `services.librefang` NixOS module (`nix/nixos-module.nix`).
+Przewodnik wdrażania dla NixOS, obejmujący cztery poziomy konsumpcji: `nix run`, `nix profile install`, overlay oraz moduł NixOS `services.librefang` (`nix/nixos-module.nix`).
 
-The document explains several non-obvious design decisions in the module and flake:
+Dokument wyjaśnia kilka nieoczywistych decyzji projektowych w module i flake'u:
 
-- **Why `ExecStart` uses `--foreground`** — `librefang start` without that flag re-execs through `spawn_detached_daemon` and calls `libc::setsid()`, which would cause a `Type=exec` unit's main process to exit and kill the detached child.
-- **Why no `config.toml` is generated** — the daemon writes that file itself (boot-time MCP migrator at `mcp_migrate.rs:383`, atomic config writes from API handlers). A read-only store path would break both paths.
-- **Why `environmentFile` must not be a store path** — Nix store paths are world-readable; the module asserts against Nix path literals to prevent accidental credential exposure.
-- **Why `MemoryDenyWriteExecute` is off** — the WASM plugin sandbox needs writable-executable pages.
-- **Why a `stateDir` under `/home`, `/root`, or `/run/user` fails evaluation** — `ProtectHome=true` makes those trees inaccessible.
+- **Dlaczego `ExecStart` używa `--foreground`** — `librefang start` bez tej flagi ponownie wykonuje przez `spawn_detached_daemon` i wywołuje `libc::setsid()`, co spowodowałoby, że główny proces jednostki `Type=exec` zakończyłby się i zabił odłączonego potomka.
+- **Dlaczego nie generuje się `config.toml`** — demon zapisuje ten plik sam (migrator MCP przy starcie w `mcp_migrate.rs:383`, atomowe zapisy konfiguracji z handlerów API). Tylko do odczytu ścieżka store'u zepsułaby obydwie ścieżki.
+- **Dlaczego `environmentFile` nie może być ścieżką store'u** — ścieżki store'u Nixa są odczytywalne dla wszystkich; moduł asercuje przeciwko literałom ścieżek Nixa, aby zapobiec przypadkowej ekspozycji poświadczeń.
+- **Dlaczego `MemoryDenyWriteExecute` jest wyłączone** — sandbox wtyczek WASM wymaga stron zapisywalno-wykonywalnych.
+- **Dlaczego `stateDir` w katalogach `/home`, `/root` lub `/run/user` powoduje błąd ewaluacji** — `ProtectHome=true` sprawia, że te drzewa są niedostępne.
 
-The document also catalogs past Nix-path breakages (#2937, #3052, #3156, #3197, #6081) and source-filter regressions (#5714, #6547) as institutional memory, since CI does not exercise the Nix path on every PR.
+Dokument kataloguje również dawne awarie ścieżek Nixa (#2937, #3052, #3156, #3197, #6081) i regresje filtrów źródła (#5714, #6547) jako pamięć instytucjonalną, ponieważ CI nie testuje ścieżki Nixa przy każdym PR.
 
 ### `release.md`
 
-Documents the transitional state of the release pipeline after #3304 1/N: a monolithic `release.yml` (~2,500 lines, ~30 jobs) remains the canonical entrypoint, with five `workflow_dispatch`-only split workflows added as scaffolding for a later cutover.
+Dokumentuje stan przejściowy potoku wydawania wersji po #3304 1/N: monolityczny `release.yml` (~2500 linii, ~30 zadań) pozostaje kanonicznym punktem wejścia, z pięcioma rozdzielonymi przepływami pracy `workflow_dispatch`-only dodanymi jako szkielet dla późniejszego przejścia.
 
-The document covers:
+Dokument obejmuje:
 
-- When to use the monolithic path vs. a split workflow for single-target reruns.
-- Authentication deltas: split workflows are wired for OIDC trusted publishing (npm, PyPI) where the monolithic file uses long-lived PATs (`NPM_TOKEN`, `CARGO_REGISTRY_TOKEN`).
-- GitHub environment configuration requirements (required reviewers, wait timers) that must be set manually before the split workflows can be relied upon.
-- A three-phase migration plan from the current scaffolded state through reusable-workflow conversion to the final OIDC cutover.
+- Kiedy używać ścieżki monolitycznej vs rozdzielonego przepływu pracy dla ponownych uruchomień pojedynczego celu.
+- Różnice w uwierzytelnianiu: rozdzielone przepływy pracy są skonfigurowane dla OIDC trusted publishing (npm, PyPI), gdzie monolityczny plik używa długotrwałych PATów (`NPM_TOKEN`, `CARGO_REGISTRY_TOKEN`).
+- Wymagania konfiguracji środowiska GitHub (wymagani recenzenci, timery oczekiwania), które muszą być ustawione ręcznie przed możliwością polegania na rozdzielonych przepływach pracy.
+- Trzyfazowy plan migracji od obecnego stanu szkieletu przez konwersję do przepływów wielokrotnego użytku po ostateczne przejście na OIDC.
 
-## How the docs connect to the codebase
+## Jak dokumenty łączą się z kodem źródłowym
 
 ```mermaid
 graph TD
-    subgraph "Source of truth (code)"
+    subgraph "Źródło prawdy (kod)"
         CR[config_reload.rs<br/>build_reload_plan<br/>classified_reload_fields]
         DRM[doc_reload_table_matches_<br/>classified_reload_fields]
         NIX[nix/nixos-module.nix<br/>flake.nix]
         REL[.github/workflows/<br/>release*.yml]
     end
 
-    subgraph "Documentation"
+    subgraph "Dokumentacja"
         CRD[config-reload.md]
         NIXD[nixos.md]
         RLD[release.md]
     end
 
-    CR -->|"transcribed by"| CRD
-    DRM -.->|"enforces sync"| CRD
-    NIX -->|"describes behavior of"| NIXD
-    REL -->|"documents structure of"| RLD
+    CR -->|"przepisane przez"| CRD
+    DRM -.->|"wymusza synchronizację"| CRD
+    NIX -->|"opisuje zachowanie"| NIXD
+    REL -->|"dokumentuje strukturę"| RLD
 ```
 
-The `config-reload.md` document is uniquely coupled to code: the drift-guard test `doc_reload_table_matches_classified_reload_fields` creates a bidirectional contract. The NixOS and release documents have no automated sync mechanism — they rely on contributor diligence and are therefore more drift-prone.
+Dokument `config-reload.md` jest unikalnie sprzężony z kodem: test strażnika rozbieżności `doc_reload_table_matches_classified_reload_fields` tworzy dwukierunkową umowę. Dokumenty NixOS i wydawania wersji nie mają mechanizmu automatycznej synchronizacji — polegają na sumienności współtwórców i są dlatego bardziej podatne na rozbieżności.
 
-## Maintenance guidelines
+## Wytyczne utrzymaniowe
 
-**When adding or reclassifying a `KernelConfig` field:**
+**Przy dodawaniu lub przeklasyfikowaniu pola `KernelConfig`:**
 
-1. Update `build_reload_plan` / `build_reload_plan_with_caps` in `crates/librefang-kernel/src/config_reload.rs`.
-2. Update the corresponding row in `config-reload.md` — the drift-guard test will fail the build if you forget.
-3. If the field has sub-fields with different classifications (like `external_auth` or `registry`), add a row note spelling out which sub-field is which class.
+1. Zaktualizuj `build_reload_plan` / `build_reload_plan_with_caps` w `crates/librefang-kernel/src/config_reload.rs`.
+2. Zaktualizuj odpowiadający wiersz w `config-reload.md` — test strażnika rozbieżności przerywie kompilację, jeśli zapomnisz.
+3. Jeśli pole ma podpola z różnymi klasyfikacjami (jak `external_auth` lub `registry`), dodaj notatkę do wiersza określającą, które podpole ma jaką klasę.
 
-**When changing the NixOS module or flake:**
+**Przy zmianie modułu NixOS lub flake'a:**
 
-- Update `nixos.md` in the same PR if the change affects operator-visible behavior (new options, changed defaults, hardening directives, new known sharp edges).
-- If a new compile-time-embedded asset is added to the Rust source, add it to the `fileset` union at `flake.nix:66-94` or the Nix build will fail while every other build path succeeds.
+- Zaktualizuj `nixos.md` w tym samym PR, jeśli zmiana wpływa na zachowanie widoczne dla operatora (nowe opcje, zmienione domyślne, dyrektywy utwardzania, nowe znane ostre krawędzie).
+- Jeśli nowe zasoby osadzane w czasie kompilacji zostały dodane do źródła Rusta, dodaj je do unii `fileset` w `flake.nix:66-94`, w przeciwnym razie kompilacja Nixa zawiedzie, podczas gdy każda inna ścieżka kompilacji zakończy się sukcesem.
 
-**When changing release workflows:**
+**Przy zmianie przepływów pracy wydawania wersji:**
 
-- Update `release.md` if you add, remove, or rename a split workflow, change authentication mechanisms, or modify the migration plan.
-- The document is the only place that records the rationale for CI coverage decisions (why `nixos-vm-test` is opt-in, why the pull-request lane runs `--no-build`), so preserve that context when editing.
+- Zaktualizuj `release.md`, jeśli dodajesz, usuwasz lub zmieniasz nazwę rozdzielonego przepływu pracy, zmieniasz mechanizmy uwierzytelniania lub modyfikujesz plan migracji.
+- Dokument jest jedynym miejscem, które rejestruje racjonalność decyzji o pokryciu CI (dlaczego `nixos-vm-test` jest opcjonalny, dlaczego ścieżka pull-request uruchamia `--no-build`), więc zachowaj ten kontekst podczas edycji.
 
-## Referenced source locations
+## Odsyłane lokalizacje w kodzie źródłowym
 
-The documents in this module cite code across several crates. Key references:
+Dokumenty w tym module odwołują się do kodu w kilku kratkach. Kluczowe referencje:
 
-| Document | Key source references |
+| Dokument | Kluczowe referencje w kodzie źródłowym |
 |---|---|
-| `config-reload.md` | `crates/librefang-kernel/src/config_reload.rs` (planner, `HotAction`, `ReloadCapabilities`, drift-guard test), `crates/librefang-api/src/server.rs` (`refresh_master_credential`) |
-| `nixos.md` | `flake.nix` (packages, overlay, source filters), `nix/nixos-module.nix`, `crates/librefang-cli/src/commands/daemon.rs` (foreground flag, init path), `crates/librefang-kernel/src/kernel/boot.rs` (`LIBREFANG_LISTEN` override), `crates/librefang-api/src/server.rs` (`check_bind_auth_safety`, `any_auth_configured`), `deploy/librefang.service` (reference hardening unit) |
+| `config-reload.md` | `crates/librefang-kernel/src/config_reload.rs` (planer, `HotAction`, `ReloadCapabilities`, test strażnika rozbieżności), `crates/librefang-api/src/server.rs` (`refresh_master_credential`) |
+| `nixos.md` | `flake.nix` (pakiety, overlay, filtry źródła), `nix/nixos-module.nix`, `crates/librefang-cli/src/commands/daemon.rs` (flaga foreground, ścieżka init), `crates/librefang-kernel/src/kernel/boot.rs` (nadpisanie `LIBREFANG_LISTEN`), `crates/librefang-api/src/server.rs` (`check_bind_auth_safety`, `any_auth_configured`), `deploy/librefang.service` (referencyjna jednostka utwardzania) |
 | `release.md` | `.github/workflows/release*.yml`, `.github/workflows/nix-build.yml`, `xtask/src/publish_npm_binaries.rs` |

@@ -2,139 +2,139 @@
 
 # librefang-desktop
 
-The native desktop and mobile application shell for the LibreFang Agent OS. Built on **Tauri 2.0**, this crate produces both a full-featured desktop binary (macOS, Windows, Linux) and a mobile thin client (iOS, Android) from a single codebase.
+Natywna powłoka aplikacji desktopowej i mobilnej dla LibreFang Agent OS. Zbudowana na **Tauri 2.0**, ta crate generuje zarówno pełnoprawny binar desktopowy (macOS, Windows, Linux), jak i mobilnego klienta typu thin client (iOS, Android) z jednej bazy kodu.
 
 ---
 
-## Purpose
+## Przeznaczenie
 
-`librefang-desktop` serves two distinct deployment modes from one crate:
+`librefang-desktop` obsługuje dwa różne tryby wdrożenia z jednej cratety:
 
-| Mode | Platform | Behavior |
-|------|----------|----------|
-| **Full desktop** | macOS, Windows, Linux | Embeds and runs the `librefang-api` HTTP/WS server locally, renders a system tray icon, registers global shortcuts, and manages auto-updates. |
-| **Mobile thin client** | iOS, Android | Renders a dashboard webview that connects over HTTP/WS to a remote `librefang` daemon. No local daemon is embedded. |
+| Tryb | Platforma | Zachowanie |
+|------|-----------|------------|
+| **Pełny desktop** | macOS, Windows, Linux | Osadza i uruchamia lokalnie serwer HTTP/WS `librefang-api`, wyświetla ikonę w zasobniku systemowym, rejestruje skróty globalne i zarządza automatycznymi aktualizacjami. |
+| **Mobilny thin client** | iOS, Android | Wyświetla panel nawigacyjny w webview, który łączy się przez HTTP/WS ze zdalnym demonem `librefang`. Żaden lokalny demon nie jest osadzany. |
 
-The mobile architecture is intentional: LibreFang runs cron jobs, autodream, channel adapters, and triggers 24×7 — workloads that iOS/Android background execution limits cannot sustain.
+Architektura mobilna jest celowa: LibreFang uruchamia zadania cron, autodream, adaptery kanałów i wyzwalacze 24×7 — obciążenia, których limity wykonania w tle iOS/Android nie są w stanie utrzymać.
 
 ---
 
-## Architecture
+## Architektura
 
 ```mermaid
 graph TD
     subgraph Desktop["Desktop (macOS/Windows/Linux)"]
         Main["main.rs → run()"]
-        Main --> Tray["System Tray (tray.rs)"]
-        Main --> Server["Embedded Server (server.rs)"]
-        Main --> Shortcuts["Global Shortcuts (shortcuts.rs)"]
-        Main --> Updater["Auto-Updater (updater.rs)"]
-        Main --> Conn["Connection Manager (connection.rs)"]
-        Server --> API["librefang-api router"]
-        Conn --> Kernel["librefang-kernel event bus"]
+        Main --> Tray["Zasobnik systemowy (tray.rs)"]
+        Main --> Server["Serwer osadzony (server.rs)"]
+        Main --> Shortcuts["Skróty globalne (shortcuts.rs)"]
+        Main --> Updater["Automatyczne aktualizacje (updater.rs)"]
+        Main --> Conn["Menedżer połączeń (connection.rs)"]
+        Server --> API["router librefang-api"]
+        Conn --> Kernel["szyna zdarzeń librefang-kernel"]
     end
 
-    subgraph Mobile["Mobile (iOS/Android)"]
+    subgraph Mobile["Mobilnie (iOS/Android)"]
         MobileMain["mobile_main() → run()"]
         MobileMain --> Conn
-        Conn -->|HTTP/WS| RemoteDaemon["Remote librefang daemon"]
+        Conn -->|HTTP/WS| RemoteDaemon["Zdalny demon librefang"]
     end
 ```
 
 ---
 
-## Entry Points
+## Punkty wejścia
 
 ### `src/main.rs`
 
-Desktop binary entry point. Loads environment configuration via `librefang_extensions::dotenv::load_dotenv`, then delegates to `run()`.
+Punkt wejścia binarny desktopowy. Ładuje konfigurację środowiska za pomocą `librefang_extensions::dotenv::load_dotenv`, a następnie deleguje do `run()`.
 
 ### `src/lib.rs`
 
-Contains the two public entry points:
+Zawiera dwa publiczne punkty wejścia:
 
-- **`run()`** — Orchestrates the full application lifecycle: initializes i18n, loads `.env`, initializes the secret vault (`librefang_extensions::vault::init`), sets up the system tray (`setup_tray`), configures global keyboard shortcuts (`build_shortcut_plugin`), loads saved connection preferences, validates any configured server URL, and starts forwarding kernel events to the frontend.
-- **`mobile_main()`** — Mobile entry point that calls into `run()` with mobile-appropriate configuration. Platform-specific plugins (tray, single-instance, autostart, global-shortcut, updater, shell) are compiled out via `cfg` gates.
+- **`run()`** — Orkiestruje pełny cykl życia aplikacji: inicjalizuje i18n, ładuje `.env`, inicjalizuje magazyn sekretów (`librefang_extensions::vault::init`), konfiguruje zasobnik systemowy (`setup_tray`), konfiguruje globalne skróty klawiszowe (`build_shortcut_plugin`), ładuje zapisane preferencje połączeń, weryfikuje skonfigurowany adres URL serwera i rozpoczyna przekazywanie zdarzeń kernela do frontendu.
+- **`mobile_main()`** — Mobilny punkt wejścia wywołujący `run()` z konfiguracją odpowiednią dla platformy mobilnej. Wtyczki specyficzne dla platformy (tray, single-instance, autostart, global-shortcut, updater, shell) są wykluczane z kompilacji za pomocą bramek `cfg`.
 
-Kernel events are bridged to the Tauri frontend via `forward_kernel_events`, which calls `librefang_kernel::event_bus::recv_event_skipping_lag` in a loop and emits each event to the webview.
-
----
-
-## Key Components
-
-### Connection Manager (`src/connection.rs`)
-
-Manages whether the app runs a local daemon or connects to a remote one. Core types and functions:
-
-- **`DesktopConfig`** — Persisted user preferences (serialized to TOML). Written atomically via `librefang_runtime::mcp_migrate::write`.
-- **`ConnectionPreference`** — Enum representing the user's choice between local and remote operation.
-- **`load_saved_preference()`** — Reads the last saved config from disk.
-- **`save_preference()`** — Persists a new `DesktopConfig`.
-- **`start_local()`** — Spawns the embedded daemon process via `librefang_subprocess::spawn` and records the `ConnectionPreference`.
-- **`connect_remote()`** — Validates the server URL (via `validate_server_url`), persists the preference, and determines the `navigation_target` for the frontend.
-- **`navigation_target()`** — Returns the URL the webview should load (local server vs. remote URL).
-- **`connection_html()`** — Renders an HTML status snippet used by the tray's "Change Server" dialog.
-
-### System Tray (`src/tray.rs`)
-
-Platform-divergent tray implementation:
-
-- **macOS / Windows** — Uses Tauri's native `tray-icon` feature (`NSStatusItem` / `Shell_NotifyIconW`).
-- **Linux** — Uses [`ksni`](https://crates.io/crates/ksni) (pure D-Bus StatusNotifierItem), implemented through `LibreFangLinuxTray`. The `ksni` dependency is pinned to `default-features = false, features = ["async-io"]` — the `tokio` backend triggers a nested-runtime panic when Tauri/notify-rust makes blocking session-bus calls inside a Tokio worker thread.
-
-**`setup_tray()`** builds the tray menu with these actions:
-
-| Action | Handler |
-|--------|---------|
-| Open dashboard | `open_browser` |
-| Toggle launch-at-login | `toggle_launch_at_login` |
-| Change server | `change_server` |
-| Open config directory | `open_config_dir` |
-| Check for updates | `check_updates` |
-| View agent count | `get_agent_count` |
-| View status | `get_status_text` |
-
-The tray also uses `librefang_types::backoff::next_delay` for polling intervals (e.g., agent count refresh).
-
-### Embedded Server (`src/server.rs`)
-
-On desktop, the app embeds the `librefang-api` HTTP/WebSocket server:
-
-- **`run_embedded_server()`** — Calls `librefang_api::server::build_router` to construct the Axum router, spawns the server via `librefang_subprocess::spawn`, and wires up `librefang_api::webchat::sync_dashboard` for real-time dashboard state.
-- **`start_server()`** — Returns a `ServerHandle` for lifecycle management.
-
-### Global Shortcuts (`src/shortcuts.rs`)
-
-**`build_shortcut_plugin()`** constructs the `tauri-plugin-global-shortcut` plugin instance with the keyboard shortcuts configured for the app.
-
-### Auto-Updater (`src/updater.rs`)
-
-Manages checking for and applying application updates:
-
-- **`spawn_startup_check()`** — Runs on app launch. First verifies the update manifest is reachable (`manifest_reachable`), then calls `do_check()`. If an update is found, it calls `download_and_install_update()`.
-- **`do_check()`** — Performs the actual update manifest query, returning `UpdateInfo` if a newer version exists.
-- **`download_and_install_update()`** — Downloads and applies the update binary.
-- **`check_for_update` (tray.rs)** — User-triggered path from the tray menu; spawns the update check asynchronously.
-
-The Tauri command `install_update` (in `commands.rs`) also calls `download_and_install_update`.
-
-### Tauri Commands (`src/commands.rs`)
-
-Commands exposed to the frontend webview via the Tauri IPC layer:
-
-- **`install_update`** — Triggers update download + install.
-- **`import_agent_toml`** — Writes agent configuration TOML to disk via `librefang_runtime::mcp_migrate::write`.
-- **`uninstall_app`** — Removes application files, including catalog sync data (`librefang_runtime::catalog_sync::remove_file`).
+Zdarzenia kernela są przekazywane do frontendu Tauri za pomocą `forward_kernel_events`, który w pętli wywołuje `librefang_kernel::event_bus::recv_event_skipping_lag` i emituje każde zdarzenie do webview.
 
 ---
 
-## Platform Compilation Matrix
+## Kluczowe komponenty
 
-Desktop-only plugins are gated behind `cfg(not(any(target_os = "ios", target_os = "android")))`:
+### Menedżer połączeń (`src/connection.rs`)
 
-| Plugin | macOS/Windows | Linux | iOS/Android |
-|--------|:---:|:---:|:---:|
-| `tauri` (tray-icon) | ✅ | — (ksni instead) | ❌ |
+Zarządza tym, czy aplikacja uruchamia lokalnego demona, czy łączy się ze zdalnym. Kluczowe typy i funkcje:
+
+- **`DesktopConfig`** — Utrwalone preferencje użytkownika (serializowane do TOML). Zapisywane atomowo za pomocą `librefang_runtime::mcp_migrate::write`.
+- **`ConnectionPreference`** — Enum reprezentujący wybór użytkownika między trybem lokalnym a zdalnym.
+- **`load_saved_preference()`** — Odczytuje ostatnio zapisaną konfigurację z dysku.
+- **`save_preference()`** — Utrwala nową `DesktopConfig`.
+- **`start_local()`** — Uruchamia proces osadzonego demona za pomocą `librefang_subprocess::spawn` i zapisuje `ConnectionPreference`.
+- **`connect_remote()`** — Weryfikuje adres URL serwera (za pomocą `validate_server_url`), utrwala preferencję i określa `navigation_target` dla frontendu.
+- **`navigation_target()`** — Zwraca adres URL, który webview powinien załadować (lokalny serwer vs zdalny URL).
+- **`connection_html()`** — Renderuje fragment HTML ze statusem używany w oknie dialogowym zasobnika „Zmień serwer”.
+
+### Zasobnik systemowy (`src/tray.rs`)
+
+Implementacja zasobnika różniąca się w zależności od platformy:
+
+- **macOS / Windows** — Używa natywnej funkcji `tray-icon` z Tauri (`NSStatusItem` / `Shell_NotifyIconW`).
+- **Linux** — Używa [`ksni`](https://crates.io/crates/ksni) (czysty D-Bus StatusNotifierItem), zaimplementowane przez `LibreFangLinuxTray`. Zależność `ksni` jest przypięta do `default-features = false, features = ["async-io"]` — backend `tokio` powoduje panikę zagnieżdżonego runtime-u, gdy Tauri/notify-rust wykonuje blokujące wywołania szyny sesji D-Bus wewnątrz wątku roboczego Tokio.
+
+**`setup_tray()`** buduje menu zasobnika z następującymi akcjami:
+
+| Akcja | Obsługa |
+|-------|---------|
+| Otwórz panel nawigacyjny | `open_browser` |
+| Przełącz autostart | `toggle_launch_at_login` |
+| Zmień serwer | `change_server` |
+| Otwórz katalog konfiguracji | `open_config_dir` |
+| Sprawdź aktualizacje | `check_updates` |
+| Wyświetl liczbę agentów | `get_agent_count` |
+| Wyświetl status | `get_status_text` |
+
+Zasobnik używa również `librefang_types::backoff::next_delay` do interwałów odpytywania (np. odświeżanie liczby agentów).
+
+### Serwer osadzony (`src/server.rs`)
+
+Na desktopie aplikacja osadza serwer HTTP/WebSocket `librefang-api`:
+
+- **`run_embedded_server()`** — Wywołuje `librefang_api::server::build_router` w celu skonstruowania routera Axum, uruchamia serwer za pomocą `librefang_subprocess::spawn` i podłącza `librefang_api::webchat::sync_dashboard` do stanu panelu nawigacyjnego w czasie rzeczywistym.
+- **`start_server()`** — Zwraca `ServerHandle` do zarządzania cyklem życia.
+
+### Skróty globalne (`src/shortcuts.rs`)
+
+**`build_shortcut_plugin()`** konstruuje instancję wtyczki `tauri-plugin-global-shortcut` ze skonfigurowanymi skrótami klawiszowymi aplikacji.
+
+### Automatyczne aktualizacje (`src/updater.rs`)
+
+Zarządza sprawdzaniem i stosowaniem aktualizacji aplikacji:
+
+- **`spawn_startup_check()`** — Uruchamiany przy starcie aplikacji. Najpierw weryfikuje dostępność manifestu aktualizacji (`manifest_reachable`), a następnie wywołuje `do_check()`. Jeśli znaleziono aktualizację, wywołuje `download_and_install_update()`.
+- **`do_check()`** — Wykonuje właściwe zapytanie o manifest aktualizacji, zwracając `UpdateInfo`, jeśli istnieje nowsza wersja.
+- **`download_and_install_update()`** — Pobiera i stosuje binarną aktualizację.
+- **`check_for_update` (tray.rs)** — Ścieżka wyzwalana przez użytkownika z menu zasobnika; asynchronicznie uruchamia sprawdzanie aktualizacji.
+
+Polecenie Tauri `install_update` (w `commands.rs`) również wywołuje `download_and_install_update`.
+
+### Polecenia Tauri (`src/commands.rs`)
+
+Polecenia udostępnione frontendowi webview przez warstwę IPC Tauri:
+
+- **`install_update`** — Inicjuje pobieranie i instalację aktualizacji.
+- **`import_agent_toml`** — Zapisuje konfigurację agenta w formacie TOML na dysku za pomocą `librefang_runtime::mcp_migrate::write`.
+- **`uninstall_app`** — Usuwa pliki aplikacji, w tym dane synchronizacji katalogu (`librefang_runtime::catalog_sync::remove_file`).
+
+---
+
+## Macierz kompilacji platform
+
+Wtyczki dostępne tylko na desktopie są uwarunkowane bramką `cfg(not(any(target_os = "ios", target_os = "android")))`:
+
+| Wtyczka | macOS/Windows | Linux | iOS/Android |
+|---------|:---:|:---:|:---:|
+| `tauri` (tray-icon) | ✅ | — (zamiast tego ksni) | ❌ |
 | `tauri-plugin-single-instance` | ✅ | ✅ | ❌ |
 | `tauri-plugin-autostart` | ✅ | ✅ | ❌ |
 | `tauri-plugin-global-shortcut` | ✅ | ✅ | ❌ |
@@ -144,87 +144,87 @@ Desktop-only plugins are gated behind `cfg(not(any(target_os = "ios", target_os 
 | `keyring` | ❌ | ❌ | ✅ |
 | `ksni` | ❌ | ✅ | ❌ |
 
-### Crate-Type Note
+### Uwaga dotycząca crate-type
 
-The `[lib]` section declares `crate-type = ["staticlib", "cdylib", "lib"]`. The `staticlib` and `cdylib` outputs are required for iOS (Xcode) and Android (Gradle) mobile shells to link the Rust library. Cargo cannot conditionalize crate-type on `cfg(mobile)` at the manifest level, so desktop builds also produce these artifacts — adding roughly 10–20% to clean-link time.
+Sekcja `[lib]` deklaruje `crate-type = ["staticlib", "cdylib", "lib"]`. Wyniki `staticlib` i `cdylib` są wymagane do konsolidacji biblioteki Rust przez mobilne powłoki iOS (Xcode) i Android (Gradle). Cargo nie może warunkowo zmieniać crate-type przez `cfg(mobile)` na poziomie manifestu, więc kompilacje desktopowe również produkują te artefakty — co wydłuża czas konsolidacji o około 10–20%.
 
 ---
 
-## Capabilities (Permissions)
+## Uprawnienia (Capabilities)
 
-Two capability files control IPC access from the webview:
+Dwa pliki uprawnień kontrolują dostęp IPC z webview:
 
 ### `capabilities/default.json` (Desktop)
 
-Grants the `main` window access to: core APIs, notifications, shell (open links), dialogs, global-shortcut (register/unregister/is-registered), autostart, and updater.
+Nadaje oknu `main` dostęp do: podstawowych API, powiadomień, powłoki (otwieranie linków), okien dialogowych, global-shortcut (rejestracja/wyrejestrowanie/czy-zarejestrowany), autostartu i aktualizatora.
 
 ### `capabilities/mobile.json` (iOS/Android)
 
-Grants the `main` window access to: core APIs, notifications, and dialogs only. Desktop plugins (shell, global-shortcut, autostart, updater) are not bundled on mobile.
+Nadaje oknu `main` dostęp wyłącznie do: podstawowych API, powiadomień i okien dialogowych. Wtyczki desktopowe (powłoka, global-shortcut, autostart, aktualizator) nie są dołączane w wersji mobilnej.
 
 ---
 
-## Build & Development
+## Budowanie i rozwój
 
 ### Desktop
 
 ```bash
 cargo run -p librefang-desktop
-# or with Tauri CLI:
+# lub za pomocą Tauri CLI:
 cargo tauri dev
 ```
 
-### Mobile (after one-time init)
+### Mobilnie (po jednorazowej inicjalizacji)
 
 ```bash
 cd crates/librefang-desktop
 
 # Android
-cargo tauri android init    # one-time scaffold
+cargo tauri android init    # jednorazowe rusztowanie
 cargo tauri android dev
 
-# iOS (macOS only)
-cargo tauri ios init        # one-time scaffold
+# iOS (tylko macOS)
+cargo tauri ios init        # jednorazowe rusztowanie
 cargo tauri ios dev
 ```
 
-The `gen/android/` and `gen/apple/` directories are generated by the Tauri CLI and should be committed to the repository.
+Katalogi `gen/android/` i `gen/apple/` są generowane przez Tauri CLI i powinny być commitowane do repozytorium.
 
-### Minimum OS Versions
+### Minimalne wersje systemu operacyjnego
 
-| Platform | Minimum |
-|----------|---------|
+| Platforma | Minimum |
+|-----------|---------|
 | iOS | 14.0 |
 | Android | API 26 (Android 8.0) |
 
 ---
 
-## Dependencies on Workspace Crates
+## Zależności od cratety workspace
 
-| Crate | Usage |
-|-------|-------|
-| `librefang-kernel` | Event bus forwarding (`recv_event_skipping_lag`) |
-| `librefang-api` | Embedded HTTP/WS server (`build_router`, `sync_dashboard`) |
-| `librefang-types` | Backoff delay calculation (`next_delay`) |
-| `librefang-extensions` | `.env` loading, vault initialization |
-| `librefang-subprocess` | Daemon process spawning |
-| `librefang-runtime` | Config persistence (`mcp_migrate::write`), catalog sync |
+| Crate | Zastosowanie |
+|-------|--------------|
+| `librefang-kernel` | Przekazywanie szyny zdarzeń (`recv_event_skipping_lag`) |
+| `librefang-api` | Osadzony serwer HTTP/WS (`build_router`, `sync_dashboard`) |
+| `librefang-types` | Obliczanie opóźnienia wycofania (`next_delay`) |
+| `librefang-extensions` | Ładowanie `.env`, inicjalizacja magazynu sekretów |
+| `librefang-subprocess` | Uruchamianie procesu demona |
+| `librefang-runtime` | Utrwalanie konfiguracji (`mcp_migrate::write`), synchronizacja katalogu |
 
-### Feature Flags
+### Flagi funkcji
 
 ```toml
 [features]
 default = ["librefang-api/default"]
-custom-protocol = ["tauri/custom-protocol"]   # production builds
-mobile = []                                     # no-op; mobile targets are cfg-gated
+custom-protocol = ["tauri/custom-protocol"]   # kompilacje produkcyjne
+mobile = []                                     # brak operacji; platformy mobilne są uwarunkowane przez cfg
 ```
 
-The previously existing `all-channels`, `mini`, and `mobile-no-email` features have been removed — channel adapters are now sidecars, not Rust features. CI workflows referencing these flags must drop the `-f` argument.
+Dawniej istniejące flagi funkcji `all-channels`, `mini` i `mobile-no-email` zostały usunięte — adaptery kanałów są teraz sidecarami, a nie funkcjami Rusta. Workflowsy CI odwołujące się do tych flag muszą usunąć argument `-f`.
 
 ---
 
-## Linux Tray: `ksni` Runtime Constraint
+## Zasobnik systemowy na Linuxie: ograniczenie runtime-u `ksni`
 
-The `ksni` crate is configured with `default-features = false, features = ["async-io"]`. This is mandatory — the default `tokio` backend pulls in `zbus/tokio`, which triggers a nested-runtime panic (`"Cannot start a runtime from within a runtime"`) when Tauri or `notify-rust` invokes blocking D-Bus session bus connection calls from inside a Tokio worker thread. The `async-io` backend avoids this entirely.
+Crate `ksni` jest skonfigurowana z `default-features = false, features = ["async-io"]`. Jest to obowiązkowe — domyślny backend `tokio` ciągnie `zbus/tokio`, co powoduje panikę zagnieżdżonego runtime-u („Cannot start a runtime from within a runtime”), gdy Tauri lub `notify-rust` wywołuje blokujące połączenia szyny sesji D-Bus z wnętrza wątku roboczego Tokio. Backend `async-io` całkowicie tego unika.
 
-GTK3 remains in the Linux build graph transitively through Tauri's webview runtime (WebKitGTK), but `libappindicator` has been eliminated as a direct dependency.
+GTK3 pozostaje w grafie kompilacji Linuksa przechodnio przez runtime webview Tauri (WebKitGTK), ale `libappindicator` został wyeliminowany jako bezpośrednia zależność.

@@ -1,10 +1,10 @@
 # crates — librefang-runtime-audit
 
-# `librefang-runtime-audit` — Tamper-Evident Audit Log
+# `librefang-runtime-audit` — Dziennik audytowy odporny na manipulację
 
-A Merkle hash chain audit trail for security-critical LibreFang runtime events. Every auditable action is appended to an append-only log where each entry's SHA-256 hash incorporates the previous entry's hash, forming a linked chain that detects retroactive edits. When a SQLite connection pool is supplied, entries persist across daemon restarts. An optional external anchor file extends tamper-evidence beyond what the database alone can prove.
+Łańcuch audytowy z haszami Merklego dla kluczowych z punktu widzenia bezpieczeństwa zdarzeń środowiska uruchomieniowego LibreFang. Każda audytowalna akcja jest dołączana do dziennika typu append-only, w którym hasz SHA-256 każdego wpisu uwzględnia hasz poprzedniego wpisu, tworząc powiązany łańcuch wykrywający modyfikacje wsteczne. Gdy dostarczona zostanie pula połączeń SQLite, wpisy są utrwalane między restartami demona. Opcjonalny zewnętrzny plik kotwiczny rozszerza ochronę przed manipulacją poza to, co baza danych może udowodnić sama.
 
-## Architecture
+## Architektura
 
 ```mermaid
 flowchart TD
@@ -19,159 +19,159 @@ flowchart TD
     J --> K["compare tip against<br/>external anchor file"]
 ```
 
-## Core Concepts
+## Podstawowe koncepcje
 
-### The Merkle Chain
+### Łańcuch Merklego
 
-Each `AuditEntry` stores its own `hash` and the `hash` of its predecessor (`prev_hash`). The genesis entry's `prev_hash` is 64 zero characters. Verification walks the chain forward, recomputing every hash and checking each `prev_hash` link. Any field edit — timestamp, agent id, detail, outcome, user attribution — breaks the link at that point.
+Każdy `AuditEntry` przechowuje własny `hash` oraz `hash` swojego poprzednika (`prev_hash`). `prev_hash` wpisu genezy to 64 znaki zero. Weryfikacja przechodzi łańcuch naprzód, przeliczając każdy hasz i sprawdzając każde powiązanie `prev_hash`. Dowolna modyfikacja pola — znacznik czasu, identyfikator agenta, szczegóły, wynik, przypisanie użytkownika — przerywa powiązanie w tym miejscu.
 
-Two hash layouts exist:
+Istnieją dwa układy haszowania:
 
-- **v2 (current):** Every field is prefixed with a `\x1f`-delimited tag (`\x1fseq=`, `\x1ftimestamp=`, etc.) so byte content cannot shift across a field boundary. This closes an ambiguity where `agent_id="a", detail="bc"` and `agent_id="ab", detail="c"` produced identical hashes.
-- **v1 (legacy):** Pre-delimiter layout — six fields concatenated with no separators, then optionally-tagged `user_id`/`channel`, then bare `prev_hash`. Retained solely so `verify_integrity` can validate entries written before the fix. New entries are never written with this layout.
+- **v2 (bieżący):** Każde pole jest poprzedzone tagiem rozdzielanym znakiem `\x1f` (`\x1fseq=`, `\x1ftimestamp=`, itd.), aby treść bajtowa nie mogła przesunąć się między granicami pól. To zamyka niejednoznaczność, w której `agent_id="a", detail="bc"` i `agent_id="ab", detail="c"` dawały identyczne hasze.
+- **v1 (legacy):** Układ sprzed wprowadzenia delimiterów — sześć pól połączonych bez separatorów, następnie opcjonalnie otagowane `user_id`/`channel`, a na końcu goły `prev_hash`. Zachowany wyłącznie po to, aby `verify_integrity` mogło weryfikować wpisy zapisane przed poprawką. Nowe wpisy nie są nigdy zapisywane w tym układzie.
 
-`verify_integrity` accepts either layout per entry, so upgrading does not raise false tamper alarms on existing logs.
+`verify_integrity` akceptuje oba układy dla każdego wpisu, więc uaktualnienie nie powoduje fałszywych alarmów o manipulacji na istniejących dziennikach.
 
-### `AuditAction` — Append-Only Enum
+### `AuditAction` — Enum typowy dla append-only
 
-The variant name is folded into the per-entry hash via `Display`. **Adding a new variant is safe**; renaming or reordering is a breaking change that invalidates every persisted hash mentioning it. The `as_str()` and `FromStr` implementations use exhaustive `match` arms (no wildcards), so the compiler forces coverage when a variant is added — preventing the reload path from silently coercing an unmapped action to `ToolInvoke`.
+Nazwa wariantu jest włączana do hasza danego wpisu poprzez `Display`. **Dodanie nowego wariantu jest bezpieczne**; zmiana nazwy lub zmiana kolejności jest zmianą łamiącą kompatybilność, która unieważnia każdy utrwalony hasz ją zawierający. Implementacje `as_str()` i `FromStr` używają wyczerpujących gałęzi `match` (bez symboli wieloznacznych), więc kompilator wymusza pokrycie po dodaniu wariantu — zapobiegając śliskiej koercji niezmapowanej akcji do `ToolInvoke` na ścieżce przeładowania.
 
-Current variants cover tool invocations, capability checks, agent lifecycle, memory/file/network/shell access, auth, config changes, dream consolidation, RBAC events (`UserLogin`, `RoleChange`, `PermissionDenied`, `BudgetExceeded`), retention self-audit (`RetentionTrim`), and A2A agent lifecycle (`A2aDiscovered`, `A2aTrusted`).
+Bieżące warianty obejmują wywołania narzędzi, sprawdzanie uprawnień, cykl życia agentów, dostęp do pamięci/plików/sieci/shella, autentykację, zmiany konfiguracji, konsolidację snów, zdarzenia RBAC (`UserLogin`, `RoleChange`, `PermissionDenied`, `BudgetExceeded`), samoaudyt retencji (`RetentionTrim`) oraz cykl życia agentów A2A (`A2aDiscovered`, `A2aTrusted`).
 
 ### `AuditEntry`
 
-| Field | Purpose |
+| Pole | Przeznaczenie |
 |-------|---------|
-| `seq` | Monotonically increasing 0-indexed sequence number |
-| `timestamp` | ISO-8601 (RFC-3339) recording time |
-| `agent_id` | Agent that triggered or is subject of the action |
-| `action` | `AuditAction` variant |
-| `detail` | Free-form context (tool name, file path, etc.) |
-| `outcome` | Result (`"ok"`, `"denied"`, error message) |
-| `user_id` | Optional `UserId` attribution (post-M1) |
-| `channel` | Optional origin (`"telegram"`, `"api"`, `"cli"`, etc.) |
-| `prev_hash` | SHA-256 of predecessor (genesis sentinel for first entry) |
-| `hash` | SHA-256 of this entry's content + `prev_hash` |
+| `seq` | Monotonically rosnący, indeksowany od zera numer sekwencyjny |
+| `timestamp` | Czas zapisu w formacie ISO-8601 (RFC-3339) |
+| `agent_id` | Agent, który wyzwolił akcję lub jest jej podmiotem |
+| `action` | Wariant `AuditAction` |
+| `detail` | Kontekst w formie wolnej (nazwa narzędzia, ścieżka pliku itd.) |
+| `outcome` | Wynik (`"ok"`, `"denied"`, komunikat błędu) |
+| `user_id` | Opcjonalne przypisanie `UserId` (po M1) |
+| `channel` | Opcjonalne pochodzenie (`"telegram"`, `"api"`, `"cli"`, itd.) |
+| `prev_hash` | SHA-256 poprzednika (wartość sygnalizacyjna genezy dla pierwszego wpisu) |
+| `hash` | SHA-256 zawartości tego wpisu + `prev_hash` |
 
-`user_id` and `channel` are folded into the hash only when present, so pre-M1 entries still verify.
+`user_id` i `channel` są włączane do hasza tylko gdy są obecne, więc wpisy sprzed M1 nadal przechodzą weryfikację.
 
-## `AuditLog` Constructors
+## Konstruktory `AuditLog`
 
-### `new()` — In-Memory Only
+### `new()` — Tylko w pamięci
 
-Creates an empty log with no persistence. The tip initializes to the genesis sentinel. Source of truth is the in-memory `Vec<AuditEntry>`.
+Tworzy pusty dziennik bez utrwalania. Wskaźnik końcowy (tip) inicjalizuje się wartością sygnalizacyjną genezy. Źródłem prawdy jest `Vec<AuditEntry>` w pamięci.
 
-### `with_db(pool)` — SQLite-Backed
+### `with_db(pool)` — Oparte na SQLite
 
-Loads all rows from `audit_entries` ordered by `seq`, recovers any chain anchor left by a prior trim, and runs `verify_integrity` on load. Failures are logged at `WARN` (not `ERROR`) so dev hosts with routine untracked restarts don't drown the operator's `grep ERROR daemon.log` — see #5478. Schema v22 added the `user_id`/`channel` columns; pre-migration rows deserialize as `None` and keep their original hash.
+Ładuje wszystkie wiersze z `audit_entries` uporządkowane według `seq`, odzyskuje wszelkie kotwice łańcucha pozostawione przez poprzednie przycinanie i uruchamia `verify_integrity` przy ładowaniu. Błędy są logowane na poziomie `WARN` (nie `ERROR`), aby hosty deweloperskie z rutynowymi niesledzonymi restartami nie zalały operatora wynikami `grep ERROR daemon.log` — zobacz #5478. Schemat v22 dodał kolumny `user_id`/`channel`; wiersze sprzed migracji deserializują się jako `None` i zachowują oryginalny hasz.
 
-Unknown `action` strings (rows written by a newer daemon) are logged by name and temporarily coerced to `ToolInvoke` rather than dropping the row. The hash will not recompute until the binary is upgraded.
+Nieznane ciągi `action` (wiersze zapisane przez nowszą wersję demona) są logowane pod nazwą i tymczasowo koercjonowane do `ToolInvoke` zamiast odrzucania wiersza. Hasz nie zostanie przeliczony do czasu uaktualnienia pliku binarnego.
 
-### `with_db_anchored(pool, anchor_path)` — DB + External Witness
+### `with_db_anchored(pool, anchor_path)` — Baza danych + zewnętrzny świadek
 
-Extends `with_db` with an external tip-anchor file. On construction:
+Rozszerza `with_db` o zewnętrzny plik kotwiczny wskaźnika końcowego. Podczas konstrukcji:
 
-1. Entries load from SQLite and the chain re-verifies.
-2. If the anchor file exists, its `seq:hash` is compared against the in-DB tip. Divergence logs a loud `error!` pointing at `librefang security verify` and `audit-reset`.
-3. If the DB has rows but no anchor exists, the anchor is seeded from the current tip so future rewrites are detectable.
-4. A corrupt anchor file is refused — never silently overwritten.
+1. Wpisy ładują się z SQLite, a łańcuch jest ponownie weryfikowany.
+2. Jeśli plik kotwiczny istnieje, jego `seq:hash` jest porównywany z końcówką w bazie danych. Rozbieżność loguje głośny `error!` wskazujący na `librefang security verify` i `audit-reset`.
+3. Jeśli baza danych zawiera wiersze, ale kotwica nie istnieje, kotwica jest inicjalizowana z bieżącej końcówki, aby przyszłe nadpisywania były wykrywalne.
+4. Uszkodzony plik kotwiczny jest odrzucany — nigdy nie jest cicho nadpisywany.
 
-The anchor file format is deliberately human-readable: `<seq> <hex-hash>\n`. Writes are atomic (`.tmp` + rename) so a crash mid-write never leaves a truncated anchor.
+Format pliku kotwicznego jest celowo czytelny dla człowieka: `<seq> <hex-hash>\n`. Zapisy są atomowe (`.tmp` + zmiana nazwy), więc awaria w trakcie zapisu nigdy nie pozostawia obciętej kotwicy.
 
-#### Threat Model
+#### Model zagrożeń
 
-A DB-only chain is self-consistent but cannot detect a full table rewrite: an attacker with write access to `audit_entries` can wipe every row, insert fabricated history, and recompute every hash from the genesis sentinel forward. The external anchor closes that gap by storing the latest `seq:hash` outside SQLite, where the attacker must tamper with it separately. For stronger guarantees, point `anchor_path` at a location the daemon can write but unprivileged code cannot (chmod-0400 file owned by a different user, systemd `ReadOnlyPaths=` mount, NFS share, or a pipe to `logger`).
+Łańcuch oparty wyłącznie na bazie danych jest samospójny, ale nie może wykryć pełnego nadpisania tabeli: atakujący z prawem zapisu do `audit_entries` może usunąć każdy wiersz, wstawić sfabrykowaną historię i przeliczyć każdy hasz od wartości sygnalizacyjnej genezy naprzód. Zewnętrzna kotwica zamyka tę lukę, przechowując najnowszy `seq:hash` poza SQLite, gdzie atakujący musi ją manipulować oddzielnie. Dla silniejszych gwarancji, wskaż `anchor_path` na lokalizację, do której daemon może zapisywać, ale nieuprzywilejowany kod nie może (plik chmod-0400 należący do innego użytkownika, montaż systemd `ReadOnlyPaths=`, udział NFS lub potok do `logger`).
 
-## Recording Events
+## Rejestrowanie zdarzeń
 
 ### `record(agent_id, action, detail, outcome) -> String`
 
-Convenience wrapper omitting user/channel attribution. Returns the new entry's hash.
+Wygodny wrapper pomijający przypisanie użytkownika/kanału. Zwraca hasz nowego wpisu.
 
 ### `record_with_context(agent_id, action, detail, outcome, user_id, channel) -> String`
 
-Full form with optional attribution. The append flow:
+Pełna forma z opcjonalnym przypisaniem. Przepływ dołączania:
 
-1. Lock `entries` and `tip` mutexes.
-2. Derive `seq` from `entries.last().seq + 1` (not `len()`, since trim may have dropped a prefix).
-3. Compute the v2 hash and build the `AuditEntry`.
-4. If DB-backed: `BEGIN IMMEDIATE` → INSERT → commit. **On failure, the entry is dropped and the chain does not advance.** This prevents the chain-break-on-restart class of bugs (#4050/#4078) where an in-memory-only retry queue left orphaned `prev_hash` links on disk after a restart.
-5. On success: push to `entries`, advance `tip`, increment `persisted_rows`.
-6. **Soft-cap eviction:** if `entries.len()` exceeds `effective_soft_cap()`, drain the oldest prefix and record the last dropped entry's hash as the new `chain_anchor`.
-7. If anchored: rewrite the anchor file with the current `persisted_rows` count and tip hash.
+1. Zablokowanie muteksów `entries` i `tip`.
+2. Pochodzenie `seq` z `entries.last().seq + 1` (nie `len()`, ponieważ przycinanie mogło usunąć prefiks).
+3. Obliczenie hasza v2 i zbudowanie `AuditEntry`.
+4. Jeśli oparte na bazie danych: `BEGIN IMMEDIATE` → INSERT → commit. **W przypadku niepowodzenia wpis jest odrzucany, a łańcuch się nie przesuwa.** Zapobiega to klasie błędów przerwania łańcucha przy restarcie (#4050/#4078), gdzie wyłącznie w pamięci kolejka ponowień pozostawiała osierocone powiązania `prev_hash` na dysku po restarcie.
+5. W przypadku sukcesu: dodanie do `entries`, przesunięcie `tip`, inkrementacja `persisted_rows`.
+6. **Ewkcja miękkiego limitu:** jeśli `entries.len()` przekracza `effective_soft_cap()`, opróżniany jest najstarszy prefiks, a hasz ostatniego odrzuconego wpisu jest zapisywany jako nowa `chain_anchor`.
+7. Jeśli zakotwiczono: nadpisanie pliku kotwicznego bieżącą liczbą `persisted_rows` i haszem końcówki.
 
-`BEGIN IMMEDIATE` acquires a RESERVED lock at the SQLite layer so concurrent processes cannot interleave two appends against the same `prev_hash`.
+`BEGIN IMMEDIATE` nabiera blokady RESERVED na warstwie SQLite, aby współbieżne procesy nie mogły przeplatać dwóch dołączeń przeciwko temu samemu `prev_hash`.
 
-### Soft Cap and Memory Bounds
+### Miękki limit i ograniczenia pamięci
 
-Two ceilings govern the in-memory window:
+Dwa pułapy zarządzają oknem w pamięci:
 
-| Constant | Value | Applies When |
+| Stała | Wartość | Stosowane gdy |
 |----------|-------|--------------|
-| `MAX_AUDIT_ENTRIES` | 10,000 | No operator cap configured |
-| `MAX_IN_MEMORY_SOFT_CAP_NUMERATOR / DENOMINATOR` | 3 / 2 (1.5×) | Operator cap is set |
+| `MAX_AUDIT_ENTRIES` | 10 000 | Brak skonfigurowanego limitu operatora |
+| `MAX_IN_MEMORY_SOFT_CAP_NUMERATOR / DENOMINATOR` | 3 / 2 (1,5×) | Limit operatora jest ustawiony |
 
-`set_max_in_memory_entries(n)` stores the operator's configured `audit.retention.max_in_memory_entries`. `effective_soft_cap()` returns `n × 1.5` (or the hard 10,000 default when `n == 0`). The 1.5× headroom lets the buffer grow slightly between scheduled `trim()` cycles (#5665) without unbounded growth.
+`set_max_in_memory_entries(n)` przechowuje skonfigurowaną przez operatora wartość `audit.retention.max_in_memory_entries`. `effective_soft_cap()` zwraca `n × 1,5` (lub domyślne twarde 10 000, gdy `n == 0`). Bufor 1,5× pozwala buforowi nieznacznie rosnąć między zaplanowanymi cyklami `trim()` (#5665) bez nieograniczonego wzrostu.
 
-The soft cap drains the **in-memory** window only — DB rows stay on disk. `persisted_rows` tracks the on-disk population separately so the anchor `seq` stays accurate after eviction.
+Miękki limit opróżnia tylko okno **w pamięci** — wiersze w bazie danych pozostają na dysku. `persisted_rows` śledzi oddzielnie populację na dysku, aby `seq` kotwicy pozostawał dokładny po ewekcji.
 
-## Retention
+## Retencja
 
 ### `trim(policy, now) -> TrimReport`
 
-Applies `AuditRetentionConfig` in two passes:
+Stosuje `AuditRetentionConfig` w dwóch przebiegach:
 
-1. **Cap pass:** If `max_in_memory_entries` is set and exceeded, mark the oldest overflow for dropping.
-2. **Per-action pass:** Walk forward from the cap boundary. For each entry, if its action has a configured `retention_days_by_action` window and the entry is older than that window, drop it. Stop at the first survivor.
+1. **Przebieg limitu:** Jeśli `max_in_memory_entries` jest ustawiony i przekroczony, oznacz najstarsze przepełnienie do usunięcia.
+2. **Przebieg per-akcja:** Przejdź naprzód od granicy limitu. Dla każdego wpisu, jeśli jego akcja ma skonfigurowane okno `retention_days_by_action` i wpis jest starszy niż to okno, usuń go. Zatrzymaj się na pierwszym ocalałym.
 
-**Dropping is prefix-only.** The chain is a contiguous linked list — you cannot punch holes. The first entry whose retention keeps it halts the trim, so newer entries of "should-drop" actions survive.
+**Usuwanie ma charakter wyłącznie prefiksowy.** Łańcuch to ciągła lista powiązana — nie można w niej robić dziur. Pierwszy wpis, którego retencja go zachowuje, zatrzymuje przycinanie, więc nowsze wpisy akcji „do usunięcia" przetrwają.
 
-Returns a `TrimReport` with per-action drop counts, total dropped, and the new chain anchor hash. The caller (kernel periodic task) is responsible for recording the `RetentionTrim` self-audit row.
+Zwraca `TrimReport` z liczbami usunięć per-akcja, całkowitą liczbą usunięć i nowym haszem kotwicy łańcucha. Wywołujący (periodyczne zadanie jądra) jest odpowiedzialny za zapisanie wiersza samoaudytu `RetentionTrim`.
 
-**Persist-before-mutate:** the DB `DELETE` runs before the in-memory `drain`. If the DELETE fails, nothing is trimmed and the report is empty — the trim retries on the next tick. This prevents a restart from resurrecting rows that retention removed.
+**Utrwal-przed-modyfikacją:** `DELETE` w bazie danych wykonuje się przed `drain` w pamięci. Jeśli DELETE się nie powiedzie, nic nie jest przycinane, a raport jest pusty — przycinanie powtarza się przy następnym cyklu. Zapobiega to ożywianiu wierszy przez restart, które retencja usunęła.
 
 ### `prune(retention_days) -> usize`
 
-Legacy day-based retention. Same prefix-only semantics and persist-before-mutate discipline as `trim`. Updates `chain_anchor` to the last dropped entry's hash so `verify_integrity` continues to pass across the prune boundary.
+Dziedziczna retencja oparta na dniach. Ta sama semantyka wyłącznie prefiksowa i zasada utrwal-przed-modyfikacją co `trim`. Aktualizuje `chain_anchor` do hasza ostatniego usuniętego wpisu, aby `verify_integrity` nadal przechodziło przez granicę przycinania.
 
-### Chain Anchor Recovery
+### Odzyskiwanie kotwicy łańcucha
 
-`chain_anchor` is in-memory only — no schema column. On boot, `with_db` recovers it from the surviving rows: if the first entry's `prev_hash` is not the genesis sentinel, that `prev_hash` **is** the anchor (it points at the dropped predecessor). This keeps verification working across restarts without schema changes.
+`chain_anchor` istnieje wyłącznie w pamięci — brak kolumny w schemacie. Przy starcie `with_db` odzyskuje ją z ocalałych wierszy: jeśli `prev_hash` pierwszego wpisu nie jest wartością sygnalizacyjną genezy, to `prev_hash` **jest** kotwicą (wskazuje na usuniętego poprzednika). Utrzymuje to działanie weryfikacji między restartami bez zmian schematu.
 
-## Verification
+## Weryfikacja
 
 ### `verify_integrity() -> Result<(), String>`
 
-1. Seed `expected_prev` from `chain_anchor` (or genesis sentinel).
-2. Walk every entry: check `prev_hash` links, recompute the v2 hash (falling back to v1 legacy), fail on first mismatch.
-3. If anchored: read the anchor file and compare `seq` against `persisted_rows` and `hash` against the tip. **Missing anchor file fails closed** — a silent disappearance is indistinguishable from an attacker deleting it.
+1. Inicjalizacja `expected_prev` z `chain_anchor` (lub wartości sygnalizacyjnej genezy).
+2. Przejście przez każdy wpis: sprawdzenie powiązań `prev_hash`, przeliczenie hasza v2 (z fallbackiem do v1 legacy), awaria przy pierwszej niezgodności.
+3. Jeśli zakotwiczono: odczytanie pliku kotwicznego i porównanie `seq` z `persisted_rows` oraz `hash` z końcówką. **Brak pliku kotwiczego skutkuje awarią w trybie zamkniętym** — ciche zniknięcie jest nieodróżnialne od usunięcia pliku przez atakującego.
 
-Error messages identify the break point: `"chain break at seq N"` for link failures, `"hash mismatch at seq N"` for content tampering, `"audit anchor mismatch"` for external witness divergence.
+Komunikaty błędów identyfikują punkt przerwania: `"chain break at seq N"` dla awarii powiązania, `"hash mismatch at seq N"` dla manipulacji treścią, `"audit anchor mismatch"` dla rozbieżności zewnętrznego świadka.
 
-## Read Accessors
+## Metody dostępu
 
-| Method | Returns |
+| Metoda | Zwraca |
 |--------|---------|
-| `tip_hash()` | Current chain tip (or genesis sentinel) |
-| `len()` / `is_empty()` | In-memory window size |
-| `recent(n)` | Up to `n` most recent entries (cloned) |
-| `since_seq(cursor)` | Every entry with `seq > cursor` — for SSE streaming consumers |
-| `anchor_path()` | Configured external anchor path, if any |
+| `tip_hash()` | Bieżąca końcówka łańcucha (lub wartość sygnalizacyjna genezy) |
+| `len()` / `is_empty()` | Rozmiar okna w pamięci |
+| `recent(n)` | Do `n` najnowszych wpisów (sklonowanych) |
+| `since_seq(cursor)` | Każdy wpis z `seq > cursor` — dla konsumentów strumieniowania SSE |
+| `anchor_path()` | Skonfigurowana ścieżka zewnętrznej kotwicy, jeśli ustawiona |
 
-`since_seq` is strictly greater-than: `since_seq(0)` skips `seq=0`. The SSE handler backfills via `recent` on first poll, then enters the cursor loop.
+`since_seq` używa ścisłego większe-niż: `since_seq(0)` pomija `seq=0`. Handler SSE wstecznie wypełnia dane przez `recent` przy pierwszym odpytaniu, a następnie przechodzi w pętlę kursora.
 
-## Integration Points
+## Punkty integracji
 
-| Caller | Usage |
+| Wywołujący | Zastosowanie |
 |--------|-------|
-| `kernel::boot::boot_with_config` | Constructs the log via `with_db_anchored`, applies `set_max_in_memory_entries` from config |
-| `kernel::bindings_and_handle::set_self_handle` | Periodic `prune` calls |
-| `routes::audit::entry` | Reads `AuditEntry` for the audit API surface |
-| `tui::event::spawn_fetch_audit` | Fetches entries for the TUI audit view |
-| `librefang-runtime` | Re-exports at `runtime::audit` (historical path preserved post god-crate split) |
+| `kernel::boot::boot_with_config` | Konstruuje dziennik przez `with_db_anchored`, stosuje `set_max_in_memory_entries` z konfiguracji |
+| `kernel::bindings_and_handle::set_self_handle` | Okresowe wywołania `prune` |
+| `routes::audit::entry` | Odczytuje `AuditEntry` dla powierzchni API audytu |
+| `tui::event::spawn_fetch_audit` | Pobiera wpisy dla widoku audytu w TUI |
+| `librefang-runtime` | Reeksportuje jako `runtime::audit` (historyczna ścieżka zachowana po podziale god-crate) |
 
-## Operational Notes
+## Uwagi operacyjne
 
-- **`librefang security verify`** — Inspects chain integrity from the CLI.
-- **`librefang security audit-reset`** — Truncates the chain and re-anchors at zero. Intended for dev environments where untracked restarts have broken the chain. **Never run in compliance/production** — it destroys pre-break forensic value.
-- Audit retention config does **not** hot-reload (see `config_reload.rs: build_reload_plan`), so `set_max_in_memory_entries` is typically called once at boot.
+- **`librefang security verify`** — Sprawdza integralność łańcucha z CLI.
+- **`librefang security audit-reset`** — Truncuje łańcuch i kotwiczy ponownie od zera. Przeznaczone dla środowisk deweloperskich, gdzie niesledzone restarty zerwały łańcuch. **Nigdy nie uruchamiać w środowiskach compliance/produkcyjnych** — niszczy wartość dowodową sprzed przerwania.
+- Konfiguracja retencji audytu **nie** przeładowuje się w locie (zobacz `config_reload.rs: build_reload_plan`), więc `set_max_in_memory_entries` jest zazwyczaj wywoływane raz przy starcie.

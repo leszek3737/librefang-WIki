@@ -2,13 +2,13 @@
 
 # deploy/grafana
 
-Grafana observability stack for LibreFang. This module provisions four datasources (Prometheus, Tempo, Loki, Jaeger) and ships five pre-built dashboards covering system health, LLM/token consumption, HTTP API performance, cost/budget, and local Ollama GPU usage. Everything is file-provisioned — no manual Grafana UI configuration is required after deployment.
+Stos obserwowalności Grafana dla LibreFang. Ten moduł aprowizuje cztery źródła danych (Prometheus, Tempo, Loki, Jaeger) i dostarcza pięć gotowych dashboardów obejmujących stan systemu, zużycie LLM/tokenów, wydajność HTTP API, koszty/budżet oraz lokalne wykorzystanie GPU przez Ollamę. Wszystko jest aprowizowane z plików — po wdrożeniu nie jest wymagana żadna ręczna konfiguracja w interfejsie Grafany.
 
-## Module layout
+## Układ modułu
 
 ```
 deploy/grafana/
-├── dashboards/                       # JSON dashboard definitions (mounted into the container)
+├── dashboards/                       # Definicje dashboardów w JSON (montowane w kontenerze)
 │   ├── librefang.json                # uid: librefang-overview
 │   ├── librefang-llm.json            # uid: librefang-llm
 │   ├── librefang-http.json           # uid: librefang-http
@@ -16,129 +16,129 @@ deploy/grafana/
 │   └── ollama.json                   # uid: ollama-local
 └── provisioning/
     ├── dashboards/
-    │   └── dashboard.yml             # File provider: watches /var/lib/grafana/dashboards
+    │   └── dashboard.yml             # Dostawca plikowy: obserwuje /var/lib/grafana/dashboards
     └── datasources/
-        ├── prometheus.yml            # uid: librefang-prometheus  (default)
+        ├── prometheus.yml            # uid: librefang-prometheus  (domyślny)
         ├── tempo.yml                 # uid: librefang-tempo
         ├── loki.yml                  # uid: librefang-loki
         └── jaeger.yml                # uid: librefang-jaeger
 ```
 
-The two directories map to Grafana's provisioning system. `provisioning/datasources/*.yml` are read once at startup and register datasources by stable UID. `provisioning/dashboards/dashboard.yml` declares a single file provider named **LibreFang** that watches `/var/lib/grafana/dashboards` and hot-reloads any JSON in that path. The dashboard JSON files in `deploy/grafana/dashboards/` are expected to be volume-mounted there by the compose/k8s setup that brings Grafana up.
+Te dwa katalogi mapują się do systemu aprowizacji Grafany. Pliki `provisioning/datasources/*.yml` są odczytywane raz przy starcie i rejestrują źródła danych za pomocą stabilnych UID. Plik `provisioning/dashboards/dashboard.yml` deklaruje jednego dostawcę plikowego o nazwie **LibreFang**, który obserwuje `/var/lib/grafana/dashboards` i dynamicznie przeładowuje każdy JSON w tej ścieżce. Pliki JSON dashboardów w `deploy/grafana/dashboards/` powinny być zamontowane jako wolumeny w tej lokalizacji przez konfigurację compose/k8s uruchamiającą Grafanę.
 
-## Datasources and cross-linking
+## Źródła danych i powiązania między nimi
 
-The four datasources form a connected observability graph rather than four isolated panels. Cross-links are wired at the provisioning level so that navigating from a log line to a trace, or from a span to a metric, works without additional UI setup.
+Cztery źródła danych tworzą połączony graf obserwowalności, a nie cztery odizolowane panele. Powiązania są skonfigurowane na poziomie aprowizacji, dzięki czemu nawigacja z wiersza logu do śledzenia lub z zakresu do metryki działa bez dodatkowej konfiguracji w interfejsie.
 
 ```mermaid
 graph LR
-  L[Loki<br/>logs] -. trace_id regex .-> T[Tempo<br/>traces]
-  L -. trace_id regex .-> J[Jaeger<br/>traces]
-  T -- tracesToMetrics --> P[Prometheus<br/>metrics]
+  L[Loki<br/>logi] -. trace_id regex .-> T[Tempo<br/>śledzenia]
+  L -. trace_id regex .-> J[Jaeger<br/>śledzenia]
+  T -- tracesToMetrics --> P[Prometheus<br/>metryki]
   J -- tracesToMetrics --> P
-  P --> D[(Dashboards)]
+  P --> D[(Dashboardy)]
   T --> D
   L --> D
 ```
 
-- **Prometheus** (`librefang-prometheus`, default) — `http://prometheus:9090`. Source for every numeric panel across all five dashboards.
-- **Tempo** (`librefang-tempo`) — `http://tempo:3200`. `tracesToMetrics` is pointed back at Prometheus so a selected span can pivot to its underlying metrics. Node graph enabled.
-- **Jaeger** (`librefang-jaeger`) — `http://jaeger:16686`. Same `tracesToMetrics` link to Prometheus and node graph enabled. Jaeger all-in-one serves both UI and query API on `16686`; the datasource reuses that port over the docker bridge, so the host port remains available for direct UI access.
-- **Loki** (`librefang-loki`) — `http://loki:3100`. Two `derivedFields` are configured to extract a 32-hex `trace_id` from log lines and turn it into clickable links to Tempo and Jaeger. The regex (`trace_id="?([0-9a-f]{32})"?`) is intentionally inert until the daemon emits `trace_id` in log lines — provisioning is in place so no Grafana change is required when the Rust-side logging change lands.
+- **Prometheus** (`librefang-prometheus`, domyślny) — `http://prometheus:9090`. Źródło dla każdego panelu numerycznego we wszystkich pięciu dashboardach.
+- **Tempo** (`librefang-tempo`) — `http://tempo:3200`. `tracesToMetrics` wskazuje z powrotem na Prometheus, aby wybrany zakres mógł przejść do powiązanych metryk. Graf węzłów włączony.
+- **Jaeger** (`librefang-jaeger`) — `http://jaeger:16686`. To samo powiązanie `tracesToMetrics` do Prometheus i graf węzłów włączony. Jaeger all-in-one obsługuje zarówno interfejs, jak i API zapytań na porcie `16686`; źródło danych ponownie używa tego portu przez most docker, więc port hosta pozostaje dostępny do bezpośredniego dostępu z interfejsu.
+- **Loki** (`librefang-loki`) — `http://loki:3100`. Skonfigurowano dwa `derivedFields` do wyodrębniania 32-znakowego szesnastkowego `trace_id` z wierszy logów i zamiany go na klikalne linki do Tempo i Jaeger. Wyrażenie regularne (`trace_id="?([0-9a-f]{32})"?`) jest celowo nieaktywne, dopóki demon nie zacznie emitować `trace_id` w wierszach logów — aprowizacja jest już na miejscu, więc po wprowadzeniu zmian w logowaniu po stronie Rusta nie będzie wymagana żadna modyfikacja Grafany.
 
-## Dashboard catalog
+## Katalog dashboardów
 
-Each LibreFang dashboard carries a consistent set of dashboard links in its top bar — sibling dashboards plus three external shortcuts: Tempo Explore (prefilled `{ resource.service.name="librefang" }`), Loki Explore (prefilled `{service="librefang"}`), and the standalone Jaeger UI. The `keepTime: true` flag on the Explore links preserves the current time window when pivoting.
+Każdy dashboard LibreFang ma w górnym pasku spójny zestaw linków do dashboardów — dashboardy równorzędne oraz trzy skróty zewnętrzne: Tempo Explore (wstępnie wypełnione `{ resource.service.name="librefang" }`), Loki Explore (wstępnie wypełnione `{service="librefang"}`) i samodzielny interfejs Jaeger. Flaga `keepTime: true` na linkach Explore zachowuje bieżące okno czasowe podczas przełączania.
 
-### LibreFang Overview (`librefang-overview`)
+### Przegląd LibreFang (`librefang-overview`)
 
-Tags: `librefang`, `overview`. Default time range: last 1 hour.
+Tagi: `librefang`, `overview`. Domyślny zakres czasu: ostatnia 1 godzina.
 
-Top-row stat strip surfaces the high-signal vitals:
+Górny pasek statystyk prezentuje kluczowe wskaźniki:
 
-| Stat | Metric | Notes |
-|------|--------|-------|
-| Version | `librefang_info{version}` | Rendered as `textMode: name` so the version label shows as the value |
-| Uptime | `librefang_uptime_seconds` | `dtdurations` unit formats as `Xd Yh` |
-| Active Agents | `librefang_agents_active` | Thresholds: green → yellow at 10 → red at 50 |
-| Total Agents | `librefang_agents_total` | |
-| Active Sessions | `librefang_active_sessions` | Yellow at 5, red at 20 |
-| Cost Today (USD) | `librefang_cost_usd_today` | 4-decimal USD; yellow at $1, red at $10 |
-| Panics | `librefang_panics_total` | Orange at 1, red at 100 |
-| Restarts | `librefang_restarts_total` | Red at 1 |
+| Statystyka | Metryka | Uwagi |
+|------------|---------|-------|
+| Wersja | `librefang_info{version}` | Renderowana jako `textMode: name`, aby etykieta wersji wyświetlała się jako wartość |
+| Czas pracy | `librefang_uptime_seconds` | Jednostka `dtdurations` formatuje jako `Xd Yh` |
+| Aktywne agenty | `librefang_agents_active` | Progi: zielony → żółty przy 10 → czerwony przy 50 |
+| Wszystkie agenty | `librefang_agents_total` | |
+| Aktywne sesje | `librefang_active_sessions` | Żółty przy 5, czerwony przy 20 |
+| Koszt dzisiaj (USD) | `librefang_cost_usd_today` | 4 miejsca po przecinku; żółty przy $1, czerwony przy $10 |
+| Paniki | `librefang_panics_total` | Pomarańczowy przy 1, czerwony przy 100 |
+| Restarty | `librefang_restarts_total` | Czerwony przy 1 |
 
-Two time-series panels follow: **Panics & Restarts Over Time** and **Active vs Total Agents**. This dashboard has no template variables — it intentionally shows the global view.
+Następują dwa panele szeregów czasowych: **Paniki i restarty w czasie** oraz **Aktywne vs wszystkie agenty**. Ten dashboard nie ma zmiennych szablonowych — celowo pokazuje widok globalny.
 
-### LibreFang LLM & Token Usage (`librefang-llm`)
+### LibreFang LLM i zużycie tokenów (`librefang-llm`)
 
-Tags: `librefang`, `llm`, `tokens`. The deep-dive view for model consumption. Three template variables provide filtering:
+Tagi: `librefang`, `llm`, `tokens`. Widok szczegółowy zużycia modelu. Trzy zmienne szablonowe umożliwiają filtrowanie:
 
 - `agent` — `label_values(librefang_tokens, agent)`
 - `provider` — `label_values(librefang_tokens, provider)`
-- `model` — `label_values(librefang_tokens{provider=~"$provider"}, model)` (cascaded from provider)
+- `model` — `label_values(librefang_tokens{provider=~"$provider"}, model)` (kaskadowo z provider)
 
-All variables default to All (regex `.*`), support multi-select, and refresh on dashboard load (`refresh: 2`). Every panel target carries the `{agent=~"$agent",provider=~"$provider",model=~"$model"}` selector so filters apply uniformly.
+Wszystkie zmienne domyślnie ustawione na Wszystkie (regex `.*`), obsługują wielokrotny wybór i odświeżają się przy ładowaniu dashboardu (`refresh: 2`). Każdy cel panelu zawiera selektor `{agent=~"$agent",provider=~"$provider",model=~"$model"}`, dzięki czemu filtry działają jednolicie.
 
-Four stat panels at the top: total tokens, input tokens, output tokens, LLM calls (all 1-hour window). Below them: tokens-by-agent (stacked area), LLM calls by agent (stacked bars), input-vs-output stacked bars, tokens by provider/model (stacked area), an agent token breakdown donut, an input/output ratio donut, and **Tool Calls by Agent** as stacked bars. The tool-calls panel is the only one driven by `librefang_tool_calls`.
+Cztery panele statystyk na górze: tokeny całkowite, tokeny wejściowe, tokeny wyjściowe, wywołania LLM (wszystkie w oknie 1 godziny). Poniżej: tokeny według agenta (obszar skumulowany), wywołania LLM według agenta (słupki skumulowane), słupki skumulowane wejście/wyjście, tokeny według dostawcy/modelu (obszar skumulowany), pierścień podziału tokenów według agenta, pierścień stosunku wejście/wyjście oraz **Wywołania narzędzi według agenta** jako słupki skumulowane. Panel wywołań narzędzi jest jedynym napędzanym przez `librefang_tool_calls`.
 
-### LibreFang HTTP & API (`librefang-http`)
+### LibreFang HTTP i API (`librefang-http`)
 
-Tags: `librefang`, `http`, `api`. No template variables — fixed global view.
+Tagi: `librefang`, `http`, `api`. Brak zmiennych szablonowych — stały widok globalny.
 
-Built on two Prometheus series:
+Oparty na dwóch seriach Prometheus:
 
-- `librefang_http_requests_total{method, status, path}` — counter for request volume and error rates
-- `librefang_http_request_duration_seconds_bucket{path, le}` — histogram for latency
+- `librefang_http_requests_total{method, status, path}` — licznik dla wolumenu żądań i wskaźnika błędów
+- `librefang_http_request_duration_seconds_bucket{path, le}` — histogram dla opóźnień
 
-Panels:
-- **HTTP Request Rate** — total `rate(...[5m])` plus per-method breakdown
-- **Request Latency (p50 / p90 / p99)** — `histogram_quantile()` over the duration bucket; p50 green, p90 orange, p99 red
-- **Request Rate by Status Code** — stacked area by `status` label
-- **HTTP Error Rate (4xx / 5xx)** — two regex matchers `status=~"4.."` and `status=~"5.."`, colored orange/red
-- **Top Endpoints by Request Count** — `topk(10, sum by (path) (increase(...[1h])))`
-- **Slowest Endpoints (p99 Latency)** — `topk(10, histogram_quantile(0.99, sum by (path, le) (...)))`
+Panele:
+- **Wskaźnik żądań HTTP** — całkowity `rate(...[5m])` plus podział według metody
+- **Opóźnienie żądań (p50 / p90 / p99)** — `histogram_quantile()` na bucketach czasu trwania; p50 zielony, p90 pomarańczowy, p99 czerwony
+- **Wskaźnik żądań według kodu statusu** — obszar skumulowany według etykiety `status`
+- **Wskaźnik błędów HTTP (4xx / 5xx)** — dwa matchery regex `status=~"4.."` i `status=~"5.."`, kolor pomarańczowy/czerwony
+- **Top punktów końcowych według liczby żądań** — `topk(10, sum by (path) (increase(...[1h])))`
+- **Najwolniejsze punkty końcowe (opóźnienie p99)** — `topk(10, histogram_quantile(0.99, sum by (path, le) (...)))`
 
-### LibreFang Cost & Budget (`librefang-cost`)
+### LibreFang Koszty i budżet (`librefang-cost`)
 
-Tags: `librefang`, `cost`, `budget`. Same `agent`/`provider`/`model` template variables as the LLM dashboard. Default time range extended to **last 6 hours** (vs. 1 hour elsewhere) because cost trends are more meaningful over a longer window.
+Tagi: `librefang`, `cost`, `budget`. Te same zmienne szablonowe `agent`/`provider`/`model` co na dashboardzie LLM. Domyślny zakres czasu rozszerzony do **ostatnich 6 godzin** (vs. 1 godzina w pozostałych), ponieważ trendy kosztowe są bardziej znaczące w dłuższym oknie.
 
-This dashboard treats token consumption as the primary cost proxy. Panels:
-- **Cost Today (USD)** stat with gradient thresholds: green < $1, yellow < $5, orange < $10, red ≥ $10
-- **Total Tokens** and **LLM Calls** stats (1-hour window)
-- **Cost Trend** time-series on `librefang_cost_usd_today`
-- **Tokens by Agent** stacked area (legend sorted by last value, descending)
-- **Cost by Model (token share)** donut — `sum by (provider, model)`, instant query
-- **Output Tokens by Agent** horizontal bar gauge — `topk(10, librefang_tokens_output{...})`, thresholds at 10k (yellow) and 100k (red). Panel description notes output tokens are typically 3–5× more expensive than input tokens.
-- **Input / Output Token Ratio** donut — two instant queries with fixed blue (input) and orange (output) colors
+Ten dashboard traktuje zużycie tokenów jako główną proxy kosztów. Panele:
+- **Koszt dzisiaj (USD)** statystyka z progami gradientowymi: zielony < $1, żółty < $5, pomarańczowy < $10, czerwony ≥ $10
+- **Tokeny całkowite** i **Wywołania LLM** statystyki (okno 1 godziny)
+- **Trend kosztów** szereg czasowy na `librefang_cost_usd_today`
+- **Tokeny według agenta** obszar skumulowany (legenda posortowana według ostatniej wartości, malejąco)
+- **Koszty według modelu (udział tokenów)** pierścień — `sum by (provider, model)`, zapytanie natychmiastowe
+- **Tokeny wyjściowe według agenta** poziomy pasek miernika — `topk(10, librefang_tokens_output{...})`, progi przy 10k (żółty) i 100k (czerwony). Opis panelu zaznacza, że tokeny wyjściowe są zazwyczaj 3–5× droższe niż tokeny wejściowe.
+- **Stosunek tokenów wejściowych / wyjściowych** pierścień — dwa zapytania natychmiastowe z ustalonymi kolorami niebieskim (wejście) i pomarańczowym (wyjście)
 
 ### Ollama (`ollama-local`)
 
-Tags: `ollama`. 30-second auto-refresh. Local inference monitoring, completely separate from the LibreFang dashboards and carries no dashboard links to the others.
+Tagi: `ollama`. Automatyczne odświeżanie co 30 sekund. Monitorowanie lokalnej inferencji, całkowicie oddzielone od dashboardów LibreFang i nie zawiera linków do pozostałych.
 
-| Panel | Metric(s) |
-|-------|-----------|
-| Service Status | `ollama_up` (value mapping: 0 = DOWN/red, 1 = UP/green) |
-| Installed Models | `ollama_models_total` |
-| Loaded in VRAM | `ollama_loaded_models_total` |
-| VRAM Usage by Model | `ollama_model_vram_bytes > 0` (bar gauge, max 16 GB, thresholds at 8 GB / 14 GB) |
-| Model Sizes | `ollama_model_size_bytes` |
-| VRAM Used (Total) | `sum(ollama_model_vram_bytes)` plus per-model breakdown |
+| Panel | Metryki |
+|-------|---------|
+| Status usługi | `ollama_up` (mapowanie wartości: 0 = WYŁĄCZONA/czerwony, 1 = WŁĄCZONA/zielony) |
+| Zainstalowane modele | `ollama_models_total` |
+| Załadowane w VRAM | `ollama_loaded_models_total` |
+| Wykorzystanie VRAM według modelu | `ollama_model_vram_bytes > 0` (miernik słupkowy, max 16 GB, progi przy 8 GB / 14 GB) |
+| Rozmiary modeli | `ollama_model_size_bytes` |
+| Wykorzystanie VRAM (całkowite) | `sum(ollama_model_vram_bytes)` plus podział według modelu |
 
-## Metrics reference
+## Odniesienie metryk
 
-The dashboards consume the following Prometheus series. The instrumented LibreFang daemon must expose all of these for the dashboards to render:
+Dashboardy konsumują następujące serie Prometheus. Instrumentowany demon LibreFang musi eksponować wszystkie te metryki, aby dashboardy mogły się renderować:
 
-**Core system** (overview): `librefang_info`, `librefang_uptime_seconds`, `librefang_agents_active`, `librefang_agents_total`, `librefang_active_sessions`, `librefang_panics_total`, `librefang_restarts_total`, `librefang_cost_usd_today`
+**System podstawowy** (przegląd): `librefang_info`, `librefang_uptime_seconds`, `librefang_agents_active`, `librefang_agents_total`, `librefang_active_sessions`, `librefang_panics_total`, `librefang_restarts_total`, `librefang_cost_usd_today`
 
-**LLM usage** (llm + cost dashboards): `librefang_tokens`, `librefang_tokens_input`, `librefang_tokens_output`, `librefang_llm_calls`, `librefang_tool_calls` — all carrying labels `{agent, provider, model}`
+**Zużycie LLM** (dashboardy llm + cost): `librefang_tokens`, `librefang_tokens_input`, `librefang_tokens_output`, `librefang_llm_calls`, `librefang_tool_calls` — wszystkie z etykietami `{agent, provider, model}`
 
-**HTTP** (http dashboard): `librefang_http_requests_total{method,status,path}` (counter), `librefang_http_request_duration_seconds_bucket{path,le}` (histogram)
+**HTTP** (dashboard http): `librefang_http_requests_total{method,status,path}` (licznik), `librefang_http_request_duration_seconds_bucket{path,le}` (histogram)
 
-**Ollama** (ollama dashboard): `ollama_up`, `ollama_models_total`, `ollama_loaded_models_total`, `ollama_model_vram_bytes{model}`, `ollama_model_size_bytes{model}`
+**Ollama** (dashboard ollama): `ollama_up`, `ollama_models_total`, `ollama_loaded_models_total`, `ollama_model_vram_bytes{model}`, `ollama_model_size_bytes{model}`
 
-## Provisioning mechanics
+## Mechanika aprowizacji
 
-`provisioning/dashboards/dashboard.yml` declares one provider:
+`provisioning/dashboards/dashboard.yml` deklaruje jednego dostawcę:
 
 ```yaml
 providers:
@@ -153,20 +153,20 @@ providers:
       foldersFromFilesStructure: false
 ```
 
-Key behaviors:
-- Dashboards load flat into the root folder (no subfolder hierarchy from file structure).
-- `editable: true` allows in-UI edits, but changes are not persisted back to these JSON files — the file is the source of truth on container restart.
-- `disableDeletion: false` means deleting a JSON from the mounted path removes its dashboard.
-- All datasource YAMLs set `editable: false`, so datasource endpoints can only be changed by editing these files and restarting Grafana.
+Kluczowe zachowania:
+- Dashboardy ładują się płasko do folderu głównego (bez hierarchii podfolderów ze struktury plików).
+- `editable: true` pozwala na edycję w interfejsie, ale zmiany nie są zapisywane z powrotem do tych plików JSON — plik jest źródłem prawdy przy restarcie kontenera.
+- `disableDeletion: false` oznacza, że usunięcie JSON z zamontowanej ścieżki usuwa jego dashboard.
+- Wszystkie pliki YAML źródeł danych mają ustawione `editable: false`, więc punkty końcowe źródeł danych mogą być zmieniane tylko przez edycję tych plików i restart Grafany.
 
-The expected docker-compose pattern is to mount `deploy/grafana/dashboards` to `/var/lib/grafana/dashboards` and `deploy/grafana/provisioning` to `/etc/grafana/provisioning`. Grafana reads provisioning on boot and hot-reloads dashboards when files change.
+Oczekiwany wzorzec docker-compose polega na zamontowaniu `deploy/grafana/dashboards` do `/var/lib/grafana/dashboards` oraz `deploy/grafana/provisioning` do `/etc/grafana/provisioning`. Grafana odczytuje aprowizację przy starcie i dynamicznie przeładowuje dashboardy po zmianie plików.
 
-## Modifying dashboards
+## Modyfikowanie dashboardów
 
-When editing a dashboard JSON:
+Podczas edycji pliku JSON dashboardu:
 
-1. **UID stability** — the `uid` field is how dashboard links resolve (`/d/librefang-overview`, etc.). Never change a UID without updating the `links` array in every sibling dashboard.
-2. **Template variable selectors** — any new panel on the llm or cost dashboards should include the full `{agent=~"$agent",provider=~"$provider",model=~"$model"}` selector so filters behave consistently.
-3. **Datasource references** — panels reference datasources by UID (`librefang-prometheus`), not by name. This is intentional; it keeps dashboards portable across environments where datasource display names might differ.
-4. **Schema version** — these dashboards target schema version 38–39. Bumping is safe but not required; Grafana will auto-upgrade on load.
-5. **Version field** — bump the top-level `version` integer on each save to help diff tracking, though Grafana does not enforce this.
+1. **Stabilność UID** — pole `uid` to sposób, w jaki linki do dashboardów się rozwiązują (`/d/librefang-overview` itd.). Nigdy nie zmieniaj UID bez aktualizacji tablicy `links` w każdym dashboardzie równorzędnym.
+2. **Selektory zmiennych szablonowych** — każdy nowy panel na dashboardach llm lub cost powinien zawierać pełny selektor `{agent=~"$agent",provider=~"$provider",model=~"$model"}`, aby filtry działały spójnie.
+3. **Odwołania do źródeł danych** — panele odnoszą się do źródeł danych za pomocą UID (`librefang-prometheus`), a nie nazwy. To celowe; sprawia, że dashboardy są przenośne między środowiskami, gdzie nazwy wyświetlane źródeł danych mogą się różnić.
+4. **Wersja schematu** — te dashboardy celują w schemat w wersji 38–39. Zwiększenie jest bezpieczne, ale nie wymagane; Grafana automatycznie uaktualni schemat przy ładowaniu.
+5. **Pole wersji** — zwiększ liczbę całkowitą `version` najwyższego poziomu przy każdym zapisie, aby ułatwić śledzenie zmian (diff), choć Grafana tego nie wymusza.

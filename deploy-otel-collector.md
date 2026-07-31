@@ -2,68 +2,68 @@
 
 # deploy/otel-collector
 
-OpenTelemetry Collector configuration for LibreFang's local development stack. Acts as the central telemetry hub: ingests OTLP traces and metrics from the application and fans them out to multiple backends for storage, visualization, and debugging.
+Konfiguracja OpenTelemetry Collector dla lokalnego środowiska deweloperskiego LibreFang. Działa jako centralny węzeł telemetrii: przyjmuje ślady i metryki OTLP z aplikacji i rozdziela je do wielu backendów w celu przechowywania, wizualizacji i debugowania.
 
-## Purpose
+## Przeznaczenie
 
-LibreFang emits telemetry via the standard OTLP protocol. Rather than having the application talk directly to each backend, this collector sits in between to:
+LibreFang emituje telemetrię za pomocą standardowego protokołu OTLP. Zamiast pozwalania aplikacji na bezpośrednią komunikację z każdym backendem, ten collector znajduje się pomiędzy nimi, aby:
 
-- **Normalize ingestion** — the app only needs to know one endpoint (the collector), regardless of how many backends consume the data.
-- **Fan out traces** — simultaneously to Tempo (Grafana correlation), Jaeger (trace-debug UI), and stdout (quick local visibility).
-- **Bridge metrics to Prometheus** — exposes an scrape endpoint that Prometheus polls.
-- **Gate startup** — provides a health check so dependent services (Prometheus, Grafana) only start once the collector is actually accepting OTLP traffic.
+- **Ujednolicić przyjmowanie danych** — aplikacja musi znać tylko jeden punkt końcowy (collector), niezależnie od tego, ile backendów konsumuje dane.
+- **Rozdzielić ślady** — jednocześnie do Tempo (korelacja w Grafanie), Jaeger (interfejs debugowania śladów) oraz stdout (szybka widoczność lokalna).
+- **Zmostkować metryki do Prometheus** — udostępnia punkt końcowy scrapowania, od którego Prometheus pobiera dane.
+- **Warunkować uruchomienie** — udostępnia health check, dzięki czemu zależne usługi (Prometheus, Grafana) uruchamiają się dopiero, gdy collector faktycznie akceptuje ruch OTLP.
 
-## Configuration File
+## Plik konfiguracyjny
 
 ### `config.yaml`
 
-The sole file in this module. Loaded by the `otel/opentelemetry-collector-contrib` image at container startup.
+Jedyny plik w tym module. Wczytywany przez obraz `otel/opentelemetry-collector-contrib` podczas uruchamiania kontenera.
 
-#### Receivers
+#### Receivery
 
-| Receiver | Protocol | Endpoint | Purpose |
-|----------|----------|----------|---------|
-| `otlp` | gRPC | `0.0.0.0:4317` | Primary trace + metric ingestion from LibreFang |
-| `otlp` | HTTP | `0.0.0.0:4318` | Alternative HTTP-based OTLP ingestion |
+| Receiver | Protokół | Punkt końcowy | Przeznaczenie |
+|----------|----------|---------------|---------------|
+| `otlp` | gRPC | `0.0.0.0:4317` | Główne przyjmowanie śladów i metryk z LibreFang |
+| `otlp` | HTTP | `0.0.0.0:4318` | Alternatywne przyjmowanie OTLP przez HTTP |
 
-Both endpoints bind to `0.0.0.0` so they are reachable from other containers on the Docker bridge network.
+Oba punkty końcowe wiążą się z `0.0.0.0`, więc są osiągalne z innych kontenerów w sieci bridge Docker.
 
-#### Extension: `health_check`
+#### Rozszerzenie: `health_check`
 
-Exposes health endpoints (`/`, `/health/status`, etc.) on `0.0.0.0:13133`. Docker Compose uses this in its healthcheck directive — dependent services are gated on the collector passing this check before they start.
+Udostępnia punkty końcowe health check (`/`, `/health/status` itp.) na `0.0.0.0:13133`. Docker Compose korzysta z tego w dyrektywie healthcheck — usługi zależne czekają, aż collector przejdzie ten sprawdzian, zanim się uruchomią.
 
-#### Processor: `batch`
+#### Procesor: `batch`
 
-Applied to both pipelines. Groups telemetry into batches before export, reducing the number of outbound requests to Tempo, Jaeger, and Prometheus. Uses default settings (send batch size: 8192, timeout: 200ms).
+Zastosowany do obu pipeline'ów. Grupuje telemetrię w batche przed eksportem, zmniejszając liczbę żądań wychodzących do Tempo, Jaeger i Prometheus. Używa ustawień domyślnych (rozmiar batcha wysyłania: 8192, timeout: 200 ms).
 
-#### Exporters
+#### Eksportery
 
-| Exporter | Type | Endpoint | Notes |
-|----------|------|----------|-------|
-| `debug` | stdout | — | Normal verbosity. Prints traces to collector logs for quick debugging. |
-| `prometheus` | scrape endpoint | `0.0.0.0:8889` | Exposes collected metrics in Prometheus format for scraping. |
-| `otlp/tempo` | OTLP/gRPC | `tempo:4317` | Long-term trace storage. `tls.insecure: true` — plaintext on internal Docker bridge. |
-| `otlp/jaeger` | OTLP/gRPC | `jaeger:4317` | Trace debugging UI (waterfall, diff, dependency graph). Same plaintext bridge. |
+| Eksporter | Typ | Punkt końcowy | Uwagi |
+|-----------|-----|---------------|-------|
+| `debug` | stdout | — | Normalna szczegółowość. Drukuje ślady w logach collectora do szybkiego debugowania. |
+| `prometheus` | punkt końcowy scrapowania | `0.0.0.0:8889` | Udostępnia zebrane metryki w formacie Prometheus do scrapowania. |
+| `otlp/tempo` | OTLP/gRPC | `tempo:4317` | Długoterminowe przechowywanie śladów. `tls.insecure: true` — tekst jawny na wewnętrznej sieci bridge Docker. |
+| `otlp/jaeger` | OTLP/gRPC | `jaeger:4317` | Interfejs debugowania śladów (waterfall, diff, graf zależności). Również tekst jawny na sieci bridge. |
 
-The `tls.insecure` flag on both Tempo and Jaeger exporters is intentional and safe: all traffic stays on the Docker bridge network and never traverses an external network.
+Flaga `tls.insecure` w eksporterach Tempo i Jaeger jest celowa i bezpieczna: cały ruch pozostaje w sieci bridge Docker i nigdy nie przechodzi przez sieć zewnętrzną.
 
-#### Service Pipelines
+#### Pipeliny usług
 
-Two pipelines are defined:
+Zdefiniowane są dwa pipeliny:
 
-**Traces pipeline:**
+**Pipeline śladów:**
 ```
 otlp receiver → batch processor → [debug, otlp/tempo, otlp/jaeger]
 ```
-Every trace span is fanned out to all three exporters simultaneously. Tempo is the long-term store queried by Grafana; Jaeger provides the dedicated trace-debugging UI at `:16686`; stdout gives immediate local visibility without opening a browser.
+Każdy span śladu jest jednocześnie rozsyłany do wszystkich trzech eksporterów. Tempo jest długoterminowym magazynem odpytywanym przez Grafanę; Jaeger udostępnia dedykowany interfejs debugowania śladów pod `:16686`; stdout zapewnia natychmiastową widoczność lokalną bez otwierania przeglądarki.
 
-**Metrics pipeline:**
+**Pipeline metryk:**
 ```
 otlp receiver → batch processor → prometheus exporter
 ```
-Metrics are batched and then made available for Prometheus to scrape on `:8889`.
+Metryki są grupowane w batche i udostępniane do scrapowania przez Prometheus na `:8889`.
 
-## Data Flow
+## Przepływ danych
 
 ```mermaid
 graph LR
@@ -82,25 +82,25 @@ graph LR
     HC[Health Check :13133] -.->|gates startup| PROM
 ```
 
-## Port Reference
+## Odniesienie portów
 
-| Port | Protocol | Direction | Description |
-|------|----------|-----------|-------------|
-| `4317` | OTLP/gRPC | Inbound | Application trace + metric ingestion |
-| `4318` | OTLP/HTTP | Inbound | HTTP-based OTLP ingestion |
-| `13133` | HTTP | Inbound | Health check (Docker Compose healthcheck) |
-| `8889` | HTTP | Outbound (scrape) | Prometheus metrics endpoint |
-| `tempo:4317` | OTLP/gRPC | Outbound | Trace export to Tempo |
-| `jaeger:4317` | OTLP/gRPC | Outbound | Trace export to Jaeger |
+| Port | Protokół | Kierunek | Opis |
+|------|----------|----------|------|
+| `4317` | OTLP/gRPC | Przychodzący | Przyjmowanie śladów i metryk z aplikacji |
+| `4318` | OTLP/HTTP | Przychodzący | Przyjmowanie OTLP przez HTTP |
+| `13133` | HTTP | Przychodzący | Health check (Docker Compose healthcheck) |
+| `8889` | HTTP | Wychodzący (scrapowanie) | Punkt końcowy metryk Prometheus |
+| `tempo:4317` | OTLP/gRPC | Wychodzący | Eksport śladów do Tempo |
+| `jaeger:4317` | OTLP/gRPC | Wychodzący | Eksport śladów do Jaeger |
 
-## Integration with the Dev Stack
+## Integracja ze środowiskiem deweloperskim
 
-This module is consumed by the top-level Docker Compose configuration. The collector container depends on `tempo` and `jaeger` being available (it connects to them by Docker service name). Conversely, `prometheus` and `grafana` depend on the collector's health check passing before they start.
+Ten moduł jest wykorzystywany przez konfigurację Docker Compose najwyższego poziomu. Kontener collectora zależy od dostępności `tempo` i `jaeger` (łączy się z nimi po nazwie usługi Docker). Z kolei `prometheus` i `grafana` zależą od tego, aby health check collectora przeszedł pomyślnie, zanim się uruchomią.
 
-When adding new telemetry to LibreFang:
+Podczas dodawania nowej telemetrii do LibreFang:
 
-1. **Traces** — Configure the app's OTLP exporter to point at `localhost:4317` (or the collector service name from within Compose). Spans will automatically appear in stdout, Tempo (via Grafana), and Jaeger.
+1. **Ślady** — Skonfiguruj eksporter OTLP aplikacji tak, aby wskazywał na `localhost:4317` (lub nazwę usługi collectora wewnątrz Compose). Spany będą automatycznie pojawiać się w stdout, Tempo (przez Grafanę) i Jaeger.
 
-2. **Metrics** — Same OTLP endpoint. Metrics are routed through the metrics pipeline and made available at `:8889` for Prometheus to scrape. Ensure the app's metric instruments use the OTLP metrics exporter.
+2. **Metryki** — Ten sam punkt końcowy OTLP. Metryki są kierowane przez pipeline metryk i udostępniane na `:8889` do scrapowania przez Prometheus. Upewnij się, że instrumenty metryk aplikacji używają eksportera metryk OTLP.
 
-No code changes to this module are needed when adding new telemetry — the pipelines are generic OTLP receivers. Modifications here are only required when changing where telemetry is sent or how it is processed.
+Nie są potrzebne żadne zmiany kodu w tym module podczas dodawania nowej telemetrii — pipeliny to uniwersalne receivery OTLP. Modyfikacje w tym miejscu są wymagane tylko przy zmianie miejsca, do którego telemetria jest wysyłana, lub sposobu jej przetwarzania.

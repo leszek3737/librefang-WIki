@@ -1,38 +1,38 @@
-# Root — Cargo.toml
+# Katalog główny — Cargo.toml
 
-# Root — `Cargo.toml` (Workspace Manifest)
+# Katalog główny — `Cargo.toml` (manifest obszaru roboczego)
 
-## Purpose
+## Przeznaczenie
 
-The root `Cargo.toml` is the **Cargo workspace manifest** for the entire `librefang` monorepo. It does not compile any code itself. Instead it:
+Główny `Cargo.toml` to **manifest obszaru roboczego Cargo** dla całego monorepo `librefang`. Nie kompiluje samodzielnie żadnego kodu. Zamiast tego:
 
-1. Declares all first-party crates as workspace **members**.
-2. Pins every third-party dependency **once**, so member crates reference versions by name (`dep.workspace = true`) rather than re-declaring them.
-3. Sets workspace-wide package metadata (version, edition, MSRV, license).
-4. Configures build **profiles** (`dev`, `release`, `release-local`) with non-default settings tuned for this project.
-5. Defines a workspace-level **lint policy** that member crates opt into.
+1. Deklaruje wszystkie kraty pierwszej strony jako **składowe** obszaru roboczego.
+2. Przypina każdą zależność strony trzeciej **jednorazowo**, dzięki czemu składowe kraty odwołują się do wersji po nazwie (`dep.workspace = true`) zamiast ponownie je deklarować.
+3. Ustawia metadane pakietu dla całego obszaru roboczego (wersja, wydanie, MSRV, licencja).
+4. Konfiguruje **profile kompilacji** (`dev`, `release`, `release-local`) z nietrywialnymi ustawieniami dostosowanymi do tego projektu.
+5. Definiuje **politykę lintowania** na poziomie obszaru roboczego, do której dołączają składowe kraty.
 
-Any change to a version pin, profile flag, or lint rule here is a cross-cutting decision that affects every crate in the workspace.
+Każda zmiana przypięcia wersji, flagi profilu lub reguły lintowania to decyzja przekrojowa wpływająca na każdą kratę w obszarze roboczym.
 
 ---
 
-## Package Identity
+## Tożsamość pakietu
 
-| Field | Value |
+| Pole | Wartość |
 |---|---|
-| Version | `2026.7.31` (calendar-dated) |
-| Edition | `2021` |
+| Wersja | `2026.7.31` (datowana kalendarzowo) |
+| Wydanie | `2021` |
 | Rust MSRV | `1.94.1` |
-| License | `MIT` |
-| Resolver | `2` (feature unification off) |
+| Licencja | `MIT` |
+| Resolver | `2` (unifikacja funkcji wyłączona) |
 
-All member crates inherit these values unless they override locally.
+Wszystkie składowe kraty dziedziczą te wartości, chyba że nadpiszą je lokalnie.
 
 ---
 
-## Workspace Members
+## Składowe obszaru roboczego
 
-The workspace contains **30 crates** plus `xtask`, organized into functional layers:
+Obszar roboczy zawiera **30 krat** oraz `xtask`, zorganizowanych w warstwy funkcyjne:
 
 ```mermaid
 graph TD
@@ -91,81 +91,81 @@ graph TD
     end
 ```
 
-### Naming Convention
+### Konwencja nazewnictwa
 
-Every crate uses the `librefang-` prefix except `xtask`, which is a build/task automation tool invoked via `cargo xtask`.
+Każda krata używa przedrostka `librefang-` z wyjątkiem `xtask`, który jest narzędziem automatyzacji kompilacji/zadań wywoływanym przez `cargo xtask`.
 
-### Layer Summary
+### Podsumowanie warstw
 
-| Layer | Crates | Responsibility |
+| Warstwa | Kraty | Odpowiedzialność |
 |---|---|---|
-| **Foundation** | `types`, `wire`, `subprocess`, `kernel-handle` | Shared types, wire protocols, process spawning, kernel handle abstractions |
-| **Runtime** | `runtime`, `runtime-audit`, `runtime-media`, `runtime-sandbox-docker`, `runtime-mcp` | Execution environment: auditing, media handling, Docker sandboxing, MCP transport |
-| **LLM** | `llm-drivers`, `llm-driver` | LLM provider integration |
-| **Kernel** | `kernel`, `kernel-router`, `kernel-metering`, `api`, `http`, `acp` | Core orchestration, request routing, usage metering, HTTP server, Agent Client Protocol (Zed integration) |
-| **Memory** | `memory`, `memory-wiki` | Persistent storage and knowledge base |
-| **Interface** | `cli`, `desktop`, `channels`, `hands` | User-facing entry points: terminal, desktop app, communication channels, input handling |
-| **Extensions** | `extensions`, `skills`, `import`, `telemetry`, `rl-export` | Plugin system, skill definitions, data import, observability, reinforcement-learning export |
-| **Tooling** | `xtask`, `testing` | Build automation and shared test utilities |
+| **Foundation** | `types`, `wire`, `subprocess`, `kernel-handle` | Współdzielone typy, protokoły sieciowe, uruchamianie procesów, abstrakcje uchwytów jądra |
+| **Runtime** | `runtime`, `runtime-audit`, `runtime-media`, `runtime-sandbox-docker`, `runtime-mcp` | Środowisko wykonawcze: audytowanie, obsługa mediów, piaskownica Docker, transport MCP |
+| **LLM** | `llm-drivers`, `llm-driver` | Integracja z dostawcami LLM |
+| **Kernel** | `kernel`, `kernel-router`, `kernel-metering`, `api`, `http`, `acp` | Orkiestracja rdzenia, trasowanie żądań, pomiar zużycia, serwer HTTP, Agent Client Protocol (integracja Zed) |
+| **Memory** | `memory`, `memory-wiki` | Magazyn trwały i baza wiedzy |
+| **Interface** | `cli`, `desktop`, `channels`, `hands` | Punkty wejścia dla użytkownika: terminal, aplikacja desktopowa, kanały komunikacji, obsługa wprowadzania |
+| **Extensions** | `extensions`, `skills`, `import`, `telemetry`, `rl-export` | System wtyczek, definicje umiejętności, import danych, telemetria, eksport uczenia ze wzmocnieniem |
+| **Tooling** | `xtask`, `testing` | Automatyzacja kompilacji i współdzielone narzędzia testowe |
 
 ---
 
-## Dependency Strategy
+## Strategia zależności
 
-All external dependencies are declared in `[workspace.dependencies]`. Member crates consume them via:
+Wszystkie zależności zewnętrzne są deklarowane w `[workspace.dependencies]`. Składowe kraty korzystają z nich poprzez:
 
 ```toml
-# In a member crate's Cargo.toml
+# W Cargo.toml składowej kraty
 [dependencies]
 tokio.workspace = true
 serde = { workspace = true }
 ```
 
-This ensures **single-source version pinning** — no two crates can accidentally depend on different major versions of the same crate.
+Zapewnia to **jednoźródłowe przypinanie wersji** — żadne dwie kraty nie mogą przypadkowo zależeć od różnych głównych wersji tej samej kraty.
 
-### Notable Dependency Decisions
+### Znaczace decyzje dotyczące zależności
 
-The manifest comments document several non-obvious choices that are critical to maintain:
+Komentarze w manifeście dokumentują kilka nieoczywistych wyborów, które są krytyczne do utrzymania:
 
-#### OpenTelemetry Stack (aligned on 0.32)
+#### Stos OpenTelemetry (wyrównany do 0.32)
 
-The entire OTel stack must stay version-aligned. `tracing-opentelemetry 0.33` depends on `opentelemetry 0.32`, so all OTel crates are pinned to `0.32`:
+Cały stos OTel musi pozostać wyrównany wersjami. `tracing-opentelemetry 0.33` zależy od `opentelemetry 0.32`, więc wszystkie kraty OTel są przypięte do `0.32`:
 
-| Crate | Version | Rationale |
+| Krata | Wersja | Uzasadnienie |
 |---|---|---|
-| `opentelemetry` | `0.32` | Core API |
-| `opentelemetry_sdk` | `0.32` (with `rt-tokio`) | SDK with Tokio runtime |
-| `opentelemetry-otlp` | `0.32` (`default-features = false`) | gRPC/tonic only — **disabling defaults is critical** to avoid pulling `reqwest 0.12` alongside the workspace `reqwest 0.13`, which would duplicate the entire HTTP/TLS stack |
-| `tracing-opentelemetry` | `0.33` | Bridge crate |
-| `opentelemetry-http` | `0.32` | W3C trace-context header injection for outbound LLM requests — pulled explicitly because `otlp` has defaults disabled |
+| `opentelemetry` | `0.32` | Rdzeniowe API |
+| `opentelemetry_sdk` | `0.32` (z `rt-tokio`) | SDK ze środowiskiem wykonawczym Tokio |
+| `opentelemetry-otlp` | `0.32` (`default-features = false`) | Tylko gRPC/tonic — **wyłączenie domyślnych funkcji jest krytyczne**, aby uniknąć podciągnięcia `reqwest 0.12` obok `reqwest 0.13` z obszaru roboczego, co spowodowałoby duplikację całego stosu HTTP/TLS |
+| `tracing-opentelemetry` | `0.33` | Krata mostkująca |
+| `opentelemetry-http` | `0.32` | Wstrzykiwanie nagłówków W3C trace-context dla wychodzących żądań LLM — podciągnięte jawnie, ponieważ `otlp` ma wyłączone domyślne funkcje |
 
-**Warning:** Bumping any single OTel crate without bumping the rest will reintroduce two copies of `opentelemetry::trace::Tracer` in the dependency graph, breaking `SdkTracer: Tracer` in `telemetry.rs`.
+**Ostrzeżenie:** Zwiększenie wersji którejkolwiek z krat OTel bez zwiększenia pozostałych spowoduje ponowne wprowadzenie dwóch kopii `opentelemetry::trace::Tracer` do grafu zależności, co złamie `SdkTracer: Tracer` w `telemetry.rs`.
 
-#### Agent Client Protocol (exact-pinned)
+#### Agent Client Protocol (dokładnie przypięty)
 
 ```toml
 agent-client-protocol = { version = "=2.0.0", features = ["unstable"] }
 ```
 
-Pinned with `=` because the `unstable` feature is explicitly marked **breaking** by upstream (Zed). A caret bump could change wire-format expectations between minor releases. Bumping this pin requires an explicit, reviewed change.
+Przypięty z `=`, ponieważ funkcja `unstable` jest jawnie oznaczona jako **łamiąca kompatybilność** przez projekt nadrzędny (Zed). Zwiększenie wersji z operatorem karetka mogłoby zmienić oczekiwania formatu sieciowego między wydaniami minor. Zwiększenie tego przypięcia wymaga jawnej, zrecenzowanej zmiany.
 
-#### `serde_yaml` Migration
+#### Migracja `serde_yaml`
 
 ```toml
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 ```
 
-The original `serde_yaml` is archived (RUSTSEC-2024-0320). The maintained fork `serde_yaml_ng` is aliased to the `serde_yaml` name so existing `use serde_yaml::...` call sites remain unchanged.
+Oryginalna kratka `serde_yaml` jest zarchiwizowana (RUSTSEC-2024-0320). Utrzymywany fork `serde_yaml_ng` jest aliasowany do nazwy `serde_yaml`, aby istniejące miejsca wywołań `use serde_yaml::...` pozostały niezmienione.
 
-#### `jsonwebtoken` Crypto Provider
+#### Dostawca kryptograficzny `jsonwebtoken`
 
 ```toml
 jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 ```
 
-Version 10+ defers signature operations to a process-level `CryptoProvider` and **panics at decode time** if none is enabled. The `aws_lc_rs` feature matches the rustls provider that `librefang-cli` installs at startup. Without this, OIDC token validation panics in production.
+Wersja 10+ odlicza operacje podpisu do procesowego `CryptoProvider` i **panikuje podczas dekodowania**, jeśli żaden nie jest włączony. Funkcja `aws_lc_rs` odpowiada dostawcy rustls, który `librefang-cli` instaluje podczas uruchamiania. Bez tego walidacja tokenów OIDC panikuje na produkcji.
 
-#### `reqwest` Configuration
+#### Konfiguracja `reqwest`
 
 ```toml
 reqwest = { version = "0.13", default-features = false, features = [
@@ -174,7 +174,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 ```
 
-Defaults are disabled to avoid pulling in `native-tls` / OpenSSL. TLS is handled via `rustls` exclusively.
+Domyślne funkcje są wyłączone, aby uniknąć podciągnięcia `native-tls` / OpenSSL. TLS jest obsługiwane wyłącznie przez `rustls`.
 
 #### `psl` (Public Suffix List)
 
@@ -182,71 +182,71 @@ Defaults are disabled to avoid pulling in `native-tls` / OpenSSL. TLS is handled
 psl = "2"
 ```
 
-Chosen over `publicsuffix` because it bakes the PSL data in at compile time — no runtime fetch. Used by MCP auth to validate that a token endpoint shares a registrable domain with the declared issuer.
+Wybrano zamiast `publicsuffix`, ponieważ kompiluje dane PSL w czasie kompilacji — bez pobierania w czasie wykonania. Używane przez MCP auth do weryfikacji, czy punkt końcowy tokena współdzieli domenę rejestrowalną z deklarowanym wystawcą.
 
-### Full Dependency Reference
+### Pełne zestawienie zależności
 
-| Category | Crates |
+| Kategoria | Kraty |
 |---|---|
-| **Async runtime** | `tokio` (full), `tokio-stream`, `tokio-util` (compat), `futures`, `async-trait` |
-| **Serialization** | `serde` (derive), `serde_json`, `serde_yaml` (ng fork), `toml`, `rmp-serde`, `json5` |
-| **Error handling** | `thiserror`, `anyhow` |
-| **Concurrency** | `dashmap`, `crossbeam`, `arc-swap` |
-| **Tracing/Telemetry** | `tracing`, `tracing-subscriber` (env-filter, registry), full OTel stack (above), `metrics`, `metrics-exporter-prometheus` |
-| **Database** | `rusqlite` (bundled, serde_json), `r2d2`, `r2d2_sqlite` |
-| **HTTP server** | `axum` (ws), `tower`, `tower-http` (cors, trace, compression, limit) |
-| **HTTP client** | `reqwest` (rustls), `ureq` (sync) |
+| **Środowisko wykonawcze async** | `tokio` (full), `tokio-stream`, `tokio-util` (compat), `futures`, `async-trait` |
+| **Serializacja** | `serde` (derive), `serde_json`, `serde_yaml` (fork ng), `toml`, `rmp-serde`, `json5` |
+| **Obsługa błędów** | `thiserror`, `anyhow` |
+| **Współbieżność** | `dashmap`, `crossbeam`, `arc-swap` |
+| **Tracing/Telemetria** | `tracing`, `tracing-subscriber` (env-filter, registry), pełny stos OTel (powyżej), `metrics`, `metrics-exporter-prometheus` |
+| **Baza danych** | `rusqlite` (bundled, serde_json), `r2d2`, `r2d2_sqlite` |
+| **Serwer HTTP** | `axum` (ws), `tower`, `tower-http` (cors, trace, compression, limit) |
+| **Klient HTTP** | `reqwest` (rustls), `ureq` (sync) |
 | **WebSocket** | `tokio-tungstenite` (rustls-tls-native-roots) |
-| **TLS/Crypto** | `rustls`, `webpki-roots`, `rustls-native-certs`, `sha2`, `hmac`, `ed25519-dalek`, `x25519-dalek`, `hkdf`, `rsa`, `aes-gcm`, `argon2`, `zeroize`, `subtle` |
-| **Auth** | `webauthn-rs`, `totp-rs`, `jsonwebtoken`, `keyring` (native backends) |
+| **TLS/Kryptografia** | `rustls`, `webpki-roots`, `rustls-native-certs`, `sha2`, `hmac`, `ed25519-dalek`, `x25519-dalek`, `hkdf`, `rsa`, `aes-gcm`, `argon2`, `zeroize`, `subtle` |
+| **Uwierzytelnianie** | `webauthn-rs`, `totp-rs`, `jsonwebtoken`, `keyring` (natywne backendy) |
 | **CLI** | `clap` (derive), `clap_complete`, `ratatui`, `colored`, `portable-pty` |
 | **MCP/ACP** | `rmcp`, `agent-client-protocol` |
-| **Sandbox** | `wasmtime` |
-| **Templating** | `tera` (sandboxed, default-features off) |
-| **Time** | `chrono` (serde), `chrono-tz` |
-| **IDs** | `uuid` (v4, v5, serde) |
-| **Rate limiting** | `governor` |
-| **Archives** | `zip` (deflate only), `tar`, `flate2` |
+| **Piaskownica** | `wasmtime` |
+| **Szablony** | `tera` (sandboxed, domyślne funkcje wyłączone) |
+| **Czas** | `chrono` (serde), `chrono-tz` |
+| **Identyfikatory** | `uuid` (v4, v5, serde) |
+| **Limitowanie częstotliwości** | `governor` |
+| **Archiwa** | `zip` (tylko deflate), `tar`, `flate2` |
 | **i18n** | `fluent`, `unic-langid` |
 | **Regex** | `regex`, `regex-lite` |
-| **Misc utilities** | `base64`, `bitflags`, `bytes`, `smallvec`, `walkdir`, `dirs`, `which`, `socket2`, `url`, `urlencoding`, `hex`, `psl` |
-| **Testing/bench** | `tempfile`, `criterion` (html_reports) |
+| **Różne narzędzia** | `base64`, `bitflags`, `bytes`, `smallvec`, `walkdir`, `dirs`, `which`, `socket2`, `url`, `urlencoding`, `hex`, `psl` |
+| **Testy/benchmarke** | `tempfile`, `criterion` (html_reports) |
 
 ---
 
-## Build Profiles
+## Profile kompilacji
 
 ### `[profile.dev]`
 
-| Setting | Value | Rationale |
+| Ustawienie | Wartość | Uzasadnienie |
 |---|---|---|
-| `split-debuginfo` | `"unpacked"` | Faster incremental linking on macOS |
-| `debug` | `"line-tables-only"` | Shrinks test binaries ~60% to relieve CI memory pressure. Panics/backtraces retain `file:line`; only debugger variable inspection is lost. |
+| `split-debuginfo` | `"unpacked"` | Szybsze konsolidowanie przyrostowe na macOS |
+| `debug` | `"line-tables-only"` | Zmniejsza binaria testowe o ~60%, aby odciążyć pamięć CI. Paniki/backtrace zachowują `plik:linia`; utracona jest tylko inspekcja zmiennych w debuggerze. |
 
 ### `[profile.release]`
 
-| Setting | Value | Rationale |
+| Ustawienie | Wartość | Uzasadnienie |
 |---|---|---|
-| `lto` | `"fat"` | Whole-program optimization |
-| `codegen-units` | `1` | Maximum optimization opportunity |
-| `strip` | `"symbols"` | Stripped executable for distribution |
-| `debug` | `"line-tables-only"` | Function names + `file:line` for crash diagnosis without variable-inspection DWARF |
-| `split-debuginfo` | `"packed"` | Debug info emitted to a separate `.dSYM`/`.dwp` file, uploaded as a separate release artifact |
-| `opt-level` | `"s"` | Size-optimized — daemon bottleneck is network I/O, not CPU. Trims 5–15% binary vs `opt-level=3` |
+| `lto` | `"fat"` | Optymalizacja całego programu |
+| `codegen-units` | `1` | Maksymalna możliwość optymalizacji |
+| `strip` | `"symbols"` | Binaria bez symboli do dystrybucji |
+| `debug` | `"line-tables-only"` | Nazwy funkcji + `plik:linia` do diagnostyki awarii bez DWARF inspekcji zmiennych |
+| `split-debuginfo` | `"packed"` | Informacje debug emitowane do osobnego pliku `.dSYM`/`.dwp`, przesyłane jako oddzielny artefakt wydania |
+| `opt-level` | `"s"` | Optymalizacja rozmiaru — wąskim gardłem demona jest I/O sieciowe, a nie CPU. Obcina 5–15% binarium względem `opt-level=3` |
 
-**The `split-debuginfo = "packed"` setting is load-bearing.** Issue #6659 tracked a `tokio-rt-worker` stack overflow (unbounded recursion) whose crash report showed only a six-function cycle in a 52-frame window — undiagnosable because no shipped build carried symbols. With packed debug info, the release workflow uploads symbols as a separate artifact, enabling `atos`/`addr2line` symbolication of crash reports without bloating the distributed binary.
+**Ustawienie `split-debuginfo = "packed"` jest kluczowe.** Zgłoszenie #6659 śledziło przepełnienie stosu `tokio-rt-worker` (nieograniczona rekursja), którego raport o awarii pokazywał tylko sześciowątkowy cykl w 52-klatkowym oknie — nien diagnozowalny, ponieważ żaden dystrybuowany build nie zawierał symboli. Dzięki spakowanym informacjom debug, przepływ pracy wydania przesyła symbole jako osobny artefakt, umożliwiając symbolizację raportów o awarii przez `atos`/`addr2line` bez powiększania dystrybuowanego binarium.
 
 ### `[profile.release-local]`
 
-Inherits `release` but relaxes optimization for faster local builds:
+Dziedziczy `release`, ale łagodzi optymalizację dla szybszych lokalnych kompilacji:
 
 ```toml
 inherits = "release"
-lto = "thin"          # faster than "fat"
-codegen-units = 4     # parallelized
+lto = "thin"          # szybsze niż "fat"
+codegen-units = 4     # zrównoleglone
 ```
 
-Use this profile for local performance testing or when you need a release-mode binary without the full LTO cost:
+Użyj tego profilu do lokalnego testowania wydajności lub gdy potrzebujesz binarium w trybie wydania bez pełnego kosztu LTO:
 
 ```sh
 cargo build --profile release-local
@@ -254,42 +254,42 @@ cargo build --profile release-local
 
 ---
 
-## Lint Policy
+## Polityka lintowania
 
 ```toml
 [workspace.lints.rust]
 warnings = "deny"
 ```
 
-This replaces the previous CI-level `RUSTFLAGS=-D warnings` (issue #3554), which leaked into dependency compilation and broke CI on transitive lint regressions. The workspace lint scope applies **only** to first-party crates that explicitly opt in:
+Zastępuje to poprzednie `RUSTFLAGS=-D warnings` na poziomie CI (zgłoszenie #3554), które wyciekało do kompilacji zależności i zrywało CI z powodu regresji lintów przechodnich. Zakres lintów obszaru roboczego ma zastosowanie **tylko** do krat pierwszej strony, które jawnie się dołączają:
 
 ```toml
-# In a member crate's Cargo.toml
+# W Cargo.toml składowej kraty
 [lints]
 workspace = true
 ```
 
-Third-party dependencies are unaffected.
+Zależności strony trzeciej pozostają nietknięte.
 
 ---
 
-## How to Contribute Changes
+## Jak wnosić zmiany
 
-### Adding a new crate
+### Dodawanie nowej kraty
 
-1. Create the crate under `crates/librefang-<name>/`.
-2. Add `"crates/librefang-<name>"` to the `members` array.
-3. Use `[lints] workspace = true` to inherit the deny-warnings policy.
-4. Consume dependencies via `.workspace = true` references — do **not** pin versions locally.
+1. Utwórz kratę w `crates/librefang-<nazwa>/`.
+2. Dodaj `"crates/librefang-<nazwa>"` do tablicy `members`.
+3. Użyj `[lints] workspace = true`, aby dziedziczyć politykę odrzucania ostrzeżeń.
+4. Korzystaj z zależności przez odwołania `.workspace = true` — **nie** przypinaj wersji lokalnie.
 
-### Bumping a dependency
+### Zwiększanie wersji zależności
 
-- Most bumps are routine. However, these dependencies have **hard version-alignment constraints** and must be bumped as a group:
-  - **OpenTelemetry stack**: `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, `tracing-opentelemetry`, `opentelemetry-http`
-  - **`agent-client-protocol`**: exact-pinned, requires explicit review
-  - **`rmcp`**: MCP SDK, verify transport compatibility
-- When adding a comment explaining *why* a pin is unusual, follow the existing pattern: reference the issue/PR number and explain the failure mode if the constraint is violated.
+- Większość podwyższeń wersji jest rutynowa. Następujące zależności mają jednak **twarde ograniczenia wyrównania wersji** i muszą być podwyższane grupowo:
+  - **Stos OpenTelemetry**: `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, `tracing-opentelemetry`, `opentelemetry-http`
+  - **`agent-client-protocol`**: dokładnie przypięty, wymaga jawnej recenzji
+  - **`rmcp`**: MCP SDK, weryfikuj kompatybilność transportu
+- Podczas dodawania komentarza wyjaśniającego *dlaczego* przypięcie jest nietypowe, podążaj za istniejącym wzorcem: odwołaj się do numeru zgłoszenia/PR i wyjaśnij tryb awarii w przypadku naruszenia ograniczenia.
 
-### Changing build profiles
+### Zmiana profili kompilacji
 
-Any change to `[profile.release]` should be justified against the #6659 debug-info requirement and the CI memory constraints from #1805/#1807. Document trade-offs in the manifest comments.
+Każda zmiana w `[profile.release]` powinna być uzasadniona względem wymogu informacji debug z #6659 oraz ograniczeń pamięci CI z #1805/#1807. Dokumentuj kompromisy w komentarzach manifestu.

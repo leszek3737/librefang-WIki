@@ -2,199 +2,199 @@
 
 # librefang-runtime-mcp
 
-MCP (Model Context Protocol) client that connects LibreFang agents to external tool servers. Handles the full lifecycle: transport establishment, MCP handshake, tool discovery, argument validation, taint scanning, and tool invocation across four distinct transport types.
+Klient MCP (Model Context Protocol), który łączy agentów LibreFang z zewnętrznymi serwerami narzędzi. Obsługuje pełny cykl życia: nawiązywanie transportu, handshake MCP, odkrywanie narzędzi, walidację argumentów, skanowanie skażenia i wywoływanie narzędzi za pośrednictwem czterech odrębnych typów transportu.
 
-## Architecture
+## Architektura
 
 ```mermaid
 graph TD
-    A["Agent tool call<br/>mcp_server_tool"] --> B[resolve_mcp_server_from_known]
+    A["Wywołanie narzędzia agenta<br/>mcp_server_tool"] --> B[resolve_mcp_server_from_known]
     B --> C[McpConnection]
-    C --> D{Transport Type}
-    D -->|Stdio| E["rmcp SDK<br/>stdin/stdout subprocess"]
-    D -->|SSE| F["JSON-RPC over<br/>HTTP POST"]
+    C --> D{Typ transportu}
+    D -->|Stdio| E["rmcp SDK<br/>podproces stdin/stdout"]
+    D -->|SSE| F["JSON-RPC przez<br/>HTTP POST"]
     D -->|Streamable HTTP| G["rmcp SDK<br/>MCP 2025-03-26+"]
-    D -->|HttpCompat| H["Plain HTTP/JSON<br/>templated adapter"]
-    C --> I["Taint Scanner<br/>+ Caller Context"]
+    D -->|HttpCompat| H["Zwykły HTTP/JSON<br/>szablonowany adapter"]
+    C --> I["Skaner skażenia<br/>+ kontekst wywołującego"]
     I --> E
     I --> F
     I --> G
     I --> H
 ```
 
-## Transport Types
+## Typy transportu
 
-`McpTransport` is a tagged enum selected per server in config:
+`McpTransport` to znakowana enum wybierana dla każdego serwera w konfiguracji:
 
-| Variant | Wire Protocol | rmcp SDK | Use Case |
+| Wariant | Protokół przewodowy | rmcp SDK | Przypadek użycia |
 |---------|--------------|----------|----------|
-| `Stdio` | MCP over subprocess stdin/stdout | Yes | Local MCP servers (npx, python, node) |
-| `Sse` | JSON-RPC 2.0 over HTTP POST | No (hand-rolled) | Legacy remote servers |
-| `Http` | Streamable HTTP (MCP 2025-03-26+) | Yes | Modern remote servers |
-| `HttpCompat` | Templated plain HTTP/JSON | No | Non-MCP REST APIs |
+| `Stdio` | MCP przez stdin/stdout podprocesu | Tak | Lokalne serwery MCP (npx, python, node) |
+| `Sse` | JSON-RPC 2.0 przez HTTP POST | Nie (ręcznie napisany) | Przestarzałe serwery zdalne |
+| `Http` | Streamable HTTP (MCP 2025-03-26+) | Tak | Nowoczesne serwery zdalne |
+| `HttpCompat` | Szablonowany zwykły HTTP/JSON | Nie | Nie-MCP RESTowe API |
 
-The Stdio and Streamable HTTP transports delegate to the `rmcp` crate for protocol handling. SSE uses a minimal hand-rolled JSON-RPC client. HttpCompat is a built-in shim that maps MCP tool calls onto arbitrary REST endpoints via path/body/query templates.
+Transporty Stdio i Streamable HTTP delegują obsługę protokołu do skrzynki `rmcp`. SSE używa minimalistycznego, ręcznie napisanego klienta JSON-RPC. HttpCompat to wbudowany shim, który mapuje wywołania narzędzi MCP na dowolne punkty końcowe REST za pomocą szablonów ścieżki/ciała/zapytania.
 
-## Connection Lifecycle
+## Cykl życia połączenia
 
-### Connect
+### Połączenie
 
-`McpConnection::connect(config)` performs transport-specific setup, the MCP `initialize` handshake (where applicable), and tool discovery:
+`McpConnection::connect(config)` wykonuje konfigurację specyficzną dla transportu, handshake MCP `initialize` (tam, gdzie ma to zastosowanie) i odkrywanie narzędzi:
 
-1. **Stdio**: Spawns the subprocess with a sandboxed environment (env vars cleared, only `SAFE_ENV_VARS` + declared vars passed through), establishes the rmcp service, calls `list_all_tools()`. Shell interpreters (`bash`, `sh`, `powershell`, ...) are blocked — operators must specify a runtime directly.
+1. **Stdio**: Uruchamia podproces w zesandboksowanym środowisku (zmienne środowiskowe wyczyszczone, przekazywane tylko `SAFE_ENV_VARS` + zadeklarowane zmienne), ustanawia usługę rmcp, wywołuje `list_all_tools()`. Interpretatory powłoki (`bash`, `sh`, `powershell`, ...) są blokowane — operatorzy muszą jawnie wskazać środowisko uruchomieniowe.
 
-2. **SSE**: Creates an HTTP client, builds a header map from config-declared headers + cached OAuth bearer token, then runs `initialize` → `notifications/initialized` → `tools/list` as hand-rolled JSON-RPC requests.
+2. **SSE**: Tworzy klienta HTTP, buduje mapę nagłówków z zadeklarowanych w konfiguracji nagłówków + buforowanego tokena bearer OAuth, a następnie wykonuje `initialize` → `notifications/initialized` → `tools/list` jako ręcznie napisane żądania JSON-RPC.
 
-3. **Streamable HTTP**: Uses rmcp's `StreamableHttpClientTransport`. On 401, extracts the `WWW-Authenticate` header and attempts OAuth metadata discovery. If OAuth is required but the flow can't complete automatically, returns the sentinel error `"OAUTH_NEEDS_AUTH"` so the API layer can drive the PKCE flow via the UI.
+3. **Streamable HTTP**: Używa `StreamableHttpClientTransport` z rmcp. Przy kodzie 401, wyodrębnia nagłówek `WWW-Authenticate` i podejmuje próbę odkrycia metadanych OAuth. Jeśli OAuth jest wymagany, ale przepływ nie może zakończyć się automatycznie, zwraca błąd-sentinel `"OAUTH_NEEDS_AUTH"`, aby warstwa API mogła przeprowadzić przepływ PKCE przez interfejs użytkownika.
 
-4. **HttpCompat**: Probes the base URL for reachability (non-fatal on failure), then statically registers tools from config. No handshake.
+4. **HttpCompat**: Sonduje bazowy URL pod kątem osiągalności (niekrytyczny przy awarii), następnie statycznie rejestruje narzędzia z konfiguracji. Brak handshake'u.
 
-After tool discovery, `discover_and_register_resources()` checks whether the server advertised the `resources` capability and, if so, registers synthetic `list_resources` / `read_resource` tools so agents can access MCP resources through the standard tool-call loop.
+Po odkryciu narzędzi, `discover_and_register_resources()` sprawdza, czy serwer ogłasza możliwość `resources` i, jeśli tak, rejestruje syntetyczne narzędzia `list_resources` / `read_resource`, aby agenci mogli uzyskiwać dostęp do zasobów MCP przez standardową pętlę wywołań narzędzi.
 
-### Tool Namespacing
+### Przestrzenie nazw narzędzi
 
-All tools are namespaced as `mcp_{server_name}_{original_tool_name}` via `format_mcp_tool_name()`. The connection maintains a `HashMap<String, String>` from namespaced names back to original names for dispatch. The functions `resolve_mcp_server_from_known()`, `normalize_name()`, and `is_mcp_tool()` (called from `tool_runner::dispatch`, `tools_and_skills`, and route handlers) use this naming convention to route agent tool calls to the correct connection.
+Wszystkie narzędzia są przestrzennie nazwane jako `mcp_{server_name}_{original_tool_name}` za pomocą `format_mcp_tool_name()`. Połączenie utrzymuje `HashMap<String, String>` mapującą nazwy przestrzenne z powrotem na oryginalne nazwy w celu wysyłania. Funkcje `resolve_mcp_server_from_known()`, `normalize_name()` i `is_mcp_tool()` (wywoływane z `tool_runner::dispatch`, `tools_and_skills` oraz procedur obsługi tras) używają tej konwencji nazewnictwa do kierowania wywołań narzędzi agenta do poprawnego połączenia.
 
-### Call
+### Wywołanie
 
-Tool invocation goes through `call_tool_with_caller()`, which:
+Wywołanie narzędzia przechodzi przez `call_tool_with_caller()`, który:
 
-1. **Resolves the original tool name** from the namespaced name.
-2. **Intercepts synthetic resource tools** (`list_resources`, `read_resource`) and routes them to `resources/list` / `resources/read` instead of `tools/call`.
-3. **Validates arguments** against the tool's JSON Schema (`validate_args_against_schema`) — checks `type: "object"` conformance and `required` field presence. This is a lightweight guard, not a full JSON Schema validator.
-4. **Taint-scans the arguments** before any kernel mutation (see Taint Scanning below).
-5. **Strips agent-supplied caller context** from `arguments` (security boundary — see Caller Context below).
-6. **Injects kernel-attested caller context** out-of-band.
-7. **Dispatches** to the transport-specific call method.
+1. **Rozwiązuje oryginalną nazwę narzędzia** z nazwy w przestrzeni.
+2. **Przechwytuje syntetyczne narzędzia zasobów** (`list_resources`, `read_resource`) i kieruje je do `resources/list` / `resources/read` zamiast `tools/call`.
+3. **Waliduje argumenty** względem schematu JSON narzędzia (`validate_args_against_schema`) — sprawdza zgodność `type: "object"` i obecność pól `required`. Jest to lekka straż, a nie pełny walidator schematu JSON.
+4. **Skanuje skażenie argumentów** przed jakąkolwiek mutacją jądra (patrz Skanowanie skażenia poniżej).
+5. **Usuwa kontekst wywołującego dostarczony przez agenta** z `arguments` (granica bezpieczeństwa — patrz Kontekst wywołującego poniżej).
+6. **Wstrzykuje kontekst wywołującego zaświadczonego przez jądro** poza pasmem.
+7. **Wysyła** do metody wywołania specyficznej dla transportu.
 
-For HttpCompat, the call renders the request template (path params, JSON body, or query string) against the arguments, sends the HTTP request, and returns the response body.
+Dla HttpCompat, wywołanie renderuje szablon żądania (parametry ścieżki, ciało JSON lub ciąg zapytania) względem argumentów, wysyła żądanie HTTP i zwraca treść odpowiedzi.
 
-### Close / Drop
+### Zamknięcie / Drop
 
-`McpConnection::close()` is async and bounded by a 10-second timeout. It cancels the rmcp service, which drops the `TokioChildProcess` and reaps the subprocess. The `Drop` impl provides a best-effort fallback: if a tokio runtime is available, it spawns the close as a background task; otherwise it relies on rmcp's `DropGuard` to cancel the token synchronously. Callers doing hot-reload should prefer explicit `.close()` to guarantee subprocess reap before starting a new connection.
+`McpConnection::close()` jest asynchroniczne i ograniczone 10-sekundowym limitem czasu. Anuluje usługę rmcp, która upuszcza `TokioChildProcess` i zbiera podproces. Implementacja `Drop` zapewnia najlepszy wysiłek (best-effort): jeśli dostępne jest środowisko wykonawcze tokio, uruchamia zamknięcie jako zadanie w tle; w przeciwnym razie polega na `DropGuard` rmcp do synchronicznego anulowania tokena. Wywołujący wykonujący hot-reload powinni preferować jawne `.close()`, aby zagwarantować zebranie podprocesu przed uruchomieniem nowego połączenia.
 
-## Caller Context Injection
+## Wstrzykiwanie kontekstu wywołującego
 
-The kernel attests the identity of the entity driving each agent turn and ships it to MCP servers for per-user authorization:
+Jądro zaświadcza tożsamość jednostki napędzającej każdą turę agenta i przesyła ją do serwerów MCP w celu autoryzacji per-użytkownik:
 
 ```rust
 pub struct CallerContext {
-    pub peer_id: Option<String>,    // e.g. Telegram user id
+    pub peer_id: Option<String>,    // np. identyfikator użytkownika Telegram
     pub channel: Option<String>,    // "telegram", "slack", ...
-    pub chat_id: Option<String>,    // conversation id
+    pub chat_id: Option<String>,    // identyfikator konwersacji
     pub session_id: Option<String>, // LibreFang SessionId
 }
 ```
 
-**Security invariant**: the agent cannot influence these values. The constant `CALLER_CONTEXT_ARG_KEY` (`"_librefang_caller"`) is an unconditional denylist entry — `strip_caller_from_arguments()` removes it from `arguments` before every transmit. The kernel value travels out-of-band:
+**Niezmienność bezpieczeństwa**: agent nie może wpływać na te wartości. Stała `CALLER_CONTEXT_ARG_KEY` (`"_librefang_caller"`) to bezwarunkowy wpis na liście blokującej — `strip_caller_from_arguments()` usuwa go z `arguments` przed każdą transmisją. Wartość z jądra podróżuje poza pasmem:
 
-- **Rmcp / SSE**: in the request `_meta` field under `CALLER_CONTEXT_META_KEY` (`"io.librefang/caller"`)
-- **HttpCompat**: in the `CALLER_CONTEXT_HEADER` (`X-Librefang-Caller`) HTTP header
+- **Rmcp / SSE**: w polu żądania `_meta` pod `CALLER_CONTEXT_META_KEY` (`"io.librefang/caller"`)
+- **HttpCompat**: w nagłówku HTTP `CALLER_CONTEXT_HEADER` (`X-Librefang-Caller`)
 
-Placing caller context in `_meta` rather than `arguments` avoids breaking MCP servers that forward unknown arguments verbatim to downstream REST APIs (e.g. `@notionhq/notion-mcp-server` rejects non-scalar query parameters).
+Umieszczenie kontekstu wywołującego w `_meta` zamiast w `arguments` pozwala uniknąć psucia serwerów MCP, które przekazują nieznane argumenty dosłownie do podrzędnych API REST (np. `@notionhq/notion-mcp-server` odrzuca nieskalarne parametry zapytania).
 
-## Taint Scanning
+## Skanowanie skażenia
 
-Outbound argument payloads are scanned for credentials and PII before transmit. The scanner walks every string leaf and object key in the JSON argument tree:
+Wychodzące ładunki argumentów są skanowane pod kątem poświadczeń i PII przed transmisją. Skaner przechodzi przez każdy liść łańcuchowy i klucz obiektu w drzewie argumentów JSON:
 
 ```mermaid
 graph TD
-    A[Agent arguments] --> B{Tool policy default=skip?}
-    B -->|Yes| C[Bypass scan]
-    B -->|No| D[Walk JSON tree]
-    D --> E{String leaf?}
-    E -->|Yes| F[Content heuristic<br/>detect_outbound_text_violation_rules_with_skip]
-    E -->|Object key| G[SensitiveKeyName check<br/>authorization, api_key, secret, ...]
-    F --> H{Rule set downgrade?}
+    A[Argumenty agenta] --> B{Domyślna polityka narzędzia=skip?}
+    B -->|Tak| C[Pomiń skanowanie]
+    B -->|Nie| D[Przejdź drzewo JSON]
+    D --> E{Liść łańcuchowy?}
+    E -->|Tak| F[Heurystyka treści<br/>detect_outbound_text_violation_rules_with_skip]
+    E -->|Klucz obiektu| G[Sprawdzenie wrażliwej nazwy klucza<br/>authorization, api_key, secret, ...]
+    F --> H{Zestaw reguł obniża?}
     G --> H
-    H -->|Block| I[Reject call]
-    H -->|Warn/Log| J[Allow + trace event]
+    H -->|Blokada| I[Odrzuć wywołanie]
+    H -->|Ostrzeżenie/Log| J[Zezwól + zdarzenie śledzenia]
 ```
 
-### Scan Modes
+### Tryby skanowania
 
-- **Full scanning** (default): both the value-content heuristic (regex/pattern matching on string values) and the sensitive-key-name check run.
-- **`taint_scanning = false`**: content heuristic is disabled, but key-name blocking (`Authorization`, `secret`, `password`, ...) always stays active.
+- **Pełne skanowanie** (domyślne): uruchamiana jest zarówno heurystyka zawartości (dopasowanie regex/wzorców na wartościach łańcuchowych), jak i sprawdzenie wrażliwych nazw kluczy.
+- **`taint_scanning = false`**: heurystyka zawartości jest wyłączona, ale blokowanie według nazwy klucza (`Authorization`, `secret`, `password`, ...) pozostaje zawsze aktywne.
 
-### Taint Policy
+### Polityka skażenia
 
-`McpTaintPolicy` provides fine-grained control:
+`McpTaintPolicy` zapewnia precyzyjną kontrolę:
 
-- **Per-tool skip**: `default = "skip"` bypasses all scanning for a tool.
-- **Per-path rule skips**: `paths` entries with JSONPath patterns (`$.headers.*`, `$.items[*]`) exempt specific argument paths from specific rules.
-- **Named rule sets**: `rule_sets` references registered `[[taint_rules]]` sets that can downgrade `Block` → `Warn` or `Log`. When multiple sets cover the same rule, the most permissive action wins.
+- **Pomijanie per narzędzie**: `default = "skip"` pomija wszystkie skanowanie dla narzędzia.
+- **Pomijanie reguł per ścieżka**: wpisy `paths` z wzorcami JSONPath (`$.headers.*`, `$.items[*]`) zwalniają określone ścieżki argumentów z określonych reguł.
+- **Nazwane zestawy reguł**: `rule_sets` odwołuje się do zarejestrowanych zestawów `[[taint_rules]]`, które mogą obniżyć `Block` → `Warn` lub `Log`. Gdy wiele zestawów obejmuje tę samą regułę, wygrywa najbardziej liberalna akcja.
 
-Rule sets are held in a `TaintRuleSetsHandle` (`Arc<ArcSwap<Vec<NamedTaintRuleSet>>>`), enabling hot-reload: the kernel calls `.store()` on config reload, and the next scan picks up new rules without restarting the connection.
+Zestawy reguł są przechowywane w `TaintRuleSetsHandle` (`Arc<ArcSwap<Vec<NamedTaintRuleSet>>>`), co umożliwia hot-reload: jądro wywołuje `.store()` przy przeładowaniu konfiguracji, a kolejne skanowanie pobiera nowe reguły bez restartowania połączenia.
 
-**Critical safety property**: the scanner iterates over *every* fired rule, not just the first. A rule set that downgrades rule A must not mask an unauthorized rule B firing in the same payload.
+**Krytyczna właściwość bezpieczeństwa**: skaner iteruje po *każdej* wyzwolonej regule, nie tylko po pierwszej. Zestaw reguł obniżający regułę A nie może maskować nieautoryzowanej reguły B wyzwolonej w tym samym ładunku.
 
-### Redaction
+## Redakcja
 
-Returned violation strings contain only the JSON path of the offending leaf — never the payload value. The error flows back to the LLM and into logs; echoing the blocked secret would defeat the filter.
+Zwracane łańcuchy naruszeń zawierają tylko ścieżkę JSON naruszającego liścia — nigdy wartości ładunku. Błąd wraca do LLM i do logów; echo zablokowanego sekretu zniweczyłoby filtr.
 
-## Subprocess Sandboxing
+## Sandboxing podprocesów
 
-Stdio MCP servers run with a hardened environment:
+Serwery MCP działające przez Stdio uruchamiane są w utwardzonym środowisku:
 
-- `env_clear()` — the subprocess does **not** inherit the daemon's full environment.
-- Only `SAFE_ENV_VARS` (PATH, HOME, LANG, system essentials, language runtime paths) plus explicitly declared `env` entries are passed through.
-- Environment variable expansion (`$VAR`, `${VAR}`) in command args is restricted to the same allowlist, preventing templates from silently reading daemon secrets like `ANTHROPIC_API_KEY`.
-- The child's stderr is drained in a background task with a 100-line / 256-byte-per-line log cap. The drain continues past the cap to prevent pipe-buffer stalls that would hang the subprocess.
+- `env_clear()` — podproces **nie** dziedziczy pełnego środowiska demona.
+- Przekazywane są tylko `SAFE_ENV_VARS` (PATH, HOME, LANG, niezbędne systemowe, ścieżki środowisk uruchomieniowych języków) oraz jawnie zadeklarowane wpisy `env`.
+- Rozszerzanie zmiennych środowiskowych (`$VAR`, `${VAR}`) w argumentach polecenia jest ograniczone do tej samej listy dozwolonych, zapobiegając szablonom w cichym odczytywaniu sekretów demona takich jak `ANTHROPIC_API_KEY`.
+- Stderr dziecka jest opróżniany w zadaniu w tle z limitem 100 linii / 256 bajtów na linię dla logów. Opróżnianie kontynuuje się po przekroczeniu limitu, aby zapobiec blokadom bufora potoków, które zawiesiłyby podproces.
 
-## Response Size Protection
+## Ochrona rozmiaru odpowiedzi
 
-`read_response_bytes_capped()` limits all HTTP response bodies (SSE and HttpCompat) to 16 MiB (`MAX_RESPONSE_BYTES`). It checks `Content-Length` first (fast path), then streams chunk-by-chunk with a running byte counter, aborting mid-read if the cap is breached. This prevents a malicious or buggy server from causing OOM.
+`read_response_bytes_capped()` ogranicza wszystkie ciała odpowiedzi HTTP (SSE i HttpCompat) do 16 MiB (`MAX_RESPONSE_BYTES`). Najpierw sprawdza `Content-Length` (szybka ścieżka), a następnie strumieniuje fragment po fragmencie z bieżącym licznikiem bajtów, przerywając w trakcie odczytu, jeśli limit zostanie przekroczony. Zapobiega to złośliwemu lub błędnemu serwerowi w wywoływaniu OOM.
 
-## SSRF Protection
+## Ochrona SSRF
 
-`check_ssrf()` runs on every outbound HTTP transport (SSE, Streamable HTTP, HttpCompat). It parses URLs with the `url` crate (no substring matching), rejects non-`http(s)` schemes, blocks userinfo, and blocks cloud-metadata endpoints (`169.254/16`, `100.64.0.0/10`, `metadata.google.internal`, etc.). Local loopback and RFC1918 addresses are allowed for operator-configured MCP backend URLs but blocked on the OAuth discovery path where hosts come from remote responses.
+`check_ssrf()` uruchamia się przy każdym wychodzącym transporcie HTTP (SSE, Streamable HTTP, HttpCompat). Analizuje adresy URL za pomocą skrzynki `url` (bez dopasowywania podciągów), odrzuca schematy inne niż `http(s)`, blokuje userinfo i blokuje punkty końcowe metadanych chmury (`169.254/16`, `100.64.0.0/10`, `metadata.google.internal`, itd.). Adresy loopback i RFC1918 są dozwolone dla URL serwerów MCP skonfigurowanych przez operatora, ale blokowane na ścieżce odkrywania OAuth, gdzie hosty pochodzą z odpowiedzi zdalnych.
 
-## MCP Resources
+## Zasoby MCP
 
-When a server advertises the `resources` capability, two synthetic tools are registered:
+Gdy serwer ogłasza możliwość `resources`, rejestrowane są dwa syntetyczne narzędzia:
 
-- `list_resources` — calls `resources/list` and `resources/templates/list`, returns JSON with URIs, names, and MIME types
-- `read_resource` — calls `resources/read` with a URI argument, returns text content (binary blobs are elided as `[binary resource ...: N base64 bytes elided]`)
+- `list_resources` — wywołuje `resources/list` i `resources/templates/list`, zwraca JSON z URI, nazwami i typami MIME
+- `read_resource` — wywołuje `resources/read` z argumentem URI, zwraca treść tekstową (bloki binarne są pomijane jako `[binary resource ...: N base64 bytes elided]`)
 
-These synthetic tools are intercepted in `call_tool_with_caller()` via the `resource_ops` set and dispatched to the resources methods, ensuring they don't shadow real server tools of the same name.
+Te syntetyczne narzędzia są przechwytywane w `call_tool_with_caller()` przez zbiór `resource_ops` i kierowane do metod zasobów, co zapewnia, że nie przesłaniają rzeczywistych narzędzi serwera o tej samej nazwie.
 
-Content blocks from tool results are rendered through `render_rmcp_content_block()` (rmcp) or `render_json_content_block()` (SSE), which handle `text`, `resource_link`, and embedded `resource` types. A `resource_link` becomes a first-class line (`[resource_link] Name — URI (mime)`) rather than collapsing into opaque JSON.
+Bloki treści z wyników narzędzi są renderowane przez `render_rmcp_content_block()` (rmcp) lub `render_json_content_block()` (SSE), które obsługują typy `text`, `resource_link` i osadzone `resource`. `resource_link` staje się pełnoprawną linią (`[resource_link] Nazwa — URI (mime)`) zamiast zapadać się w nieprzezroczysty JSON.
 
-## Tool Annotation Translation
+## Tłumaczenie adnotacji narzędzi
 
-MCP `tools/list` annotations (`readOnlyHint`, `destructiveHint`) are translated into a `metadata.tool_class` field on the tool's JSON Schema via `inject_annotation_class()`. The mapping:
+Adnotacje MCP `tools/list` (`readOnlyHint`, `destructiveHint`) są tłumaczone na pole `metadata.tool_class` schematu JSON narzędzia przez `inject_annotation_class()`. Mapowanie:
 
 - `readOnly=true, destructive=false` → `"readonly_search"`
-- Anything else → `"mutating"`
+- Cokolwiek innego → `"mutating"`
 
-This lets the runtime tool classifier select safe parallel candidates without parsing MCP annotation types.
+Pozwala to klasyfikatorowi narzędzi środowiska wykonawczego wybierać bezpiecznych kandydatów do równoległości bez analizowania typów adnotacji MCP.
 
-## Public API Summary
+## Podsumowanie publicznego API
 
-| Function / Type | Purpose |
+| Funkcja / Typ | Przeznaczenie |
 |----------------|---------|
-| `McpServerConfig` | Per-server configuration (transport, timeout, env, headers, OAuth, taint settings, roots) |
-| `McpTransport` | Tagged enum: `Stdio`, `Sse`, `Http`, `HttpCompat` |
-| `McpConnection::connect(config)` | Establish connection, handshake, discover tools |
-| `McpConnection::call_tool(name, args)` | Invoke a tool (no caller context) |
-| `McpConnection::call_tool_with_caller(name, args, caller)` | Invoke a tool with kernel-attested identity |
+| `McpServerConfig` | Konfiguracja per-serwer (transport, limit czasu, env, nagłówki, OAuth, ustawienia skażenia, korzenie) |
+| `McpTransport` | Znakowana enum: `Stdio`, `Sse`, `Http`, `HttpCompat` |
+| `McpConnection::connect(config)` | Ustanowienie połączenia, handshake, odkrycie narzędzi |
+| `McpConnection::call_tool(name, args)` | Wywołanie narzędzia (bez kontekstu wywołującego) |
+| `McpConnection::call_tool_with_caller(name, args, caller)` | Wywołanie narzędzia z tożsamością zaświadczonego przez jądro |
 | `McpConnection::list_resources()` | `resources/list` |
 | `McpConnection::read_resource(uri)` | `resources/read` |
-| `McpConnection::close()` | Explicit async teardown with timeout |
-| `format_mcp_tool_name(server, tool)` | Produce namespaced tool name |
-| `resolve_mcp_server_from_known(name)` | Reverse-lookup server from namespaced name |
-| `normalize_name(server)` | Normalize server name for config matching |
-| `is_mcp_tool(name)` | Check if a tool name is MCP-namespaced |
-| `CallerContext` | Kernel-attested identity (peer, channel, chat, session) |
-| `empty_taint_rule_sets_handle()` / `static_taint_rule_sets_handle(rules)` | Construct rule-set handles |
-| `ResourceInfo` / `ResourceTemplateInfo` | Flattened resource metadata from `resources/list` |
+| `McpConnection::close()` | Jawna asynchroniczna rozbiórka z limitem czasu |
+| `format_mcp_tool_name(server, tool)` | Utworzenie nazwy narzędzia w przestrzeni |
+| `resolve_mcp_server_from_known(name)` | Odwrotne wyszukanie serwera z nazwy w przestrzeni |
+| `normalize_name(server)` | Normalizacja nazwy serwera do dopasowania w konfiguracji |
+| `is_mcp_tool(name)` | Sprawdzenie, czy nazwa narzędzia jest w przestrzeni MCP |
+| `CallerContext` | Tożsamość zaświadczona przez jądro (peer, kanał, czat, sesja) |
+| `empty_taint_rule_sets_handle()` / `static_taint_rule_sets_handle(rules)` | Konstrukcja uchwytów zestawów reguł |
+| `ResourceInfo` / `ResourceTemplateInfo` | Spłaszczone metadane zasobów z `resources/list` |
 
-## Integration Points
+## Punkty integracji
 
-The crate is consumed by:
+Skrzynka jest konsumowana przez:
 
-- **`librefang-runtime::tool_runner::dispatch`** — calls `is_mcp_tool()`, `resolve_mcp_server_from_known()`, and `call_tool_with_caller()` to execute MCP tool calls
-- **`librefang-runtime::kernel::mcp_setup`** — constructs `McpServerConfig` and manages connection lifecycle (connect, reconnect, reload)
-- **`librefang-runtime::kernel::accessors`** / **`agent_state`** — builds the agent MCP pool and resolves server names
-- **`librefang-api::routes::mcp_auth`** — drives OAuth PKCE flow using `discover_oauth_metadata()` and SSRF guards from `mcp_oauth`
-- **`librefang-kernel::mcp_oauth_provider`** — token refresh via `is_ssrf_blocked_url()`
+- **`librefang-runtime::tool_runner::dispatch`** — wywołuje `is_mcp_tool()`, `resolve_mcp_server_from_known()` i `call_tool_with_caller()` do wykonywania wywołań narzędzi MCP
+- **`librefang-runtime::kernel::mcp_setup`** — konstruuje `McpServerConfig` i zarządza cyklem życia połączenia (połączenie, ponowne połączenie, przeładowanie)
+- **`librefang-runtime::kernel::accessors`** / **`agent_state`** — buduje pulę MCP agenta i rozwiązuje nazwy serwerów
+- **`librefang-api::routes::mcp_auth`** — prowadzi przepływ OAuth PKCE używając `discover_oauth_metadata()` i straży SSRF z `mcp_oauth`
+- **`librefang-kernel::mcp_oauth_provider`** — odświeżanie tokena przez `is_ssrf_blocked_url()`

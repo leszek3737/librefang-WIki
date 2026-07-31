@@ -2,45 +2,45 @@
 
 # web — e2e
 
-End-to-end test suite for the LibreFang web frontend, built with Playwright. The suite verifies rendering, navigation, internationalization, and registry data flows across the application in a real browser.
+Zestaw testów end-to-end dla frontendu webowego LibreFang, zbudowany w oparciu o Playwright. Zestaw weryfikuje renderowanie, nawigację, internacjonalizację oraz przepływ danych rejestru w całej aplikacji w rzeczywistej przeglądarce.
 
-## Purpose
+## Przeznaczenie
 
-These tests exercise the fully built and running web app — not isolated components. They validate that:
+Te testy sprawdzają w pełni zbudowaną i uruchomioną aplikację webową — a nie odizolowane komponenty. Walidują one, że:
 
-- Pages render the expected DOM structure after hydration
-- Registry data fetches resolve and populate the UI
-- Internationalization works across all configured locales
-- Interactive elements (dropdowns, search dialog, language switcher) behave correctly
-- Custom rendering pipelines (TOML syntax highlighting) produce expected token classes
+- Strony renderują oczekiwaną strukturę DOM po hydracji
+- Zapytania o dane rejestru kończą się sukcesem i wypełniają interfejs użytkownika
+- Internacjonalizacja działa we wszystkich skonfigurowanych ustawieniach regionalnych
+- Elementy interaktywne (rozwijane menu, okno dialogowe wyszukiwania, przełącznik języków) zachowują się poprawnie
+- Niestandardowe potoki renderowania (podświetlanie składni TOML) generują oczekiwane klasy tokenów
 
-## Test Files
+## Pliki testowe
 
-| File | Coverage Area |
-|------|---------------|
-| `homepage.spec.ts` | Landing page structure, Marketplace dropdown, language switching |
-| `registry.spec.ts` | Registry list pages, detail pages, Cmd/Ctrl+K search dialog |
-| `detail-dom.spec.ts` | Detail-page DOM: TOML highlighting, anchor links, related-items section |
-| `i18n.spec.ts` | Chinese locale rendering, hreflang link tags |
+| Plik | Obszar pokrycia |
+|------|-----------------|
+| `homepage.spec.ts` | Struktura strony głównej, rozwijane menu Marketplace, przełączanie języków |
+| `registry.spec.ts` | Strony list rejestru, strony szczegółowe, okno dialogowe wyszukiwania Cmd/Ctrl+K |
+| `detail-dom.spec.ts` | DOM strony szczegółowej: podświetlanie TOML, kotwicze linki, sekcja powiązanych elementów |
+| `i18n.spec.ts` | Renderowanie ustawień regionalnych chińskich, tagi linków hreflang |
 
-## Architecture
+## Architektura
 
 ```mermaid
 flowchart LR
-    A[Playwright Runner] --> B[Browser Session]
-    B --> C[Running Web App]
-    B --> D[Route Interception]
+    A[Playwright Runner] --> B[Sesja przeglądarki]
+    B --> C[Uruchomiona aplikacja webowa]
+    B --> D[Przechwytywanie tras]
     D --> E[FIXTURE_TOML]
     C --> F[Live Registry API]
-    D -.blocks.-> F
-    E -.serves.-> C
+    D -.blokuje.-> F
+    E -.dostarcza.-> C
 ```
 
-The suite launches a real browser against the app server. Only `detail-dom.spec.ts` intercepts network traffic; the other specs rely on the live registry backend being available.
+Zestaw uruchamia rzeczywistą przeglądarkę pod adresem serwera aplikacji. Tylko `detail-dom.spec.ts` przechwytuje ruch sieciowy; pozostałe specyfikacje polegają na dostępności live serwera rejestru.
 
-## Network Interception
+## Przechwytywanie sieci
 
-`detail-dom.spec.ts` avoids external dependencies by stubbing the two upstream manifest sources with a deterministic TOML fixture:
+`detail-dom.spec.ts` unika zależności zewnętrznych, zastępując dwa źródła manifestów nadrzędnych deterministyczną fixture TOML:
 
 ```ts
 const FIXTURE_TOML = `# Fixture manifest used by detail-dom e2e tests.
@@ -54,62 +54,62 @@ version = "0.0.1"
 `
 ```
 
-Two routes are intercepted in `beforeEach`:
+Dwie trasy są przechwytywane w `beforeEach`:
 
-- `**/stats.librefang.ai/api/registry/raw**` — the primary registry API (not yet live)
-- `**/raw.githubusercontent.com/librefang/librefang-registry/**` — the GitHub raw fallback (rate-limited on CI)
+- `**/stats.librefang.ai/api/registry/raw**` — podstawowe API rejestru (jeszcze nie uruchomione)
+- `**/raw.githubusercontent.com/librefang/librefang-registry/**` — zapasowy GitHub raw (z limitami zapytań w CI)
 
-Both respond with `200` and the fixture body, allowing the TOML highlighter to be tested without flaky network conditions.
+Obie odpowiadają statusem `200` z treścią fixture, co pozwala na testowanie podświetlacza TOML bez niestabilnych warunków sieciowych.
 
-## Test Scenarios in Detail
+## Scenariusze testowe szczegółowo
 
-### Homepage
+### Strona główna
 
-- **Hero and nav**: Asserts the document title contains "LibreFang", an `h1` is visible, and both `Marketplace` and `Features` dropdown buttons render.
-- **Marketplace dropdown**: Clicking the dropdown reveals the eight registry category links (Hands, Agents, Skills, MCP, Plugins, Providers, Workflows, Channels). The link assertion is scoped to the `<nav>` element to avoid tripping Playwright strict mode — the homepage `#evolution` section also contains a `/skills` link.
-- **Language switch**: Navigates to `/skills`, opens the language switcher, selects 简体中文, and asserts the URL changes to `/zh/skills`. This verifies that locale switching preserves the current path.
+- **Hero i nawigacja**: Sprawdza, czy tytuł dokumentu zawiera „LibreFang", czy element `h1` jest widoczny oraz czy renderują się przyciski rozwijanych menu `Marketplace` i `Features`.
+- **Rozwijane menu Marketplace**: Kliknięcie w menu rozwija osiem linków do kategorii rejestru (Hands, Agents, Skills, MCP, Plugins, Providers, Workflows, Channels). Asercja linku jest ograniczona do elementu `<nav>`, aby uniknąć naruszenia trybu ścisłego Playwright — sekcja `#evolution` na stronie głównej również zawiera link `/skills`.
+- **Przełączanie języków**: Nawiguje do `/skills`, otwiera przełącznik języków, wybiera 简体中文 i sprawdza, czy URL zmienia się na `/zh/skills`. To weryfikuje, że zmiana ustawień regionalnych zachowuje bieżącą ścieżkę.
 
-### Registry
+### Rejestr
 
-- **Skills list**: Navigates to `/skills`, confirms the `h1` heading, and waits for at least one card link (`a[href*="/skills/"]`) to appear with a 15-second timeout to accommodate the registry fetch.
-- **Detail page**: Follows the first card link, asserts the `h1` renders, and checks for the `librefang skill install` command block.
-- **Search dialog**: Presses Cmd+K (macOS) or Ctrl+K (other platforms) to open the search dialog, asserts the search input is visible, then presses Escape and asserts it closes.
+- **Lista umiejętności**: Nawiguje do `/skills`, potwierdza nagłówek `h1` i czeka na pojawienie się co najmniej jednego linku karty (`a[href*="/skills/"]`) z 15-sekundowym limitem czasu, aby uwzględnić zapytanie o dane rejestru.
+- **Strona szczegółowa**: Prowadzi za pierwszym linkiem karty, sprawdza, czy `h1` się renderuje, i weryfikuje blok komendy `librefang skill install`.
+- **Okno dialogowe wyszukiwania**: Naciska Cmd+K (macOS) lub Ctrl+K (inne platformy), aby otworzyć okno dialogowe wyszukiwania, sprawdza widoczność pola wyszukiwania, następnie naciska Escape i sprawdza, czy okno się zamyka.
 
-### Detail Page DOM
+### DOM strony szczegółowej
 
-These tests use the `/hands` category because skill manifests ship as `SKILL.md` (YAML frontmatter), not TOML. Only TOML-backed categories exercise the `.toml-highlight` renderer.
+Te testy wykorzystują kategorię `/hands`, ponieważ manifesty umiejętności są dostarczane jako `SKILL.md` (frontmatter YAML), a nie TOML. Tylko kategorie oparte na TOML uruchamiają renderer `.toml-highlight`.
 
-- **TOML highlighting**: After navigating to a detail page, waits for `.toml-highlight` to hydrate, then asserts presence of at least one `.tk-header`, `.tk-key`, and `.tk-str` span — the token classes emitted by the custom TOML highlighter.
-- **Anchor copy-link**: Clicks the `#manifest` anchor link and asserts the URL ends with `#manifest`.
-- **Related items**: Asserts the `#related` section's `h2` is visible. Uses `.first()` because the search dialog's empty state may also render "More <cat>" blocks.
+- **Podświetlanie TOML**: Po nawigacji do strony szczegółowej czeka na hydrację `.toml-highlight`, a następnie sprawdza obecność co najmniej jednego elementu span `.tk-header`, `.tk-key` i `.tk-str` — klas tokenów generowanych przez niestandardowy podświetlacz TOML.
+- **Kotwiczny link kopiowania**: Klika w link kotwiczny `#manifest` i sprawdza, czy URL kończy się `#manifest`.
+- **Powiązane elementy**: Sprawdza widoczność elementu `h2` sekcji `#related`. Używa `.first()`, ponieważ puste okno dialogowe wyszukiwania może również renderować bloki „More <cat>".
 
-### Internationalization
+### Internacjonalizacja
 
-- **zh homepage**: Navigates to `/zh/`, asserts `<html lang="zh">` and that the Features dropdown renders as `功能`.
-- **zh skills list**: Navigates to `/zh/skills` and asserts the `h1` contains `技能`.
-- **hreflang tags**: On the English homepage, verifies `link[hreflang]` elements exist for all seven locales (`en`, `zh`, `zh-TW`, `ja`, `ko`, `de`, `es`) plus the `x-default` canonical link.
+- **zh strona główna**: Nawiguje do `/zh/`, sprawdza `<html lang="zh">` oraz to, że rozwijane menu Features renderuje się jako `功能`.
+- **zh lista umiejętności**: Nawiguje do `/zh/skills` i sprawdza, czy `h1` zawiera `技能`.
+- **Tagi hreflang**: Na angielskiej stronie głównej weryfikuje istnienie elementów `link[hreflang]` dla wszystkich siedmiu ustawień regionalnych (`en`, `zh`, `zh-TW`, `ja`, `ko`, `de`, `es`) plus kanoniczny link `x-default`.
 
-## Cross-Platform Handling
+## Obsługa wieloplatformowa
 
-The search dialog test handles macOS vs. other platforms explicitly:
+Test okna dialogowego wyszukiwania obsługuje macOS i inne platformy w sposób jawny:
 
 ```ts
 const mod = process.platform === 'darwin' ? 'Meta' : 'Control'
 await page.keyboard.press(`${mod}+KeyK`)
 ```
 
-This ensures Cmd+K works on macOS CI runners and Ctrl+K works on Linux CI runners.
+Zapewnia to działanie Cmd+K na runnerach CI z macOS oraz Ctrl+K na runnerach CI z Linuxem.
 
-## Conventions
+## Konwencje
 
-- **Timeouts**: Card visibility waits use a 15-second timeout across all specs to accommodate slow registry fetches on CI.
-- **Strict mode compliance**: Selectors that could match multiple elements use `.first()` or are scoped to a parent container (e.g., `getByRole('navigation')`).
-- **Locale codes**: The suite references seven locales — `en`, `zh`, `zh-TW`, `ja`, `ko`, `de`, `es` — plus `x-default`.
-- **Fixture isolation**: The TOML fixture is self-contained and does not reference any external service, making `detail-dom` tests fully hermetic.
+- **Limity czasu**: Czekanie na widoczność kart używa 15-sekundowego limitu czasu we wszystkich specyfikacjach, aby uwzględnić wolne zapytania rejestru w CI.
+- **Zgodność z trybem ścisłym**: Selektory, które mogą pasować do wielu elementów, używają `.first()` lub są ograniczone do kontenera nadrzędnego (np. `getByRole('navigation')`).
+- **Kody ustawień regionalnych**: Zestaw odwołuje się do siedmiu ustawień regionalnych — `en`, `zh`, `zh-TW`, `ja`, `ko`, `de`, `es` — plus `x-default`.
+- **Izolacja fixture**: Fixture TOML jest samowystarczalna i nie odwołuje się do żadnego zewnętrznego serwisu, co sprawia, że testy `detail-dom` są w pełni hermetyczne.
 
-## Running the Tests
+## Uruchamianie testów
 
-Standard Playwright invocation from the `web/` directory:
+Standardowe wywołanie Playwright z katalogu `web/`:
 
 ```bash
 npx playwright test          # run all e2e specs
@@ -117,4 +117,4 @@ npx playwright test --ui     # interactive mode
 npx playwright test homepage # run a single spec by name
 ```
 
-The app server must be running and reachable. Tests assume default Playwright configuration for base URL resolution.
+Serwer aplikacji musi być uruchomiony i dostępny. Testy zakładają domyślną konfigurację Playwright do rozwiązywania bazowego adresu URL.

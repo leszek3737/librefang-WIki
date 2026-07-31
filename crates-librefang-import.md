@@ -2,212 +2,212 @@
 
 # librefang-import
 
-Migration engine for importing agents, memory, sessions, skills, and channel configurations from external agent frameworks into LibreFang. Currently supports OpenClaw (JSON5 and legacy YAML formats) and OpenFang (a format-compatible community fork). LangChain and AutoGPT are stubbed for future work.
+Silnik migracji do importowania agentów, pamięci, sesji, umiejętności i konfiguracji kanałów z zewnętrznych szkieletów agentowych do LibreFang. Obecnie obsługuje OpenClaw (formaty JSON5 i przestarzały YAML) oraz OpenFang (kompatybilny fork społecznościowy). LangChain i AutoGPT są przygotowane jako stuby do przyszłej pracy.
 
-## Architecture Overview
+## Przegląd architektury
 
 ```mermaid
 flowchart TD
-    A["run_migration(MigrateOptions)"] --> B{source}
+    A["run_migration(MigrateOptions)"] --> B{źródło}
     B -->|OpenClaw| C["openclaw::migrate"]
     B -->|OpenFang| D["openfang::migrate"]
     B -->|LangChain / AutoGPT| E["UnsupportedSource error"]
-    C --> F{config format?}
+    C --> F{format konfiguracji?}
     F -->|JSON5| G["migrate_from_json5"]
-    F -->|Legacy YAML| H["migrate_from_legacy_yaml"]
+    F -->|Przestarzały YAML| H["migrate_from_legacy_yaml"]
     G --> I["config.toml"]
     G --> J["agents/*/agent.toml"]
     G --> K["agents/*/imported_memory.md"]
     G --> L["agents/*/workspace/"]
     G --> M["imported_sessions/"]
-    C --> N["staging dir → promote into target"]
+    C --> N["katalog tymczasowy → promocja do celu"]
 ```
 
-The crate exposes three public surfaces consumed by the rest of the codebase:
+Crate udostępnia trzy publiczne interfejsy konsumowane przez resztę bazy kodu:
 
-| Caller | Entry point |
+| Wywołujący | Punkt wejścia |
 |---|---|
 | HTTP API (`routes/config/migration.rs`) | `run_migration`, `scan_openclaw_workspace`, `detect_openclaw_home` |
 | CLI (`src/commands/system.rs`) | `run_migration`, `MigrateOptions` |
 | TUI init wizard (`tui/screens/init_wizard.rs`) | `scan_openclaw_workspace`, `detect_openclaw_home`, `run_migration` |
 | xtask (`xtask/src/migrate.rs`) | `run_migration`, `MigrateOptions` |
 
-## Core Types
+## Podstawowe typy
 
 ### `MigrateOptions`
 
-The single configuration struct passed to `run_migration`:
+Jedyna struktura konfiguracyjna przekazywana do `run_migration`:
 
 ```rust
 pub struct MigrateOptions {
-    pub source: MigrateSource,      // OpenClaw, OpenFang, etc.
-    pub source_dir: PathBuf,        // Path to source workspace
-    pub target_dir: PathBuf,        // Path to ~/.librefang (or equivalent)
-    pub dry_run: bool,              // Report-only mode; never touches disk
+    pub source: MigrateSource,      // OpenClaw, OpenFang, itd.
+    pub source_dir: PathBuf,        // Ścieżka do katalogu źródłowego
+    pub target_dir: PathBuf,        // Ścieżka do ~/.librefang (lub odpowiednika)
+    pub dry_run: bool,              // Tryb tylko raportowania; nie dotyka dysku
 }
 ```
 
 ### `MigrateSource`
 
-Enumerates supported source frameworks. `LangChain` and `AutoGpt` are defined but return `MigrateError::UnsupportedSource` — they exist so the API shape is stable when those migrators land.
+Wylicza obsługiwane szkielety źródłowe. `LangChain` i `AutoGpt` są zdefiniowane, ale zwracają `MigrateError::UnsupportedSource` — istnieją, aby kształt API był stabilny, gdy te migratory zostaną zaimplementowane.
 
 ### `MigrateError`
 
-All failure modes are typed via `thiserror`. Notable variants:
+Wszystkie tryby awarii są typowane przez `thiserror`. Znaczące warianty:
 
-- `SourceNotFound(PathBuf)` — the source directory doesn't exist.
-- `ConfigParse(String)` / `AgentParse(String)` — malformed source files.
-- `Json5Parse(String)` — JSON5 deserialization failure with file context.
-- `UnsupportedVersion(u32)` — `openclaw.json` declares a schema version outside the supported set (currently `[1, 2]`). Refers to issue #3797.
-- `StagingExists(PathBuf)` — a staging directory from a previous failed migration is present; the user must remove it explicitly. Refers to #3798.
-- `InvalidId(String)` — agent ID contains path traversal components or control characters. Refers to #3794.
+- `SourceNotFound(PathBuf)` — katalog źródłowy nie istnieje.
+- `ConfigParse(String)` / `AgentParse(String)` — błędnie sformatowane pliki źródłowe.
+- `Json5Parse(String)` — błąd deserializacji JSON5 z kontekstem pliku.
+- `UnsupportedVersion(u32)` — `openclaw.json` deklaruje wersję schematu spoza obsługiwanego zbioru (obecnie `[1, 2]`). Odnosi się do zgłoszenia #3797.
+- `StagingExists(PathBuf)` — katalog tymczasowy z poprzedniej nieudanej migracji istnieje; użytkownik musi go jawnie usunąć. Odnosi się do #3798.
+- `InvalidId(String)` — identyfikator agenta zawiera komponenty przejścia ścieżki lub znaki sterujące. Odnosi się do #3794.
 
-## Migration Flow
+## Przepływ migracji
 
-### Entry Point
+### Punkt wejścia
 
-`run_migration` dispatches on `MigrateOptions::source` to the appropriate submodule. For OpenClaw, it calls `openclaw::migrate`.
+`run_migration` rozsyła na podstawie `MigrateOptions::source` do odpowiedniego podmodułu. Dla OpenClaw wywołuje `openclaw::migrate`.
 
-### Atomic Staging and Promotion
+### Atomowy staging i promocja
 
-The OpenClaw migrator does not write directly to the target directory (except in dry-run mode). Instead it uses a workspace-level atomicity strategy (#3798):
+Migrator OpenClaw nie zapisuje bezpośrednio do katalogu docelowego (z wyjątkiem trybu dry-run). Zamiast tego korzysta ze strategii atomowości na poziomie workspace (#3798):
 
-1. **Staging directory**: `staging_dir_for(target)` computes a sibling directory named `<leaf>.migrate-staging`. The name is fixed (no timestamp) so a stale directory from a previous failed run is detectable.
-2. **Refuse if staging exists**: If the staging directory is already present, the migrator returns `StagingExists` rather than silently overwriting. This forces explicit cleanup and prevents data loss.
-3. **Write into staging**: All file writes (`config.toml`, `agent.toml`, memory, sessions, workspace copies) go to the staging tree.
-4. **Promote**: `promote_staging` recursively moves staging contents into the real target. Each entry is moved via same-filesystem rename (atomic per-entry). If a cross-device rename fails, it falls back to copy-to-tmp + rename.
-5. **Never clobber (#3795)**: Existing files in the target are never overwritten. If a destination file already exists, the staged copy is dropped and a warning is added to the report.
-6. **Cleanup**: On full success, the staging directory is removed. On any error, it is left in place for inspection.
+1. **Katalog tymczasowy**: `staging_dir_for(target)` oblicza katalog równorzędny o nazwie `<leaf>.migrate-staging`. Nazwa jest stała (bez znacznika czasu), aby stary katalog z poprzedniego nieudanego uruchomienia był wykrywalny.
+2. **Odmowa, jeśli staging istnieje**: Jeśli katalog tymczasowy już istnieje, migrator zwraca `StagingExists` zamiast po cichu nadpisać. Wymusza to jawną czyszczenie i zapobiega utracie danych.
+3. **Zapis do staging**: Wszystkie zapisy plików (`config.toml`, `agent.toml`, pamięć, sesje, kopie workspace) trafiają do drzewa tymczasowego.
+4. **Promocja**: `promote_staging` rekursywnie przenosi zawartość staging do rzeczywistego celu. Każdy element jest przenoszony przez zmianę nazwy w tej samej systemie plików (atomowa na element). Jeśli zmiana nazwy między urządzeniami zawiedzie, następuje fallback do kopia-do-tmp + zmiana nazwy.
+5. **Nigdy nie nadpisuj (#3795)**: Istniejące pliki w celu nigdy nie są nadpisywane. Jeśli plik docelowy już istnieje, tymczasowa kopia jest odrzucana, a do raportu dodawane jest ostrzeżenie.
+6. **Czyszczenie**: Po pełnym sukcesie katalog tymczasowy jest usuwany. Przy jakimkolwiek błędzie pozostawiony w miejscu do inspekcji.
 
-The migration marker file (`.openclaw_migrated`) is written into staging so it promotes with the rest. On re-runs, the marker's presence causes the migrator to skip — user edits since the first import are preserved.
+Plik znacznika migracji (`.openclaw_migrated`) jest zapisywany do staging, więc promuje się razem z resztą. Przy ponownych uruchomieniach obecność znacznika powoduje pominięcie migracji — edycje użytkownika od pierwszego importu są zachowane.
 
-### Re-run Safety
+### Bezpieczeństwo ponownego uruchomienia
 
-The `.openclaw_migrated` marker file prevents re-runs from clobbering user edits. To force a re-import, the user deletes the marker file. Even then, `promote_staging` never clobbers existing files — it backs them up instead (see below).
+Plik znacznika `.openclaw_migrated` zapobiega nadpisywaniu edycji użytkownika przy ponownych uruchomieniach. Aby wymusić ponowny import, użytkownik usuwa plik znacznika. Nawet wtedy `promote_staging` nigdy nie nadpisuje istniejących plików — zamiast tego tworzy ich kopię zapasową (patrz poniżej).
 
-### Backup-before-overwrite
+### Kopia zapasowa przed nadpisaniem
 
-`write_with_backup` renames any existing destination file to `<original>.bak.<timestamp>` before writing the new content. This applies to `config.toml`, `agent.toml`, and `imported_memory.md`. If a nanosecond-precision collision occurs (extremely unlikely), the backup name falls back to nanosecond precision.
+`write_with_backup` zmienia nazwę istniejącego pliku docelowego na `<oryginał>.bak.<znacznik_czasu>` przed zapisaniem nowej zawartości. Dotyczy to `config.toml`, `agent.toml` i `imported_memory.md`. W przypadku kolizji z precyzją do nanosekundy (skrajnie nieprawdopodobnej), nazwa kopii zapasowej cofa się do precyzji nanosekundowej.
 
-### Atomic file writes
+### Atomowe zapisy plików
 
-`atomic_write` writes to a sibling `.tmp` file first, then renames into place. This prevents torn writes if the process is interrupted mid-write.
+`atomic_write` zapisuje najpierw do równorzędnego pliku `.tmp`, a następnie zmienia jego nazwę na właściwe miejsce. Zapobiega to rozdartym zapisom, jeśli proces zostanie przerwany w trakcie.
 
-## What Gets Migrated
+## Co jest migrowane
 
-### From OpenClaw JSON5 (`openclaw.json`)
+### Z OpenClaw JSON5 (`openclaw.json`)
 
-The modern OpenClaw format stores everything in a single JSON5 file at `~/.openclaw/openclaw.json`. The migrator produces:
+Nowoczesny format OpenClaw przechowuje wszystko w jednym pliku JSON5 w `~/.openclaw/openclaw.json`. Migrator tworzy:
 
-| Source | Destination | Notes |
+| Źródło | Cel | Uwagi |
 |---|---|---|
-| Global config (provider, model, memory) | `config.toml` | Serialized as TOML via `LibreFangConfig`. |
-| Each agent in `agents.list[]` | `agents/<id>/agent.toml` | Full manifest with model, capabilities, tools, system prompt. |
-| `memory/<agent>/MEMORY.md` | `agents/<agent>/imported_memory.md` | Also checks legacy `agents/<agent>/MEMORY.md` layout. |
-| `workspaces/<agent>/` | `agents/<agent>/workspace/` | Recursive copy. Also checks legacy `agents/<agent>/workspace/`. |
-| `sessions/*.jsonl` | `imported_sessions/` | Conversation logs, file-by-file copy. |
-| Bot tokens (Telegram, Discord, Slack, Mattermost) | `secrets.env` | Written with mode 0o600 on Unix. |
+| Konfiguracja globalna (dostawca, model, pamięć) | `config.toml` | Serializowana jako TOML przez `LibreFangConfig`. |
+| Każdy agent w `agents.list[]` | `agents/<id>/agent.toml` | Pełny manifest z modelem, możliwościami, narzędziami, promptem systemowym. |
+| `memory/<agent>/MEMORY.md` | `agents/<agent>/imported_memory.md` | Sprawdza również przestarzały układ `agents/<agent>/MEMORY.md`. |
+| `workspaces/<agent>/` | `agents/<agent>/workspace/` | Kopiowanie rekursywne. Sprawdza również przestarzały `agents/<agent>/workspace/`. |
+| `sessions/*.jsonl` | `imported_sessions/` | Logi konwersacji, kopiowanie plik po pliku. |
+| Tokeny bota (Telegram, Discord, Slack, Mattermost) | `secrets.env` | Zapisywane z trybem 0o600 na systemach Unix. |
 
-### From Legacy OpenClaw YAML
+### Z przestarzałego OpenClaw YAML
 
-Very old OpenClaw installations use a multi-file YAML layout (`config.yaml`, `agents/<name>/agent.yaml`, `messaging/<channel>.yaml`). The migrator handles these through a parallel code path (`migrate_from_legacy_yaml` and its sub-functions) that produces the same output structure.
+Bardzo stare instalacje OpenClaw używają wieloplikowego układu YAML (`config.yaml`, `agents/<name>/agent.yaml`, `messaging/<channel>.yaml`). Migrator obsługuje je przez równoległą ścieżkę kodu (`migrate_from_legacy_yaml` i jej podfunkcje), która tworzy taką samą strukturę wyjściową.
 
-### Agent Manifest Construction
+### Budowa manifestu agenta
 
-`convert_agent_from_json` (and its legacy counterpart `convert_legacy_agent`) build the TOML agent manifest string. Key transformations:
+`convert_agent_from_json` (i jego przestarzały odpowiednik `convert_legacy_agent`) buduje ciąg manifestu agenta w TOML. Kluczowe transformacje:
 
-- **Model resolution**: Extracts the primary model from agent-level config or defaults, falling back to `anthropic/claude-sonnet-4-20250514`. Fallback models are emitted as `[[fallback_models]]` arrays.
-- **Provider mapping**: `map_provider` normalizes provider names (e.g., `"claude"` → `"anthropic"`, `"gemini"` → `"google"`). Unknown providers pass through unchanged.
-- **API key env derivation**: `default_api_key_env` maps each provider to its conventional environment variable name (e.g., `ANTHROPIC_API_KEY`). Ollama returns an empty string (no key needed).
-- **Tool mapping**: Uses `librefang_types::tool_compat::{is_known_librefang_tool, map_tool_name}` to translate OpenClaw tool names. Unmappable tools are collected and reported as warnings, not errors.
-- **Tool profiles**: `tools_for_profile` delegates to `librefang_types::agent::ToolProfile` so migration and kernel use identical definitions.
-- **Capability derivation**: `derive_capabilities` inspects the tool list to set `shell`, `network`, `agent_message`, and `agent_spawn` capability grants.
-- **Identity/system prompt**: `extract_identity_prompt` handles both raw string identities and structured objects, checking common keys (`systemPrompt`, `prompt`, `instructions`, `persona`, etc.) and recursing into nested objects/arrays.
-- **Tool deny list**: Migrated as `tool_blocklist` (previously silently dropped, which widened agent access).
-- **Per-agent skills**: Emitted as a `skills` array (previously silently dropped).
-- **Custom workspace path**: Emitted as `workspace` (previously dropped, reverting agents to default).
+- **Rozpoznawanie modelu**: Wyodrębnia model główny z konfiguracji na poziomie agenta lub wartości domyślne, z fallbackiem do `anthropic/claude-sonnet-4-20250514`. Modele zapasowe są emitowane jako tablice `[[fallback_models]]`.
+- **Mapowanie dostawców**: `map_provider` normalizuje nazwy dostawców (np. `"claude"` → `"anthropic"`, `"gemini"` → `"google"`). Nieznani dostawcy przechodzą bez zmian.
+- **Pochodzenie klucza API env**: `default_api_key_env` mapuje każdego dostawcę na jego konwencjonalną nazwę zmiennej środowiskowej (np. `ANTHROPIC_API_KEY`). Ollama zwraca pusty ciąg (klucz nie jest potrzebny).
+- **Mapowanie narzędzi**: Używa `librefang_types::tool_compat::{is_known_librefang_tool, map_tool_name}` do tłumaczenia nazw narzędzi OpenClaw. Niezmapowalne narzędzia są zbierane i raportowane jako ostrzeżenia, a nie błędy.
+- **Profile narzędzi**: `tools_for_profile` deleguje do `librefang_types::agent::ToolProfile`, aby migracja i jądro używały identycznych definicji.
+- **Pochodzenie możliwości**: `derive_capabilities` bada listę narzędzi, aby ustawić przydziały możliwości `shell`, `network`, `agent_message` i `agent_spawn`.
+- **Tożsamość/prompt systemowy**: `extract_identity_prompt` obsługuje zarówno surowe tożsamości tekstowe, jak i strukturyzowane obiekty, sprawdzając typowe klucze (`systemPrompt`, `prompt`, `instructions`, `persona` itd.) i wchodząc rekursywnie w zagnieżdżone obiekty/tablice.
+- **Lista odrzuconych narzędzi**: Migrowana jako `tool_blocklist` (wcześniej cicho pomijana, co poszerzało dostęp agentów).
+- **Umiejętności na agenta**: Emitowane jako tablica `skills` (wcześniej cicho pomijana).
+- **Niestandardowa ścieżka workspace**: Emitowana jako `workspace` (wcześniej pomijana, powodując powrót agentów do wartości domyślnych).
 
-## What Gets Skipped
+## Co jest pomijane
 
-The migrator is explicit about features that cannot be automatically migrated. Each skipped item produces a `SkippedItem` in the report with a reason and suggested manual action.
+Migrator jest jawny w kwestii funkcji, których nie da się automatycznie zmigrować. Każdy pominięty element tworzy `SkippedItem` w raporcie z przyczyną i sugerowaną ręczną akcją.
 
-### Channels — Sidecar Migration
+### Kanały — Migracja sidecar
 
-All messaging channels (Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Google Chat, Teams, IRC, Mattermost, Feishu) have migrated from in-process adapters to out-of-process sidecar adapters. The migrator does **not** emit `[channels.<name>]` blocks (the kernel would reject them). Instead:
+Wszystkie kanały komunikacyjne (Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Google Chat, Teams, IRC, Mattermost, Feishu) przeszły migrację z adapterów in-process na adaptery sidecar out-of-process. Migrator **nie** emituje bloków `[channels.<name>]` (jądro by je odrzuciło). Zamiast tego:
 
-- **Bot tokens** for Telegram, Discord, Slack, and Mattermost are still migrated to `secrets.env` (the sidecars read them from there).
-- Each channel produces a `SkippedItem` with instructions to add a `[[sidecar_channels]]` block pointing at the appropriate sidecar adapter (e.g., `librefang.sidecar.adapters.telegram`).
-- iMessage and BlueBubbles are skipped with different reasons (macOS-only, no adapter).
+- **Tokeny bota** dla Telegram, Discord, Slack i Mattermost są nadal migrowane do `secrets.env` (sidecary odczytują je stamtąd).
+- Każdy kanał tworzy `SkippedItem` z instrukcjami dodania bloku `[[sidecar_channels]]` wskazującego odpowiedni adapter sidecar (np. `librefang.sidecar.adapters.telegram`).
+- iMessage i BlueBubbles są pomijane z innych przyczyn (tylko macOS, brak adaptera).
 
-### Other Skipped Features
+### Inne pomijane funkcje
 
-| Feature | Reason |
+| Funkcja | Przyczyna |
 |---|---|
-| Cron jobs (`cron`) | Use LibreFang's `ScheduleMode::Periodic` |
-| Webhook hooks (`hooks`) | Use LibreFang's event system |
-| Auth profiles (`auth-profiles.json`) | Security: API keys/OAuth tokens not auto-migrated |
-| Skill entries | Must be reinstalled via `librefang skill install` |
-| Vector index (`memory-search/index.db`) | Not portable; LibreFang rebuilds embeddings |
-| Cron run state (`cron-store.json`) | Not portable |
-| Session config | Differs structurally from LibreFang's per-agent sessions |
-| Memory backend config | LibreFang uses SQLite with vector embeddings |
+| Zadania cron (`cron`) | Użyj `ScheduleMode::Periodic` z LibreFang |
+| Hooki webhook (`hooks`) | Użyj systemu zdarzeń LibreFang |
+| Profile autoryzacji (`auth-profiles.json`) | Bezpieczeństwo: klucze API/tokeny OAuth nie są migrowane automatycznie |
+| Wpisy umiejętności | Należy przeinstalować przez `librefang skill install` |
+| Indeks wektorowy (`memory-search/index.db`) | Nieprzenośny; LibreFang przebudowuje osadzenia |
+| Stan zadań cron (`cron-store.json`) | Nieprzenośny |
+| Konfiguracja sesji | Różni się strukturalnie od sesji per-agent LibreFang |
+| Konfiguracja backendu pamięci | LibreFang używa SQLite z osadzeniami wektorowymi |
 
-## Security Hardening
+## Uzmocnienie bezpieczeństwa
 
-### Agent ID Validation (#3794)
+### Walidacja identyfikatora agenta (#3794)
 
-`validate_migration_id` rejects IDs that contain path traversal components (`../`, absolute paths), NUL bytes, control characters, double-quotes, or backslashes. This prevents:
+`validate_migration_id` odrzuca identyfikatory zawierające komponenty przejścia ścieżki (`../`, ścieżki absolutne), bajty NUL, znaki sterujące, cudzysłowy lub ukośniki wsteczne. Zapobiega to:
 
-- Path traversal during file creation.
-- Manifest injection — since IDs are interpolated into TOML comment lines and description fields, a malicious ID could otherwise break out of those contexts and inject arbitrary manifest keys (e.g., widening `[capabilities]` with `shell = ["*"]`).
+- Przejściu ścieżki podczas tworzenia plików.
+- Wstrzykiwaniu manifestu — ponieważ identyfikatory są interpolowane do linii komentarzy TOML i pól opisu, złośliwy identyfikator mógłby w przeciwnym razie wydostać się z tych kontekstów i wstrzyknąć arbitralne klucze manifestu (np. rozszerzając `[capabilities]` o `shell = ["*"]`).
 
-### TOML Escaping
+### Uciekanie TOML
 
-`toml_escape` escapes backslash, double-quote, newlines, tabs, and control characters per the TOML spec. Every untrusted string interpolated into a TOML basic string passes through this function. This prevents manifest injection through agent names, descriptions, system prompts, model names, provider names, tags, and skills.
+`toml_escape` uczykuje ukośnik wsteczny, cudzysłów, nowej linii, tabulatory i znaki sterujące zgodnie ze specyfikacją TOML. Każdy niezaufany ciąg interpolowany do podstawowego ciągu TOML przechodzi przez tę funkcję. Zapobiega to wstrzykiwaniu manifestu przez nazwy agentów, opisy, prompty systemowe, nazwy modeli, nazwy dostawców, tagi i umiejętności.
 
-`toml_comment_safe` collapses control characters to spaces for safe inclusion in TOML `#` comment lines, where backslash-escaping doesn't apply.
+`toml_comment_safe` zastępuje znaki sterujące spacjami w celu bezpiecznego włączenia w linie komentarzy TOML `#`, gdzie uciekanie ukośnikiem wstecznym nie ma zastosowania.
 
-### Secrets File Permissions
+### Uprawnienia pliku sekretów
 
-`write_secret_env` creates `secrets.env` with mode `0o600` from the moment it exists (via `OpenOptionsExt::mode` on Unix), rather than write-then-chmod. The parent directory is created with mode `0o700`. This closes the window where tokens could be world-readable on shared hosts if the process dies between file creation and `set_permissions`.
+`write_secret_env` tworzy `secrets.env` z trybem `0o600` od momentu jego istnienia (przez `OpenOptionsExt::mode` na systemach Unix), zamiast zapis-then-chmod. Katalog nadrzędny jest tworzony z trybem `0o700`. Zamyka to okno, w którym tokeny mogłyby być czytelne dla wszystkich na współdzielonych hostach, jeśli proces zginie między utworzeniem pliku a `set_permissions`.
 
-## Workspace Scanning
+## Skanowanie workspace
 
-`scan_openclaw_workspace` provides a read-only inventory of what's available for migration. It returns a `ScanResult` containing:
+`scan_openclaw_workspace` dostarcza tylko-do-odczytu inwentaryzację tego, co jest dostępne do migracji. Zwraca `ScanResult` zawierający:
 
-- `has_config`: Whether a config file was found.
-- `agents`: List of `ScannedAgent` with name, provider, model, tool count, and flags for memory/sessions/workspace presence.
-- `channels`: List of channel names detected.
-- `skills`: List of skill names detected.
-- `has_memory`: Whether any agent memory was found.
+- `has_config`: Czy znaleziono plik konfiguracyjny.
+- `agents`: Lista `ScannedAgent` z nazwą, dostawcą, modelem, liczbą narzędzi i flagami obecności pamięci/sesji/workspace.
+- `channels`: Lista wykrytych nazw kanałów.
+- `skills`: Lista wykrytych nazw umiejętności.
+- `has_memory`: Czy znaleziono jakąkolwiek pamięć agenta.
 
-This is used by the TUI init wizard and HTTP API to show a preview before the user commits to a migration.
+Używane przez TUI init wizard i HTTP API do pokazania podglądu przed zatwierdzeniem migracji przez użytkownika.
 
-### Auto-detection
+### Autodetekcja
 
-`detect_openclaw_home` searches standard locations (`~/.openclaw`, `~/.clawdbot`, `~/.moldbot`, `~/.moltbot`, `~/.config/openclaw`, Windows `%APPDATA%/openclaw`, `%LOCALAPPDATA%/openclaw`) and the `OPENCLAW_STATE_DIR` environment variable. A directory is accepted if it contains a recognized config file or has `sessions/` or `memory/` subdirectories.
+`detect_openclaw_home` przeszukuje standardowe lokalizacje (`~/.openclaw`, `~/.clawdbot`, `~/.moldbot`, `~/.moltbot`, `~/.config/openclaw`, Windows `%APPDATA%/openclaw`, `%LOCALAPPDATA%/openclaw`) oraz zmienną środowiskową `OPENCLAW_STATE_DIR`. Katalog jest akceptowany, jeśli zawiera rozpoznawalny plik konfiguracyjny lub ma podkatalogi `sessions/` lub `memory/`.
 
-## Report Module
+## Moduł raportu
 
-`MigrationReport` captures the outcome of a migration run:
+`MigrationReport` przechwytuje wynik uruchomienia migracji:
 
-- `source`: Framework name string.
-- `dry_run`: Whether this was a report-only run.
-- `imported`: `Vec<MigrateItem>` — each item has a `kind` (Config, Agent, Memory, Session, Secret, Skill, Channel), a `name`, and a `destination` path.
-- `skipped`: `Vec<SkippedItem>` — each item has a `kind`, `name`, and `reason`.
-- `warnings`: `Vec<String>` — non-fatal issues (backups made, unmapped tools, write failures).
+- `source`: Ciąg nazwy szkieletu.
+- `dry_run`: Czy to było uruchomienie tylko raportowania.
+- `imported`: `Vec<MigrateItem>` — każdy element ma `kind` (Config, Agent, Memory, Session, Secret, Skill, Channel), `name` i ścieżkę `destination`.
+- `skipped`: `Vec<SkippedItem>` — każdy element ma `kind`, `name` i `reason`.
+- `warnings`: `Vec<String>` — problemy niekrytyczne (utworzone kopie zapasowe, niezmapowane narzędzia, błędy zapisu).
 
-`MigrationReport::to_markdown` renders the report as a Markdown document, which is written to `migration_report.md` in the target directory after a successful migration.
+`MigrationReport::to_markdown` renderuje raport jako dokument Markdown, który jest zapisywany do `migration_report.md` w katalogu docelowym po udanej migracji.
 
-## OpenFang Module
+## Moduł OpenFang
 
-The `openfang` module handles the OpenFang community fork, which uses the same format as LibreFang. Migration is largely a structural copy with schema-drift detection via `warn_on_schema_drift`, which calls into `librefang_types` config validation (`detect_unknown_fields`) to flag fields that may have diverged between forks.
+Moduł `openfang` obsługuje fork społecznościowy OpenFang, który używa tego samego formatu co LibreFang. Migracja jest w dużej mierze kopia strukturalną z detekcją rozbieżności schematu przez `warn_on_schema_drift`, która wywołuje walidację konfiguracji `librefang_types` (`detect_unknown_fields`), aby oflagować pola, które mogły rozbiec się między forkami.
 
-## Adding a New Source Framework
+## Dodawanie nowego szkieletu źródłowego
 
-1. Add a variant to `MigrateSource` and its `Display` impl.
-2. Create a module (e.g., `pub mod myframework;`) with a `pub fn migrate(options: &MigrateOptions) -> Result<MigrationReport, MigrateError>`.
-3. Add a match arm in `run_migration`.
-4. Use the security helpers (`validate_migration_id`, `toml_escape`, `toml_comment_safe`, `write_secret_env`, `atomic_write`, `write_with_backup`) from `openclaw.rs` — they are not yet pub but follow the established pattern.
-5. Populate a `MigrationReport` with `imported`, `skipped`, and `warnings` entries.
-6. If the source has a schema version, add a version check early in the flow (following the `SUPPORTED_OPENCLAW_VERSIONS` pattern).
+1. Dodaj wariant do `MigrateSource` i jego implementacji `Display`.
+2. Utwórz moduł (np. `pub mod myframework;`) z `pub fn migrate(options: &MigrateOptions) -> Result<MigrationReport, MigrateError>`.
+3. Dodaj ramię match w `run_migration`.
+4. Użyj pomocników bezpieczeństwa (`validate_migration_id`, `toml_escape`, `toml_comment_safe`, `write_secret_env`, `atomic_write`, `write_with_backup`) z `openclaw.rs` — nie są jeszcze pub, ale podążają za ustalonym wzorcem.
+5. Wypełnij `MigrationReport` wpisami `imported`, `skipped` i `warnings`.
+6. Jeśli źródło ma wersję schematu, dodaj sprawdzenie wersji wcześnie w przepływie (podążając za wzorcem `SUPPORTED_OPENCLAW_VERSIONS`).

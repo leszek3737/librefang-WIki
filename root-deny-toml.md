@@ -1,150 +1,150 @@
 # Root — deny.toml
 
-# `deny.toml` — Supply-Chain Audit Configuration
+# `deny.toml` — Konfiguracja audytu łańcucha dostaw
 
-## Purpose
+## Cel
 
-`deny.toml` configures [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny) to enforce supply-chain policy across the LibreFang workspace. It gates four categories of risk:
+`deny.toml` konfiguruje [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny) w celu egzekwowania polityki łańcucha dostaw w obszarze roboczym LibreFang. Bramkuje cztery kategorie ryzyka:
 
-| Check | What it catches |
-|-------|----------------|
-| **advisories** | Known vulnerabilities, yanked crates (RustSec database) |
-| **licenses** | Licenses outside the explicit allow-list |
-| **bans** | Duplicate crate versions, wildcard requirements |
-| **sources** | Crates sourced from registries or git repos other than crates.io |
+| Kontrola | Co wykrywa |
+|----------|------------|
+| **advisories** | Znane podatności, wycofane crate'y (baza RustSec) |
+| **licenses** | Licencje spoza jawnegoallow-listy |
+| **bans** | Duplikaty wersji crate'ów, wymagania z symbolami wieloznacznymi |
+| **sources** | Crate'y pochodzące z rejestrów lub repozytoriów git innych niż crates.io |
 
-The file is the single source of truth for dependency policy. Every `ignore`, `skip`, and license exception should trace back to a documented justification — see CONTRIBUTING.md (§ Dependency policy).
+Plik jest jedynym źródłem prawdy dla polityki zależności. Każdy `ignore`, `skip` i wyjątek licencyjny powinien odnosić się do udokumentowanego uzasadnienia — patrz CONTRIBUTING.md (§ Polityka zależności).
 
-## Running the Checks
+## Uruchamianie kontroli
 
-### Locally
+### Lokalnie
 
 ```sh
 cargo deny check advisories
 cargo deny check bans licenses sources
 ```
 
-### In CI
+### W CI
 
-The GitHub Actions workflow at `.github/workflows/cargo-deny.yml` runs the same checks on every pull request and on pushes to `main` that touch `Cargo.toml`, `Cargo.lock`, `deny.toml`, or the workflow file itself.
+Przepływ pracy GitHub Actions w `.github/workflows/cargo-deny.yml` uruchamia te same kontrole przy każdym pull requeście i przy pushach do `main`, które dotykają `Cargo.toml`, `Cargo.lock`, `deny.toml` lub samego pliku przepływu pracy.
 
 ```mermaid
 flowchart LR
-    PR[PR touches deps] --> CI[cargo-deny workflow]
+    PR[PR dotyka deps] --> CI[przepływ cargo-deny]
     CI --> ADV[advisories]
     CI --> LIC[licenses]
     CI --> BAN[bans]
     CI --> SRC[sources]
-    ADV -- pass --> OK[Merge allowed]
+    ADV -- pass --> OK[Scalowanie dozwolone]
     LIC -- pass --> OK
     BAN -- warn --> OK
     SRC -- pass --> OK
-    ADV -- fail --> BLK[Block merge]
+    ADV -- fail --> BLK[Blokuj scalenie]
     LIC -- fail --> BLK
     SRC -- fail --> BLK
 ```
 
-## Graph & Target Resolution
+## Graf i rozdzielczość targetów
 
-The `[graph]` section lists the four platform triples the project ships to: Linux x86_64, macOS x86_64 and aarch64, and Windows x86_64. Cargo-deny resolves the full dependency graph for each target so that platform-specific crates (e.g. GTK bindings on Linux) are included in the audit rather than silently skipped.
+Sekcja `[graph]` zawiera cztery trójki platform docelowych projektu: Linux x86_64, macOS x86_64 i aarch64 oraz Windows x86_64. Cargo-deny rozwiązuje pełny graf zależności dla każdego targetu, aby crate'y specyficzne dla platformy (np. powiązania GTK na Linuksie) były uwzględniane w audycie, a nie po cichu pomijane.
 
-`[output] feature-depth = 1` makes feature unification visible in diagnostic output, which helps diagnose duplicate-version warnings.
+`[output] feature-depth = 1` sprawia, że unifikacja cech (features) jest widoczna w diagnostyce, co pomaga diagnozować ostrzeżenia o duplikatach wersji.
 
-## Advisories
+## Advisory
 
-The RustSec advisory database is fetched from the canonical repository into `$CARGO_HOME/advisory-dbs`. Yanked crates are denied outright (`yanked = "deny"`).
+Baza danych RustSec advisory jest pobierana z kanonicznego repozytorium do `$CARGO_HOME/advisory-dbs`. Wycofane crate'y są odrzucane bezwarunkowo (`yanked = "deny"`).
 
-The `ignore` list suppresses advisories that are currently unfixable. Each entry includes:
+Lista `ignore` tłumi advisory, których obecnie nie da się usunąć. Każdy wpis zawiera:
 
-- **`id`** — the RustSec advisory identifier
-- **`reason`** — a human-readable explanation linking the upstream advisory and noting why it cannot be resolved yet
+- **`id`** — identyfikator RustSec advisory
+- **`reason`** — czytelny dla człowieka opis odsyłający do advisory nadrzędnego z adnotacją, dlaczego nie można go jeszcze rozwiązać
 
-Ignoring an advisory is scoped by ID, not by crate+version, so a fresh occurrence of the same advisory in a different dependency path will still fail the audit. The current ignores fall into three groups:
+Ignorowanie advisory jest ograniczone do identyfikatora, nie do crate+version, więc nowe wystąpienie tego samego advisory na innej ścieżce zależności nadal spowoduje niepowodzenie audytu. Obecne ignorowania dzielą się na trzy grupy:
 
-### gtk-rs GTK3 unmaintained family
+### Rodzina gtk-rs GTK3 — nieutrzymywana
 
-RUSTSEC-2024-0411 through RUSTSEC-2024-0420 cover `gtk`, `gtk-sys`, `atk`, `atk-sys`, `gdk`, `gdk-sys`, `gdkx11`, `gdkx11-sys`, `gdkwayland-sys`, and `gdk-pixbuf`. These arrive transitively via `tauri-runtime-wry` on Linux. They cannot be upgraded until Tauri migrates to GTK4 — tracked upstream at [tauri-apps/tauri#9220](https://github.com/tauri-apps/tauri/issues/9220).
+RUSTSEC-2024-0411 do RUSTSEC-2024-0420 obejmuje `gtk`, `gtk-sys`, `atk`, `atk-sys`, `gdk`, `gdk-sys`, `gdkx11`, `gdkx11-sys`, `gdkwayland-sys` i `gdk-pixbuf`. Pojawiają się tranzytywnie przez `tauri-runtime-wry` na Linuksie. Nie można ich zaktualizować, dopóki Tauri nie przeprowadzi migracji do GTK4 — śledzone nadrzędnie w [tauri-apps/tauri#9220](https://github.com/tauri-apps/tauri/issues/9220).
 
-### Other unmaintained transitives
+### Inne nieutrzymywane tranzytywy
 
-| Advisory | Crate | Context |
-|----------|-------|---------|
-| RUSTSEC-2023-0071 | `rsa` | Marvin attack; no upstream fix |
-| RUSTSEC-2024-0370 | `proc-macro-error` | Unmaintained transitive |
-| RUSTSEC-2025-0057 | `fxhash` | Unmaintained transitive |
-| RUSTSEC-2025-0075 / 0080 / 0081 / 0098 / 0100 | `unic-*` | Unmaintained, via kuchikiki/selectors chain |
-| RUSTSEC-2026-0192 | `ttf-parser` | Unmaintained, via `pdf-extract` → `lopdf`, no safe upgrade |
+| Advisory | Crate | Kontekst |
+|----------|-------|----------|
+| RUSTSEC-2023-0071 | `rsa` | Atak Marvin; brak poprawki nadrzędnej |
+| RUSTSEC-2024-0370 | `proc-macro-error` | Nieutrzymywana zależność tranzytywna |
+| RUSTSEC-2025-0057 | `fxhash` | Nieutrzymywana zależność tranzytywna |
+| RUSTSEC-2025-0075 / 0080 / 0081 / 0098 / 0100 | `unic-*` | Nieutrzymywane, przez łańcuch kuchikiki/selectors |
+| RUSTSEC-2026-0192 | `ttf-parser` | Nieutrzymywane, przez `pdf-extract` → `lopdf`, brak bezpiecznej aktualizacji |
 
-## Licenses
+## Licencje
 
-`confidence-threshold = 0.8` requires high-confidence SPDX detection. The `allow` list is intentionally restrictive: only permissive licenses compatible with the project's Apache-2.0 / MIT distribution model are accepted. Strong copyleft licenses (GPL, AGPL, LGPL) are deliberately excluded — adding one requires a maintainer-level decision documented in CONTRIBUTING.md.
+`confidence-threshold = 0.8` wymaga wykrywania SPDX z wysokim poziomem pewności. Lista `allow` jest celowo restrykcyjna: dopuszczalne są tylko licencje permisywne kompatybilne z modelem dystrybucji Apache-2.0 / MIT projektu. Silne licencje copyleft (GPL, AGPL, LGPL) są celowo wykluczone — dodanie którejkolwiek wymaga decyzji na poziomie maintainera udokumentowanej w CONTRIBUTING.md.
 
-The allow-list includes:
+Allow-lista obejmuje:
 
-- **Standard permissive:** Apache-2.0, Apache-2.0 WITH LLVM-exception, MIT, BSD-2-Clause, BSD-3-Clause, 0BSD, ISC, Zlib
-- **Unicode licenses:** Unicode-DFS-2016, Unicode-3.0
-- **Weak copyleft (file-scoped):** MPL-2.0
-- **Public domain equivalents:** CC0-1.0, Unlicense
-- **Data license:** CDLA-Permissive-2.0 (used by `webpki-roots`)
+- **Standardowe permisywne:** Apache-2.0, Apache-2.0 WITH LLVM-exception, MIT, BSD-2-Clause, BSD-3-Clause, 0BSD, ISC, Zlib
+- **Licencje Unicode:** Unicode-DFS-2016, Unicode-3.0
+- **Słaby copyleft (zakres pliku):** MPL-2.0
+- **Równoważniki domeny publicznej:** CC0-1.0, Unlicense
+- **Licencja danych:** CDLA-Permissive-2.0 (używana przez `webpki-roots`)
 
-The `Unlicense` entry exists specifically for `ksni`. `CDLA-Permissive-2.0` exists for `webpki-roots`.
+Wpis `Unlicense` istnieje konkretnie dla `ksni`. `CDLA-Permissive-2.0` istnieje dla `webpki-roots`.
 
-### `ring` License Clarification
+### Uściślenie licencji `ring`
 
-The `ring` crate ships a hand-rolled multi-license file rather than a single SPDX identifier. The `[[licenses.clarify]]` block overrides automatic detection with the correct expression (`MIT AND ISC AND OpenSSL`) and pins the LICENSE file hash (`0xbd0eed23`) so any change to the upstream file is flagged.
+Crate `ring` dostarcza ręcznie napisany plik wielolicencyjny zamiast pojedynczego identyfikatora SPDX. Blok `[[licenses.clarify]]` nadpisuje automatyczne wykrywanie poprawnym wyrażeniem (`MIT AND ISC AND OpenSSL`) i przypina hash pliku LICENSE (`0xbd0eed23`), aby każda zmiana w pliku nadrzędnym była sygnalizowana.
 
-## Bans
+## Bany
 
-### Duplicate versions
+### Duplikaty wersji
 
-`multiple-versions = "warn"` — the workspace legitimately pulls different minor versions of shared crates (e.g. `tokio-util`, `hashbrown`). This setting surfaces duplicates in CI logs without failing unrelated PRs. The policy is to revisit the count during routine dependency review and promote to `"deny"` once the workspace is consolidated.
+`multiple-versions = "warn"` — obszar roboczy legalnie pobiera różne wersje pomocnicze współdzielonych crate'ów (np. `tokio-util`, `hashbrown`). To ustawienie uwidacznia duplikaty w logach CI bez blokowania niezwiązanych PR-ów. Polityka zakłada ponowne przeliczenie liczby podczas rutynowego przeglądu zależności i promowanie do `"deny"` po konsolidacji obszaru roboczego.
 
-### Wildcard requirements
+### Wymagania z symbolami wieloznacznymi
 
-`wildcards = "warn"` with `allow-wildcard-paths = true` — wildcard version specs (`*`) are normally a mistake in published crates, but workspace-internal crates depend on each other via `path = "..."`. Cargo-deny still flags these because the internal crates declare `version = "..."` fields, making them appear "public" from the tool's perspective. The setting keeps them visible without breaking CI.
+`wildcards = "warn"` z `allow-wildcard-paths = true` — specyfikacje wersji ze symbolami wieloznacznymi (`*`) są zwykle błędem w opublikowanych crate'ach, ale wewnętrzne crate'y obszaru roboczego zależą od siebie nawzajem przez `path = "..."`. Cargo-deny nadal je flaguje, ponieważ wewnętrzne crate'y deklarują pola `version = "..."`, co sprawia, że z perspektywy narzędzia wyglądają na „publiczne". Ustawienie utrzymuje je widoczne bez przerywania CI.
 
-### Version skips
+### Pominięcia wersji
 
-The `zip` crate is explicitly skipped (`skip`) because `tauri-plugin-updater` pulls in v4.x transitively while the project's own code uses v8.x. This duplicate is allowed until Tauri upstream catches up.
+Crate `zip` jest jawnie pominięty (`skip`), ponieważ `tauri-plugin-updater` tranzytywnie pobiera v4.x, podczas gdy własny kod projektu używa v8.x. Ten duplikat jest dozwolony, dopóki nadrzędny Tauri nie nadrobi zaległości.
 
-## Sources
+## Źródła
 
-All four registry/git policies are set to deny by default:
+Wszystkie cztery polityki rejestru/git są domyślnie ustawione na odrzucenie:
 
 - `unknown-registry = "deny"`
 - `unknown-git = "deny"`
-- `allow-registry` — only crates.io (`https://github.com/rust-lang/crates.io-index`)
-- `allow-git` — empty (no git dependencies)
+- `allow-registry` — tylko crates.io (`https://github.com/rust-lang/crates.io-index`)
+- `allow-git` — puste (brak zależności git)
 
-If a git dependency becomes necessary, add its repository URL to `allow-git` with a comment linking to the upstream issue or PR explaining why a published crates.io version is not yet usable.
+Jeśli zależność git stanie się konieczna, dodaj jej URL repozytorium do `allow-git` z komentarzem odsyłającym do nadrzędnego issue lub PR tłumaczącego, dlaczego opublikowana wersja crates.io nie jest jeszcze użyteczna.
 
-## Common Maintenance Tasks
+## Częste zadania konserwacyjne
 
-### Ignoring a new advisory
+### Ignorowanie nowego advisory
 
-When CI reports a new advisory that cannot be immediately fixed:
+Gdy CI zgłosi nowe advisory, którego nie da się natychmiast usunąć:
 
-1. Read the advisory at the `rustsec.org` URL.
-2. Confirm it is transitive and has no safe upgrade path.
-3. Add an entry to the `ignore` array with the `id` and a `reason` that links the advisory URL and explains the resolution blocker.
+1. Przeczytaj advisory pod adresem URL `rustsec.org`.
+2. Potwierdź, że jest tranzytywne i nie ma bezpiecznej ścieżki aktualizacji.
+3. Dodaj wpis do tablicy `ignore` z `id` oraz `reason`, który odsyła do URL advisory i tłumaczy blokadę rozwiązania.
 
 ```toml
-{ id = "RUSTSEC-20XX-XXXX", reason = "crate-name issue; transitive via X. https://rustsec.org/advisories/RUSTSEC-20XX-XXXX" },
+{ id = "RUSTSEC-20XX-XXXX", reason = "crate-name issue; tranzytywne przez X. https://rustsec.org/advisories/RUSTSEC-20XX-XXXX" },
 ```
 
-### Allowing a new license
+### Zezwalanie na nową licencję
 
-1. Read the upstream LICENSE file manually.
-2. Verify compatibility with Apache-2.0 / MIT distribution.
-3. Add the SPDX identifier to the `allow` array.
-4. If the decision is non-obvious, document it in CONTRIBUTING.md.
+1. Ręcznie przeczytaj plik LICENSE nadrzędnej biblioteki.
+2. Zweryfikuj kompatybilność z dystrybucją Apache-2.0 / MIT.
+3. Dodaj identyfikator SPDX do tablicy `allow`.
+4. Jeśli decyzja nie jest oczywista, udokumentuj ją w CONTRIBUTING.md.
 
-### Handling a duplicate-version conflict
+### Obsługa konfliktu duplikatu wersji
 
-If a new dependency introduces a duplicate that blocks CI, add the crate to the `skip` array:
+Jeśli nowa zależność wprowadzi duplikat blokujący CI, dodaj crate do tablicy `skip`:
 
 ```toml
 { name = "crate-name", version = "0.x.y" },
 ```
 
-Leave a comment explaining which dependency pulls it in and when the skip can be removed.
+Zostaw komentarz tłumaczący, która zależność ją wprowadza i kiedy można usunąć pominięcie.

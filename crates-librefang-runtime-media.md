@@ -2,16 +2,16 @@
 
 # librefang-runtime-media
 
-Provider-agnostic media generation and understanding for LibreFang. Implements text-to-speech, image/video/music generation, speech-to-text, and image description behind a uniform trait interface, with lazy-cached drivers and configurable provider routing.
+Niezależny od dostawcy moduł generowania i rozumienia mediów dla LibreFang. Implementuje syntezę tekstu na mowę, generowanie obrazów/wideo/muzyki, rozpoznawanie mowy na tekst oraz opisywanie obrazów za jednolitym interfejsem trait, z leniwie buforowanymi sterownikami i konfigurowalnym trasowaniem do dostawców.
 
-## Architecture
+## Architektura
 
-The crate has two independent subsystems:
+Kratek zawiera dwa niezależne podsystemy:
 
-1. **Media generation** — outbound synthesis/generation of new media (TTS, images, video, music) via the `MediaDriver` trait and `MediaDriverCache`.
-2. **Media understanding** — inbound analysis of existing media (image description, audio transcription) via the `MediaEngine` struct in `media_understanding`.
+1. **Generowanie mediów** — wychodząca synteza/generowanie nowych mediów (TTS, obrazy, wideo, muzyka) przez trait `MediaDriver` i `MediaDriverCache`.
+2. **Rozumienie mediów** — wchodząca analiza istniejących mediów (opisywanie obrazów, transkrypcja audio) przez strukturę `MediaEngine` w `media_understanding`.
 
-Both subsystems share the same HTTP client (`librefang_http::proxied_client`), error discipline, and provider-detection conventions, but are otherwise decoupled.
+Oba podsystemy współdzielą tego samego klienta HTTP (`librefang_http::proxied_client`), dyscyplinę obsługi błędów oraz konwencje wykrywania dostawców, ale poza tym są rozdzielone.
 
 ```mermaid
 graph TD
@@ -38,9 +38,9 @@ graph TD
     end
 ```
 
-## The `MediaDriver` Trait
+## Trait `MediaDriver`
 
-Every provider implements `MediaDriver`, declaring which capabilities it supports via `capabilities()`. Methods for unsupported modalities have default implementations that return `MediaError::NotSupported`, so a provider only overrides what it can actually do.
+Każdy dostawca implementuje trait `MediaDriver`, deklarując wspierane możliwości przez `capabilities()`. Metody dla niewspieranych modalności mają domyślne implementacje zwracające `MediaError::NotSupported`, więc dostawca nadpisuje tylko to, co faktycznie potrafi.
 
 ```rust
 #[async_trait]
@@ -58,194 +58,194 @@ pub trait MediaDriver: Send + Sync {
 }
 ```
 
-Video generation is asynchronous: `submit_video` returns a task ID, then callers poll with `poll_video` and retrieve the final result with `get_video_result`. Image, TTS, and music are synchronous single-call methods.
+Generowanie wideo jest asynchroniczne: `submit_video` zwraca identyfikator zadania, a następnie wywołujący odpytują przez `poll_video` i pobierają ostateczny wynik przez `get_video_result`. Generowanie obrazów, TTS i muzyki to synchroniczne metody jedno wywołanie.
 
-## `MediaDriverCache` — Lazy Driver Instantiation
+## `MediaDriverCache` — Leniwa instancjonacja sterowników
 
-Drivers are created on first use and cached as `Arc<dyn MediaDriver>` in a `DashMap`. The cache key is `"{provider}|{base_url}"`, so the same provider configured with different base URLs yields separate driver instances.
+Sterowniki są tworzone przy pierwszym użyciu i buforowane jako `Arc<dyn MediaDriver>` w `DashMap`. Klucz bufora to `"{provider}|{base_url}"`, więc ten sam dostawca skonfigurowany z różnymi bazowymi URL-ami daje oddzielne instancje sterowników.
 
-### URL Resolution Priority
+### Priorytet rozwiązywania URL
 
-When `get_or_create` is called with `base_url: None`, the cache resolves the URL in this order:
+Gdy `get_or_create` jest wywołane z `base_url: None`, bufor rozwiązuje URL w następującej kolejności:
 
-1. **Explicit `base_url` argument** passed to `get_or_create` — highest priority.
-2. **`provider_urls` map** — populated from `[provider_urls]` in config, checked by provider name and canonical alias.
-3. **Driver's hardcoded default** — lowest priority.
+1. **Jawny argument `base_url`** przekazany do `get_or_create` — najwyższy priorytet.
+2. **Mapa `provider_urls`** — wypełniana z `[provider_urls]` w konfiguracji, sprawdzana po nazwie dostawcy i kanonicznym aliasie.
+3. **Zahardkodowana domyślna wartość sterownika** — najniższy priorytet.
 
-Provider aliases are resolved by `canonical_provider_name` (currently `"google"` → `"gemini"`), so a `provider_urls` entry under `gemini` is found when a caller asks for `google`.
+Aliasy dostawców są rozwiązywane przez `canonical_provider_name` (obecnie `"google"` → `"gemini"`), więc wpis `provider_urls` pod `gemini` jest znajdowany, gdy wywołujący pyta o `google`.
 
-### Provider Registry
+### Rejestr dostawców
 
-`load_providers_from_registry` accepts a slice of `ProviderInfo` from the model catalog. Providers with non-empty `media_capabilities` are added to the preference list in registry order, with built-in providers (`openai`, `gemini`, `elevenlabs`, `minimax`, `google_tts`) appended as fallback. This list drives `detect_for_capability`, which returns the first configured provider supporting a given capability.
+`load_providers_from_registry` przyjmuje wycinek `ProviderInfo` z katalogu modeli. Dostawcy z niepustymi `media_capabilities` są dodawani do listy preferencji w kolejności rejestru, a wbudowani dostawcy (`openai`, `gemini`, `elevenlabs`, `minimax`, `google_tts`) są dołączani jako rezerwa. Ta lista napędza `detect_for_capability`, które zwraca pierwszego skonfigurowanego dostawcę wspierającego daną możliwość.
 
-### Unknown Providers
+### Nieznani dostawcy
 
-If a provider name is not recognized but a `base_url` is configured (either explicitly or via `provider_urls`), the cache falls back to `GenericOpenAICompatMediaDriver` — an OpenAI-compatible driver parameterized by provider name and URL. The API key is read from `{PROVIDER_UPPER}_API_KEY`. Without a `base_url`, the request fails with an `InvalidRequest` error guiding the operator to `config.toml`.
+Jeśli nazwa dostawcy nie jest rozpoznana, ale skonfigurowany jest `base_url` (jawnie lub przez `provider_urls`), bufor przechodzi na `GenericOpenAICompatMediaDriver` — sterownik kompatybilny z OpenAI, sparametryzowany nazwą dostawcy i URL-em. Klucz API jest odczytywany ze zmiennej `{PROVIDER_UPPER}_API_KEY`. Bez `base_url` żądanie kończy się błędem `InvalidRequest`, kierującym operatora do `config.toml`.
 
 ### Hot-Reload
 
-`update_provider_urls` replaces the URL map and clears the cache, so subsequent `get_or_create` calls build fresh drivers with the new URLs. `clear` empties the cache without touching URL configuration.
+`update_provider_urls` zastępuje mapę URL-i i czyści bufor, więc kolejne wywołania `get_or_create` tworzą nowe sterowniki z nowymi URL-ami. `clear` czyści bufor bez dotykania konfiguracji URL-i.
 
-## Provider Implementations
+## Implementacje dostawców
 
 ### ElevenLabs (`elevenlabs.rs`)
 
-**Capability:** Text-to-speech via `POST /v1/text-to-speech/{voice_id}`.
+**Możliwość:** Synteza tekstu na mowę przez `POST /v1/text-to-speech/{voice_id}`.
 
-**Auth:** `ELEVENLABS_API_KEY` environment variable.
+**Uwierzytelnienie:** Zmienna środowiskowa `ELEVENLABS_API_KEY`.
 
-**Defaults:**
+**Wartości domyślne:**
 - Model: `eleven_multilingual_v2`
-- Voice: `21m00Tcm4TlvDq8ikWAM` (Rachel)
-- Format: `opus_48000_32` (chosen so WhatsApp PTT voice notes work without transcoding; callers needing MP3 pass `format: Some("mp3_44100_128")`)
+- Głos: `21m00Tcm4TlvDq8ikWAM` (Rachel)
+- Format: `opus_48000_32` (wybrany tak, aby wiadomości głosowe WhatsApp PTT działały bez transkodowania; wywołujący potrzebujący MP3 przekazują `format: Some("mp3_44100_128")`)
 
-**Voice ID validation:** The `voice_id` is interpolated directly into the URL path, so `validate_voice_id` enforces a strict shape: exactly 20 ASCII-alphanumeric characters. This closes path-traversal and query-string injection vectors. The validator runs *before* the API key check, so when both are wrong the agent sees the actionable `InvalidRequest` error rather than a generic `MissingKey`.
+**Walidacja identyfikatora głosu:** `voice_id` jest interpolowany bezpośrednio w ścieżkę URL, więc `validate_voice_id` wymusza ścisły format: dokładnie 20 znaków alfanumerycznych ASCII. Zamyka to wektory path-traversal i wstrzykiwania query-string. Walidator działa *przed* sprawdzeniem klucza API, więc gdy oba są błędne, agent widzi działający błąd `InvalidRequest`, a nie ogólny `MissingKey`.
 
-Error echoes from invalid voice IDs are capped at `VOICE_ID_ERROR_ECHO_MAX_BYTES` (64 bytes) so a 10 KB malicious input doesn't produce a 10 KB error string.
+Echa błędów z nieprawidłowych identyfikatorów głosu są ograniczane do `VOICE_ID_ERROR_ECHO_MAX_BYTES` (64 bajty), aby złośliwe wejście o rozmiarze 10 KB nie wyprodukowało 10 KB ciągu błędu.
 
-**Response limits:** 25 MB max (`MAX_AUDIO_RESPONSE_BYTES`), checked both via `Content-Length` header and actual byte count.
+**Limity odpowiedzi:** Maksymalnie 25 MB (`MAX_AUDIO_RESPONSE_BYTES`), sprawdzane zarówno przez nagłówek `Content-Length`, jak i rzeczywistą liczbę bajtów.
 
 ### Gemini (`gemini.rs`)
 
-**Capability:** Image generation via Imagen 3 (`POST /v1beta/models/{model}:predict`).
+**Możliwość:** Generowanie obrazów przez Imagen 3 (`POST /v1beta/models/{model}:predict`).
 
-**Auth:** `GEMINI_API_KEY` or `GOOGLE_API_KEY`, passed as `?key=` query parameter.
+**Uwierzytelnienie:** `GEMINI_API_KEY` lub `GOOGLE_API_KEY`, przekazywane jako parametr zapytania `?key=`.
 
-**Defaults:**
+**Wartości domyślne:**
 - Model: `imagen-3.0-generate-002`
-- Aspect ratios: `1:1`, `3:4`, `4:3`, `9:16`, `16:9`
+- Proporcje: `1:1`, `3:4`, `4:3`, `9:16`, `16:9`
 
-Returns base64-encoded images. If all predictions are empty, checks for `raiFilteredReason` (content filter) and returns `MediaError::ContentFiltered`. Individual images exceeding 10 MB are skipped with a `warn!`.
+Zwraca obrazy zakodowane w base64. Jeśli wszystkie predykcje są puste, sprawdza `raiFilteredReason` (filtr treści) i zwraca `MediaError::ContentFiltered`. Indywidualne obrazy przekraczające 10 MB są pomijane z ostrzeżeniem `warn!`.
 
 ### Google Cloud TTS (`google_tts.rs`)
 
-**Capability:** Text-to-speech via `POST /v1/text:synthesize`.
+**Możliwość:** Synteza tekstu na mowę przez `POST /v1/text:synthesize`.
 
-**Auth:** `GOOGLE_API_KEY` or `GOOGLE_CLOUD_API_KEY`, passed as `?key=` query parameter.
+**Uwierzytelnienie:** `GOOGLE_API_KEY` lub `GOOGLE_CLOUD_API_KEY`, przekazywane jako parametr zapytania `?key=`.
 
-**Defaults:**
-- Voice: `en-US-Standard-F`
-- Language: `en-US`
-- Speaking rate: `1.0`
+**Wartości domyślne:**
+- Głos: `en-US-Standard-F`
+- Język: `en-US`
+- Tempo mówienia: `1.0`
 
-**SSML handling:** `build_input` detects SSML markup and routes accordingly:
-- Text containing `<speak>` is sent as-is under the `ssml` field.
-- Text containing SSML tags (e.g. `<break>`, `<prosody>`) without a `<speak>` wrapper is auto-wrapped.
-- All other text is sent as plain `text`.
+**Obsługa SSML:** `build_input` wykrywa znaczniki SSML i odpowiednio trasuje:
+- Tekst zawierający `<speak>` jest wysyłany bez zmian w polu `ssml`.
+- Tekst zawierający znaczniki SSML (np. `<break>`, `<prosody>`) bez otoki `<speak>` jest automatycznie owijany.
+- Cały pozostały tekst jest wysyłany jako zwykły `text`.
 
-The `is_ssml` detector uses unambiguous SSML-only tags (`<prosody>`, `<emphasis>`, `<say-as>`, `<phoneme>`, `<par>`, `<seq>`) and requires SSML-specific attributes on ambiguous tags (`<sub alias="...">`, `<mark name="...">`, `<audio src="...">`) to avoid false positives on ordinary HTML.
+Detektor `is_ssml` używa jednoznacznych znaczników specyficznych dla SSML (`<prosody>`, `<emphasis>`, `<say-as>`, `<phoneme>`, `<par>`, `<seq>`) i wymaga atrybutów specyficznych dla SSML na niejednoznacznych znacznikach (`<sub alias="...">`, `<mark name="...">`, `<audio src="...">`), aby uniknąć fałszywych alarmów na zwykłym HTML.
 
-**Audio encoding mapping** (`map_audio_encoding`):
+**Mapowanie kodowania audio** (`map_audio_encoding`):
 
-| Requested format | Google encoding |
+| Żądany format | Kodowanie Google |
 |---|---|
 | `opus`, `ogg` | `OGG_OPUS` |
 | `wav`, `pcm`, `linear16` | `LINEAR16` |
-| anything else | `MP3` |
+| wszystko inne | `MP3` |
 
-### MiniMax and OpenAI
+### MiniMax i OpenAI
 
-Source for these modules is truncated in this snapshot. From the cache registry, `MiniMaxMediaDriver` supports video generation (with a `check_base_resp` helper for the MiniMax API's non-standard response envelope), and `OpenAIMediaDriver` supports image generation and TTS. Both also have `GenericOpenAICompatMediaDriver` for user-defined OpenAI-compatible endpoints.
+Źródło tych modułów jest obcięte w tym zrzucie. Z rejestru bufora wynika, że `MiniMaxMediaDriver` wspiera generowanie wideo (z pomocnikiem `check_base_resp` dla niestandardowej otoki odpowiedzi API MiniMax), a `OpenAIMediaDriver` wspiera generowanie obrazów i TTS. Oba mają również `GenericOpenAICompatMediaDriver` dla zdefiniowanych przez użytkownika punktów końcowych kompatybilnych z OpenAI.
 
 ## `MediaError`
 
-All failures flow through a single error enum:
+Wszystkie awarie przepływają przez pojedynczą enumerację błędów:
 
-| Variant | Meaning |
+| Wariant | Znaczenie |
 |---|---|
-| `NotSupported` | The driver doesn't implement this modality. |
-| `MissingKey` | Required API key environment variable is not set. |
-| `Http` | Network or transport error. |
-| `Api` | Provider returned non-2xx; carries `status` and truncated `message`. |
-| `RateLimit` | Provider rate-limited the request. |
-| `ContentFiltered` | Safety filter rejected the request. |
-| `InvalidRequest` | Caller-supplied parameters failed validation. |
-| `TaskNotFound` | Async task ID (video) not recognized. |
-| `Other` | Catch-all for size limits, parse failures, etc. |
+| `NotSupported` | Sterownik nie implementuje tej modalności. |
+| `MissingKey` | Wymagana zmienna środowiskowa klucza API nie jest ustawiona. |
+| `Http` | Błąd sieci lub transportu. |
+| `Api` | Dostawca zwrócił status spoza 2xx; zawiera `status` i skróconą `message`. |
+| `RateLimit` | Dostawca ograniczył żądanie (rate-limit). |
+| `ContentFiltered` | Filtr bezpieczeństwa odrzucił żądanie. |
+| `InvalidRequest` | Parametry dostarczone przez wywołującego nie przeszły walidacji. |
+| `TaskNotFound` | Asynchroniczne ID zadania (wideo) nie rozpoznane. |
+| `Other` | Kategoria zbiorcza dla limitów rozmiaru, błędów parsowania itp. |
 
-Error messages from provider API responses are truncated to 500 bytes via `safe_truncate_str` (a UTF-8-boundary-safe truncation helper) before being embedded in `MediaError`.
+Komunikaty błędów z odpowiedzi API dostawców są skracane do 500 bajtów przez `safe_truncate_str` (pomocnik obcinający z zachowaniem granic UTF-8) przed osadzeniem w `MediaError`.
 
-## Media Understanding (`media_understanding.rs`)
+## Rozumienie mediów (`media_understanding.rs`)
 
-The `MediaEngine` handles *inbound* media analysis — describing images and transcribing audio. Unlike the generation subsystem, understanding uses **single-provider dispatch with no fallback cascade**: it picks one provider and surfaces its error directly if it fails.
+`MediaEngine` obsługuje *wchodzącą* analizę mediów — opisywanie obrazów i transkrypcję audio. W przeciwieństwie do podsystemu generowania, rozumienie używa **wysyłania do jednego dostawcy bez kaskady rezerw**: wybiera jednego dostawcę i bezpośrednio przekazuje jego błąd w przypadku niepowodzenia.
 
-### Provider Selection
+### Wybór dostawcy
 
-For each modality, the engine resolves a provider in two steps:
+Dla każdej modalności silnik rozwiązuje dostawcę w dwóch krokach:
 
-1. If `[media] image_provider` / `audio_provider` is explicitly set in config, use it.
-2. Otherwise, auto-detect by checking which API key environment variable is present.
+1. Jeśli `[media] image_provider` / `audio_provider` jest jawnie ustawiony w konfiguracji, użyj go.
+2. W przeciwnym razie — autodetekcja przez sprawdzenie, która zmienna środowiskowa klucza API jest obecna.
 
-Auto-detection logs a `warn!` (audio) or `debug!` (image) recommending explicit configuration for reproducibility.
+Autodetekcja loguje `warn!` (audio) lub `debug!` (obraz) z zaleceniem jawnej konfiguracji dla powtarzalności.
 
-**Vision provider priority:** Anthropic → OpenAI → Groq → Gemini
+**Priorytet dostawców wizyjnych:** Anthropic → OpenAI → Groq → Gemini
 
-**Audio (STT) provider priority:** Groq → OpenAI → Gemini → ElevenLabs → MiniMax → Fireworks → Together → SiliconFlow
+**Priorytet dostawców audio (STT):** Groq → OpenAI → Gemini → ElevenLabs → MiniMax → Fireworks → Together → SiliconFlow
 
-### Model Resolution
+### Rozwiązywanie modelu
 
-Model selection follows a three-tier precedence:
+Wybór modelu następuje w trzech poziomach priorytetu:
 
-1. `[media] image_model` / `audio_model` — operator-set per-modality override.
-2. `[media.custom_stt] model` — for custom/self-hosted STT providers *only*. `custom_stt_model_ref` explicitly returns `None` for every built-in provider name, so this setting cannot accidentally override a built-in provider's default.
-3. Hardcoded provider default from `default_vision_model` / `default_audio_model`.
+1. `[media] image_model` / `audio_model` — nadpisanie przez operatora per modalność.
+2. `[media.custom_stt] model` — tylko dla dostawców STT niestandardowych/samodzielnych. `custom_stt_model_ref` jawnie zwraca `None` dla każdej wbudowanej nazwy dostawcy, więc to ustawienie nie może przypadkowo nadpisać domyślnych wartości wbudowanego dostawcy.
+3. Zahardkodowana wartość domyślna dostawcy z `default_vision_model` / `default_audio_model`.
 
-### Concurrency Control
+### Kontrola współbieżności
 
-`MediaEngine` holds a `tokio::sync::Semaphore` capped at `max_concurrency` (clamped to 1–8). `process_attachments` spawns one task per attachment, each acquiring a permit. Per-modality config flags (`image_description`, `audio_transcription`, `video_description`) gate which attachments are processed at all.
+`MediaEngine` przechowuje `tokio::sync::Semaphore` z maksymalną wartością `max_concurrency` (ograniczonym do 1–8). `process_attachments` uruchamia jedno zadanie na załącznik, z każdym nabywającym pozwolenie. Flagi konfiguracyjne per modalność (`image_description`, `audio_transcription`, `video_description`) decydują, które załączniki są w ogóle przetwarzane.
 
-### Image Description
+### Opisywanie obrazów
 
-`describe_image` reads image bytes from `MediaSource::FilePath` or `MediaSource::Base64` (URL sources are rejected — callers must download first), base64-encodes them, and dispatches to the provider-specific vision function:
+`describe_image` odczytuje bajty obrazu ze źródła `MediaSource::FilePath` lub `MediaSource::Base64` (źródła URL są odrzucane — wywołujący muszą pobrać najpierw), koduje je w base64 i wysyła do specyficznej dla dostawcy funkcji wizyjnej:
 
-- **Anthropic** — `image` content block with base64 source via the Messages API.
-- **OpenAI / Groq** — `image_url` content block with a data URL via Chat Completions.
-- **Gemini** — `inline_data` part via `generateContent`.
+- **Anthropic** — blok treści `image` ze źródłem base64 przez API Messages.
+- **OpenAI / Groq** — blok treści `image_url` z URL-em danych przez Chat Completions.
+- **Gemini** — część `inline_data` przez `generateContent`.
 
-Each provider function extracts the text response from its provider-specific JSON shape.
+Każda funkcja dostawcy wyodrębnia odpowiedź tekstową ze swojego specyficznego kształtu JSON.
 
-### Audio Transcription
+### Transkrypcja audio
 
-`transcribe_audio` handles a more complex pipeline:
+`transcribe_audio` obsługuje bardziej złożoną rurociąg:
 
-1. **Read bytes** from `FilePath` or `Base64` source.
-2. **Derive file extension** from MIME type or source path.
-3. **Video containers** (`MediaType::Video`): extract the audio track via `extract_video_audio_track`, which re-encodes to Ogg/Opus using ffmpeg (`-c:a libopus`, mono, 32 kbps, 48 kHz). The video stream is dropped.
-4. **Telegram `.oga` files**: re-packetize to `.ogg` via `transcode_oga_to_ogg_opus` using ffmpeg's `-c:a copy` (the payload is already Opus; only the container wrapper differs).
-5. **Dispatch** to the selected STT provider.
+1. **Odczyt bajtów** ze źródła `FilePath` lub `Base64`.
+2. **Pochodzenie rozszerzenia pliku** z typu MIME lub ścieżki źródła.
+3. **Kontenery wideo** (`MediaType::Video`): wyodrębnienie ścieżki audio przez `extract_video_audio_track`, które reenkoduje do Ogg/Opus używając ffmpeg (`-c:a libopus`, mono, 32 kbps, 48 kHz). Strumień wideo jest odrzucany.
+4. **Pliki Telegram `.oga`**: repaketyzacja do `.ogg` przez `transcode_oga_to_ogg_opus` używając `-c:a copy` ffmpeg (ładunek jest już Opus; różni się tylko otoka kontenera).
+5. **Wysłanie** do wybranego dostawcy STT.
 
-**STT dispatch arms:**
+**Ramię wysyłania STT:**
 
-| Provider | Protocol |
+| Dostawca | Protokół |
 |---|---|
-| Groq, OpenAI, MiniMax, Fireworks, Together, SiliconFlow | OpenAI Whisper multipart (`whisper_transcribe`) |
-| Gemini | Multimodal `generateContent` with `inline_data` |
-| ElevenLabs | Speech-to-Text API (`/v1/speech-to-text`) |
-| Custom / self-hosted | OpenAI Whisper multipart via `custom_stt_config` |
+| Groq, OpenAI, MiniMax, Fireworks, Together, SiliconFlow | Multipart OpenAI Whisper (`whisper_transcribe`) |
+| Gemini | Multimodalny `generateContent` z `inline_data` |
+| ElevenLabs | API Speech-to-Text (`/v1/speech-to-text`) |
+| Custom / samodzielny | Multipart OpenAI Whisper przez `custom_stt_config` |
 
-`whisper_transcribe` sends `language` and `prompt` form fields only when they are set (from the per-call argument or `[media]` config defaults), producing byte-identical requests to pre-feature behavior when neither is configured. Custom endpoints with `key_required = false` omit the `Authorization` header entirely rather than sending an empty bearer token.
+`whisper_transcribe` wysyła pola formularza `language` i `prompt` tylko wtedy, gdy są ustawione (z argumentu wywołania lub domyślnych wartości konfiguracji `[media]`), produkując bajtowo identyczne żądania do zachowania sprzed dodania funkcji, gdy żadne nie jest skonfigurowane. Niestandardowe punkty końcowe z `key_required = false` pomijają nagłówek `Authorization` całkowicie zamiast wysyłać pusty token bearer.
 
-### ffmpeg Integration
+### Integracja z ffmpeg
 
-All ffmpeg usage flows through `run_ffmpeg_pipe`, a shared helper that:
+Całe użycie ffmpeg przepływa przez `run_ffmpeg_pipe`, współdzielony pomocnik, który:
 
-- Feeds input via stdin, collects stdout — no scratch files on disk.
-- Runs stdin writes and stdout/stderr reads as concurrent tasks to avoid pipe-buffer deadlocks.
-- Enforces a 30-second wall-clock timeout, killing and reaping the child on expiry.
-- Reports a human-readable "install ffmpeg" error message parameterized by `install_hint`.
+- Karmi wejście przez stdin, zbiera stdout — bez plików tymczasowych na dysku.
+- Uruchamia zapisy stdin i odczyty stdout/stderr jako współbieżne zadania, aby uniknąć zakleszczeń bufora rur.
+- Wymusza 30-sekundowy limit czasu zegara ściennego, zabijając i zbierając proces potomny po upływie.
+- Zgłasza czytelny dla człowieka komunikat błędu "zainstaluj ffmpeg" sparametryzowany przez `install_hint`.
 
-### Observability
+### Obserwowalność
 
-`record_media_understanding_failure` emits the `librefang_media_understanding_failures_total` counter with labels `kind` (image/audio), `provider`, and `model`, plus a structured `warn!`. This is the detection signal for hosted models being silently retired by providers — the failure surfaces as an actionable metric rather than degrading to raw media passthrough with only a log line. The counter is emitted at the point of failure inside the engine, regardless of which caller triggered it.
+`record_media_understanding_failure` emituje licznik `librefang_media_understanding_failures_total` z etykietami `kind` (obraz/audio), `provider` i `model`, plus strukturalny `warn!`. To jest sygnał detekcji dla cicho wygaszanych modeli hostowanych przez dostawców — awaria pojawia się jako mierzalna metryka zamiast degradować do bezpośredniego przekazywania mediów tylko z wpisem w logach. Licznik jest emitowany w punkcie awarii wewnątrz silnika, niezależnie od tego, który wywołujący ją wywołał.
 
-Cardinality is bounded: `kind` has two values, and `provider`/`model` are drawn from the configured or built-in default set, matching the label discipline of other LibreFang counters.
+Kardynalność jest ograniczona: `kind` ma dwie wartości, a `provider`/`model` są pobierane ze skonfigurowanego lub wbudowanego zestawu domyślnego, zgodnie z dyscypliną etykiet innych liczników LibreFang.
 
-### Error Sanitization
+### Sanityzacja błędów
 
-Provider errors returned to the agent prompt (via `Err(String)`) are sanitized to carry only the HTTP status code, not the response body. Full response bodies are kept in `tracing::warn!` for operator diagnosis. This prevents provider error responses from leaking API keys or request internals into the LLM context. Gemini URLs embed the API key as `?key=…`, so reqwest error displays are never surfaced to the caller.
+Błędy dostawców zwracane do podpowiedzi agenta (przez `Err(String)`) są sanityzowane tak, aby zawierały tylko kod statusu HTTP, nie treść odpowiedzi. Pełne treści odpowiedzi są zachowywane w `tracing::warn!` do diagnostyki przez operatora. Zapobiega to wyciekowi kluczy API lub wewnętrznych elementów żądań z odpowiedzi błędów dostawców do kontekstu LLM. URL-e Gemini zawierają klucz API jako `?key=…`, więc wyświetlenia błędów reqwest nigdy nie są przekazywane wywołującemu.
 
-## Integration with the Parent Crate
+## Integracja z kratekiem nadrzędnym
 
-`librefang-runtime` re-exports this crate at its historical paths (`runtime::media`, `runtime::media_understanding`) behind the default-on `media` feature flag, so downstream call sites require no import changes. The crate was extracted from `librefang-runtime` as part of the #3710 god-crate split.
+`librefang-runtime` reeksportuje ten kratek pod jego historycznymi ścieżkami (`runtime::media`, `runtime::media_understanding`) za flagą funkcji `media` domyślnie włączonej, więc podrzędne punkty wywołań nie wymagają zmian importów. Kratek został wydzielony z `librefang-runtime` jako część podziału god-crate #3710.
 
-The types crate `librefang-types` provides all shared request/response types (`MediaTtsRequest`, `MediaImageRequest`, `MediaConfig`, `MediaAttachment`, `MediaCapability`, etc.), and `librefang-http` provides the proxy-aware HTTP client used by all providers.
+Kratek typów `librefang-types` dostarcza wszystkie współdzielone typy żądań/odpowiedzi (`MediaTtsRequest`, `MediaImageRequest`, `MediaConfig`, `MediaAttachment`, `MediaCapability` itd.), a `librefang-http` dostarcza klienta HTTP świadomego proxy, używanego przez wszystkich dostawców.

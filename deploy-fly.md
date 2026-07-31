@@ -1,72 +1,72 @@
 # deploy — fly
 
-# deploy/fly — Fly.io Deployment Module
+# deploy/fly — Moduł wdrożeniowy Fly.io
 
-One-command deploy and teardown for LibreFang on Fly.io. This module contains three files: an interactive install script, an uninstall script, and the Fly.io app configuration template.
+Jednokomendowe wdrożenie i usuwanie LibreFang na Fly.io. Ten moduł zawiera trzy pliki: interaktywny skrypt instalacyjny, skrypt odinstalowujący oraz szablon konfiguracji aplikacji Fly.io.
 
-## Files
+## Pliki
 
-| File | Purpose |
-|------|---------|
-| `deploy.sh` | Bootstrap a new LibreFang instance on Fly.io from a clean shell |
-| `uninstall.sh` | Discover and destroy LibreFang apps on your Fly.io account |
-| `fly.toml` | App definition consumed by `flyctl deploy` |
+| Plik | Przeznaczenie |
+|------|---------------|
+| `deploy.sh` | Inicjalizacja nowej instancji LibreFang na Fly.io z czystej powłoki |
+| `uninstall.sh` | Wykrywanie i usuwanie aplikacji LibreFang z Twojego konta Fly.io |
+| `fly.toml` | Definicja aplikacji wykorzystywana przez `flyctl deploy` |
 
-## Public Usage
+## Użytek publiczny
 
-Both scripts are designed to be piped directly from the GitHub raw URL:
+Oba skrypty są zaprojektowane tak, aby można je było bezpośrednio przesyłać potokowo z surowego adresu URL GitHub:
 
 ```bash
-# Deploy
+# Wdrożenie
 curl -sL https://raw.githubusercontent.com/librefang/librefang/main/deploy/fly/deploy.sh | bash
 
-# Uninstall
+# Odinstalowanie
 curl -sL https://raw.githubusercontent.com/librefang/librefang/main/deploy/fly/uninstall.sh | bash
 ```
 
-## deploy.sh — Step-by-Step Flow
+## deploy.sh — Krok po kroku
 
-The script runs under `set -euo pipefail` and orchestrates eight sequential phases:
+Skrypt uruchamiany jest z opcją `set -euo pipefail` i koordynuje osiem sekwencyjnych faz:
 
 ```mermaid
 flowchart TD
-    A[Check/install flyctl] --> B[Auth login]
-    B --> C[Clone repo to tmpdir]
-    C --> D[Name & create Fly app]
-    D --> E[Create 1GB volume]
-    E --> F[Select LLM providers via TUI]
-    F --> G[Deploy remote-only]
-    G --> H[Print URLs & cleanup]
+    A[Sprawdź/zainstaluj flyctl] --> B[Logowanie autoryzacyjne]
+    B --> C[Klonowanie repozytorium do katalogu tmp]
+    C --> D[Nazwa i utworzenie aplikacji Fly]
+    D --> E[Utworzenie wolumenu 1 GB]
+    E --> F[Wybór dostawców LLM przez TUI]
+    F --> G[Wdrożenie w trybie remote-only]
+    G --> H[Wyświetlenie URL-i i porządki]
 ```
 
-### Phase Details
+### Szczegóły faz
 
-**1. flyctl bootstrap**
-Checks `command -v flyctl`. If missing, runs the official `fly.io/install.sh` and prepends `~/.fly/bin` to `PATH`.
+**1. Bootstrap flyctl**
+Sprawdza `command -v flyctl`. Jeśli brak, uruchamia oficjalny `fly.io/install.sh` i dodaje `~/.fly/bin` na początek `PATH`.
 
-**2. Authentication**
-Runs `flyctl auth whoami` to detect an existing session. Falls back to `flyctl auth login`, which opens a browser for OAuth.
+**2. Autoryzacja**
+Uruchamia `flyctl auth whoami` w celu wykrycia istniejącej sesji. W razie braku przechodzi do `flyctl auth login`, co otwiera przeglądarkę do autoryzacji OAuth.
 
-**3. Repository clone**
-Creates a temporary directory via `mktemp -d`, then `git clone --depth 1` of the main repo into it. This is necessary because the deploy uses `--remote-only`, which requires a full project checkout for the remote builder to read `fly.toml` and the Dockerfile context.
+**3. Klonowanie repozytorium**
+Tworzy katalog tymczasowy przez `mktemp -d`, następnie wykonuje `git clone --depth 1` głównego repozytorium. Jest to konieczne, ponieważ wdrożenie używa `--remote-only`, co wymaga pełnego pobrania projektu, aby zdalny builder mógł odczytać `fly.toml` i kontekst Dockerfile.
 
-**4. App naming & creation**
-Enters an interactive loop:
-- If the user provides a custom name, it is sanitized: lowercased, non-alphanumeric characters replaced with `-`, leading/trailing dashes stripped, consecutive dashes collapsed.
-- If left empty, generates `librefang-<8 hex chars>` via `openssl rand -hex 4`.
-- Calls `flyctl apps create <name> --machines`. On failure (name taken), re-prompts.
-- After successful creation, patches `deploy/fly/fly.toml` in the cloned working tree with `sed` to replace the `app = ` line with the chosen name.
+**4. Nazwanie i utworzenie aplikacji**
+Wchodzi w interaktywną pętlę:
+- Jeśli użytkownik poda niestandardową nazwę, jest ona sanitzowana: zamiana na małe litery, znaki niealfanumeryczne zastępowane przez `-`, usuwanie początkowych/końcowych myślników, zwijanie powtórzonych myślników.
+- Jeśli pozostanie pusta, generuje `librefang-<8 znaków hex>` przez `openssl rand -hex 4`.
+- Wywołuje `flyctl apps create <nazwa> --machines`. W przypadku błędu (nazwa zajęta) — ponownie pyta.
+- Po pomyślnym utworzeniu, poprawia `deploy/fly/fly.toml` w sklonowanym drzewie roboczym za pomocą `sed`, zastępując linię `app = ` wybraną nazwą.
 
-**5. Persistent volume**
-Creates a volume named `librefang_data` in region `nrt` (Tokyo), 1 GB. This volume is referenced by the `[mounts]` block in `fly.toml` and mounted at `/data`.
+**5. Wolumen trwały**
+Tworzy wolumen o nazwie `librefang_data` w regionie `nrt` (Tokio), o rozmiarze 1 GB. Ten wolumen jest referencjonowany przez blok `[mounts]` w `fly.toml` i montowany w `/data`.
 
-**6. LLM provider secret configuration**
-Displays a custom TUI multi-select (see [TUI Implementation](#tui-implementation) below). For each selected provider, prompts for the API key and calls `flyctl secrets set`.
+**6. Konfiguracja kluczy tajnych dostawców LLM**
+Wyświetla niestandardowe wielokrotne zaznaczanie TUI (patrz [Implementacja TUI](#implementacja-tui) poniżej). Dla każdego wybranego dostawcy prosi o klucz API i wywołuje `flyctl secrets set`.
 
-The supported providers and their environment variable names:
+Obsługiwani dostawcy i nazwy ich zmiennych środowiskowych:
 
-| Provider | Secret Key |
-|----------|------------|
+| Dostawca | Klucz tajny |
+|----------|-------------|
 | OpenAI | `OPENAI_API_KEY` |
 | Anthropic | `ANTHROPIC_API_KEY` |
 | Google Gemini | `GEMINI_API_KEY` |
@@ -76,89 +76,89 @@ The supported providers and their environment variable names:
 | Mistral | `MISTRAL_API_KEY` |
 | xAI / Grok | `XAI_API_KEY` |
 
-**7. Deploy**
+**7. Wdrożenie**
 ```bash
 flyctl deploy --app "$APP_NAME" --config deploy/fly/fly.toml --remote-only
 ```
-`--remote-only` forces Fly.io to build the image on their infrastructure rather than locally, avoiding the need for a local Docker daemon.
+`--remote-only` wymusza budowanie obrazu przez Fly.io na ich infrastrukturze, zamiast lokalnie, co eliminuje konieczność posiadania lokalnego demona Dockera.
 
-**8. Output & cleanup**
-Prints the dashboard URL (`https://<app>.fly.dev`), the health endpoint (`/api/health`), and the dashboard management command. Removes the temporary clone directory.
+**8. Wynik i porządki**
+Wyświetla URL panelu (`https://<app>.fly.dev`), punkt kontrolny zdrowia (`/api/health`) oraz komendę zarządzania panelem. Usuwa tymczasowy katalog klonu.
 
-## uninstall.sh — Flow
+## uninstall.sh — Przepływ
 
 ```mermaid
 flowchart TD
-    A[Verify flyctl installed] --> B[Auth if needed]
-    B --> C[List all apps, filter librefang-*]
-    C --> D{Any found?}
-    D -- No --> E[Exit: nothing to do]
-    D -- Yes --> F[TUI multi-select]
-    F --> G{Selection empty?}
-    G -- Yes --> H[Cancel]
-    G -- No --> I[Type 'yes' confirmation]
-    I --> J[flyctl apps destroy each]
+    A[Sprawdź zainstalowanie flyctl] --> B[Autoryzacja w razie potrzeby]
+    B --> C[Wyświetl wszystkie aplikacje, przefiltruj librefang-*]
+    C --> D{Znaleziono?}
+    D -- Nie --> E[Zakończ: nic do zrobienia]
+    D -- Tak --> F[Wielokrotne zaznaczanie TUI]
+    F --> G{Wybór pusty?}
+    G -- Tak --> H[Anuluj]
+    G -- Nie --> I[Potwierdzenie — wpisz 'yes']
+    I --> J[flyctl apps destroy dla każdej]
 ```
 
-App discovery uses `flyctl apps list --json` piped through a Python one-liner that filters names starting with `librefang`. Destruction requires a literal `yes` confirmation prompt. Each selected app is destroyed with `flyctl apps destroy <name> --yes`, which also removes associated volumes and secrets.
+Wykrywanie aplikacji używa `flyctl apps list --json` przesyłane potokowo przez jednolinijkowy skrypt Pythona, który filtruje nazwy zaczynające się od `librefang`. Usunięcie wymaga dosłownego potwierdzenia wpisaniem `yes`. Każda wybrana aplikacja jest usuwana przez `flyctl apps destroy <nazwa> --yes`, co usuwa również powiązane wolumeny i klucze tajne.
 
-## TUI Implementation
+## Implementacja TUI
 
-Both scripts implement an identical interactive multi-select pattern via the `tui_multiselect` function. Key mechanics:
+Oba skrypty implementują identyczny wzorzec interaktywnego wielokrotnego zaznaczania za pomocą funkcji `tui_multiselect`. Kluczowe mechaniki:
 
-- **Cursor hiding**: ANSI `\033[?25l` hides the cursor on entry; a `trap` on `RETURN` restores it with `\033[?25h`.
-- **Input handling**: Uses `read -rsn1` for single-character, no-echo reads from `/dev/tty` (critical for piped execution). Arrow keys are detected as escape sequences — `\x1b[A` (up) and `\x1b[B` (down) — by reading subsequent bytes with a 0.1s timeout.
-- **Controls**: `↑/↓` or `k/j` navigate, `space` toggles, `enter` confirms (auto-selects the highlighted item if nothing else is toggled), `q` or `esc` skips/cancels.
-- **State**: A `selected` array of 0/1 flags parallel to the items array. On exit, populates the global `SELECTED_INDICES` array with indices where the flag is 1.
-- **Redraw**: On each keypress, moves cursor up N lines (`printf "\033[%dA" "$count"`) and re-renders the full menu.
+- **Ukrywanie kursora**: ANSI `\033[?25l` ukrywa kursor przy wejściu; `trap` na `RETURN` przywraca go przez `\033[?25h`.
+- **Obsługa wejścia**: Używa `read -rsn1` do odczytu pojedynczych znaków bez echa z `/dev/tty` (istotne przy wykonywaniu przez potok). Klawisze strzałek są wykrywane jako sekwencje ucieczki — `\x1b[A` (w górę) i `\x1b[B` (w dół) — poprzez odczyt kolejnych bajtów z limitem czasu 0,1 s.
+- **Sterowanie**: `↑/↓` lub `k/j` nawigacja, `spacja` przełącza zaznaczenie, `enter` potwierdza (automatycznie zaznacza podświetloną pozycję, jeśli nic innego nie jest zaznaczone), `q` lub `esc` pomija/anuluje.
+- **Stan**: Tablica `selected` flag 0/1 równoległa do tablicy elementów. Przy wyjściu wypełnia globalną tablicę `SELECTED_INDICES` indeksami, dla których flaga wynosi 1.
+- **Ponowne rysowanie**: Przy każdym naciśnięciu klawisza przesuwa kursor w górę o N linii (`printf "\033[%dA" "$count"`) i renderuje pełne menu od nowa.
 
-The `draw_menu` inner function is redefined per-call, closing over the specific `TUI_ITEMS`/`PROVIDER_NAMES` arrays in scope.
+Wewnętrzna funkcja `draw_menu` jest redefiniowana przy każdym wywołaniu, zamykając w sobie specyficzne tablice `TUI_ITEMS`/`PROVIDER_NAMES` w zakresie.
 
-## fly.toml — Configuration Reference
+## fly.toml — Odniesienie konfiguracji
 
 ```toml
-app = "librefang"              # Overwritten by deploy.sh with the actual app name
-primary_region = "nrt"         # Tokyo
+app = "librefang"              # Nadpisywane przez deploy.sh rzeczywistą nazwą aplikacji
+primary_region = "nrt"         # Tokio
 ```
 
-| Section | Key | Value | Notes |
-|---------|-----|-------|-------|
-| `[build]` | `image` | `ghcr.io/librefang/librefang:latest` | Pre-built OCI image; no Dockerfile build needed |
-| `[env]` | `LIBREFANG_HOME` | `/data` | Matches the volume mount destination |
-| `[env]` | `LIBREFANG_LISTEN` | `0.0.0.0:4545` | Must match `internal_port` |
-| `[env]` | `LIBREFANG_ALLOW_NO_AUTH` | `1` | **Intentionally open for demo.** Remove and set `LIBREFANG_API_KEY` for private deployments |
-| `[http_service]` | `force_https` | `true` | Automatic HTTP → HTTPS redirect |
-| `[http_service]` | `auto_stop_machines` | `"suspend"` | Suspend rather than destroy idle machines |
-| `[http_service]` | `auto_start_machines` | `true` | Wake on incoming request |
-| `[http_service]` | `min_machines_running` | `1` | Always keep one warm replica |
-| `[mounts]` | `source` → `destination` | `librefang_data` → `/data` | References the volume created in deploy phase 5 |
-| `[[vm]]` | `memory` / `cpu_kind` / `cpus` | `256mb` / `shared` / `1` | Minimum viable sizing |
+| Sekcja | Klucz | Wartość | Uwagi |
+|--------|-------|---------|-------|
+| `[build]` | `image` | `ghcr.io/librefang/librefang:latest` | Gotowy obraz OCI; nie wymaga budowania z Dockerfile |
+| `[env]` | `LIBREFANG_HOME` | `/data` | Odpowiada punktowi montowania wolumenu |
+| `[env]` | `LIBREFANG_LISTEN` | `0.0.0.0:4545` | Musi odpowiadać `internal_port` |
+| `[env]` | `LIBREFANG_ALLOW_NO_AUTH` | `1` | **Intencjonalnie otwarte na potrzeby demonstracji.** Usuń i ustaw `LIBREFANG_API_KEY` dla prywatnych wdrożeń |
+| `[http_service]` | `force_https` | `true` | Automatyczne przekierowanie HTTP → HTTPS |
+| `[http_service]` | `auto_stop_machines` | `"suspend"` | Uśpienie zamiast usuwania bezczynnych maszyn |
+| `[http_service]` | `auto_start_machines` | `true` | Wybudzenie przy nadchodzącym żądaniu |
+| `[http_service]` | `min_machines_running` | `1` | Zawsze utrzymuj jedną cieplą replikę |
+| `[mounts]` | `source` → `destination` | `librefang_data` → `/data` | Referencja do wolumenu utworzonego w fazie 5 wdrożenia |
+| `[[vm]]` | `memory` / `cpu_kind` / `cpus` | `256mb` / `shared` / `1` | Minimalne żywotne wymiary |
 
-### Security Note
+### Uwaga dotycząca bezpieczeństwa
 
-The default `fly.toml` ships with `LIBREFANG_ALLOW_NO_AUTH = "1"`, making the instance publicly accessible without an API key. This matches the live public demo configuration. For private deployments, remove that line and set a secret instead:
+Domyślny `fly.toml` jest dostarczany z `LIBREFANG_ALLOW_NO_AUTH = "1"`, co sprawia, że instancja jest publicznie dostępna bez klucza API. Jest to zgodne z konfiguracją publicznej demonstracji na żywo. W przypadku wdrożeń prywatnych usuń tę linię i ustaw klucz tajny:
 
 ```bash
-flyctl secrets set LIBREFANG_API_KEY=your-secret --app your-app-name
+flyctl secrets set LIBREFANG_API_KEY=twój-sekret --app nazwa-twojej-aplikacji
 ```
 
-## Logging Helpers
+## Funkcje pomocnicze logowania
 
-All three files share four identical output functions:
+Wszystkie trzy pliki współdzielą cztery identyczne funkcje wyjściowe:
 
-| Function | Prefix | Color | Stream | Behavior |
-|----------|--------|-------|--------|----------|
-| `info` | `→` | Blue | stdout | Informational step |
-| `ok` | `✓` | Green | stdout | Success confirmation |
-| `warn` | `⚠` | Yellow | stdout | Non-fatal warning |
-| `err` | `✗` | Red | stderr | **Calls `exit 1`** |
+| Funkcja | Prefiks | Kolor | Strumień | Zachowanie |
+|---------|---------|-------|----------|------------|
+| `info` | `→` | Niebieski | stdout | Informacyjny krok |
+| `ok` | `✓` | Zielony | stdout | Potwierdzenie sukcesu |
+| `warn` | `⚠` | Żółty | stdout | Niekrytyczne ostrzeżenie |
+| `err` | `✗` | Czerwony | stderr | **Wywołuje `exit 1`** |
 
-## Environment Requirements
+## Wymagania środowiskowe
 
-- **flyctl** — auto-installed by `deploy.sh` if missing; `uninstall.sh` requires pre-installation
-- **bash** with `set -euo pipefail` support (bash 4.0+ for associative arrays used in TUI)
-- **git** — for shallow clone in deploy
-- **openssl** — for random name generation
-- **python3** — used only in `uninstall.sh` for JSON parsing of `flyctl apps list`
-- **curl** — for flyctl bootstrap and piping the script itself
-- A `/dev/tty` device — required for interactive TUI and all `read` prompts (scripts are designed to work even when piped through `curl | bash`)
+- **flyctl** — automatycznie instalowany przez `deploy.sh` w razie braku; `uninstall.sh` wymaga wcześniejszej instalacji
+- **bash** z obsługą `set -euo pipefail` (bash 4.0+ ze względu na tablice asocjacyjne używane w TUI)
+- **git** — do płytkiego klonowania podczas wdrożenia
+- **openssl** — do generowania losowej nazwy
+- **python3** — używany tylko w `uninstall.sh` do analizy JSON z `flyctl apps list`
+- **curl** — do bootstrapa flyctl i przesyłania potokowego samego skryptu
+- Urządzenie `/dev/tty` — wymagane dla interaktywnego TUI i wszystkich promptów `read` (skrypty są zaprojektowane tak, aby działać nawet gdy uruchamiane przez `curl | bash`)

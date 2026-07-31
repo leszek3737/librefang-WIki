@@ -1,217 +1,217 @@
 # examples
 
-# Examples Module
+# Moduł przykładów
 
-Reference templates and tutorials for the three extension surfaces of LibreFang: **agents**, **skills**, and **channel adapters**. Each subdirectory is a self-contained, copy-and-modify starting point.
+Szablony referencyjne i samouczki dla trzech powierzchni rozszerzeń LibreFang: **agenta**, **umiejętności** i **adapterów kanałów**. Każdy podkatalog to samodzielny punkt wyjścia typu „kopiuj i modyfikuj".
 
-## Layout
+## Układ
 
-| Directory | Extension Surface | Language / Format |
+| Katalog | Powierzchnia rozszerzenia | Język / Format |
 |-----------|------------------|-------------------|
-| `custom-agent/` | Agent definition | TOML manifest |
-| `custom-skill-prompt/` | Skill (prompt-only) | TOML manifest |
-| `custom-skill-python/` | Skill (compute) | Python + TOML |
-| `custom-skill-wasm/` | Skill (compute) | Rust → WASM + TOML |
-| `custom-channel/` | Channel adapter (native) | Rust trait guide |
-| `sidecar-channel-bash/` | Channel adapter (sidecar) | Bash + jq |
-| `sidecar-channel-go/` | Channel adapter (sidecar) | Go |
-| `sidecar-channel-node/` | Channel adapter (sidecar) | Node.js |
-| `sidecar-channel-python/` | Channel adapter (sidecar) | Python |
+| `custom-agent/` | Definicja agenta | Manifest TOML |
+| `custom-skill-prompt/` | Umiejętność (tylko prompt) | Manifest TOML |
+| `custom-skill-python/` | Umiejętność (obliczeniowa) | Python + TOML |
+| `custom-skill-wasm/` | Umiejętność (obliczeniowa) | Rust → WASM + TOML |
+| `custom-channel/` | Adapter kanału (natywny) | Przewodnik po cechach Rusta |
+| `sidecar-channel-bash/` | Adapter kanału (sidecar) | Bash + jq |
+| `sidecar-channel-go/` | Adapter kanału (sidecar) | Go |
+| `sidecar-channel-node/` | Adapter kanału (sidecar) | Node.js |
+| `sidecar-channel-python/` | Adapter kanału (sidecar) | Python |
 
 ---
 
-## Agents
+## Agenci
 
 ### `custom-agent/agent.toml`
 
-A minimal agent template. Copy it, edit the fields, and spawn:
+Minimalny szablon agenta. Skopiuj go, edytuj pola i uruchom:
 
 ```bash
 librefang agent spawn examples/custom-agent/agent.toml
 ```
 
-Key fields in the manifest:
+Kluczowe pola w manifeście:
 
-| Section | Field | Purpose |
+| Sekcja | Pole | Przeznaczenie |
 |---------|-------|---------|
-| top-level | `module` | The agent runtime module (here `builtin:chat`) |
-| `[model]` | `provider` / `model` | Set to `"default"` to inherit from global config, or pin to a specific provider/model |
-| `[model]` | `system_prompt` | Injected as the system message on every conversation |
-| `[resources]` | `max_llm_tokens_per_hour` | Per-agent rate-limit budget |
-| `[capabilities]` | `tools`, `memory_read`, `memory_write`, `agent_spawn` | Sandboxed permissions; memory scopes use glob patterns (`self.*`) |
-| `[workspaces]` | named paths | Optional shared directories between agents, relative to `workspaces_dir` |
+| najwyższy poziom | `module` | Moduł środowiska uruchomieniowego agenta (tutaj `builtin:chat`) |
+| `[model]` | `provider` / `model` | Ustaw na `"default"`, aby dziedziczyć z konfiguracji globalnej, lub przypnij do konkretnego dostawcy/modelu |
+| `[model]` | `system_prompt` | Wstrzykiwany jako komunikat systemowy przy każdej rozmowie |
+| `[resources]` | `max_llm_tokens_per_hour` | Budżet limitu szybkości dla pojedynczego agenta |
+| `[capabilities]` | `tools`, `memory_read`, `memory_write`, `agent_spawn` | Uprawnienia w trybie piaskownicy; zakresy pamięci używają wzorców glob (`self.*`) |
+| `[workspaces]` | nazwane ścieżki | Opcjonalne katalogi współdzielone między agentami, względne wobec `workspaces_dir` |
 
 ---
 
-## Skills
+## Umiejętności
 
-Skills are the compute/prompt units that agents invoke as tools. Three runtimes are demonstrated.
+Umiejętności to jednostki obliczeniowe/promptowe, które agenci wywołują jako narzędzia. Zademonstrowano trzy środowiska uruchomieniowe.
 
-### Prompt-Only (`custom-skill-prompt/`)
+### Tylko prompt (`custom-skill-prompt/`)
 
-No code — pure prompt engineering. The manifest declares `[runtime] type = "promptonly"`, an `[input]` schema, and a `[prompt] template` with Jinja-style `{{variable}}` interpolation. Test with:
+Brak kodu — czysta inżynieria promptów. Manifest deklaruje `[runtime] type = "promptonly"`, schemat `[input]` oraz szablon `[prompt]` z interpolacją w stylu Jinja `{{zmienna}}`. Testowanie za pomocą:
 
 ```bash
 librefang skill test ./examples/custom-skill-prompt \
-  --input '{"topic": "Q1 planning", "duration_minutes": "30"}'
+  --input '{"topic": "Planowanie Q1", "duration_minutes": "30"}'
 ```
 
 ### Python (`custom-skill-python/`)
 
-A `main.py` with a `run(input: dict) -> str` entry point. The manifest declares `[runtime] type = "python"` with `entry = "main.py"`. The input schema in `[input]` maps directly to the keys of the `input` dict.
+Plik `main.py` z punktem wejścia `run(input: dict) -> str`. Manifest deklaruje `[runtime] type = "python"` z `entry = "main.py"`. Schemat wejścia w `[input]` mapuje się bezpośrednio na klasy słownika `input`.
 
 ### WASM (`custom-skill-wasm/`)
 
-A Rust `cdylib` crate using the [`librefang-skill`](../../sdk/rust/librefang-skill) SDK. The handler is registered via the `skill!` macro:
+Kratek Rusta `cdylib` używający SDK [`librefang-skill`](../../sdk/rust/librefang-skill). Obsługa jest rejestrowana za pomocą makra `skill!`:
 
 ```rust
 fn handle(req: Request) -> Result<Value, String> {
-    // req.tool is the tool name; req.input is a serde_json::Value
+    // req.tool to nazwa narzędzia; req.input to serde_json::Value
 }
 
 skill!(handle);
 ```
 
-The `[lib] name = "skill"` in `Cargo.toml` ensures the artifact is always `skill.wasm`. The manifest declares `[runtime] type = "wasm"` with `entry = "skill.wasm"`. Skills that perform pure compute declare no capabilities:
+`[lib] name = "skill"` w `Cargo.toml` zapewnia, że artefakt nazywa się zawsze `skill.wasm`. Manifest deklaruje `[runtime] type = "wasm"` z `entry = "skill.wasm"`. Umiejętności wykonujące czyste obliczenia nie deklarują żadnych możliwości:
 
 ```toml
 [requirements]
 capabilities = []
 ```
 
-Build and test:
+Kompilacja i testowanie:
 
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo build --release --target wasm32-unknown-unknown
 cp target/wasm32-unknown-unknown/release/skill.wasm skill.wasm
-librefang skill test . --input '{"text": "Hello world. Bye!"}'
+librefang skill test . --input '{"text": "Witaj świecie. Cześć!"}'
 ```
 
-The `.wasm` artifact lives at the skill root (not in `target/`) because the packager excludes `target/`.
+Artefakt `.wasm` znajduje się w katalogu głównym umiejętności (nie w `target/`), ponieważ pakiet wyklucza `target/`.
 
 ---
 
-## Channel Adapters
+## Adaptery kanałów
 
-Channel adapters bridge external messaging platforms into the kernel. There are two integration paths:
+Adaptery kanałów mostują zewnętrzne platformy komunikacyjne do jądra. Istnieją dwie ścieżki integracji:
 
 ```mermaid
 flowchart LR
-    subgraph Native["Native (Rust)"]
-        A[Platform API] --> B[ChannelAdapter trait impl]
-        B --> C[librefang-channels crate]
+    subgraph Native["Natywny (Rust)"]
+        A[API platformy] --> B[Implementacja cechy ChannelAdapter]
+        B --> C[Kratek librefang-channels]
     end
-    subgraph Sidecar["Sidecar (any language)"]
-        D[Platform API] --> E[Subprocess adapter]
-        E <-- "JSON over stdio" --> F[Sidecar bridge in kernel]
+    subgraph Sidecar["Sidecar (dowolny język)"]
+        D[API platformy] --> E[Adapter podprocesu]
+        E <-- "JSON przez stdio" --> F[Most sidecar w jądrze]
     end
-    C --> G[Kernel message router]
+    C --> G[Router komunikatów jądra]
     F --> G
 ```
 
-### Native Adapters — `custom-channel/`
+### Adaptery natywne — `custom-channel/`
 
-A complete walkthrough for implementing the `ChannelAdapter` trait (defined in `crates/librefang-channels/src/types.rs`). Five methods are required; the rest have default implementations:
+Kompletny przewodnik krok po kroku implementacji cechy `ChannelAdapter` (zdefiniowanej w `crates/librefang-channels/src/types.rs`). Wymagane jest pięć metod; pozostałe mają domyślne implementacje:
 
-| Method | Required | Purpose |
+| Metoda | Wymagana | Przeznaczenie |
 |--------|----------|---------|
-| `name()` | yes | Static identifier string |
-| `channel_type()` | yes | Returns a `ChannelType` variant |
-| `start()` | yes | Returns a `Stream<Item = ChannelMessage>` for incoming messages |
-| `send()` | yes | Delivers a `ChannelContent` response to a `ChannelUser` |
-| `stop()` | yes | Signals shutdown, cleans up resources |
-| `send_typing()` | no | Default no-op; override for typing indicators |
-| `send_reaction()` | no | Default no-op; override for lifecycle reactions |
-| `send_in_thread()` | no | Default falls back to `send()` |
-| `status()` | no | Default returns `ChannelStatus::default()` |
+| `name()` | tak | Statyczny ciąg identyfikacyjny |
+| `channel_type()` | tak | Zwraca wariant `ChannelType` |
+| `start()` | tak | Zwraca `Stream<Item = ChannelMessage>` dla komunikatów przychodzących |
+| `send()` | tak | Dostarcza odpowiedź `ChannelContent` do `ChannelUser` |
+| `stop()` | tak | Sygnalizuje zamknięcie, czyści zasoby |
+| `send_typing()` | nie | Domyślnie operacja pusta; nadpisz dla wskaźników pisania |
+| `send_reaction()` | nie | Domyślnie operacja pusta; nadpisz dla reakcji cyklu życia |
+| `send_in_thread()` | nie | Domyślnie deleguje do `send()` |
+| `status()` | nie | Domyślnie zwraca `ChannelStatus::default()` |
 
-**Key patterns** the example demonstrates:
+**Kluczowe wzorce** zademonstrowane w przykładzie:
 
-- **Secret hygiene**: store API keys/tokens in `Zeroizing<String>` so they are wiped from memory on drop.
-- **Graceful shutdown**: use a `watch::channel(false)` pair; the spawned task selects on `shutdown_rx.changed()`.
-- **Stream bridging**: create an `mpsc::channel::<ChannelMessage>(256)`, spawn a polling/websocket task that sends into the channel, and return `Box::pin(ReceiverStream::new(rx))` from `start()`.
-- **Message splitting**: use `split_message(text, MAX_LEN)` from `crate::types` to chunk long replies.
+- **Higiena tajemnic**: przechowuj klucze/tokeny API w `Zeroizing<String>`, aby były kasowane z pamięci przy operacji drop.
+- **Łagodne zamykanie**: użyj pary `watch::channel(false)`; uruchomione zadanie oczekuje na `shutdown_rx.changed()`.
+- **Mostkowanie strumieni**: utwórz `mpsc::channel::<ChannelMessage>(256)`, uruchom zadanie odpytywania/websocket wysyłające do kanału i zwróć `Box::pin(ReceiverStream::new(rx))` z `start()`.
+- **Dzielenie komunikatów**: użyj `split_message(text, MAX_LEN)` z `crate::types` do dzielenia długich odpowiedzi na fragmenty.
 
-Registration involves three files:
+Rejestracja obejmuje trzy pliki:
 
-1. **Module declaration** in `crates/librefang-channels/src/lib.rs` behind a feature gate:
+1. **Deklaracja modułu** w `crates/librefang-channels/src/lib.rs` za flagą funkcji:
    ```rust
    #[cfg(feature = "channel-myplatform")]
    pub mod myplatform;
    ```
 
-2. **Feature flag** in `crates/librefang-channels/Cargo.toml`:
+2. **Flaga funkcji** w `crates/librefang-channels/Cargo.toml`:
    ```toml
    channel-myplatform = []
    ```
-   Add `"channel-myplatform"` to the `all-channels` list (and `default` if it should compile by default).
+   Dodaj `"channel-myplatform"` do listy `all-channels` (oraz `default`, jeśli ma się kompilować domyślnie).
 
-3. **Unit tests** at the bottom of the adapter file covering creation, name/type assertions, and any parsing logic.
+3. **Testy jednostkowe** na dole pliku adaptera, obejmujące tworzenie, asercje nazwy/typu i logikę parsowania.
 
-Reference adapters by complexity: `webhook.rs` (HTTP + HMAC verification) → `discord.rs` (Gateway WebSocket) → `slack.rs` (Socket Mode) → `matrix.rs` (client-server API).
+Adaptery referencyjne według złożoności: `webhook.rs` (HTTP + weryfikacja HMAC) → `discord.rs` (WebSocket bramy) → `slack.rs` (Socket Mode) → `matrix.rs` (API klient-serwer).
 
-### Sidecar Adapters
+### Adaptery sidecar
 
-An alternative to native Rust: LibreFang spawns your adapter as a subprocess and communicates via **newline-delimited JSON** over stdio. No Rust compilation required.
+Alternatywa dla natywnego Rusta: LibreFang uruchamia adapter jako podproces i komunikuje się za pomocą **oznaczanego nową linią JSON** przez stdio. Nie wymaga kompilacji Rusta.
 
-#### Protocol
+#### Protokół
 
-**Events** (adapter → LibreFang via stdout):
+**Zdarzenia** (adapter → LibreFang przez stdout):
 
-| `method` | `params` | When |
+| `method` | `params` | Kiedy |
 |----------|----------|------|
-| `ready` | *(none)* | Sent once on startup to signal readiness |
-| `message` | `user_id`, `user_name`, `text`, `channel_id`, `platform` | An incoming message from the platform |
-| `error` | `message` | Report a non-fatal error |
+| `ready` | *(brak)* | Wysyłane raz przy starcie w celu sygnalizacji gotowości |
+| `message` | `user_id`, `user_name`, `text`, `channel_id`, `platform` | Komunikat przychodzący z platformy |
+| `error` | `message` | Raportowanie błędu niekrytycznego |
 
-**Commands** (LibreFang → adapter via stdin):
+**Polecenia** (LibreFang → adapter przez stdin):
 
-| `method` | `params` | Action |
+| `method` | `params` | Akcja |
 |----------|----------|--------|
-| `send` | `channel_id`, `text` | Deliver a message to the platform |
-| `shutdown` | *(none)* | Clean up and exit |
+| `send` | `channel_id`, `text` | Dostarczenie komunikatu na platformę |
+| `shutdown` | *(brak)* | Czyszczenie i wyjście |
 
-`stderr` is forwarded to LibreFang's logs for debugging.
+`stderr` jest przekierowane do logów LibreFang w celu debugowania.
 
-#### Lifecycle
+#### Cykl życia
 
-Every adapter follows the same flow regardless of language:
+Każdy adapter podąża za tym samym przepływem niezależnie od języka:
 
-1. Emit `{"method": "ready"}` on stdout.
-2. Read stdin line-by-line; parse each line as a JSON command.
-3. Handle `send` by delivering to the platform (the examples echo back a `message` event).
-4. Handle `shutdown` by exiting cleanly.
+1. Emituj `{"method": "ready"}` na stdout.
+2. Czytaj stdin linia po linii; parsuj każdą linię jako polecenie JSON.
+3. Obsługuj `send`, dostarczając na platformę (przykłady odsyłają zdarzenie `message` jako echo).
+4. Obsługuj `shutdown`, kończąc działanie poprawnie.
 
-#### Language Implementations
+#### Implementacje w różnych językach
 
-Four examples ship, all implementing the same echo adapter:
+Dołączone są cztery przykłady, wszystkie implementujące ten sam adapter echo:
 
-| Directory | Entry Point | Dependencies |
+| Katalog | Punkt wejścia | Zależności |
 |-----------|-------------|--------------|
 | `sidecar-channel-bash/` | `adapter.sh` | `jq` |
-| `sidecar-channel-go/` | `adapter.go` | stdlib only |
+| `sidecar-channel-go/` | `adapter.go` | tylko stdlib |
 | `sidecar-channel-node/` | `adapter.js` | stdlib (`readline`) |
 | `sidecar-channel-python/` | `adapter.py` | stdlib (`json`, `sys`) |
 
-Each defines a `sendEvent`/`send_event`/`sendEvent` helper that serializes a `{method, params}` object to stdout with a trailing newline, and a command handler that switches on the `method` field.
+Każdy definiuje pomocniczą funkcję `sendEvent`/`send_event`/`sendEvent`, która serializuje obiekt `{method, params}` do stdout z końcową nową linią, oraz obsługę poleceń, która rozgałęzia się na podstawie pola `method`.
 
-#### Configuration
+#### Konfiguracja
 
-Register a sidecar adapter in `~/.librefang/config.toml`:
+Zarejestruj adapter sidecar w `~/.librefang/config.toml`:
 
 ```toml
 [[sidecar_channels]]
 name = "echo-test"
 command = "python3"
 args = ["path/to/adapter.py"]
-channel_type = "custom-echo"  # optional, defaults to name
-env = {}                       # optional environment variables
+channel_type = "custom-echo"  # opcjonalne, domyślnie przyjmuje wartość name
+env = {}                       # opcjonalne zmienne środowiskowe
 ```
 
-#### First-Party Sidecar Adapters
+#### Adaptery sidecar pierwszej strony
 
-Production adapters (`ntfy`, `telegram`, `webhook`) previously lived in this directory as standalone scripts. They now ship inside the `librefang-sdk` Python package under `librefang.sidecar.adapters`. Reference them by module:
+Adaptery produkcyjne (`ntfy`, `telegram`, `webhook`) wcześniej znajdowały się w tym katalogu jako samodzielne skrypty. Teraz są dołączane w pakiecie Pythona `librefang-sdk` pod `librefang.sidecar.adapters`. Odnosisz się do nich przez moduł:
 
 ```toml
 [[sidecar_channels]]
@@ -225,11 +225,11 @@ NTFY_TOPIC = "my-topic"
 
 ---
 
-## Relationship to the Rest of the Codebase
+## Relacja z resztą bazy kodu
 
-These examples are consumed via the `librefang` CLI — they are not linked into the kernel workspace. Two exceptions:
+Te przykłady są wykorzystywane przez CLI `librefang` — nie są dołączane do przestrzeni roboczej jądra. Dwa wyjątki:
 
-- **`custom-skill-wasm/`** uses a path dependency (`../../sdk/rust/librefang-skill`) and declares its own `[workspace]` root to avoid being pulled into the kernel workspace (it targets `wasm32-unknown-unknown`).
-- **`custom-channel/`** describes adding files directly into `crates/librefang-channels/src/`, making it the only example that modifies kernel source.
+- **`custom-skill-wasm/`** używa zależności ścieżkowej (`../../sdk/rust/librefang-skill`) i deklaruje własny korzeń `[workspace]`, aby nie zostać wciągniętym do przestrzeni roboczej jądra (celuje w `wasm32-unknown-unknown`).
+- **`custom-channel/`** opisuje dodawanie plików bezpośrednio do `crates/librefang-channels/src/`, co czyni go jedynym przykładem modyfikującym kod źródłowy jądra.
 
-All other examples are standalone: copy the directory, edit, and point the CLI at it.
+Wszystkie pozostałe przykłady są samodzielne: skopiuj katalog, edytuj i wskaż CLI na niego.

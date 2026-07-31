@@ -2,11 +2,11 @@
 
 # `rust-toolchain.toml`
 
-## Purpose
+## Przeznaczenie
 
-This file pins the Rust toolchain used by the workspace. It ensures that every developer, CI runner, and automated process invokes the same compiler version and component set without manual `rustup` commands. When any `cargo` command is run inside this repository, `rustup` reads this file and automatically installs/switchs to the specified toolchain.
+Ten plik przypina łańcuch narzędzi Rust używany przez obszar roboczy. Zapewnia, że każdy programista, proces CI i procesy automatyczne wywołują tę samą wersję kompilatora i zestaw komponentów bez ręcznych poleceń `rustup`. Gdy jakiekolwiek polecenie `cargo` jest uruchamiane w tym repozytorium, `rustup` odczytuje ten plik i automatycznie instaluje/przełącza na określony łańcuch narzędzi.
 
-## Configuration
+## Konfiguracja
 
 ```toml
 [toolchain]
@@ -17,11 +17,11 @@ components = ["rustfmt", "clippy"]
 
 ### `channel = "stable"`
 
-Tracks the latest stable release of Rust. The toolchain updates when new stable versions are published—there is no hard pin to a specific version number.
+Śledzi najnowsze stabilne wydanie Rusta. Łańcuch narzędzi aktualizuje się, gdy publikowane są nowe wersje stabilne — nie ma twardego przypięcia do konkretnej numeru wersji.
 
 ### `profile = "minimal"`
 
-Installs only `rustc`, `cargo`, and `rust-std`. This skips `rust-docs` (~150 MB), which neither CI nor typical development needs. To get offline standard library documentation locally:
+Instaluje tylko `rustc`, `cargo` i `rust-std`. Pomija `rust-docs` (~150 MB), które nie są potrzebne ani CI, ani typowemu rozwojowi. Aby uzyskać dokumentację standardowej biblioteki offline lokalnie:
 
 ```sh
 rustup component add rust-docs
@@ -29,14 +29,14 @@ rustup component add rust-docs
 
 ### `components`
 
-| Component  | Purpose                                      |
-|------------|----------------------------------------------|
-| `rustfmt`  | Code formatting (`cargo fmt`)               |
-| `clippy`   | Linting (`cargo clippy`)                     |
+| Komponent | Przeznaczenie                               |
+|-----------|---------------------------------------------|
+| `rustfmt` | Formatowanie kodu (`cargo fmt`)             |
+| `clippy`  | Linting (`cargo clippy`)                    |
 
-## MSRV Contract
+## Kontrakt MSRV
 
-The Minimum Supported Rust Version is **not** defined here. It lives in `Cargo.toml`:
+Minimalna Wersja Obsługiwana Rusta (Minimum Supported Rust Version) **nie jest** zdefiniowana tutaj. Znajduje się w `Cargo.toml`:
 
 ```toml
 # Cargo.toml
@@ -44,35 +44,35 @@ The Minimum Supported Rust Version is **not** defined here. It lives in `Cargo.t
 rust-version = "1.94.1"
 ```
 
-This separation is intentional:
+To rozdzielenie jest celowe:
 
-- **`rust-toolchain.toml`** controls what toolchain you *build and test with* (latest stable).
-- **`Cargo.toml` `rust-version`** declares the minimum compiler downstream consumers *must have* to use the published crates.
+- **`rust-toolchain.toml`** kontroluje, z jakim łańcuchem narzędzi *budujesz i testujesz* (najnowsza stabilna).
+- **`Cargo.toml` `rust-version`** deklaruje minimalny kompilator, jaki konsumenci downstream *muszą posiadać*, aby korzystać z opublikowanych crate-ów.
 
-Because the toolchain tracks stable while the MSRV is pinned to a specific version, bumping the stable compiler is **non-breaking** for downstream consumers as long as all new code respects the declared MSRV. Contributors must avoid using language features or standard library APIs stabilized after Rust 1.94.1, even though their local compiler may be newer.
+Ponieważ łańcuch narzędzi śledzi stabilną, podczas gdy MSRV jest przypięty do konkretnej wersji, aktualizacja stabilnego kompilatora jest **niełamiąca** dla konsumentów downstream, o ile cały nowy kod szanuje zadeklarowaną MSRV. Kontrybutorzy muszą unikać używania funkcji językowych lub API standardowej biblioteki ustabilizowanych po Rust 1.94.1, nawet jeśli ich lokalny kompilator jest nowszy.
 
-## How It Connects to the Rest of the Codebase
+## Jak to się łączy z resztą bazy kodu
 
 ```mermaid
 graph LR
     RT[rust-toolchain.toml<br/>channel, profile, components]
     CT[Cargo.toml<br/>rust-version = 1.94.1]
-    CI[CI Pipelines]
-    DEV[Developer Workstation]
+    CI[Potoki CI]
+    DEV[Stacja robocza programisty]
 
-    RT -->|auto-selects toolchain| CI
-    RT -->|auto-selects toolchain| DEV
-    CT -->|enforces MSRV on| CI
-    CT -->|publishes MSRV to| DOWN[Downstream Consumers]
+    RT -->|auto-selekcja łańcucha narzędzi| CI
+    RT -->|auto-selekcja łańcucha narzędzi| DEV
+    CT -->|wymusza MSRV na| CI
+    CT -->|publikuje MSRV do| DOWN[Konsumenci downstream]
 
-    CI -->|builds & tests with latest stable| SRC[Workspace Crates]
-    DEV -->|builds & tests with latest stable| SRC
+    CI -->|buduje i testuje z najnowszą stabilną| SRC[Crates obszaru roboczego]
+    DEV -->|buduje i testuje z najnowszą stabilną| SRC
 ```
 
-Every `cargo` invocation in this repository—build, test, fmt, clippy, doc—is governed by this file. CI pipelines do not need to install Rust separately; `rustup` handles it automatically when the job enters the repository directory. The same applies to developers cloning the repo for the first time.
+Każde wywołanie `cargo` w tym repozytorium — build, test, fmt, clippy, doc — jest zarządzane przez ten plik. Potoki CI nie muszą instalować Rusta osobno; `rustup` obsługuje to automatycznie, gdy zadanie wchodzi do katalogu repozytorium. To samo dotyczy programistów klonujących repozytorium po raz pierwszy.
 
-## Practical Notes
+## Uwagi praktyczne
 
-- **Changing the channel** to `nightly` or a specific version (e.g., `"1.95.0"`) affects all contributors and CI simultaneously. Do this with care and coordinate.
-- **Adding a component** (e.g., `rust-src` for IDE support or `miri` for undefined-behavior detection) is a workspace-wide change. Add it to the `components` array so CI picks it up too.
-- **Checking MSRV compliance locally**: use a tool like [`cargo-msrv`](https://github.com/foresterre/cargo-msrv) to verify that code compiles against Rust 1.94.1, since your local toolchain will be newer stable.
+- **Zmiana kanału** na `nightly` lub konkretną wersję (np. `"1.95.0"`) wpływa na wszystkich kontrybutorów i CI jednocześnie. Rób to ostrożnie i w porozumieniu.
+- **Dodanie komponentu** (np. `rust-src` do wsparcia IDE lub `miri` do wykrywania niezdefiniowanego zachowania) jest zmianą obejmującą cały obszar roboczy. Dodaj go do tablicy `components`, aby CI również go pobrał.
+- **Sprawdzanie zgodności z MSRV lokalnie**: użyj narzędzia takiego jak [`cargo-msrv`](https://github.com/foresterre/cargo-msrv), aby zweryfikować, że kod kompiluje się z Rust 1.94.1, ponieważ Twój lokalny łańcuch narzędzi będzie nowszą stabilną.

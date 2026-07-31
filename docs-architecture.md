@@ -1,68 +1,68 @@
-# docs — architecture
+# docs — architektura
 
-# Architecture Documentation (`docs/architecture/`)
+# Dokumentacja architektury (`docs/architecture/`)
 
-## Purpose
+## Cel
 
-This directory holds the canonical architecture reference for LibreFang — the design documents that answer *why* the system is shaped the way it is and *how* specific subsystems work at a level deeper than API reference. Each file targets a single concern and is written to stand on its own, with cross-links where one document depends on another's context.
+Ten katalog zawiera kanoniczne materiały referencyjne architektury LibreFang — dokumenty projektowe odpowiadające na pytanie, *dlaczego* system ma taki kształt i *jak* działają poszczególne podsystemy na poziomie głębszym niż dokumentacja API. Każdy plik dotyczy jednego zagadnienia i jest napisany tak, aby stanowić samodzielną całość, z odsyłaczami tam, gdzie jeden dokument opiera się na kontekście innego.
 
-The documents here are **normative**: they define contracts, naming conventions, and migration policies. Code reviews cite them when reviewing changes to the subsystems they cover.
+Dokumenty zawarte tutaj są **normatywne**: definiują kontrakty, konwencje nazewnictwa i zasady migracji. Code review powołuje się na nie przy weryfikacji zmian w podsystemach, które obejmują.
 
-## Document inventory
+## Inwentarz dokumentów
 
-The module currently contains 15 documents organized into several clusters:
+Moduł zawiera obecnie 15 dokumentów zorganizowanych w kilka grup:
 
-### Logging & observability
+### Logowanie i obserwowalność
 
-| Document | Covers |
+| Dokument | Zakres |
 |---|---|
-| [`access-log-fields.md`](#) | The structured-field schema emitted by the `request_logging` middleware — `request_id`, `method`, `path`, `status`, `latency_ms`, `agent_id` — and how `agent_id` travels from handler to middleware via `Response::extensions`. |
-| [`audit-user-attribution.md`](#) | How the tamper-evident audit trail (`librefang-runtime-audit`) attributes events to LibreFang users, which event classes are inherently userless, and how operators filter by user. |
+| [`access-log-fields.md`](#) | Schemat ustrukturyzowanych pól emitowanych przez middleware `request_logging` — `request_id`, `method`, `path`, `status`, `latency_ms`, `agent_id` — oraz sposób przesyłania `agent_id` z handlera do middleware'a przez `Response::extensions`. |
+| [`audit-user-attribution.md`](#) | Sposób, w jaki audytowalny ślad (`librefang-runtime-audit`) przypisuje zdarzenia użytkownikom LibreFang, które klasy zdarzeń są z natury bezużytkownikowe i jak operatorzy filtrować po użytkowniku. |
 
-### API surface
+### Powierzchnia API
 
-| Document | Covers |
+| Dokument | Zakres |
 |---|---|
-| [`api-conventions.md`](#) | Wire-shape contract for sum types (discriminated unions with explicit `type` tags), sentinel-value prohibition (`""` must not mean "unset"), `skip_serializing_if` usage, and the lint script that enforces it. |
-| [`idempotency.md`](#) | The `Idempotency-Key` header middleware for state-creating `POST` endpoints — replay vs. conflict semantics, 24h cache window, SQLite persistence via migration v34. |
+| [`api-conventions.md`](#) | Kontrakt formatu przesyłania dla typów sum (unie rozróżniane z jawnymi tagami `type`), zakaz wartości wartownikowych (`""` nie może oznaczać „nieustawione"), stosowanie `skip_serializing_if` oraz skrypt lint sprawdzający przestrzeganie tych zasad. |
+| [`idempotency.md`](#) | Middleware nagłówka `Idempotency-Key` dla endpointów `POST` tworzących stan — semantyka powtórki vs. konflikt, okno pamięci podręcznej 24 h, persystencja SQLite przez migrację v34. |
 
-### Error model
+### Model błędów
 
-| Document | Covers |
+| Dokument | Zakres |
 |---|---|
-| [`error-contracts.md`](#) | The target error taxonomy across 24 crates: `LibreFangError` as the application enum, `ToolError` as the tool-runner replacement for `Result<String, String>`, per-crate domain enums, the `anyhow` ban in libraries, and the per-slice migration order. |
+| [`error-contracts.md`](#) | Docelowa taksonomia błędów w 24 createch: `LibreFangError` jako enum aplikacyjny, `ToolError` jako zamiennik `Result<String, String>` w runnerze narzędzi, domenowe enumy per crate, zakaz `anyhow` w bibliotekach oraz kolejność migracji per wycinek. |
 
-### Agent execution
+### Wykonywanie agentów
 
-| Document | Covers |
+| Dokument | Zakres |
 |---|---|
-| [`message-history-trimming.md`](#) | How `safe_trim_messages` caps stored conversation history — safe cut points at turn boundaries (never mid-tool-call), the three-tier config resolution (manifest → global → constant), and interaction with token-based context-window trimming. |
-| [`cron-session-sizing.md`](#) | Persistent cron session growth control: `cron_session_max_messages`, `cron_session_max_tokens`, the `SummarizeTrim` compaction mode, warn thresholds, and the concurrency caveat around the shared `(agent, "cron")` session. |
-| [`hand-agent-restore.md`](#) | Why hand-managed agents restore from `hand_state.json` (not the SQLite boot path), and the operational consequence when that file is missing or unreadable. |
+| [`message-history-trimming.md`](#) | Sposób, w jaki `safe_trim_messages` ogranicza przechowywaną historię konwersacji — bezpieczne punkty cięcia na granicach tur (nigdy w trakcie wywołania narzędzia), trójpoziomowa resolucja konfiguracji (manifest → globalne → stała) oraz interakcja z przycinaniem okna kontekstowego opartym na tokenach. |
+| [`cron-session-sizing.md`](#) | Kontrola wzrostu trwałych sesji cron: `cron_session_max_messages`, `cron_session_max_tokens`, tryb kompaktacji `SummarizeTrim`, progi ostrzeżeń oraz zastrzeżenie dotyczące współbieżności wokół współdzielonej sesji `(agent, "cron")`. |
+| [`hand-agent-restore.md`](#) | Dlaczego agenty zarządzane ręcznie przywracają stan z `hand_state.json` (a nie ze ścieżki boot SQLite) oraz skutki operacyjne, gdy ten plik jest nieobecny lub nie do odczytu. |
 
-### Security & auth
+### Bezpieczeństwo i autoryzacja
 
-| Document | Covers |
+| Dokument | Zakres |
 |---|---|
-| [`mcp-oauth-host-pinning.md`](#) | The `token_endpoint_host_matches` policy that prevents OAuth code exfiltration during MCP server authorization — exact-host match (Rule 1) and eTLD+1 registrable-domain match (Rule 2), the PSL private-domain carve-out, and IP-literal short-circuit. |
-| [`passkey-webauthn.md`](#) | Passkey/WebAuthn login — registration and authentication ceremonies, RP-ID/origin configuration, credential storage in `webauthn_credentials` (migration v44), TOTP interaction, and browser support matrix. |
-| [`plugin-signing.md`](#) | Plugin distribution trust model — three-layer defense (HTTPS transport, SHA-256 checksum, Ed25519 signature), the pubkey resolver chain (env var → TOFU cache → HTTP fetch), and what gets signed (index metadata, not bundle bytes). |
+| [`mcp-oauth-host-pinning.md`](#) | Polityka `token_endpoint_host_matches` zapobiegająca eksfiltracji kodu OAuth podczas autoryzacji serwera MCP — dokładne dopasowanie hosta (Reguła 1) i dopasowanie rejestrowalnej domeny eTLD+1 (Reguła 2), wyłączenie prywatnych domen z PSL oraz obejście dla literałów IP. |
+| [`passkey-webauthn.md`](#) | Logowanie passkey/WebAuthn — ceremonie rejestracji i uwierzytelniania, konfiguracja RP-ID/origin, przechowywanie danych uwierzytelniających w `webauthn_credentials` (migracja v44), interakcja z TOTP oraz macierz wsparcia przeglądarek. |
+| [`plugin-signing.md`](#) | Model zaufania dystrybucji wtyczek — trzywarstwowa obrona (transport HTTPS, suma kontrolna SHA-256, podpis Ed25519), łańcuch resolwerów kluczy publicznych (zmienna środowiskowa → pamięć TOFU → pobranie HTTP) oraz to, co jest podpisywane (metadane indeksu, a nie bajty bundla). |
 
-### Infrastructure & deployment
+### Infrastruktura i wdrożenie
 
-| Document | Covers |
+| Dokument | Zakres |
 |---|---|
-| [`multi-replica-rfc.md`](#) | The proposal (not yet accepted) for running LibreFang as multiple daemon replicas — current single-replica constraints (24 singleton workers, per-session locks, audit hash chain, budget reservations), the four-phase plan, and the seven readiness criteria. |
-| [`openrouter-live-catalog.md`](#) | Runtime resolution of OpenRouter model inventory — embedded snapshot fallback, live `/models` fetch with TTL and cooldown, narrow-sync model migration, and `assistant` agent exclusion. |
+| [`multi-replica-rfc.md`](#) | Propozycja (jeszcze niezaakceptowana) uruchamiania LibreFang jako wielu replik demona — obecne ograniczenia pojedynczej repliki (24 singleton workerów, blokady per-sesja, łańcuch hashów audytu, rezerwacje budżetu), czterofazowy plan oraz siedem kryteriów gotowości. |
+| [`openrouter-live-catalog.md`](#) | Resolucja w czasie wykonywania inwentarza modeli OpenRouter — wbudowany zapasowy snapshot, pobieranie na żywo z `/models` z TTL i cooldownem, wąska migracja modeli oraz wykluczenie agenta `assistant`. |
 
-### Channel adapters
+### Adaptery kanałów
 
-| Document | Covers |
+| Dokument | Zakres |
 |---|---|
-| [`rust-sidecar-sdk.md`](#) | The first-party Rust SDK for out-of-process channel adapters — `SidecarAdapter` trait, `run_stdio_main` entry point, `MessageBuilder` / `Schema` / `Content` types, panic isolation, and conformance corpus. |
-| [`rust-telegram-sidecar.md`](#) | The first-party Telegram adapter built against the Rust sidecar SDK — feature-parity port of the Python adapter, auto-resolution of the bundled binary, capabilities, and the Markdown→HTML pipeline. |
+| [`rust-sidecar-sdk.md`](#) | Autorski SDK Rust dla adapterów kanałów out-of-process — trait `SidecarAdapter`, punkt wejścia `run_stdio_main`, typy `MessageBuilder` / `Schema` / `Content`, izolacja paniki oraz korpus zgodności. |
+| [`rust-telegram-sidecar.md`](#) | Autorski adapter Telegram zbudowany na SDK Rust sidecar — port z pełną parzystością funkcji względem adaptera Python, automatyczna resolucja dołączonego pliku binarnego, capabilities oraz potok Markdown→HTML. |
 
-## How these documents relate to the codebase
+## Jak te dokumenty odnoszą się do bazy kodu
 
 ```mermaid
 graph TD
@@ -77,7 +77,7 @@ graph TD
         CHANNELS[librefang-channels]
     end
 
-    subgraph "Architecture docs"
+    subgraph "Dokumenty architektury"
         API_CONV[api-conventions]
         ERR_CONTRACTS[error-contracts]
         ACCESS_LOG[access-log-fields]
@@ -109,61 +109,61 @@ graph TD
     MULTI_REPLICA --> AUDIT
 ```
 
-Each document explicitly names the source files it governs. For example, `error-contracts.md` points to `crates/librefang-runtime/src/tool_runner/error.rs` and the `LibreFangError` definition in `crates/librefang-types/`. When reviewing a PR that touches one of those files, the reviewer should consult the corresponding document for the contract the code must satisfy.
+Każdy dokument jawnie wymienia pliki źródłowe, którymi zarządza. Na przykład `error-contracts.md` wskazuje na `crates/librefang-runtime/src/tool_runner/error.rs` oraz definicję `LibreFangError` w `crates/librefang-types/`. Przy weryfikacji PR-a, który dotyka jednego z tych plików, recenzent powinien skorzystać z odpowiedniego dokumentu w celu sprawdzenia kontraktu, którego kod musi spełniać.
 
-## Conventions used across documents
+## Konwencje stosowane w dokumentach
 
-### Issue tracking
+### Śledzenie zgłoszeń
 
-Documents reference GitHub issues with inline links (e.g. `[#3511]`, `#3576`, `#6634`). These are the canonical tracking numbers for the work the document describes. A document marked as tracking an issue is incomplete until the issue closes.
+Dokumenty odwołują się do zgłoszeń GitHub za pomocą łączy w tekście (np. `[#3511]`, `#3576`, `#6634`). Są to kanoniczne numery śledzenia dla pracy opisanej w dokumencie. Dokument oznaczony jako śledzący zgłoszenie jest niekompletny, dopóki zgłoszenie nie zostanie zamknięte.
 
-### RFC vs. reference
+### RFC vs. dokumentacja referencyjna
 
-Most documents are **reference** — they describe a system that exists and works. `multi-replica-rfc.md` is explicitly marked as a **proposal** that is not yet accepted; it carries a `Status` header so a reader does not mistake the target architecture for the current one.
+Większość dokumentów to **dokumentacja referencyjna** — opisują system, który istnieje i działa. `multi-replica-rfc.md` jest jawnie oznaczony jako **propozycja**, która nie została jeszcze zaakceptowana; zawiera nagłówek `Status`, aby czytelnik nie pomylił architektury docelowej z bieżącą.
 
-### Code excerpts
+### Fragmenty kodu
 
-Documents embed Rust, TOML, SQL, and shell snippets directly from the codebase. These are illustrative, not generated — if the code they reference changes, the document must be updated manually. The excerpt is typically followed by a path comment or a prose pointer to the exact file.
+Dokumenty osadzają fragmenty kodu Rust, TOML, SQL i powłoki bezpośrednio z bazy kodu. Stanowią one ilustrację, nie są generowane — jeśli kod, do którego się odnoszą, ulegnie zmianie, dokument musi zostać zaktualizowany ręcznie. Fragment jest zazwyczaj opatrzony komentarzem ze ścieżką lub opisową wskazówką do dokładnego pliku.
 
-### "What this PR ships" / migration sections
+### Sekcje „Co dostarcza ten PR" / migracji
 
-Several documents (`error-contracts.md`, `api-conventions.md`) include explicit migration sections describing what is already landed, what is in scope for the current PR, and what remains. This reflects the incremental approach: conventions are introduced, a lint is added in warn mode, and the existing inventory is migrated slice-by-slice in follow-up PRs.
+Niektóre dokumenty (`error-contracts.md`, `api-conventions.md`) zawierają wyraźne sekcje migracji opisujące, co zostało już wdrożone, co jest w zakresie bieżącego PR-a, a co pozostaje do zrobienia. Odbija to podejście przyrostowe: konwencje są wprowadzane, lint jest dodawany w trybie ostrzeżeń, a istniejący zasób jest migrowany wycinek po wycinku w kolejnych PR-ach.
 
-## Contributing to this module
+## Wkład w ten moduł
 
-### When to add a new document
+### Kiedy dodać nowy dokument
 
-Add a document when a subsystem has a non-obvious design constraint that would be expensive to rediscover from code alone. Good candidates:
+Dodaj dokument, gdy podsystem ma nietrywialne ograniczenie projektowe, którego ponowne odkrycie wyłącznie z kodu byłoby kosztowne. Dobrzy kandydaci:
 
-- Security-sensitive trust boundaries (see `mcp-oauth-host-pinning.md`, `plugin-signing.md`)
-- Cross-crate contracts that multiple reviewers need to enforce (see `error-contracts.md`, `api-conventions.md`)
-- Operational behavior operators need to reason about (see `cron-session-sizing.md`, `message-history-trimming.md`)
+- Wrażliwe na bezpieczeństwo granice zaufania (patrz `mcp-oauth-host-pinning.md`, `plugin-signing.md`)
+- Międzykrate kontrakty, które wieloma recenzentom muszą wymusić (patrz `error-contracts.md`, `api-conventions.md`)
+- Zachowanie operacyjne, o którym operatorzy muszą rozumować (patrz `cron-session-sizing.md`, `message-history-trimming.md`)
 
-Do not add a document for a single function's internal logic — that belongs in code comments.
+Nie dodawaj dokumentu dla wewnętrznej logiki pojedynczej funkcji — to należy do komentarzy w kodzie.
 
-### When to update an existing document
+### Kiedy zaktualizować istniejący dokument
 
-Update when:
+Aktualizuj, gdy:
 
-- The contract changes (new error variant, new log field, new config knob).
-- Coverage expands (the `with_agent_id` coverage list in `access-log-fields.md` grows as more handlers are wired).
-- A migration slice lands (the migration order table in `error-contracts.md` gets its checkboxes updated).
+- Kontrakt ulega zmianie (nowy wariant błędu, nowe pole logu, nowy parametr konfiguracji).
+- Zakres się rozszerza (lista pokrycia `with_agent_id` w `access-log-fields.md` rośnie wraz z podłączaniem kolejnych handlerów).
+- Wycinek migracji zostaje wdrożony (tabela kolejności migracji w `error-contracts.md` ma zaktualizowane pola wyboru).
 
-### Style
+### Styl
 
-- Lead with the problem the subsystem solves, then the solution shape, then the details.
-- Reference actual file paths so a reader can `grep` from the document to the code.
-- Distinguish between "this is how it works" and "this is how it should work" — the latter is an RFC or a follow-up note, and must be labeled as such.
-- Include the `#issue` number for tracking. When the issue closes, update or remove the tracking reference.
+- Zacznij od problemu, który podsystem rozwiązuje, potem opisz kształt rozwiązania, a następnie szczegóły.
+- Powołuj się na rzeczywiste ścieżki plików, aby czytelnik mógł przejść `grep`iem z dokumentu do kodu.
+- Rozróżniaj między „tak to działa" a „tak to powinno działać" — drugie to RFC lub uwaga do następnego kroku i musi być odpowiednio oznaczone.
+- Podaj numer `#issue` do śledzenia. Po zamknięciu zgłoszenia zaktualizuj lub usuń odwołanie śledzące.
 
-### Relationship to other documentation
+### Relacja z inną dokumentacją
 
-These documents sit between the operator-facing runbooks (`docs/operations/`) and inline code comments:
+Te dokumenty znajdują się między podręcznikami operacyjnymi (`docs/operations/`) a komentarzami w kodzie:
 
-| Layer | Audience | Content |
+| Warstwa | Odbiorcy | Zawartość |
 |---|---|---|
-| `docs/operations/` | Operators | How to configure, deploy, and troubleshoot |
-| `docs/architecture/` (this module) | Developers and advanced operators | Why the system is shaped this way, cross-cutting contracts |
-| Code comments | Contributors to a specific file | Implementation detail, local invariants |
+| `docs/operations/` | Operatorzy | Jak konfigurować, wdrażać i rozwiązywać problemy |
+| `docs/architecture/` (ten moduł) | Programiści i zaawansowani operatorzy | Dlaczego system ma taki kształt, kontrakty przekrojowe |
+| Komentarze w kodzie | Kontrybutorzy konkretnego pliku | Szczegóły implementacji, lokalne niezmienniki |
 
-When an architecture document and an operations document cover the same knob (e.g. `max_history_messages`), the architecture document explains *why* the value exists and *how* the resolution chain works, while the operations document says *what to set it to*.
+Gdy dokument architektoniczny i dokument operacyjny dotyczą tego samego parametru (np. `max_history_messages`), dokument architektoniczny wyjaśnia, *dlaczego* wartość istnieje i *jak* działa łańcuch resolucji, podczas gdy dokument operacyjny podaje, *na co go ustawić*.

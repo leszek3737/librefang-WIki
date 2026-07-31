@@ -2,16 +2,16 @@
 
 # web — src
 
-The frontend source for the LibreFang website. A React SPA that serves three distinct surfaces from a single bundle: the marketing homepage, a lazy-loaded registry browser (8 categories), and standalone pages for deploy/changelog/metrics. Routing is path-based via `window.location.pathname` — there is no client-side router like react-router. State is managed through a lightweight Zustand store, server data through TanStack Query, and internationalisation through a custom translation-merge system supporting 9 locales.
+Źródło frontendowe witryny LibreFang. Aplikacja SPA w React, która z jednego pakietu obsługuje trzy różne powierzchnie: stronę główną marketingową, leniwie ładowaną przeglądarkę rejestru (8 kategorii) oraz samodzielne strony dla deploy/changelog/metrics. Routing oparty na ścieżkach odbywa się poprzez `window.location.pathname` — nie ma client-side routera takiego jak react-router. Stan zarządzany przez lekki sklep Zustand, dane serwera przez TanStack Query, a internacjonalizacja przez niestandardowy system scalania tłumaczeń obsługujący 9 locale.
 
-## Architecture Overview
+## Przegląd architektury
 
 ```mermaid
 graph TD
-    A[App.tsx] -->|pathname match| H[Homepage sections]
-    A -->|pathname match| R[RegistryPage / RegistryDetailPage]
-    A -->|pathname match| D[DeployPage / ChangelogPage / MetricsPage]
-    A -->|pathname match| NF[404]
+    A[App.tsx] -->|dopasowanie pathname| H[Sekcje strony głównej]
+    A -->|dopasowanie pathname| R[RegistryPage / RegistryDetailPage]
+    A -->|dopasowanie pathname| D[DeployPage / ChangelogPage / MetricsPage]
+    A -->|dopasowanie pathname| NF[404]
 
     H --> Reg[useRegistry - react-query]
     H --> I18n[getTranslation - i18n]
@@ -21,174 +21,174 @@ graph TD
 
     Reg --> API[stats.librefang.ai/api]
 
-    A --> SEO[hreflang + JSON-LD + meta tags]
+    A --> SEO[hreflang + JSON-LD + meta tagi]
     A --> Search[SearchDialog Cmd+K]
     A --> EB[ErrorBoundary]
 ```
 
 ## Routing
 
-`App` is the single entry point. On mount it inspects `window.location.pathname` exactly once (captured in `useState` initializers) and renders the matching surface. There is no history API manipulation for navigation — all cross-page links are plain `<a href>` tags, causing full page loads. This is intentional: the site is statically hosted on Cloudflare Pages and full navigations keep the bundle cache warm without client-side router complexity.
+`App` to jedyny punkt wejścia. Po zamontowaniu sprawdza `window.location.pathname` dokładnie raz (przechwycone w inicjalizatorach `useState`) i renderuje pasującą powierzchnię. Nie ma manipulacji API historii do nawigacji — wszystkie linki między stronami to zwykłe tagi `<a href>`, powodujące pełne przeładowania stron. Jest to celowe: strona jest statycznie hostowana na Cloudflare Pages, a pełne nawigacje utrzymują ciepły cache pakietu bez złożoności client-side routera.
 
-### Route detection
+### Wykrywanie tras
 
-| Pattern | Match function | Result |
+| Wzorzec | Funkcja dopasowująca | Wynik |
 |---|---|---|
-| `/`, `/{locale}` | `isHomepagePath` | Homepage |
+| `/`, `/{locale}` | `isHomepagePath` | Strona główna |
 | `/{locale}?/deploy` | `localeRouteRe('deploy')` | `DeployPage` |
 | `/{locale}?/changelog` | `localeRouteRe('changelog')` | `ChangelogPage` |
-| `/{locale}?/metrics` | regex on `metrics` | `MetricsPage` |
-| `/{locale}?/{category}` or `/{category}/{id}` | `detectRegistryRoute` | `RegistryPage` or `RegistryDetailPage` |
-| anything else | fallback | 404 page |
+| `/{locale}?/metrics` | regex na `metrics` | `MetricsPage` |
+| `/{locale}?/{category}` lub `/{category}/{id}` | `detectRegistryRoute` | `RegistryPage` lub `RegistryDetailPage` |
+| cokolwiek innego | fallback | Strona 404 |
 
-`detectRegistryRoute` strips an optional locale prefix, checks the first segment against `REGISTRY_ROUTES`, and validates item IDs against `/^[a-z0-9][a-z0-9_-]*$/i` to guard against path traversal. Supported categories: `skills`, `mcp`, `plugins`, `hands`, `agents`, `providers`, `workflows`, `channels`.
+`detectRegistryRoute` usuwa opcjonalny prefiks locale, sprawdza pierwszy segment względem `REGISTRY_ROUTES` i weryfikuje identyfikatory elementów wzorcem `/^[a-z0-9][a-z0-9_-]*$/i` w celu ochrony przed path traversal. Obsługiwane kategorie: `skills`, `mcp`, `plugins`, `hands`, `agents`, `providers`, `workflows`, `channels`.
 
-### Locale handling
+### Obsługa locale
 
-`getCurrentLang` parses the path prefix. Supported locales: `en` (default), `zh`, `zh-TW`, `de`, `ja`, `ko`, `es`, `pl`, `uk`. The store's `lang` is synced from the URL on mount and on `popstate`. Links throughout the app compute a `langPrefix` (`''` for English, `/{locale}` otherwise) to prefix internal URLs.
+`getCurrentLang` analizuje prefiks ścieżki. Obsługiwane locale: `en` (domyślne), `zh`, `zh-TW`, `de`, `ja`, `ko`, `es`, `pl`, `uk`. Wartość `lang` w sklepie jest synchronizowana z URL przy montowaniu i przy `popstate`. Linki w całej aplikacji obliczają `langPrefix` (`''` dla angielskiego, `/{locale}` w przeciwnym razie), aby prefiksować wewnętrzne URL.
 
-## Lazy Loading
+## Leniwe ładowanie
 
-Only homepage sections ship in the initial bundle. Everything else is `React.lazy` + `Suspense`:
+Tylko sekcje strony głównej są dołączane do początkowego pakietu. Wszystko inne to `React.lazy` + `Suspense`:
 
 - `DeployPage`, `ChangelogPage`, `MetricsPage`
 - `RegistryPage`, `RegistryDetailPage`
 - `SearchDialog`, `InstallBanner`
 
-The suspense fallback is a centered spinner (`suspenseFallback` in `App`). `SearchDialog` and `InstallBanner` use `null` fallbacks since they mount only when triggered.
+Fallback suspense to wyśrodkowany spinner (`suspenseFallback` w `App`). `SearchDialog` i `InstallBanner` używają fallback `null`, ponieważ montują się tylko po wyzwoleniu.
 
-## Homepage Sections
+## Sekcje strony głównej
 
-The homepage composes ~14 section components, each receiving the translation object `t` via `SectionProps`:
+Strona główna składa się z ~14 komponentów sekcji, z których każdy otrzymuje obiekt tłumaczenia `t` poprzez `SectionProps`:
 
-| Component | Purpose |
+| Komponent | Przeznaczenie |
 |---|---|
-| `Hero` | Animated headline, typing terminal effect, stats bar |
-| `Architecture` | Expandable accordion of 5 system layers; pulls channel/hand data from registry |
-| `Hands` | Horizontal-scroll carousel of registry hands |
-| `BrowseRegistry` | 8-card grid linking to each registry category |
-| `Workflows` | Feature cards for workflow patterns |
-| `Evolution` | Self-evolving skills section |
-| `Performance` | Comparison table (LibreFang vs others) |
-| `Install` | OS-detected install commands with copy button |
-| `Downloads` | GitHub release assets fetched from stats API, categorised by platform |
-| `Docs` | Documentation category cards |
-| `EveryApiPartner` | Partner integration callout |
-| `FAQ` | Accordion of Q&A |
-| `GitHubStats` | Live GitHub metrics + star history chart + contributor image |
-| `Footer` | Links and branding |
+| `Hero` | Animowany nagłówek, efekt pisania terminala, pasek statystyk |
+| `Architecture` | Rozwijany akordeon 5 warstw systemu; pobiera dane kanałów/hands z rejestru |
+| `Hands` | Karuzela z przewijaniem poziomym hands z rejestru |
+| `BrowseRegistry` | Siatka 8 kart linkujących do każdej kategorii rejestru |
+| `Workflows` | Karty funkcji dla wzorców workflow |
+| `Evolution` | Sekcja samorozwijających się umiejętności |
+| `Performance` | Tabela porównawcza (LibreFang vs inne) |
+| `Install` | Polecenia instalacji wykrywające system operacyjny z przyciskiem kopiowania |
+| `Downloads` | Zasoby wydań GitHub pobierane ze stats API, kategoryzowane według platformy |
+| `Docs` | Karty kategorii dokumentacji |
+| `EveryApiPartner` | Wezwanie do integracji partnerskiej |
+| `FAQ` | Akordeon pytań i odpowiedzi |
+| `GitHubStats` | Metryki GitHub na żywo + wykres historii gwiazdek + obraz kontrybutorów |
+| `Footer` | Linki i branding |
 
-### Key hooks and utilities in App.tsx
+### Kluczowe hooki i narzędzia w App.tsx
 
-**`useTyping(texts, speed, pause)`** — Cycles through an array of strings with a typewriter effect (type → pause → delete → next). Returns the currently displayed substring.
+**`useTyping(texts, speed, pause)`** — Przechodzi przez tablicę ciągów znaków z efektem maszyny do pisania (wpisz → pauza → usuń → następny). Zwraca aktualnie wyświetlany podciąg.
 
-**`FadeIn`** — Wrapper around `motion.div` that animates opacity/translateY on scroll-into-view (`whileInView`, fires once).
+**`FadeIn`** — Wrapper wokół `motion.div`, który animuje opacity/translateY przy przewinięciu w pole widzenia (`whileInView`, odpala raz).
 
-**`isPopular` / `sortByPopularity`** — Items tagged `popular` in their registry `tags` array are sorted first and visually marked with 🔥.
+**`isPopular` / `sortByPopularity`** — Elementy oznaczone `popular` w tablicy `tags` rejestru są sortowane jako pierwsze i wizualnie oznaczane 🔥.
 
-**`trackEvent(action, label)`** — Fires `window.gtag('event', ...)` if Google Analytics is loaded. Called from `onClick` handlers on CTAs.
+**`trackEvent(action, label)`** — Uruchamia `window.gtag('event', ...)`, jeśli Google Analytics jest załadowane. Wywoływane z handlerów `onClick` na CTA.
 
-**`categorizeAssets(assets)`** — Regex-matches GitHub release asset filenames into Desktop (.dmg, .exe, .AppImage, .deb, .rpm) and CLI (.tar.gz, .zip per platform) buckets. Skips `.sha256` checksum files.
+**`categorizeAssets(assets)`** — Dopasowuje regexem nazwy plików zasobów wydań GitHub do koszyków Desktop (.dmg, .exe, .AppImage, .deb, .rpm) i CLI (.tar.gz, .zip według platformy). Pomija pliki sum kontrolnych `.sha256`.
 
-## Components
+## Komponenty
 
 ### `SiteHeader`
 
-Fixed top navigation, byte-for-byte identical across all pages. The `isSubpage` prop only affects link targets (cross-page `#anchor` vs same-page smooth scroll) and disables the IntersectionObserver scroll-spy. Two dropdown menus: "Marketplace" (links to the 8 registry category pages) and "Learn" (links to homepage sections). Also contains the language switcher (9 locales), theme toggle (light/dark), and search trigger. The mobile hamburger menu replicates all nav items.
+Stała nawigacja górna, identyczna bajt po bajcie na wszystkich stronach. Prop `isSubpage` wpływa tylko na cele linków (międzystronicowe `#anchor` vs płynne przewijanie na tej samej stronie) i wyłącza scroll-spy IntersectionObserver. Dwa menu rozwijane: „Marketplace" (linki do 8 stron kategorii rejestru) i „Learn" (linki do sekcji strony głównej). Zawiera również przełącznik języka (9 locale), przełącznik motywu (light/dark) oraz wyzwalacz wyszukiwania. Mobilne menu hamburger replikuje wszystkie elementy nawigacji.
 
 ### `SearchDialog`
 
-Global Cmd/Ctrl+K search overlay. Searches across all registry items plus 8 homepage section anchors.
+Globalna nakładka wyszukiwania Cmd/Ctrl+K. Przeszukuje wszystkie elementy rejestru oraz 8 kotwic sekcji strony głównej.
 
-**Scoring pipeline:**
-1. Query is debounced 80ms (`debouncedQuery`)
-2. Each candidate hit is scored via `scoreHit` (items) or `scoreText` (anchors)
-3. Exact ID match = 1000, prefix = 500, substring = 200/150, tag match = 30
-4. Fuzzy subsequence fallback (`fuzzySubseq`) for typo tolerance
-5. Popular items get +5 bonus
-6. Results capped at 40, max 5 per category (`PER_CATEGORY_CAP`)
-7. Empty query shows anchors + popular items
+**Potok oceniania:**
+1. Zapytanie jest debouncowane 80ms (`debouncedQuery`)
+2. Każdy trafny kandydat jest oceniany poprzez `scoreHit` (elementy) lub `scoreText` (kotwice)
+3. Dokładne dopasowanie ID = 1000, prefiks = 500, podciąg = 200/150, dopasowanie tagu = 30
+4. Fuzzy subsequence fallback (`fuzzySubseq`) dla tolerancji literówek
+5. Popularne elementy otrzymują bonus +5
+6. Wyniki ograniczone do 40, maksymalnie 5 na kategorię (`PER_CATEGORY_CAP`)
+7. Puste zapytanie pokazuje kotwice + popularne elementy
 
-Keyboard navigation: ↑/↓ to move, Enter to open, Esc to close. Paste handler detects URLs or `category/id` strings and navigates directly.
+Nawigacja klawiaturą: ↑/↓ aby się poruszać, Enter aby otworzyć, Esc aby zamknąć. Handler wklejania wykrywa URL lub ciągi `category/id` i nawiguje bezpośrednio.
 
 ### `RegistryIcon`
 
-Maps registry TOML icon strings to React components. Supports the `lucide:<kebab-name>` format (50+ mapped icons) and falls back to rendering legacy emoji glyphs as text for backwards compatibility. Unknown lucide names default to `<Box />`.
+Mapuje ciągi ikon TOML rejestru na komponenty React. Obsługuje format `lucide:<kebab-name>` (50+ zmapowanych ikon) i wraca do renderowania starszych glifów emoji jako tekstu dla zgodności wstecznej. Nieznane nazwy lucide domyślnie renderują `<Box />`.
 
 ### `Breadcrumbs`
 
-Renders a `Home / Category / Item` trail in page content (not in the header). First segment always links to the locale-aware homepage.
+Renderuje ścieżkę `Home / Category / Item` w treści strony (nie w nagłówku). Pierwszy segment zawsze linkuje do strony głównej uwzględniającej locale.
 
 ### `ErrorBoundary`
 
-Class-based error boundary wrapping the entire app. On uncaught errors it:
-1. Logs to console
-2. Sends a `sendBeacon` report to `stats.librefang.ai/api/errors` with message, stack, pathname, lang, and UA (truncated to 256 chars)
-3. Renders a recovery card with reload/home buttons
+Klasowy boundary błędów obejmujący całą aplikację. Przy nieprzechwyconych błędach:
+1. Loguje do konsoli
+2. Wysyła raport `sendBeacon` na `stats.librefang.ai/api/errors` z wiadomością, stosem, pathname, językiem i UA (obciętym do 256 znaków)
+3. Renderuje kartę odzyskiwania z przyciskami reload/home
 
-Reporting failures are silently swallowed — error reporting must never cascade a crash.
+Błędy raportowania są cicho połykane — raportowanie błędów nigdy nie może kaskadowo powodować awarii.
 
 ### `InstallBanner`
 
-PWA install prompt. Captures `beforeinstallprompt`, shows a banner at the bottom of the screen, and calls `event.prompt()` on click. Dismissal is persisted in `localStorage` under `librefang.install.dismissed`.
+Prompt instalacji PWA. Przechwytuje `beforeinstallprompt`, wyświetla baner na dole ekranu i wywołuje `event.prompt()` po kliknięciu. Odrzucenie jest utrwalane w `localStorage` pod kluczem `librefang.install.dismissed`.
 
 ### `BrandIcons`
 
-Inlined SVG icons for GitHub and Twitter/X (lucide-react removed brand icons). Drop-in compatible with lucide component signatures (`size`, `className` props).
+Wbudowane inline ikony SVG dla GitHub i Twitter/X (lucide-react usunął ikony brandowe). Kompatybilne drop-in z sygnaturami komponentów lucide (props `size`, `className`).
 
-## State Management
+## Zarządzanie stanem
 
-### Store (`store.ts`)
+### Sklep (`store.ts`)
 
-Zustand store with:
-- `lang` — current locale code
+Sklep Zustand z:
+- `lang` — aktualny kod locale
 - `theme` — `'light' | 'dark'`
-- `switchLang(lang)` — updates store and syncs to URL/path
-- `toggleTheme()` — flips theme and persists preference
-- `detectLang()` — initial locale detection from path
+- `switchLang(lang)` — aktualizuje sklep i synchronizuje z URL/ścieżką
+- `toggleTheme()` — przełącza motyw i utrwala preferencję
+- `detectLang()` — początkowe wykrywanie locale ze ścieżki
 
-### Registry Data (`useRegistry.ts`)
+### Dane rejestru (`useRegistry.ts`)
 
-TanStack Query hook fetching registry data from the stats API. Returns typed registry data with arrays for each category plus aggregate counts (`handsCount`, `channelsCount`, etc.). `getLocalizedDesc` and `getLocalizedName` resolve locale-specific fields from items with fallback to English.
+Hook TanStack Query pobierający dane rejestru ze stats API. Zwraca typowane dane rejestru z tablicami dla każdej kategorii oraz zagregowanymi liczbami (`handsCount`, `channelsCount` itd.). `getLocalizedDesc` i `getLocalizedName` rozwiązują polace specyficzne dla locale z elementów z fallbackiem do angielskiego.
 
-## SEO and Metadata
+## SEO i metadane
 
-Three `useEffect` blocks in `App` manage SEO dynamically:
+Trzy bloki `useEffect` w `App` zarządzają SEO dynamicznie:
 
-**hreflang tags** — On every page/locale change, stale `<link rel="alternate">` tags are removed and new ones injected for `x-default`, `en`, and all 9 locales. Paths are normalised by stripping the locale prefix before re-prefixing.
+**Tagi hreflang** — Przy każdej zmianie strony/locale, przestarzałe tagi `<link rel="alternate">` są usuwane i nowe są wstrzykiwane dla `x-default`, `en` i wszystkich 9 locale. Ścieżki są normalizowane przez usunięcie prefiksu locale przed ponownym prefiksowaniem.
 
-**JSON-LD structured data** — A single `<script id="ld-json">` tag is rewritten on route change:
-- Registry detail: `SoftwareSourceCode` with codeRepository link
-- Registry list: `CollectionPage` with category description
-- Homepage: `SoftwareApplication` with offers (price: 0), operating systems, sameAs GitHub
+**Dane strukturalne JSON-LD** — Pojedynczy tag `<script id="ld-json">` jest przepisywany przy zmianie trasy:
+- Szczegóły rejestru: `SoftwareSourceCode` z linkiem codeRepository
+- Lista rejestru: `CollectionPage` z opisem kategorii
+- Strona główna: `SoftwareApplication` z ofertami (cena: 0), systemami operacyjnymi, sameAs GitHub
 
-**Meta tags** — `<title>`, `<meta name="description">`, and Open Graph (`og:title`, `og:description`, `og:image`) are updated per route. Registry detail pages get category-specific OG images from `librefang.ai/og/{category}/{id}.svg`.
+**Meta tagi** — `<title>`, `<meta name="description">` i Open Graph (`og:title`, `og:description`, `og:image`) są aktualizowane według trasy. Strony szczegółów rejestru otrzymują specyficzne dla kategorii obrazy OG z `librefang.ai/og/{category}/{id}.svg`.
 
-## Internationalisation
+## Internacjonalizacja
 
-Translations live in `i18n.ts`. `getTranslation(lang)` returns a merged `Translation` object. The merge system (`mergeTranslation` → `mergeObject`) overlays locale-specific keys on top of the English base, so partial translations fall back gracefully. All section components receive `t: Translation` and access deeply nested keys (e.g., `t.hero.title1`, `t.architecture.layers[0].label`).
+Tłumaczenia znajdują się w `i18n.ts`. `getTranslation(lang)` zwraca scalony obiekt `Translation`. System scalania (`mergeTranslation` → `mergeObject`) nakłada klucze specyficzne dla locale na bazę angielską, więc częściowe tłumaczenia elegancko fallbackują. Wszystkie komponenty sekcji otrzymują `t: Translation` i uzyskują dostęp do głęboko zagnieżdżonych kluczy (np. `t.hero.title1`, `t.architecture.layers[0].label`).
 
-Some section content (like `Downloads` labels) uses inline `Record<string, Record<string, string>>` lookup tables keyed by locale, separate from the main translation file.
+Część treści sekcji (np. etykiety `Downloads`) używa inline tablic wyszukiwania `Record<string, Record<string, string>>` indeksowanych według locale, oddzielonych od głównego pliku tłumaczeń.
 
-## Utilities (`lib/utils.ts`)
+## Narzędzia (`lib/utils.ts`)
 
-- `cn(...classes)` — Tailwind class merger (clsx/classnames pattern)
-- `useFavorites` — localStorage-backed favorites with pub/sub notification
-- `useMarketplace` — marketplace-specific data hook used by registry pages
+- `cn(...classes)` — scalacz klas Tailwind (wzorzec clsx/classnames)
+- `useFavorites` — ulubione z obsługą localStorage z powiadomieniem pub/sub
+- `useMarketplace` — hook danych specyficznych dla marketplace używany przez strony rejestru
 
-## Pages (lazy-loaded)
+## Strony (leniwie ładowane)
 
-| Page | Purpose |
+| Strona | Przeznaczenie |
 |---|---|
-| `RegistryPage` | Lists all items in a category with filtering, sorting, favorites |
-| `RegistryDetailPage` | Single item detail view with full metadata, source links |
-| `DeployPage` | One-click deploy forms for Fly.io, Railway, Render, GCP, Docker |
-| `ChangelogPage` | Versioned release notes with timeline |
-| `MetricsPage` | Live usage/community metrics dashboard |
+| `RegistryPage` | Lista wszystkich elementów w kategorii z filtrowaniem, sortowaniem, ulubionymi |
+| `RegistryDetailPage` | Widok szczegółów pojedynczego elementu z pełnymi metadanymi, linkami do źródła |
+| `DeployPage` | Formularze wdrażania jednym kliknięciem dla Fly.io, Railway, Render, GCP, Docker |
+| `ChangelogPage` | Wersjonowane informacje o wydaniach z osi czasu |
+| `MetricsPage` | Panel metryk użycia/społeczności na żywo |
 
-## Contributing Notes
+## Uwagi dotyczące współpracy
 
-- **Adding a homepage section:** Create a component accepting `SectionProps`, add it to the JSX in `App`'s homepage return, add translation keys under a matching namespace, and add an anchor link in `SiteHeader`'s `anchorLinks` array.
-- **Adding a registry category:** Add the key to `RegistryCategory` type, update `REGISTRY_ROUTES`, add to `BrowseRegistry`'s `cats` array, add to `SearchDialog`'s `CATEGORIES`, add to `SiteHeader`'s `featureLinks`, and add translation entries under `t.registry.categories`.
-- **Adding a locale:** Add the code to `LOCALES` in `App.tsx`, add detection in `getCurrentLang`, add to `languages` in `i18n.ts`, add to the hreflang loop, and provide translations.
-- **Bundle size:** Keep the homepage lean. Anything only needed on subpages should be `lazy()`-loaded. The current split saves ~40KB on the initial bundle for homepage visitors.
+- **Dodawanie sekcji strony głównej:** Utwórz komponent akceptujący `SectionProps`, dodaj go do JSX w return strony głównej `App`, dodaj klucze tłumaczeń pod pasującą przestrzenią nazw i dodaj link kotwicy w tablicy `anchorLinks` `SiteHeader`.
+- **Dodawanie kategorii rejestru:** Dodaj klucz do typu `RegistryCategory`, zaktualizuj `REGISTRY_ROUTES`, dodaj do tablicy `cats` `BrowseRegistry`, dodaj do `CATEGORIES` `SearchDialog`, dodaj do `featureLinks` `SiteHeader` i dodaj wpisy tłumaczeń pod `t.registry.categories`.
+- **Dodawanie locale:** Dodaj kod do `LOCALES` w `App.tsx`, dodaj wykrywanie w `getCurrentLang`, dodaj do `languages` w `i18n.ts`, dodaj do pętli hreflang i dostarcz tłumaczenia.
+- **Rozmiar pakietu:** Utrzymuj stronę główną lekką. Wszystko, co jest potrzebne tylko na podstronach, powinno być ładowane przez `lazy()`. Obecny podział oszczędza ~40KB na początkowym pakiecie dla odwiedzających stronę główną.

@@ -2,20 +2,20 @@
 
 # librefang-memory
 
-Memory substrate for the LibreFang Agent OS. Provides the persistence layer that agents, the kernel, and the API all read and write through — covering structured key/value state, semantic text/vector search, knowledge graph relations, session message history, proactive (mem0-style) memory, and several operational stores (channel bindings, goal runs, workflow runs, idempotency cache, usage tracking).
+Podłoże pamięciowe dla LibreFang Agent OS. Dostarcza warstwę trwałości, przez którą agenci, jądro i API odczytują i zapisują dane — obejmującą uporządkowany stan klucz/wartość, semantyczne wyszukiwanie tekstowe/wektorowe, relacje grafu wiedzy, historię wiadomości sesji, proaktywną pamięć (w stylu mem0) oraz kilka magazynów operacyjnych (powiązania kanałów, przebiegi celów, przebiegi workflow, pamięć podręczna idempotencji, śledzenie użycia).
 
-All stores share a single r2d2 SQLite connection pool managed by `MemorySubstrate`, with migrations applied at boot via `migration::run_migrations`.
+Wszystkie magazyny współdzielą jedną pulę połączeń SQLite zarządzaną przez `r2d2` w ramach `MemorySubstrate`, z migracjami aplikowanymi przy starcie przez `migration::run_migrations`.
 
-## Architecture
+## Architektura
 
 ```mermaid
 graph TD
-    Sub[MemorySubstrate<br/>shared r2d2 pool + migrations]
-    Sub --> Structured[Structured Store<br/>key/value, sessions, audit]
-    Sub --> Semantic[Semantic Store<br/>text + vector recall]
-    Sub --> KG[Knowledge Graph<br/>entities + relations]
-    Sub --> OpStores[Operational Stores]
-    Sub --> Proactive[Proactive Memory<br/>mem0-style add/search/consolidate]
+    Sub[MemorySubstrate<br/>współdzielona pula r2d2 + migracje]
+    Sub --> Structured[Magazyn uporządkowany<br/>klucz/wartość, sesje, audyt]
+    Sub --> Semantic[Magazyn semantyczny<br/>odtwarzanie tekstowe + wektorowe]
+    Sub --> KG[Graf wiedzy<br/>encje + relacje]
+    Sub --> OpStores[Magazyny operacyjne]
+    Sub --> Proactive[Pamięć proaktywna<br/>mem0-style dodawanie/wyszukiwanie/konsolidacja]
 
     OpStores --> CB[ChannelBindingStore]
     OpStores --> GR[GoalRunStore]
@@ -23,18 +23,18 @@ graph TD
     OpStores --> IDEM[IdempotencyStore]
     OpStores --> USG[UsageStore]
 
-    Semantic -->|optional| HVS[HttpVectorStore<br/>Qdrant / Weaviate / remote]
-    Consolidation[ConsolidationEngine] -->|decay + dedup| Structured
-    Decay[decay module] -->|soft-delete sweep| Structured
+    Semantic -->|opcjonalny| HVS[HttpVectorStore<br/>Qdrant / Weaviate / zdalny]
+    Consolidation[ConsolidationEngine] -->| Decay + deduplikacja| Structured
+    Decay[moduł decay] -->|czyszczenie miękkiego usunięcia| Structured
 ```
 
-## Core concepts
+## Kluczowe koncepcje
 
-### Shared connection pool
+### Współdzielona pula połączeń
 
-Every store wraps the same `Pool<SqliteConnectionManager>` handed out by `MemorySubstrate`. This keeps all persisted state under one WAL file and avoids redundant open calls. Stores are cheap clones — they hold only an `Arc` to the pool internally.
+Każdy magazyn opakowuje to samo `Pool<SqliteConnectionManager>` przekazywane przez `MemorySubstrate`. Utrzymuje to cały utrwalony stan w jednym pliku WAL i unika zbędnych wywołań otwarcia. Magazyny są tanimi klonami — wewnętrznie trzymają jedynie `Arc` do puli.
 
-**Constructing a store requires migrations to have run first.** The pattern in tests is:
+**Konstrukcja magazynu wymaga wcześniejszego uruchomienia migracji.** Wzorzec w testach:
 
 ```rust
 let pool = Pool::builder().max_size(1).build(SqliteConnectionManager::memory()).unwrap();
@@ -42,155 +42,155 @@ crate::migration::run_migrations(&pool.get().unwrap()).unwrap();
 let store = ChannelBindingStore::new(pool);
 ```
 
-### Soft-delete invariant
+### Niezmiennik miękkiego usunięcia
 
-The `memories` table uses a `deleted` flag column rather than hard `DELETE`. Decay, consolidation, and user-initiated `forget*` all set `deleted = 1` and stamp `deleted_at`. Hard removal happens later in `prune_soft_deleted_memories`, scheduled by the kernel retention sweep. Every `forget*` variant must stamp `deleted_at` or the prune sweep (which filters `deleted_at IS NOT NULL`) will skip it forever, leaking the embedding BLOB.
+Tabela `memories` używa kolumny flagowej `deleted` zamiast twardego `DELETE`. Decay, konsolidacja i inicjowane przez użytkownika operacje `forget*` ustawiają `deleted = 1` i oznaczają `deleted_at`. Twarde usunięcie następuje później w `prune_soft_deleted_memories`, zaplanowane przez cykl retencji jądra. Każda wariacja `forget*` musi oznaczyć `deleted_at`, w przeciwnym razie cykl czyszczenia (filtrujący `deleted_at IS NOT NULL`) pominie ją na zawsze, powodując wyciek BLOBa osadzania.
 
-### Tenant isolation by `agent_id`
+### Izolacja dzierżawców przez `agent_id`
 
-Memories, knowledge graph entities/relations, and consolidation candidate sets are all scoped by `agent_id`. The consolidation engine processes each agent's memories in isolation to prevent cross-tenant merges — identical content belonging to different agents must never be compared or merged.
+Pamięci, encje/relacje grafu wiedzy oraz zestawy kandydatów konsolidacji są wszystkie zakresowane przez `agent_id`. Silnik konsolidacji przetwarza pamięci każdego agenta w izolacji, aby zapobiec cross-tenantowym scaleniom — identyczna treść należąca do różnych agentów nigdy nie może być porównywana ani scalana.
 
-## Key modules
+## Kluczowe moduły
 
-### Channel binding store (`channel_binding_store.rs`)
+### Magazyn powiązań kanałów (`channel_binding_store.rs`)
 
-Two-level agent dispatch lookup for inbound channel messages. Replaces the non-deterministic `list_agents().first()` fallback the bridge previously used.
+Dwupoziomowa wyszukiwarka wysyłania agentów dla wiadomości przychodzących kanału. Zastępuje niedeterministyczny powrót `list_agents().first()`, którego most używał wcześniej.
 
-Two tables drive dispatch:
-- **`channel_instance_defaults`** — one row per `[[sidecar_channels]]` instance, seeded from config at boot.
-- **`conversation_bindings`** — per-`(instance, conversation)` override written by the `/agent` command.
+Dwie tabele napędzają wysyłanie:
+- **`channel_instance_defaults`** — jeden wiersz na instancję `[[sidecar_channels]]`, zasiany z konfiguracji przy starcie.
+- **`conversation_bindings`** — nadpisanie na poziomie `(instancja, konwersacja)` zapisywane przez komendę `/agent`.
 
-`ChannelBindingStore::resolve` performs the lookup: conversation override wins, falling back to the instance default, then `None`. Tables store the agent **name** (not the per-spawn `AgentId` uuid); the bridge maps name → id at dispatch time.
+`ChannelBindingStore::resolve` wykonuje wyszukiwanie: nadpisanie konwersacji ma pierwszeństwo, z następującym powrotem do domyślnego instancji, potem `None`. Tabele przechowują **nazwę** agenta (nie per-spawn `AgentId` uuid); most mapuje nazwa → id w czasie wysyłania.
 
-Key methods:
-- `seed_instance_default(instance, agent)` — upserts from config at boot using `ON CONFLICT DO UPDATE` (not `INSERT OR REPLACE`, which would delete+reinsert).
-- `set_instance_default(instance, agent, bound_by)` — operator/runtime rebind with audit trail.
-- `set_conversation_binding(instance, conversation_id, agent, bound_by)` — the `/agent <name>` action.
-- `resolve(instance, conversation_id)` — the two-level dispatch lookup.
+Kluczowe metody:
+- `seed_instance_default(instance, agent)` — upsert z konfiguracji przy starcie używający `ON CONFLICT DO UPDATE` (nie `INSERT OR REPLACE`, co usunęłoby i wstawiło ponownie).
+- `set_instance_default(instance, agent, bound_by)` — ponowne przypisanie operatora/runtime ze śladem audytu.
+- `set_conversation_binding(instance, conversation_id, agent, bound_by)` — akcja `/agent <nazwa>`.
+- `resolve(instance, conversation_id)` — dwupoziomowe wyszukiwanie wysyłania.
 
-The same conversation ID on two different instances resolves independently — this is the #5672 cross-bot leak guard.
+Ten sam identyfikator konwersacji na dwóch różnych instancjach jest rozwiązywany niezależnie — to ochrona przed cross-botowym wyciekiem #5672.
 
-### Chunker (`chunker.rs`)
+### Fragmentator (`chunker.rs`)
 
-Splits long text into overlapping chunks for embedding-based memory. Splitting strategy in priority order:
+Dzieli długi tekst na zachodzące na siebie fragmenty do osadzania opartego na pamięci. Strategia podziału w kolejności priorytetu:
 
-1. Split on paragraph boundaries (`\n\n`).
-2. If a paragraph exceeds `max_size`, split on sentence boundaries (`. ` / `.\n` for ASCII; `。` / `？` / `！` for CJK).
-3. If a sentence still exceeds `max_size`, hard-split at the character limit using char-boundary-safe slicing.
+1. Podział na granicach akapitów (`\n\n`).
+2. Jeśli akapit przekracza `max_size`, podział na granicach zdań (`. ` / `.\n` dla ASCII; `。` / `？` / `！` dla CJK).
+3. Jeśli zdanie nadal przekracza `max_size`, twardy podział na granicy znaków z użyciem cięcia bezpiecznego dla granic znaków.
 
-Overlap is applied by prepending the last `overlap` characters of the previous chunk. All length checks are char-based (not byte-based) for correct Unicode handling.
+Nachodzenie jest aplikowane przez dodawanie ostatnich `overlap` znaków poprzedniego fragmentu na początek. Wszystkie sprawdzenia długości są oparte na znakach (nie na bajtach) dla poprawnej obsługi Unicode.
 
 ```rust
 pub fn chunk_text(text: &str, max_size: usize, overlap: usize) -> Vec<String>
 ```
 
-### Consolidation engine (`consolidation.rs`)
+### Silnik konsolidacji (`consolidation.rs`)
 
-Runs as a periodic kernel-wide sweep (`kernel/background_lifecycle.rs::memory_consolidation`). Two phases per cycle:
+Uruchamiany jako okresowy cykl całego jądra (`kernel/background_lifecycle.rs::memory_consolidation`). Dwie fazy na cykl:
 
-**Phase 1 — Decay:** Reduces confidence of memories not accessed in the last 7 days by the configured `decay_rate` factor, floored at 0.1.
+**Faza 1 — Decay:** Zmniejsza pewność pamięci, do których nie uzyskano dostępu w ostatnich 7 dniach, o skonfigurowany współczynnik `decay_rate`, z podłogą na 0.1.
 
-**Phase 2 — Dedup/merge:** For each agent, loads up to `MAX_CANDIDATES_PER_AGENT` (500) active memories ordered by confidence DESC, then does an O(N²) pairwise Jaccard text-similarity comparison. Pairs exceeding `duplicate_threshold` (default 0.85, configurable via `[proactive_memory] duplicate_threshold`) are merged. At most `MAX_MERGES_PER_RUN` (100) merges are applied per cycle.
+**Faza 2 — Deduplikacja/scalanie:** Dla każdego agenta ładuje do `MAX_CANDIDATES_PER_AGENT` (500) aktywnych pamięci uporządkowanych DESC po pewności, następnie wykonuje O(N²) parowe porównanie podobieństwa tekstowego Jaccarda. Pary przekraczające `duplicate_threshold` (domyślnie 0.85, konfigurowalne przez `[proactive_memory] duplicate_threshold`) są scalane. Co najwyżej `MAX_MERGES_PER_RUN` (100) skaleni jest aplikowanych na cykl.
 
-Merge semantics when keeper absorbs a loser:
-- **`access_count`**: summed (keeper + loser)
-- **`metadata`**: JSON object union, keeper wins on key collision; non-object payloads on either side fall back to preserving the keeper verbatim
-- **`embedding`**: confidence-weighted running average across all absorbed losers (not pairwise re-blend)
-- **`confidence`**: `max(keeper, loser)`
+Semantyka scalania, gdy zachowujący absorbuje przegranego:
+- **`access_count`**: sumowane (zachowujący + przegrany)
+- **`metadata`**: unia obiektów JSON, zachowujący wygrywa przy kolizji kluczy; ładunki nieobiektywne po dowolnej stronie wracają do dosłownego zachowania zachowującego
+- **`embedding`**: ważona pewnością średnia krocząca po wszystkich pochłoniętych przegranych (nie parowe re-blendowanie)
+- **`confidence`**: `max(zachowujący, przegrany)`
 
-All merges in a run land in a single outer transaction (one fsync), preserving per-pair atomicity.
+Wszystkie scalenia w cyklu lądują w jednej zewnętrznej transakcji (jedno fsync), zachowując parową niepodzielność.
 
-The duplicate threshold is stored as `f32::to_bits` in an `AtomicU32` so `set_duplicate_threshold(&self, ...)` can update it through `Arc<MemorySubstrate>` during hot-reload without needing `&mut`.
+Próg duplikacji jest przechowywany jako `f32::to_bits` w `AtomicU32`, więc `set_duplicate_threshold(&self, ...)` może go zaktualizować przez `Arc<MemorySubstrate>` podczas hot-reload bez potrzeby `&mut`.
 
-> This engine is text-only (no per-call embeddings available in the global sweep). For embedding-aware per-agent dedup, use `ProactiveMemoryStore::consolidate` (the `/api/memory/agents/{id}/consolidate` route). Both engines read the same configured `duplicate_threshold` (H5).
+> Ten silnik jest wyłącznie tekstowy (brak osadzeń per wywołanie w globalnym cyklu). Dla deduplikacji świadomej osadzeń per agent, użyj `ProactiveMemoryStore::consolidate` (trasa `/api/memory/agents/{id}/consolidate`). Oba silniki czytają ten sam skonfigurowany `duplicate_threshold` (H5).
 
 ### Decay (`decay.rs`)
 
-Time-based soft-delete of stale memories based on scope TTL:
+Czasowe miękkie usuwanie przestarzałych pamięci na podstawie TTL zakresu:
 
-| Scope | Rule |
-|-------|------|
-| `user_memory` | Never decays |
-| `session_memory` | Soft-deleted after `session_ttl_days` of no access |
-| `agent_memory` | Soft-deleted after `agent_ttl_days` of no access |
+| Zakres | Reguła |
+|--------|--------|
+| `user_memory` | Nigdy nie wygasa |
+| `session_memory` | Miękko usunięta po `session_ttl_days` bez dostępu |
+| `agent_memory` | Miękko usunięta po `agent_ttl_days` bez dostępu |
 
-Timestamp comparisons use `datetime(accessed_at) < datetime(cutoff)` rather than lexicographic string comparison, which breaks when RFC3339 offsets or fractional-second precision diverge.
+Porównania sygnatur czasowych używają `datetime(accessed_at) < datetime(cutoff)` zamiast leksykograficznego porównania ciągów, które psuje się, gdy przesunięcia RFC3339 lub precyzja ułamków sekund się różnią.
 
-Accessing a memory resets the decay timer — `SemanticStore::recall_with_embedding` updates `accessed_at` on every read.
+Dostęp do pamięci resetuje licznik decay — `SemanticStore::recall_with_embedding` aktualizuje `accessed_at` przy każdym odczycie.
 
-`prune_soft_deleted_memories(pool, older_than_days)` performs the final hard `DELETE` of rows soft-deleted past the retention window, reclaiming the embedding BLOB (#3467).
+`prune_soft_deleted_memories(pool, older_than_days)` wykonuje końcowe twarde `DELETE` wierszy miękkousuniętych poza oknem retencji, odzyskując BLOB osadzania (#3467).
 
-### Goal run store (`goal_run_store.rs`)
+### Magazyn przebiegów celów (`goal_run_store.rs`)
 
-Persists active goal-run state so long-horizon goal runs survive daemon restarts and power loss. Thin CRUD layer; serialization between the kernel's `GoalRunState` and `GoalRunRow` happens in the kernel.
+Utrwala aktywny stan przebiegów celów, aby długookresowe przebiegi celów przetrwały restarty demona i utratę zasilania. Cienka warstwa CRUD; serializacja między `GoalRunState` jądra a `GoalRunRow` odbywa się w jądrze.
 
-- `save_run` uses `ON CONFLICT DO UPDATE` keyed on `goal_id` (at most one active run per goal). `created_at` is omitted from the INSERT list so the schema default fires once and is preserved across updates.
-- `load_all_runs` returns rows ordered by `started_at DESC` for deterministic boot-time recovery.
-- A `CHECK` constraint on the `phase` column rejects unknown phase values.
-- `wal_checkpoint` forces a PASSIVE WAL checkpoint after persisting terminal-phase runs, ensuring durability before the next automatic checkpoint.
+- `save_run` używa `ON CONFLICT DO UPDATE` z kluczem na `goal_id` (co najwyżej jeden aktywny przebieg na cel). `created_at` jest pominięte z listy INSERT, więc domyślne schematu odpala się raz i jest zachowywane przez aktualizacje.
+- `load_all_runs` zwraca wiersze uporządkowane DESC po `started_at` dla deterministycznego odzyskania przy starcie.
+- Ograniczenie `CHECK` na kolumnie `phase` odrzuca nieznane wartości faz.
+- `wal_checkpoint` wymusza PASSIVE WAL checkpoint po utrwaleniu przebiegów w fazie końcowej, zapewniając trwałość przed kolejnym automatycznym checkpointem.
 
-### HTTP vector store (`http_vector_store.rs`)
+### Magazyn wektorowy HTTP (`http_vector_store.rs`)
 
-Delegates vector operations to a remote HTTP/JSON service (Qdrant, Weaviate, custom microservice). Implements the `VectorStore` trait from `librefang-types`.
+Deleguje operacje wektorowe do zdalnej usługi HTTP/JSON (Qdrant, Weaviate, własna mikrousługa). Implementuje trait `VectorStore` z `librefang-types`.
 
-Expected remote API contract:
+Oczekiwana umowa API zdalnego:
 
-| Method | Path | Request body |
-|--------|------|-------------|
+| Metoda | Ścieżka | Treść żądania |
+|--------|---------|---------------|
 | POST | `/insert` | `{ id, embedding, payload, metadata }` |
 | POST | `/search` | `{ query_embedding, limit, filter? }` |
 | DELETE | `/delete` | `{ id }` |
 | POST | `/get_embeddings` | `{ ids }` |
 
-Hardening measures:
-- **Request timeout** (30s) and **connect timeout** (10s) prevent a stalled backend from pinning the `spawn_blocking` pool thread (this store sits on the hot recall/remember path).
-- **Response body cap** (`MAX_RESPONSE_BYTES` = 64 MiB) enforced both on the `Content-Length` fast path and in the streaming chunk loop, so a hostile/misbehaving backend cannot OOM the daemon via a slow unbounded body. Error-response bodies are also capped.
+Środki utwardzania:
+- **Limit czasu żądania** (30s) i **limit czasu połączenia** (10s) zapobiegają zablokowaniu wątku puli `spawn_blocking` przez opóźniony backend (ten magazyn leży na gorącej ścieżce odtwarzania/zapamiętywania).
+- **Limit treści odpowiedzi** (`MAX_RESPONSE_BYTES` = 64 MiB) egzekwowany zarówno na ścieżce szybkiej `Content-Length`, jak i w pętli strumieniowania fragmentów, więc wrogi/nieprawidłowo działający backend nie może spowodować OOM demona przez wolne nieograniczone ciało. Ciała odpowiedzi błędów są również limitowane.
 
-### Idempotency store (`idempotency.rs`)
+### Magazyn idempotencji (`idempotency.rs`)
 
-SQLite-backed Idempotency-Key cache shared by the API layer. The HTTP middleware semantics live in `librefang-api::idempotency`; this module provides the persistence shape so the API crate doesn't depend on `rusqlite` directly.
+Pamięć podręczna kluczy idempotencji wspierana przez SQLite współdzielona przez warstwę API. Semantyka middleware HTTP żyje w `librefang-api::idempotency`; ten moduł dostarcza kształt utrwalenia, aby crate API nie zależał bezpośrednio od `rusqlite`.
 
-- 24-hour replay window (`TTL_SECONDS = 86400`).
-- `lookup` opportunistically deletes expired rows and reports them as `Ok(None)`.
-- `put` uses `INSERT OR IGNORE` for first-writer-wins semantics under concurrent requests.
-- `prune_expired` is called opportunistically by the middleware so the table self-trims.
-- The `IdempotencyStore` trait is pluggable, allowing in-memory implementations for unit tests in the API crate.
+- 24-godzinne okno powtórki (`TTL_SECONDS = 86400`).
+- `lookup` oportunisticznie usuwa wygasłe wiersze i zgłasza je jako `Ok(None)`.
+- `put` używa `INSERT OR IGNORE` dla semantyki pierwszy-zapisuje-wygrywa pod współbieżnymi żądaniami.
+- `prune_expired` jest wywoływane oportunisticznie przez middleware, więc tabela samoistnie się przycina.
+- Trait `IdempotencyStore` jest podłączalny, pozwalając na implementacje w pamięci dla testów jednostkowych w crate API.
 
-Pool-exhaustion failures increment `librefang_memory_pool_get_failed_total` with `store` and `op` labels for operator visibility.
+Błędy wyczerpania puli zwiększają `librefang_memory_pool_get_failed_total` z etykietami `store` i `op` dla widoczności operatora.
 
-### Knowledge graph (`knowledge.rs`)
+### Graf wiedzy (`knowledge.rs`)
 
-SQLite-backed entity and relation store. Entities carry JSON properties; relations reference entities by name. Queries are scoped by `agent_id` to prevent cross-tenant relation leakage. The `query_graph` function parses relation references by name and surfaces corrupt entity properties rather than silently defaulting.
+Magazyn encji i relacji wspierany przez SQLite. Encje niosą właściwości JSON; relacje odwołują się do encji po nazwie. Zapytania są zakresowane przez `agent_id`, aby zapobiec cross-tenantowemu wyciekowi relacji. Funkcja `query_graph` parsuje odwołania relacji po nazwie i ujawnia uszkodzone właściwości encji zamiast domyślnego podmieniania.
 
-### Namespace ACL (`namespace_acl.rs`)
+### ACL przestrzeni nazw (`namespace_acl.rs`)
 
-Governs read/write access to memory namespaces. Execution flows through:
+Zarządza dostępem do odczytu/zapisu przestrzeni nazw pamięci. Wykonywanie płynie przez:
 
-1. API route handler (`memory_update`, `memory_query_relations`, etc.)
-2. `check_write` / `check_read` in this module
-3. `can_write` / `can_read` in `librefang-types::user_policy`
-4. `namespace_glob_matches` + `has_path_traversal` for pattern matching and security checks
+1. Obsługę trasy API (`memory_update`, `memory_query_relations`, itd.)
+2. `check_write` / `check_read` w tym module
+3. `can_write` / `can_read` w `librefang-types::user_policy`
+4. `namespace_glob_matches` + `has_path_traversal` dla dopasowywania wzorców i kontroli bezpieczeństwa
 
-Access denials go through `namespace_acl::deny`.
+Odmowy dostępu przechodzą przez `namespace_acl::deny`.
 
-### Proactive memory (`proactive`)
+### Pamięć proaktywna (`proactive`)
 
-mem0-style memory layer exposing:
-- `ProactiveMemory` — unified API: `search`, `add`, `get`, `list`
-- `ProactiveMemoryHooks` — auto-memorize / auto-retrieve hooks
-- `ProactiveMemoryStore` — implementation on top of `MemorySubstrate`
+Warstwa pamięci w stylu mem0 eksponująca:
+- `ProactiveMemory` — ujednolicone API: `search`, `add`, `get`, `list`
+- `ProactiveMemoryHooks` — hooki auto-memorizacji / auto-odtwarzania
+- `ProactiveMemoryStore` — implementacja na bazie `MemorySubstrate`
 
-Sub-modules: `chunker`, `consolidation`, `decay`, `migration`, `namespace_acl`, `prompt`, `provider`, `roster_store`, `session`.
+Podmoduły: `chunker`, `consolidation`, `decay`, `migration`, `namespace_acl`, `prompt`, `provider`, `roster_store`, `session`.
 
-## How other crates use this module
+## Jak inne craty używają tego modułu
 
-The agent loop and kernel are the primary consumers:
+Pętla agenta i jądro są głównymi konsumentami:
 
-- **Agent loop** (`src/agent_loop/`) reads/writes session messages via `Session::push_message`, `set_messages`, `mark_messages_mutated`, and persists interactions through `MemorySubstrate::remember` / `remember_with_embedding_async` / `save_session_async`.
-- **Kernel** (`librefang-kernel/`) persists workflow runs via `WorkflowStore::upsert_run` / `load_all_runs` / `wal_checkpoint`, records token usage via `UsageRecord`, and runs background consolidation/decay sweeps.
-- **API layer** (`src/routes/memory.rs`) routes through namespace ACL checks before touching the memory stores.
-- **Prompt assembly** (`src/agent_loop/prompt.rs`) uses `mark_messages_mutated` and `remember_interaction_best_effort` to persist agent interactions.
+- **Pętla agenta** (`src/agent_loop/`) odczytuje/zapisuje wiadomości sesji przez `Session::push_message`, `set_messages`, `mark_messages_mutated` i utrwala interakcje przez `MemorySubstrate::remember` / `remember_with_embedding_async` / `save_session_async`.
+- **Jądro** (`librefang-kernel/`) utrwala przebiegi workflow przez `WorkflowStore::upsert_run` / `load_all_runs` / `wal_checkpoint`, rejestruje użycie tokenów przez `UsageRecord` i uruchamia tła konsolidacji/decay.
+- **Warstwa API** (`src/routes/memory.rs`) kieruje przez kontrole ACL przestrzeni nazw przed dotknięciem magazynów pamięci.
+- **Składanie promptów** (`src/agent_loop/prompt.rs`) używa `mark_messages_mutated` i `remember_interaction_best_effort` do utrwalania interakcji agenta.
 
-## Error handling
+## Obsługa błędów
 
-All public methods return `LibreFangResult<T>`. SQLite operation failures map to `LibreFangError::memory(...)` or `LibreFangError::memory_msg(format!(...))` with context identifying the failing operation (e.g., `"channel instance default seed failed: {e}"`). Pool acquisition failures use `LibreFangError::memory(r2d2_error)`.
+Wszystkie publiczne metody zwracają `LibreFangResult<T>`. Błędy operacji SQLite mapują się na `LibreFangError::memory(...)` lub `LibreFangError::memory_msg(format!(...))` z kontekstem identyfikującym zawodzącą operację (np. `"channel instance default seed failed: {e}"`). Błędy uzyskania puli używają `LibreFangError::memory(r2d2_error)`.

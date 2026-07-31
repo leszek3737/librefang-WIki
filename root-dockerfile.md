@@ -2,104 +2,104 @@
 
 # Dockerfile
 
-The production container image for **librefang** — a Rust daemon with an embedded React dashboard. This is a three-stage multi-stage build that compiles the frontend, compiles the Rust binary with compile-time-embedded assets, and assembles a minimal runtime image.
+Obraz kontenera produkcyjny dla **librefang** — demona w języku Rust z osadzonym panelem React. Jest to trójetapowy, wieloetapowy build, który kompiluje frontend, kompiluje binarkę Rust z osadzonymi w czasie kompilacji zasobami i składa minimalny obraz środowiska uruchomieniowego.
 
 ---
 
-## Build Pipeline
+## Potok budowania
 
 ```mermaid
 flowchart LR
-    A["Stage 1: dashboard-builder
+    A["Etap 1: dashboard-builder
     node:20_20_2-alpine["20.20.2-alpine"]"] -->|"static/react"| C
-    B["Stage 2: builder
-    rust:1_94-slim-bookworm["1.94-slim-bookworm"]"] -->|"librefang binary"| C
+    B["Etap 2: builder
+    rust:1_94-slim-bookworm["1.94-slim-bookworm"]"] -->|"binarka librefang"| C
     B -->|"packages/"| C
-    C["Stage 3: runtime
+    C["Etap 3: runtime
     node:22.11.0-bookworm-slim"]
     D["deploy/
     docker-entrypoint_sh["docker-entrypoint.sh"]"] --> C
 ```
 
-### Stage 1 — Dashboard Builder (`dashboard-builder`)
+### Etap 1 — Builder dashboardu (`dashboard-builder`)
 
-Builds the React frontend that ships inside the Rust binary's static asset directory.
+Buduje frontend React, który jest dołączany do katalogu statycznych zasobów binarki Rust.
 
-| Decision | Rationale |
+| Decyzja | Uzasadnienie |
 |---|---|
-| `node:20.20.2-alpine` (pinned minor) | Reproducible builds months after a tag. A floating `node:20-alpine` could silently shift patch versions and produce a different builder image. Matches the Node 20 LTS used by CI (`.github/workflows/ci.yml`, `.github/workflows/dashboard-build.yml`). |
-| `corepack@latest` before `corepack prepare` | The keyring bundled in the Node base image goes stale as pnpm rotates signing keys, causing `"Internal Error: Cannot find matching keyid"`. Refreshing corepack first fixes this. |
-| `corepack prepare pnpm@10.33.0 --activate` | Bypasses `fetchLatestStableVersion2` (which flakes against the npm registry) by activating the exact version from `packageManager` in `package.json` directly. |
-| `pnpm install --frozen-lockfile --ignore-scripts` | Lockfile-strict install with postinstall scripts skipped for hermeticity. |
-| Node ≥ 20.19 required | Vite 8 / rolldown's optional native bindings declare `engines: ^20.19.0`. Without it, `pnpm install` silently skips the `linux-x64-musl` binding and `vite build` fails at require-time. |
+| `node:20.20.2-alpine` (zablokowany minor) | Powtarzalne buildy miesiące po oznaczeniu tagiem. Zmienny `node:20-alpine` mógłby po cichu zmienić wersje patch i wygenerować inny obraz buildera. Zgodny z Node 20 LTS używanym w CI (`.github/workflows/ci.yml`, `.github/workflows/dashboard-build.yml`). |
+| `corepack@latest` przed `corepack prepare` | Zestaw kluczy (keyring) dołączony do bazowego obrazu Node dezaktualizuje się, gdy pnpm rotuje klucze podpisywania, co powoduje `"Internal Error: Cannot find matching keyid"`. Odświeżenie corepack najpierw to naprawia. |
+| `corepack prepare pnpm@10.33.0 --activate` | Pomija `fetchLatestStableVersion2` (który zawodzi w rejestru npm), aktywując dokładną wersję z `packageManager` w `package.json` bezpośrednio. |
+| `pnpm install --frozen-lockfile --ignore-scripts` | Instalacja ze ścisłym lockfile'em z pominięciem skryptów postinstall dla hermetyzności. |
+| Node ≥ 20.19 wymagany | Opcjonalne natywne wiązania Vite 8 / rolldown deklarują `engines: ^20.19.0`. Bez tego `pnpm install` po cichu pomija wiązanie `linux-x64-musl`, a `vite build` zawodzi w czasie require. |
 
-**Output:** compiled React assets at `/build/static/react`, consumed by Stage 2.
+**Wynik:** skompilowane zasoby React w `/build/static/react`, konsumowane przez Etap 2.
 
-### Stage 2 — Rust Builder (`builder`)
+### Etap 2 — Builder Rust (`builder`)
 
-Compiles the `librefang` release binary.
+Kompiluje binarkę release `librefang`.
 
-| Decision | Rationale |
+| Decyzja | Uzasadnienie |
 |---|---|
-| `rust:1.94-slim-bookworm` (pinned minor) | Satisfies the workspace MSRV in `Cargo.toml` (`[workspace.package].rust-version = "1.94.1"`). Floating `rust:1-slim-bookworm` could land on a newer compiler without notice. |
-| `libdbus-1-dev` | Required by `libdbus-sys`, a transitive dependency of `keyring`'s `sync-secret-service` feature (added in #3180). Without it the build script panics with exit 101 — the same root cause as #3259, which blocked the v2026.4.27-beta6 image publish. |
-| Build cache mounts | `cargo/registry`, `cargo/git`, and `target` are mounted as BuildKit cache mounts so dependency compilation is cached across rebuilds. |
+| `rust:1.94-slim-bookworm` (zablokowany minor) | Spełnia MSRV workspace'u w `Cargo.toml` (`[workspace.package].rust-version = "1.94.1"`). Zmienny `rust:1-slim-bookworm` mógłby przyjąć nowszy kompilator bez ostrzeżenia. |
+| `libdbus-1-dev` | Wymagany przez `libdbus-sys`, transitywną zależność funkcji `sync-secret-service` pakietu `keyring` (dodaną w #3180). Bez tego skrypt builda panikuje z kodem wyjścia 101 — ta sama przyczyna co w #3259, która zablokowała publikację obrazu v2026.4.27-beta6. |
+| Mounty pamięci podręcznej buildu | `cargo/registry`, `cargo/git` i `target` są montowane jako mounty pamięci podręcznej BuildKit, aby kompilacja zależności była buforowana między ponownymi buildami. |
 
-#### Compile-time embedded assets
+#### Osadzone w czasie kompilacji zasoby
 
-Several crates use `include_dir!` / `include_str!` macros that require specific source trees to be present at build time. The Dockerfile copies exactly these subtrees (`.dockerignore` excludes the rest):
+Kilka crate'ów używa makr `include_dir!` / `include_str!`, które wymagają obecności konkretnych poddrzew źródłowych w czasie buildu. Dockerfile kopiuje dokładnie te poddrzewa (`.dockerignore` wyklucza resztę):
 
-| Source path | Embedded by | Failure without it |
+| Ścieżka źródłowa | Osadzane przez | Skutek braku |
 |---|---|---|
-| `sdk/python/librefang` | `librefang-channels` via `include_dir!("$CARGO_MANIFEST_DIR/../../sdk/python/librefang")` in `embedded_sdk.rs` (#5472) | Proc macro panic: `"sdk/python/librefang is not a directory"` |
-| `deploy/` | `librefang-api` via `include_str!("../../../deploy/...")` for observability stack configs (#3062) | `"couldn't read deploy/grafana/..."` |
-| `crates/librefang-api/static/react` | Copied from Stage 1 output | Frontend not served |
+| `sdk/python/librefang` | `librefang-channels` przez `include_dir!("$CARGO_MANIFEST_DIR/../../sdk/python/librefang")` w `embedded_sdk.rs` (#5472) | Panika proc macro: `"sdk/python/librefang is not a directory"` |
+| `deploy/` | `librefang-api` przez `include_str!("../../../deploy/...")` dla konfiguracji stosu observability (#3062) | `"couldn't read deploy/grafana/..."` |
+| `crates/librefang-api/static/react` | Skopiowane z wyniku Etapu 1 | Frontend nie jest serwowany |
 
-#### Build command
+#### Polecenie buildu
 
 ```bash
 cargo build --release --bin librefang --features telemetry
 ```
 
-Only `telemetry` is enabled — this is the full daemon image. Channel adapters run as out-of-process sidecars (#5408 / #5461), so the old `all-channels` / `core-channels` feature aliases no longer exist. This matches the CLI's default feature set.
+Tylko `telemetry` jest włączone — to pełny obraz demona. Adaptery kanałów działają jako boczne procesy (#5408 / #5461), więc stare aliasy funkcji `all-channels` / `core-channels` już nie istnieją. To odpowiada domyślnemu zestawowi funkcji CLI.
 
-The resulting binary is copied to `/usr/local/bin/librefang` to escape the cache-mounted `target/` directory.
+Wynikowa binarka jest kopiowana do `/usr/local/bin/librefang`, aby uciec z katalogu `target/` montowanego jako pamięć podręczna.
 
-### Stage 3 — Runtime Image
+### Etap 3 — Obraz środowiska uruchomieniowego
 
-| Base | `node:22.11.0-bookworm-slim` (pinned Node 22 LTS minor) |
+| Baza | `node:22.11.0-bookworm-slim` (zablokowany minor Node 22 LTS) |
 |---|---|
-| Rationale for pinning | A floating `node:lts-bookworm-slim` could quietly land on a new major when the `lts` alias rolls forward. |
+| Uzasadnienie blokowania | Zmienny `node:lts-bookworm-slim` mógłby po cichu przyjąć nowego majora, gdy alias `lts` się przesunie. |
 
-#### Runtime dependencies
+#### Zależności środowiska uruchomieniowego
 
-| Package | Reason |
+| Pakiet | Powód |
 |---|---|
-| `ca-certificates` | TLS verification for outbound HTTPS |
-| `curl` | Used by the `HEALTHCHECK` |
-| `python3`, `python3-venv` | Python SDK runtime support |
-| `libicu72` | ICU runtime for text processing |
-| `libdbus-1-3` | Runtime `.so` that `libdbus-sys` links against. The keyring init path runs early in boot; if the `.so` can't be resolved, the process exits 101. |
-| `gosu` | Privilege-drop tool used by `docker-entrypoint.sh` |
+| `ca-certificates` | Weryfikacja TLS dla wychodzącego HTTPS |
+| `curl` | Używany przez `HEALTHCHECK` |
+| `python3`, `python3-venv` | Wsparcie środowiska uruchomieniowego SDK Python |
+| `libicu72` | Środowisko uruchomieniowe ICU do przetwarzania tekstu |
+| `libdbus-1-3` | Runtime `.so`, z którym linkuje `libdbus-sys`. Ścieżka inicjalizacji keyring uruchamia się wcześnie przy starcie; jeśli `.so` nie może zostać rozwiązany, proces kończy z kodem 101. |
+| `gosu` | Narzędzie do porzucania uprawnień, używane przez `docker-entrypoint.sh` |
 
-#### Security posture
+#### Postawa bezpieczeństwa
 
-- A dedicated `librefang` user (uid/gid 1001) is created via `addgroup` / `adduser`.
-- CIS Docker Benchmark §4.1 compliance: the login shell is set to `/sbin/nologin` via `usermod`. The Dockerfile deliberately avoids a redundant `groupadd -r librefang && useradd -r ...` block (introduced by #3948) that collides with the already-created user — `groupadd` exits with code 9 ("group already exists"), breaking `docker build` on clean trees.
-- `/opt/librefang/packages` is chowned to the `librefang` user since `COPY` defaults to `root:root`.
+- Dedykowany użytkownik `librefang` (uid/gid 1001) jest tworzony przez `addgroup` / `adduser`.
+- Zgodność z CIS Docker Benchmark §4.1: powłoka logowania jest ustawiona na `/sbin/nologin` przez `usermod`. Dockerfile celowo unika zbędnego bloku `groupadd -r librefang && useradd -r ...` (wprowadzonego w #3948), który koliduje z już utworzonym użytkownikiem — `groupadd` kończy z kodem 9 ("group already exists"), psując `docker build` na czystych drzewach.
+- `/opt/librefang/packages` ma zmienionego właściciela na użytkownika `librefang`, ponieważ `COPY` domyślnie ustawia `root:root`.
 
 ---
 
-## Entrypoint and Command
+## Entrypoint i Command
 
 ```
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["librefang", "start", "--foreground"]
 ```
 
-The entrypoint (`deploy/docker-entrypoint.sh`) runs as **root** so it can chown bind-mounts and initialize the data directory before dropping privileges via `gosu`. The actual daemon runs as the `librefang` user.
+Entrypoint (`deploy/docker-entrypoint.sh`) działa jako **root**, aby mógł zmienić właściciela bind-mountów i zainicjować katalog danych przed porzuceniem uprawnień przez `gosu`. Właściwy demon działa jako użytkownik `librefang`.
 
-The entrypoint also rewrites `api_listen` based on the `$PORT` environment variable injected by Railway, Render, or Fly.
+Entrypoint przepisuje również `api_listen` na podstawie zmiennej środowiskowej `$PORT` wstrzykiwanej przez Railway, Render lub Fly.
 
 ---
 
@@ -110,35 +110,35 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
   CMD curl -fsS http://127.0.0.1:${PORT:-4545}/api/ready || exit 1
 ```
 
-| Aspect | Detail |
+| Aspekt | Szczegóły |
 |---|---|
-| Endpoint | `/api/ready` (not `/api/health`) — changed in #6633 |
-| Why readiness, not liveness | Docker's `HEALTHCHECK` does not restart unhealthy containers. Its consumer is Compose's `depends_on: condition: service_healthy` gate, which is readiness semantics: "may dependents start yet?" The old `/api/health` endpoint returns 200 even when its body reports `status: degraded`, so it could never fail the gate. |
-| Shell form (`CMD ...`) not exec form | Required so `${PORT:-4545}` expands at runtime from environment variables. |
-| Start period (20s) | Gives the daemon time to bind, run `librefang init` on first boot, and start the axum server. |
-| Kubernetes | Ignores `HEALTHCHECK` entirely. K8s probes are declared separately in `deploy/kubernetes/`. |
+| Endpoint | `/api/ready` (nie `/api/health`) — zmieniony w #6633 |
+| Dlaczego gotowość, a nie żywotność | Dockerowy `HEALTHCHECK` nie restartuje niezdrowych kontenerów. Jego konsument to bramka `depends_on: condition: service_healthy` w Compose, która ma semantykę gotowości: „czy zależne mogą już wystartować?". Stary endpoint `/api/health` zwraca 200 nawet gdy jego ciało raportuje `status: degraded`, więc nigdy nie mógł zawieść bramki. |
+| Forma powłoki (`CMD ...`) nie exec | Wymagana, aby `${PORT:-4545}` rozszerzało się w czasie uruchomienia ze zmiennych środowiskowych. |
+| Okres startowy (20s) | Daje demonowi czas na bindowanie, uruchomienie `librefang init` przy pierwszym starcie i uruchomienie serwera axum. |
+| Kubernetes | Całkowicie ignoruje `HEALTHCHECK`. Sondy K8s są deklarowane osobno w `deploy/kubernetes/`. |
 
 ---
 
-## Environment
+## Środowisko
 
-| Variable | Default | Purpose |
+| Zmienna | Domyślna | Przeznaczenie |
 |---|---|---|
-| `LIBREFANG_HOME` | `/data` | Data directory for persistent state |
-| `PORT` | `4545` (fallback) | Listen port, injected by PaaS providers. Expanded at runtime in the healthcheck and rewritten by the entrypoint. |
+| `LIBREFANG_HOME` | `/data` | Katalog danych dla trwałego stanu |
+| `PORT` | `4545` (fallback) | Port nasłuchiwania, wstrzykiwany przez dostawców PaaS. Rozszerzany w czasie uruchomienia w healthchecku i przepisywany przez entrypoint. |
 
 ---
 
-## Exposed Port
+## Eksponowany port
 
-`EXPOSE 4545` — the default API listen port. Override at runtime via `$PORT`.
+`EXPOSE 4545` — domyślny port nasłuchiwania API. Nadpisuj w czasie uruchomienia przez `$PORT`.
 
 ---
 
-## Key Invariants and Gotchas
+## Kluczowe niezmienniki i pułapki
 
-1. **Never unpin base image tags.** Every `FROM` line pins a specific minor. Floating tags (`node:20-alpine`, `rust:1-slim-bookworm`, `node:lts-*`) break reproducibility or risk silent major-version bumps.
-2. **`sdk/python/librefang` must be copied.** It's embedded at compile time. Only this subtree is needed; `.dockerignore` excludes the rest of `sdk/`.
-3. **`deploy/` must be copied into the builder.** Observability configs (Prometheus, Tempo, OTEL Collector, Grafana) are embedded via `include_str!`. `flake.nix` lists the same paths in its source fileset.
-4. **Don't re-add the `groupadd`/`useradd` block.** See #3948 — it collides with the existing `librefang` user and breaks the build.
-5. **`--ignore-scripts` is intentional** in the dashboard pnpm install. Removing it reintroduces non-hermetic postinstall side effects.
+1. **Nigdy nie odblokowuj tagów obrazów bazowych.** Każda linia `FROM` blokuje konkretnego minora. Zmienne tagi (`node:20-alpine`, `rust:1-slim-bookworm`, `node:lts-*`) psują powtarzalność lub ryzykują ciche przeskoki wersji major.
+2. **`sdk/python/librefang` musi być skopiowane.** Jest osadzane w czasie kompilacji. Potrzebne jest tylko to poddrzewo; `.dockerignore` wyklucza resztę `sdk/`.
+3. **`deploy/` musi być skopiowane do buildera.** Konfiguracje observability (Prometheus, Tempo, OTEL Collector, Grafana) są osadzane przez `include_str!`. `flake.nix` wymienia te same ścieżki w swoim zestawie plików źródłowych.
+4. **Nie dodawaj ponownie bloku `groupadd`/`useradd`.** Patrz #3948 — koliduje z istniejącym użytkownikiem `librefang` i psuje build.
+5. **`--ignore-scripts` jest celowe** w instalacji pnpm dashboardu. Usunięcie reintrodukuje niehermetyczne efekty uboczne postinstall.

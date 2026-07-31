@@ -1,95 +1,95 @@
-# docs — superpowers
+# docs — supermoce
 
-# `docs/superpowers` Module
+# Moduł `docs/superpowers`
 
-Planning and design documentation for substantial feature work. This module holds two artifact types—**plans** and **specs**—that together define how features are designed, scoped, and implemented before code is written.
+Dokumentacja planowania i projektowania dla istotnych prac nad funkcjonalnościami. Ten moduł zawiera dwa rodzaje artefaktów — **plany** i **specyfikacje** — które wspólnie określają, jak funkcjonalności są projektowane, zakreskowane i implementowane przed napisaniem kodu.
 
 ---
 
-## Module Structure
+## Struktura modułu
 
 ```
 docs/superpowers/
-├── plans/      # Task-by-task implementation roadmaps
-└── specs/      # Architecture and design decisions
+├── plans/      # Trasy wdrożenia krok po kroku
+└── specs/      # Decyzje architektoniczne i projektowe
 ```
 
-Each document is dated (`YYYY-MM-DD-<slug>.md`) and keyed to a feature branch. The date links the plan to its corresponding spec and vice versa.
+Każdy dokument jest oznaczony datą (`YYYY-MM-DD-<slug>.md`) i powiązany z gałęzią funkcjonalności. Data łączy plan z odpowiadającą mu specyfikacją i odwrotnie.
 
 ---
 
-## Document Types
+## Rodzaje dokumentów
 
-### Specs (`specs/`)
+### Specyfikacje (`specs/`)
 
-A spec is the architectural source of truth for a feature. It captures decisions before implementation begins. A typical spec contains:
+Specyfikacja jest architektonicznym źródłem prawdy dla funkcjonalności. Przechwytuje decyzje przed rozpoczęciem implementacji. Typowa specyfikacja zawiera:
 
-- **Summary** — one-paragraph description of the feature
-- **Goals / Non-Goals** — scoping boundaries
-- **Decisions table** — key design choices with rationale (e.g., where logic lives, blocking vs. non-blocking, discovery vs. config)
-- **Architecture** — dependency relationships, new/modified files
-- **Data structures** — Rust trait definitions, config types, enums
-- **Flow diagrams** — initial connect, auth flow, token refresh (often as ASCII art)
-- **API contracts** — endpoint signatures, request/response shapes
-- **Testing strategy** — unit, integration, manual
-- **Open questions** — unresolved items needing verification during implementation
+- **Podsumowanie** — jednoparagrafowy opis funkcjonalności
+- **Cele / Poza zakresem** — granice zakreskowania
+- **Tabela decyzji** — kluczowe wybory projektowe z uzasadnieniem (np. gdzie znajduje się logika, blokujące vs nieblokujące, odkrywanie vs konfiguracja)
+- **Architektura** — relacje zależności, nowe/modyfikowane pliki
+- **Struktury danych** — definicje cech (traits) w Ruście, typy konfiguracji, enumy
+- **Diagramy przepływu** — początkowe połączenie, przepływ uwierzytelniania, odświeżanie tokenów (często jako ASCII art)
+- **Kontrakty API** — sygnatury punktów końcowych, kształty żądań/odpowiedzi
+- **Strategia testowania** — jednostkowe, integracyjne, ręczne
+- **Otwarte pytania** — nierozwiązane kwestie wymagające weryfikacji podczas implementacji
 
-### Plans (`plans/`)
+### Plany (`plans/`)
 
-A plan is the executable breakdown of a spec into discrete tasks. Plans are designed to be consumed by agentic workers (subagents or executing-plans workflows) and follow a strict format:
+Plan to wykonalny podział specyfikacji na dyskretne zadania. Plany są zaprojektowane do konsumpcji przez agentów wykonujących (podagentów lub przepływy pracy executing-plans) i following a strict format:
 
-- **Header directive** — tells workers which skill to use for implementation
-- **Goal & Architecture summary** — brief recap linking back to the spec
-- **File Map** — tables of new and modified files with their responsibilities
-- **Tasks** — numbered, each containing:
-  - Files affected (with line numbers where applicable)
-  - Checkbox-tracked steps (`- [ ]`)
-  - Inline code blocks showing exact additions or changes
-  - Verification commands (`cargo build`, `cargo test`, `cargo clippy`)
-  - Git commit messages
+- **Dyrektywa nagłówka** — informuje agentów, jakiej umiejętności użyć do implementacji
+- **Cel i podsumowanie architektury** — krótkie przypomnienie odsyłające do specyfikacji
+- **Mapa plików** — tabele nowych i modyfikowanych plików z ich odpowiedzialnościami
+- **Zadania** — numerowane, każde zawiera:
+  - Dotyczone pliki (z numerami linii, jeśli ma to zastosowanie)
+  - Kroki śledzone checkboxami (`- [ ]`)
+  - Wbudowane bloki kodu pokazujące dokładne dodania lub zmiany
+  - Polecenia weryfikacji (`cargo build`, `cargo test`, `cargo clippy`)
+  - Komunikaty commitów git
 
-Tasks build on each other sequentially. A task isn't considered done until its verification command passes.
-
----
-
-## Working With These Documents
-
-### For Implementers
-
-1. Read the spec first to understand *why* decisions were made
-2. Follow the plan task-by-task, checking off steps as you go
-3. Run the verification command after each task before committing
-4. Use the commit message at the end of each task verbatim
-
-Plans reference exact line numbers in existing code. If line numbers have drifted due to other changes, locate the referenced symbol or struct by name instead.
-
-### Delta Tasks
-
-Plans may include a **DELTA task** at the end that supersedes earlier tasks. This happens when implementation reveals that a design assumption was wrong. A delta task explicitly states what it replaces and why.
-
-For example, in the MCP OAuth Discovery plan, **Task 12 (DELTA)** changes the OAuth flow from daemon-initiated (localhost callback listener) to UI-initiated (callback routed through the API server). It supersedes the auth flow logic from Tasks 5–7 because the original design's ephemeral localhost port was unreachable in Docker deployments.
-
-When a delta exists, read it carefully before implementing the tasks it modifies.
+Zadania budują się na siebie sekwencyjnie. Zadanie nie jest uznane za zakończone, dopóki jego polecenie weryfikacji nie przejdzie.
 
 ---
 
-## Key Conventions
+## Praca z tymi dokumentami
 
-### Plan Header Format
+### Dla implementatorów
 
-Every plan starts with this directive block:
+1. Najpierw przeczytaj specyfikację, aby zrozumieć *dlaczego* podjęto decyzje
+2. Podążaj za planem zadanie po zadaniu, odznaczając kroki w miarę postępu
+3. Uruchom polecenie weryfikacji po każdym zadaniu przed commitem
+4. Użyj komunikatu commitu na końcu każdego zadania dosłownie
+
+Plany odnoszą się do dokładnych numerów linii w istniejącym kodzie. Jeśli numery linii uległy przesunięciu z powodu innych zmian, zlokalizuj referencyjny symbol lub strukturę po nazwie.
+
+### Zadania delta
+
+Plany mogą zawierać **zadanie DELTA** na końcu, które nadpisuje wcześniejsze zadania. Dzieje się tak, gdy implementacja ujawnia, że założenie projektowe było błędne. Zadanie delta jawnie określa, co zastępuje i dlaczego.
+
+Na przykład w planie MCP OAuth Discovery **Zadanie 12 (DELTA)** zmienia przepływ OAuth z inicjowanego przez demona (lokalny listener callback) na inicjowany przez UI (callback kierowany przez serwer API). Nadpisuje logikę przepływu uwierzytelniania z Zadań 5–7, ponieważ efemeryczny lokalny port w oryginalnym projekcie był nieosiągalny w wdrożeniach Docker.
+
+Gdy istnieje delta, przeczytaj ją uważnie przed implementacją zadań, które modyfikuje.
+
+---
+
+## Kluczowe konwencje
+
+### Format nagłówka planu
+
+Każdy plan zaczyna się od tego bloku dyrektyw:
 
 ```markdown
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
-> (recommended) or superpowers:executing-plans to implement this plan task-by-task.
-> Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Dla agentów wykonujących:** WYMAGANA POD-UMIEJĘTNOŚĆ: Użyj superpowers:subagent-driven-development
+> (zalecana) lub superpowers:executing-plans, aby zaimplementować ten plan zadanie po zadaniu.
+> Kroki używają składni checkboxa (`- [ ]`) do śledzenia.
 ```
 
-This signals that the plan is structured for automated execution, not just human reading.
+To sygnalizuje, że plan jest ustrukturyzowany do automatycznego wykonania, a nie tylko do czytania przez człowieka.
 
-### Commit Messages
+### Komunikaty commitów
 
-Plans specify exact `git commit` commands at the end of each task. These follow conventional commit format scoped to the crate:
+Plany określają dokładne polecenia `git commit` na końcu każdego zadania. Te stosują konwencję conventional commit z zakresem crate:
 
 ```
 feat(runtime): add mcp_oauth module with WWW-Authenticate parser and core types
@@ -97,39 +97,39 @@ feat(kernel): implement KernelOAuthProvider with vault storage and PKCE flow
 feat(api): add MCP OAuth auth endpoints and auth state in server list
 ```
 
-### Verification Gates
+### Bramki weryfikacji
 
-Every task ends with at least one of:
+Każde zadanie kończy się co najmniej jednym z:
 
-- `cargo build --workspace --lib` — compiles
-- `cargo test --lib -p <crate>` — unit tests pass
-- `cargo test --workspace` — full suite passes
-- `cargo clippy --workspace --all-targets -- -D warnings` — no warnings
-- `npm run build` — dashboard builds
+- `cargo build --workspace --lib` — kompilacja
+- `cargo test --lib -p <crate>` — testy jednostkowe przechodzą
+- `cargo test --workspace` — pełna suita przechodzi
+- `cargo clippy --workspace --all-targets -- -D warnings` — brak ostrzeżeń
+- `npm run build` — dashboard się buduje
 
-The final task in a plan is typically a full verification pass across build, test, and clippy.
-
----
-
-## Example: MCP OAuth Discovery
-
-The current artifacts in this module (`2026-04-12-mcp-oauth-discovery`) illustrate the full pattern:
-
-| Artifact | Content |
-|----------|---------|
-| **Spec** | Trait-based injection design for OAuth on MCP Streamable HTTP connections. Decides runtime defines `McpOAuthProvider` trait, kernel implements it. Three-tier metadata discovery (WWW-Authenticate → .well-known → config.toml). UI-driven auth flow with callback through API port 4545. |
-| **Plan** | 12 tasks (11 + 1 delta) spanning 4 crates: `librefang-types`, `librefang-runtime`, `librefang-kernel`, `librefang-api`, plus the React dashboard. Starts with config types, builds up through the runtime trait and parser, kernel implementation, API endpoints, and ends with integration tests and full verification. |
-
-The plan demonstrates how a design spec translates into concrete, ordered, verifiable implementation steps.
+Ostatnie zadanie w planie to zazwyczaj pełne przejście weryfikacji przez build, testy i clippy.
 
 ---
 
-## Cross-Crate Patterns Visible in These Docs
+## Przykład: MCP OAuth Discovery
 
-The specs and plans in this module document several architectural patterns used across the codebase:
+Obecne artefakty w tym module (`2026-04-12-mcp-oauth-discovery`) ilustrują pełny wzorzec:
 
-- **Trait injection** — Runtime crates define traits (`McpOAuthProvider`); kernel crates provide implementations. This avoids circular dependencies while keeping logic testable in isolation.
-- **KernelHandle pattern** — Runtime defines interfaces, kernel wires them to concrete infrastructure (vault, HTTP, extensions).
-- **Three-tier discovery** — Prefer protocol-native discovery (`WWW-Authenticate`, `.well-known`), fall back to explicit config. Config overrides discovery where both exist.
-- **Non-blocking daemon startup** — Long-running operations (browser auth) don't block boot. The daemon marks state and continues; completion is asynchronous.
-- **Vault key namespacing** — Secrets stored with prefixed keys (`mcp_oauth:{url}:access_token`) to avoid collisions across features.
+| Artefakt | Zawartość |
+|----------|-----------|
+| **Specyfikacja** | Projekt wstrzykiwania oparty na cechach (traits) dla OAuth na połączeniach MCP Streamable HTTP. Decyduje, że runtime definiuje cechę `McpOAuthProvider`, a jądro ją implementuje. Trójwarstwowe odkrywanie metadanych (WWW-Authenticate → .well-known → config.toml). Przepływ uwierzytelniania inicjowany przez UI z callback przez port API 4545. |
+| **Plan** | 12 zadań (11 + 1 delta) obejmujących 4 craty: `librefang-types`, `librefang-runtime`, `librefang-kernel`, `librefang-api`, plus dashboard React. Zaczyna się od typów konfiguracji, buduje się przez cechę runtime i parser, implementację jądra, punkty końcowe API, a kończy testami integracyjnymi i pełną weryfikacją. |
+
+Plan pokazuje, jak specyfikacja projektowa tłumaczy się na konkretne, uporządkowane, weryfikowalne kroki implementacji.
+
+---
+
+## Wzorce wielocratowe widoczne w tych dokumentach
+
+Specyfikacje i plany w tym module dokumentują kilka wzorców architektonicznych używanych w całej bazie kodu:
+
+- **Wstrzykiwanie przez cechy (trait injection)** — Craty runtime definiują cechy (`McpOAuthProvider`); craty jądra dostarczają implementacje. Pozwala to uniknąć cyklicznych zależności, zachowując testowalność logiki w izolacji.
+- **Wzorzec KernelHandle** — Runtime definiuje interfejsy, jądro łączy je z konkretną infrastrukturą (vault, HTTP, rozszerzenia).
+- **Trójwarstwowe odkrywanie** — Preferuj odkrywanie natywne dla protokołu (`WWW-Authenticate`, `.well-known`), z fallbackiem do jawnej konfiguracji. Konfiguracja nadpisuje odkrywanie tam, gdzie istnieją oba.
+- **Nieblokujący start demona** — Długotrwałe operacje (uwierzytelnianie w przeglądarce) nie blokują uruchamiania. Demon oznacza stan i kontynuuje; ukończenie jest asynchroniczne.
+- **Przestrzenie nazw kluczy vault** — Sekrety przechowywane z kluczami z prefiksami (`mcp_oauth:{url}:access_token`), aby uniknąć kolizji między funkcjonalnościami.

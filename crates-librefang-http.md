@@ -2,71 +2,71 @@
 
 # librefang-http
 
-Centralized HTTP client builder providing proxy support and TLS fallback for all outbound connections in LibreFang.
+Centralizowany kreator klienta HTTP zapewniający obsługę proxy i awaryjną konfigurację TLS dla wszystkich połączeń wychodzących w LibreFang.
 
-## Purpose
+## Przeznaczenie
 
-Every outbound HTTP request in LibreFang should flow through a client built by this crate. It solves two problems that would otherwise plague the codebase:
+Każde żądanie HTTP wychodzące z LibreFang powinno przechodzić przez klienta utworzonego przez ten crate. Rozwiązuje dwa problemy, które w przeciwnym razie mogłyby dotknąć kodu:
 
-1. **Missing system CA certificates** — On minimal Docker images, musl/Alpine builds, and Termux/Android, reqwest's default TLS initialization panics because the system cert store is empty. This crate always seeds the trust store with bundled Mozilla CA roots (`webpki-roots`) and supplements them with whatever system certificates are available.
+1. **Brak systemowych certyfikatów CA** — Na minimalistycznych obrazach Docker, kompilacjach musl/Alpine oraz w Termux/Android domyślne inicjalizacja TLS biblioteki reqwest powoduje panikę, ponieważ systemowy magazyn certyfikatów jest pusty. Ten crate zawsze zasiewa magazyn zaufania załączonymi korzeniami CA Mozilli (`webpki-roots`) i uzupełnia je o dostępne certyfikaty systemowe.
 
-2. **Proxy consistency** — Proxy settings from `config.toml` need to reach every `reqwest::Client` uniformly, including crates that build their own clients without reading the global config. This is solved by exporting config values as environment variables during bootstrap, so reqwest's built-in env-var detection picks them up everywhere.
+2. **Spójność proxy** — Ustawienia proxy z `config.toml` muszą dotrzeć do każdego `reqwest::Client` jednolicie, w tym do crate'ów, które tworzą własnych klientów bez odczytywania globalnej konfiguracji. Rozwiązano to poprzez eksportowanie wartości konfiguracyjnych jako zmiennych środowiskowych podczas uruchamiania, dzięki czemu wbudowana detekcja zmiennych środowiskowych reqwest je wykrywa wszędzie.
 
-## TLS Configuration
+## Konfiguracja TLS
 
-TLS is configured once and cached in a `OnceLock`. The initialization seeds the root store in two layers:
+TLS jest konfigurowany raz i buforowany w `OnceLock`. Inicjalizacja zasiewa magazyn korzeni w dwóch warstwach:
 
 ```rust,ignore
-// Layer 1: Bundled Mozilla CAs — always present, no runtime dependency
+// Warstwa 1: Dołączone certyfikaty CA Mozilli — zawsze obecne, brak zależności środowiska wykonawczego
 root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-// Layer 2: System certs — adds org-internal CAs, keeps anchors current
+// Warstwa 2: Certyfikaty systemowe — dodaje wewnętrzne certyfikaty organizacyjne, utrzymuje aktualność kotwic
 let result = rustls_native_certs::load_native_certs();
 root_store.add_parsable_certificates(result.certs);
 ```
 
-The Mozilla roots are seeded first so that public CAs are always trusted regardless of system state. System certificates supplement this for corporate environments with private CAs. If no system certs are found, a debug log is emitted and the Mozilla roots carry the load.
+Korzenie Mozilli są zasiewane jako pierwsze, aby publiczne CA były zawsze zaufane niezależnie od stanu systemu. Certyfikaty systemowe uzupełniają je w środowiskach korporacyjnych z prywatnymi CA. Jeśli nie znaleziono certyfikatów systemowych, emitowany jest dziennik debugowania, a korzenie Mozilli przejmują ciężar.
 
-Call `tls_config()` to get a clone of the cached `rustls::ClientConfig`. The first invocation performs the cert scan; subsequent calls return the cached value.
+Wywołaj `tls_config()`, aby uzyskać kopię buforowanej `rustls::ClientConfig`. Pierwsze wywołanie wykonuje skanowanie certyfikatów; kolejne wywołania zwracają buforowaną wartość.
 
-## Proxy Configuration
+## Konfiguracja proxy
 
-### Global State
+### Stan globalny
 
-Proxy settings live in a global `RwLock<Option<ProxyConfig>>`:
+Ustawienia proxy znajdują się w globalnym `RwLock<Option<ProxyConfig>>`:
 
-| State | Behavior |
+| Stan | Zachowanie |
 |---|---|
-| `None` (before `init_proxy`) | `active_proxy()` returns `ProxyConfig::default()` (all fields `None`) |
-| `Some(cfg)` | All builders use the configured values |
+| `None` (przed `init_proxy`) | `active_proxy()` zwraca `ProxyConfig::default()` (wszystkie pola `None`) |
+| `Some(cfg)` | Wszystkie kreatory używają skonfigurowanych wartości |
 
-### Bootstrap vs. Hot-Reload
+### Uruchomienie vs. hot-reload
 
-`init_proxy(cfg)` is called once at daemon startup with the `[proxy]` section from `config.toml`. It can also be called during config hot-reload. The two paths differ:
+`init_proxy(cfg)` jest wywoływane raz podczas uruchamiania demona z sekcją `[proxy]` z `config.toml`. Może być również wywołane podczas hot-reload konfiguracji. Ścieżki te różnią się:
 
-**Initial call** (`GLOBAL_PROXY` is `None`):
-- Writes `HTTP_PROXY`/`http_proxy`, `HTTPS_PROXY`/`https_proxy`, and `NO_PROXY`/`no_proxy` environment variables.
-- This happens before the Tokio runtime spawns worker threads, so the `unsafe { std::env::set_var(...) }` calls cannot race.
-- Proxy URLs are validated (`http://`, `https://`, `socks5://`, `socks5h://`). Invalid schemes are logged with a redacted URL and skipped.
+**Pierwsze wywołanie** (`GLOBAL_PROXY` to `None`):
+- Zapisuje zmienne środowiskowe `HTTP_PROXY`/`http_proxy`, `HTTPS_PROXY`/`https_proxy` oraz `NO_PROXY`/`no_proxy`.
+- Dzieje się to przed uruchomieniem wątków roboczych Tokio, więc wywołania `unsafe { std::env::set_var(...) }` nie mogą się ścigać.
+- Adresy URL proxy są walidowane (`http://`, `https://`, `socks5://`, `socks5h://`). Nieprawidłowe schematy są logowane z zanonimizowanym adresem URL i pomijane.
 
-**Hot-reload call** (`GLOBAL_PROXY` already set):
-- Updates `GLOBAL_PROXY` only.
-- Does **not** call `std::env::set_var`, which is unsound in a multi-threaded context. New clients built after hot-reload will pick up the updated config from `active_proxy()`.
+**Wywołanie hot-reload** (`GLOBAL_PROXY` już ustawione):
+- Aktualizuje tylko `GLOBAL_PROXY`.
+- **Nie** wywołuje `std::env::set_var`, co jest niebezpieczne w kontekście wielowątkowym. Nowi klienci utworzeni po hot-reload odczytają zaktualizowaną konfigurację z `active_proxy()`.
 
-### Proxy Resolution Order
+### Kolejność rozwiązywania proxy
 
-When building a client, `build_http_client` applies proxy settings from `ProxyConfig` fields. If a field is `None` (not set in config), reqwest falls back to its built-in environment variable detection — which the bootstrap call has already populated. This avoids double-application and ensures that env-var-only consumers (like `librefang-channels`) also respect the proxy settings.
+Podczas tworzenia klienta `build_http_client` aplikuje ustawienia proxy z pól `ProxyConfig`. Jeśli pole to `None` (nie ustawione w konfiguracji), reqwest cofa się do wbudowanej detekcji zmiennych środowiskowych — którą wywołanie uruchamiające już wypełniło. Zapobiega to podwójnemu zastosowaniu i zapewnia, że konsumenci polegający wyłącznie na zmiennych środowiskowych (jak `librefang-channels`) również respektują ustawienia proxy.
 
-## Client Builders
+## Kreatory klientów
 
 ```mermaid
 graph TD
-    PC["proxied_client_builder()<br/>Global proxy + TLS, 10-redirect policy"]
-    PCF["proxied_client_fallback()<br/>+ 300s total timeout"]
-    OCB["oauth_client_builder()<br/>Redirects disabled"]
-    PCO["proxied_client_with_override()<br/>Per-provider proxy URL"]
-    BHC["build_http_client(&ProxyConfig)<br/>Lowest level: explicit config only"]
-    TLS["tls_config()<br/>Cached rustls config"]
+    PC["proxied_client_builder()<br/>Globalne proxy + TLS, polityka 10 przekierowań"]
+    PCF["proxied_client_fallback()<br/>+ 300s całkowity timeout"]
+    OCB["oauth_client_builder()<br/>Przekierowania wyłączone"]
+    PCO["proxied_client_with_override()<br/>Adres URL proxy per dostawca"]
+    BHC["build_http_client(&ProxyConfig)<br/>Najniższy poziom: tylko jawna konfiguracja"]
+    TLS["tls_config()<br/>Buforowana konfiguracja rustls"]
 
     PC --> BHC
     PCF --> PC
@@ -75,44 +75,44 @@ graph TD
     PCO --> TLS
 ```
 
-### Choosing the Right Builder
+### Wybór odpowiedniego kreatora
 
-| Function | When to use | Redirect policy | Timeout |
+| Funkcja | Kiedy użyć | Polityka przekierowań | Timeout |
 |---|---|---|---|
-| `proxied_client()` | General outbound requests (drivers, pairing, token refresh) | Default (10 hops) | connect: 30s, read: 300s |
-| `proxied_client_builder()` | When you need to customize the builder before `.build()` | Default (10 hops) | connect: 30s, read: 300s |
-| `oauth_client()` / `oauth_client_builder()` | OAuth flows (metadata discovery, token exchange, DCR, refresh) | **Disabled** | connect: 30s, read: 300s |
-| `proxied_client_fallback()` | Fallback when a per-provider proxy override is invalid | Default (10 hops) | connect: 30s, read: 300s, **total: 300s** |
-| `proxied_client_with_override(url)` | Per-provider proxy override (bypasses global config) | Default (10 hops) | connect: 30s, read: 300s |
-| `build_http_client(&proxy)` | Lowest level — explicit `ProxyConfig`, no global read | Default (10 hops) | connect: 30s, read: 300s |
+| `proxied_client()` | Ogólne żądania wychodzące (sterowniki, parowanie, odświeżanie tokenów) | Domyślna (10 przeskoków) | connect: 30s, read: 300s |
+| `proxied_client_builder()` | Gdy potrzebujesz dostosować kreator przed `.build()` | Domyślna (10 przeskoków) | connect: 30s, read: 300s |
+| `oauth_client()` / `oauth_client_builder()` | Przepływy OAuth (odnajdywanie metadanych, wymiana tokenów, DCR, odświeżanie) | **Wyłączona** | connect: 30s, read: 300s |
+| `proxied_client_fallback()` | Awaryjny, gdy nadpisanie proxy per dostawca jest nieprawidłowe | Domyślna (10 przeskoków) | connect: 30s, read: 300s, **całkowity: 300s** |
+| `proxied_client_with_override(url)` | Nadpisanie proxy per dostawca (pomija globalną konfigurację) | Domyślna (10 przeskoków) | connect: 30s, read: 300s |
+| `build_http_client(&proxy)` | Najniższy poziom — jawny `ProxyConfig`, brak odczytu globalnego | Domyślna (10 przeskoków) | connect: 30s, read: 300s |
 
-### Backward-Compatible Aliases
+### Aliasy wstecznie kompatybilne
 
-`client_builder()` and `new_client()` are aliases for `proxied_client_builder()` and `proxied_client()` respectively. Prefer the `proxied_*` names in new code.
+`client_builder()` i `new_client()` to aliasy odpowiednio dla `proxied_client_builder()` i `proxied_client()`. W nowym kodzie preferuj nazwy `proxied_*`.
 
-## Security: Why OAuth Clients Disable Redirects
+## Bezpieczeństwo: Dlaczego klienci OAuth wyłączają przekierowania
 
-OAuth machine-to-machine endpoints return JSON directly and have no legitimate reason to emit a 3xx mid-flow. Following a redirect on these calls is a security vulnerability:
+Punktowe końcowe machine-to-machine OAuth zwracają JSON bezpośrednio i nie mają uzasadnionego powodu do emitowania 3xx w trakcie przepływu. Podążanie za przekierowaniem w tych wywołaniach stanowi podatność bezpieczeństwa:
 
-- A **307/308** on a credential-bearing POST replays the request body (`client_secret`, `code_verifier`, `refresh_token`) to the redirect target.
-- A **302** on discovery becomes a blind SSRF / cloud-metadata pivot.
+- **307/308** na POST z danymi autoryzacyjnymi powtarza treść żądania (`client_secret`, `code_verifier`, `refresh_token`) do celu przekierowania.
+- **302** na odnajdywanie staje się ślepym obrotem SSRF / cloud-metadata.
 
-The per-URL SSRF guard validates only the initial URL — never the redirect `Location` header — so it cannot catch this class of attack. `oauth_client_builder()` calls `.redirect(reqwest::redirect::Policy::none())` to close the gap. Use it for **every** outbound OAuth request.
+Straż SSRF per adres URL waliduje tylko początkowy adres URL — nigdy nagłówek `Location` przekierowania — więc nie może przechwycić tej klasy ataków. `oauth_client_builder()` wywołuje `.redirect(reqwest::redirect::Policy::none())`, aby zamknąć lukę. Używaj go dla **każdego** wychodzącego żądania OAuth.
 
-## Default Timeouts
+## Domyślne timeouty
 
-`build_http_client` sets two timeouts on every builder:
+`build_http_client` ustawia dwa timeouty na każdym kreatorze:
 
-- **`connect_timeout`: 30s** — Caps the TCP/TLS handshake. Generous enough for slow international links to LLM providers.
-- **`read_timeout`: 300s** — Per-read inactivity timeout, not total request time. Streaming LLM responses keep this alive as long as tokens arrive; a true upstream stall triggers it. Callers can override via `.timeout()`, `.connect_timeout()`, etc. on the returned builder.
+- **`connect_timeout`: 30s** — Ogranicza czas handshake'u TCP/TLS. Wystarczająco hojny dla wolnych połączeń międzynarodowych do dostawców LLM.
+- **`read_timeout`: 300s** — Timeout nieaktywności per odczyt, a nie całkowity czas żądania. Strumieniowe odpowiedzi LLM utrzymują go aktywnym, dopóki napływają tokeny; prawdziwe zatrzymanie nadrzędnego uruchamia go. Wywołujący mogą nadpisać poprzez `.timeout()`, `.connect_timeout()` itd. na zwróconym kreatorze.
 
-## Usage Patterns
+## Wzorce użycia
 
-### Standard client for an LLM driver
+### Standardowy klient dla sterownika LLM
 
 ```rust
 let client = librefang_http::proxied_client();
-// or with per-provider proxy override:
+// lub z nadpisaniem proxy per dostawca:
 let client = librefang_http::proxied_client_with_override(proxy_url)
     .unwrap_or_else(|_| {
         tracing::warn!("invalid provider proxy, falling back");
@@ -120,29 +120,29 @@ let client = librefang_http::proxied_client_with_override(proxy_url)
     });
 ```
 
-The driver `with_proxy_and_timeout` functions exemplify this pattern — Anthropic, Gemini, OpenAI, and Ollama drivers all call through these builders. Gemini additionally demonstrates the fallback chain by trying `proxied_client_with_override` first, then `proxied_client_fallback` on error.
+Funkcje `with_proxy_and_timeout` sterowników exemplify this pattern — sterowniki Anthropic, Gemini, OpenAI i Ollama all call through these builders. Gemini dodatkowo demonstruje łańcuch awaryjny próbując najpierw `proxied_client_with_override`, a następnie `proxied_client_fallback` w przypadku błędu.
 
-### OAuth client for MCP auth flows
+### Klient OAuth dla przepływów autoryzacji MCP
 
 ```rust
 let client = librefang_http::oauth_client();
-// Safe for: metadata discovery, token exchange, refresh, dynamic client registration
+// Bezpieczny do: odnajdywania metadanych, wymiany tokenów, odświeżania, dynamicznej rejestracji klientów
 ```
 
-Used by `librefang-kernel/src/mcp_oauth_provider.rs` in `register_client` and `try_refresh`, triggered by the `auth_start` route handler.
+Używany przez `librefang-kernel/src/mcp_oauth_provider.rs` w `register_client` i `try_refresh`, wyzwalany przez obsługę trasy `auth_start`.
 
-### RL export integration
+### Integracja eksportu RL
 
-Export modules (`librefang-rl-export` for W&B, Atropos, Tinker) use `proxied_client_builder()` so they can add custom headers or configuration before building.
+Moduły eksportu (`librefang-rl-export` dla W&B, Atropos, Tinker) używają `proxied_client_builder()`, aby móc dodać niestandardowe nagłówki lub konfigurację przed zbudowaniem.
 
-## Validation
+## Walidacja
 
-Proxy URLs are validated in two places:
-- `init_proxy`: checks scheme before exporting to env vars.
-- `build_http_client`: passes URLs to `Proxy::http()` / `Proxy::https()`, which will return `Err` on malformed input. Errors are logged with `redact_proxy_url()` and the proxy is skipped rather than panicking.
+Adresy URL proxy są walidowane w dwóch miejscach:
+- `init_proxy`: sprawdza schemat przed eksportem do zmiennych środowiskowych.
+- `build_http_client`: przekazuje adresy URL do `Proxy::http()` / `Proxy::https()`, co zwróci `Err` przy nieprawidłowym wejściu. Błędy są logowane z `redact_proxy_url()`, a proxy jest pomijane zamiast powodować panikę.
 
-`is_valid_proxy_url` accepts `http://`, `https://`, `socks5://`, and `socks5h://` schemes. Credentials embedded in URLs are redacted in all log output via `librefang_types::config::redact_proxy_url`.
+`is_valid_proxy_url` akceptuje schematy `http://`, `https://`, `socks5://` oraz `socks5h://`. Dane uwierzytelniające osadzone w adresach URL są zanonimizowane w całym wyjściu dziennika poprzez `librefang_types::config::redact_proxy_url`.
 
-## Initialization Contract
+## Kontrakt inicjalizacji
 
-Call `init_proxy(cfg)` exactly once during daemon bootstrap, before spawning the Tokio runtime. The function is safe to call again during hot-reload, but the initial call must happen in a single-threaded context for the `set_var` calls to be sound. If `init_proxy` is never called, `proxied_client()` still works — it builds with an empty `ProxyConfig` and relies on reqwest's env-var detection.
+Wywołaj `init_proxy(cfg)` dokładnie raz podczas uruchamiania demona, przed utworzeniem środowiska wykonawczego Tokio. Funkcja jest bezpieczna do ponownego wywołania podczas hot-reload, ale początkowe wywołanie musi nastąpić w kontekście jednowątkowym, aby wywołania `set_var` były bezpieczne. Jeśli `init_proxy` nigdy nie zostanie wywołane, `proxied_client()` nadal działa — tworzy z pustym `ProxyConfig` i polega na detekcji zmiennych środowiskowych reqwest.

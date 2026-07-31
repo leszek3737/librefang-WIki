@@ -2,54 +2,54 @@
 
 # deploy — prometheus
 
-## Overview
+## Przegląd
 
-This module contains the Prometheus scrape configuration for the LibreFang observability stack. It defines which services Prometheus polls for metrics, how often, and through what endpoints. The file `prometheus.yml` is the single source of truth for target discovery and collection cadence.
+Ten moduł zawiera konfigurację scrapowania Prometheus dla stosu obserwowalności LibreFang. Definiuje, z których usług Prometheus pobiera metryki, jak często i przez jakie punkty końcowe. Plik `prometheus.yml` jest jedynym źródłem prawdy dla wykrywania celów i częstotliwości zbierania.
 
-Prometheus uses a **pull model**: it actively scrapes each configured target on a fixed interval and stores the resulting time series. This configuration does not push anything anywhere — it only declares where and when Prometheus should pull.
+Prometheus wykorzystuje **model pull**: aktywnie scrapuje każdy skonfigurowany cel w stałym interwale i zapisuje wynikowe szeregi czasowe. Ta konfiguracja niczego nigdzie nie wypycha — jedynie deklaruje skąd i kiedy Prometheus powinien pobierać.
 
-## Configuration Reference
+## Odniesienie do konfiguracji
 
-### Global settings
+### Ustawienia globalne
 
-| Setting | Value | Meaning |
+| Ustawienie | Wartość | Znaczenie |
 |---|---|---|
-| `scrape_interval` | `15s` | How often Prometheus pulls metrics from every target. |
-| `evaluation_interval` | `15s` | How often Prometheus evaluates alerting and recording rules. |
+| `scrape_interval` | `15s` | Jak często Prometheus pobiera metryki z każdego celu. |
+| `evaluation_interval` | `15s` | Jak często Prometheus ocenia reguły alertowania i reguły zapisu (recording rules). |
 
-Both intervals are deliberately set to the same 15-second window to keep metric freshness and rule evaluation in lockstep. If alert rules are added later, they will fire no later than 15 seconds after the condition first becomes true.
+Oba interwały są celowo ustawione na to samo 15-sekundowe okno, aby utrzymać synchronizację świeżości metryk i oceny reguł. Jeśli w przyszłości zostaną dodane reguły alertów, zostaną wyzwolone najpóźniej 15 sekund po tym, jak warunek po raz pierwszy stanie się prawdziwy.
 
-### Scrape targets
+### Cele scrapowania
 
-The configuration declares three jobs. Each job has a `job_name`, a `metrics_path`, and one or more targets with static labels.
+Konfiguracja deklaruje trzy zadania. Każde zadanie ma `job_name`, `metrics_path` oraz jeden lub więcej celów ze statycznymi etykietami.
 
-#### 1. `librefang` — the application
+#### 1. `librefang` — aplikacja
 
-- **Path:** `/api/metrics`
-- **Target:** `host.docker.internal:4545`
-- **Label:** `instance: "librefang-local"`
+- **Ścieżka:** `/api/metrics`
+- **Cel:** `host.docker.internal:4545`
+- **Etykieta:** `instance: "librefang-local"`
 
-This is the primary LibreFang service exposing its own application-level metrics on its HTTP API. The `host.docker.internal` hostname resolves to the Docker host, meaning LibreFang is expected to be running outside the collector's Docker network (e.g., launched directly on the developer's machine or in a separate compose project).
+To jest główna usługa LibreFang udostępniająca własne metryki aplikacyjne przez swoje HTTP API. Nazwa hosta `host.docker.internal` rozwiązuje się do hosta Docker, co oznacza, że LibreFang jest uruchamiany poza siecią Docker kolektora (np. bezpośrednio na maszynie deweloperskiej lub w osobnym projekcie compose).
 
-#### 2. `ollama` — the LLM inference server
+#### 2. `ollama` — serwer wnioskowania LLM
 
-- **Path:** `/metrics`
-- **Target:** `host.docker.internal:9102`
-- **Label:** `instance: "ollama-local"`
+- **Ścieżka:** `/metrics`
+- **Cel:** `host.docker.internal:9102`
+- **Etykieta:** `instance: "ollama-local"`
 
-Scrapes the Ollama metrics endpoint. Ollama's native metrics are exposed at `/metrics`, and Prometheus consumes them directly. Like LibreFang, this target is reached via the Docker host, so Ollama must bind to a port reachable from the host network.
+Scrapuje punkt końcowy metryk Ollamy. Natywne metryki Ollamy są udostępniane na `/metrics`, a Prometheus konsumuje je bezpośrednio. Podobnie jak LibreFang, ten cel jest osiągany przez hosta Docker, więc Ollama musi być powiązana z portem osiągalnym z sieci hosta.
 
-#### 3. `otel-collector` — OpenTelemetry relay
+#### 3. `otel-collector` — przekaznik OpenTelemetry
 
-- **Path:** `/metrics`
-- **Target:** `otel-collector:8889`
-- **Label:** `instance: "otel-collector"`
+- **Ścieżka:** `/metrics`
+- **Cel:** `otel-collector:8889`
+- **Etykieta:** `instance: "otel-collector"`
 
-This job scrapes the OpenTelemetry Collector's Prometheus exporter port. Unlike the other two jobs, this target uses the Docker service name `otel-collector`, meaning the collector runs in the same Docker network as Prometheus. The collector acts as an intermediary for OTLP-emitted metrics: LibreFang pushes metrics to the collector over OTLP (gRPC on `:4317`), the collector processes and exports them, and Prometheus then pulls the aggregated result from `:8889`.
+To zadanie scrapuje port eksportera Prometheus kolektora OpenTelemetry. W przeciwieństwie do dwóch pozostałych zadań, ten cel używa nazwy usługi Docker `otel-collector`, co oznacza, że kolektor działa w tej samej sieci Docker co Prometheus. Kolektor działa jako pośrednik dla metryk emitowanych przez OTLP: LibreFang wypycha metryki do kolektora przez OTLP (gRPC na `:4317`), kolektor je przetwarza i eksportuje, a następnie Prometheus pobiera zagregowany wynik z `:8889`.
 
-## Metrics collection topology
+## Topologia zbierania metryk
 
-The three jobs form two distinct collection paths — a direct pull and an indirect relay:
+Trzy zadania tworzą dwie odrębne ścieżki zbierania — bezpośredni pull i pośrednie przekazywanie:
 
 ```mermaid
 flowchart LR
@@ -67,25 +67,25 @@ flowchart LR
   OT -- "pull /metrics" --> PR
 ```
 
-Note that LibreFang is scraped **twice** through two independent paths: directly by Prometheus at `/api/metrics`, and indirectly via the OTel collector at `:8889`. This redundancy is intentional during bring-up — the direct scrape captures metrics the application emits in Prometheus exposition format, while the collector path captures metrics emitted via OpenTelemetry SDKs. When hardening the stack, pick one path per metric family to avoid double-counting.
+Należy zauważyć, że LibreFang jest scrapowany **dwukrotnie** przez dwie niezależne ścieżki: bezpośrednio przez Prometheus na `/api/metrics` oraz pośrednio przez kolektor OTel na `:8889`. Ta redundancja jest celowa podczas wdrażania — bezpośredni scrap przechwytuje metryki emitowane przez aplikację w formacie ekspozycji Prometheus, podczas gdy ścieżka przez kolektor przechwytuje metryki emitowane przez SDK OpenTelemetry. Podczas utwardzania stosu, wybierz jedną ścieżkę na rodzinę metryk, aby uniknąć podwójnego liczenia.
 
-## How this connects to the rest of the codebase
+## Jak to łączy się z resztą bazy kodu
 
-- **`deploy/` siblings.** This config is consumed by whatever brings Prometheus up — typically a `docker-compose.yml` or equivalent in `deploy/` that mounts `prometheus.yml` into the Prometheus container. The service name `otel-collector` used as a target hostname must match the service name defined in that compose file.
-- **LibreFang application.** The `/api/metrics` endpoint is implemented by the LibreFang HTTP server. Any change to that path or the port it listens on must be reflected here, or the `librefang` scrape will fail.
-- **Ollama deployment.** Port `9102` is the expected Ollama metrics port. If Ollama is reconfigured to expose metrics on a different port, update the target here.
-- **Alerting rules.** `evaluation_interval` is set, but no rule files are referenced in this config. If alert rules are added under `rule_files:`, the evaluation interval governs how quickly they fire.
+- **Katalogi równorzędne w `deploy/`.** Ta konfiguracja jest konsumowana przez cokolwiek uruchamia Prometheusa — zazwyczaj `docker-compose.yml` lub odpowiednik w `deploy/`, który montuje `prometheus.yml` do kontenera Prometheus. Nazwa usługi `otel-collector` używana jako nazwa hosta celu musi odpowiadać nazwie usługi zdefiniowanej w tym pliku compose.
+- **Aplikacja LibreFang.** Punkt końcowy `/api/metrics` jest implementowany przez serwer HTTP LibreFang. Jakakolwiek zmiana tej ścieżki lub portu, na którym nasłuchuje, musi zostać odzwierciedlona tutaj, w przeciwnym razie scrapowanie `librefang` nie powiedzie się.
+- **Wdrożenie Ollamy.** Port `9102` to oczekiwany port metryk Ollamy. Jeśli Ollama zostanie przekonfigurowana tak, aby udostępniać metryki na innym porcie, zaktualizuj cel tutaj.
+- **Reguły alertowania.** `evaluation_interval` jest ustawiony, ale w tej konfiguracji nie odwołuje się do żadnych plików reguł. Jeśli reguły alertów zostaną dodane w `rule_files:`, interwał oceny określa, jak szybko zostaną wyzwolone.
 
-## Operational notes
+## Uwagi operacyjne
 
-- **`host.docker.internal` portability.** This hostname works out of the box on Docker Desktop (macOS, Windows) but requires extra setup on Linux (e.g., `--add-host=host.docker.internal:host-gateway`). If Prometheus is deployed on a Linux host, ensure that mapping exists in the compose service definition.
-- **No service discovery.** All targets use `static_configs`, so adding or removing a service requires editing this file and reloading Prometheus (`POST /-/reload` or container restart). There is no dynamic discovery (Consul, Kubernetes, EC2, etc.).
-- **No alerting or recording rules declared.** The `evaluation_interval` is a no-op until a `rule_files:` block is added. Operators adding alerts should place rule YAMLs alongside this file and reference them from the config.
-- **No remote write/read.** Metrics stay local to the Prometheus instance. If long-term storage or federation is needed, add a `remote_write` block pointing at the chosen sink.
+- **Przenośność `host.docker.internal`.** Ta nazwa hosta działa od razu w Docker Desktop (macOS, Windows), ale wymaga dodatkowej konfiguracji na Linuksie (np. `--add-host=host.docker.internal:host-gateway`). Jeśli Prometheus jest wdrożony na hoście Linux, upewnij się, że to mapowanie istnieje w definicji usługi compose.
+- **Brak service discovery.** Wszystkie cele używają `static_configs`, więc dodanie lub usunięcie usługi wymaga edycji tego pliku i przeładowania Prometheusa (`POST /-/reload` lub restart kontenera). Nie ma dynamicznego wykrywania (Consul, Kubernetes, EC2 itp.).
+- **Brak zadeklarowanych reguł alertowania lub reguł zapisu.** `evaluation_interval` jest nieaktywny, dopóki nie zostanie dodany blok `rule_files:`. Operatorzy dodający alerty powinni umieścić pliki YAML reguł obok tego pliku i odwołać się do nich z konfiguracji.
+- **Brak remote write/read.** Metryki pozostają lokalne dla instancji Prometheus. Jeśli potrzebne jest długoterminowe przechowywanie lub federacja, dodaj blok `remote_write` wskazujący na wybrane miejsce docelowe.
 
-## Extending the configuration
+## Rozszerzanie konfiguracji
 
-To add a new scrape target, append a job block under `scrape_configs`:
+Aby dodać nowy cel scrapowania, dołącz blok zadania pod `scrape_configs`:
 
 ```yaml
   - job_name: "my-service"
@@ -96,8 +96,8 @@ To add a new scrape target, append a job block under `scrape_configs`:
           instance: "my-service-local"
 ```
 
-Keep these conventions consistent:
+Utrzymuj spójność tych konwencji:
 
-- Use the Docker service name as the hostname for anything inside the Prometheus network.
-- Use `host.docker.internal:<port>` for services running on the host.
-- Set a human-readable `instance` label that reflects *where* the service runs, not just its name — this makes Grafana dashboards and alerts easier to read when the same service is deployed in multiple environments.
+- Używaj nazwy usługi Docker jako nazwy hosta dla wszystkiego wewnątrz sieci Prometheus.
+- Używaj `host.docker.internal:<port>` dla usług uruchomionych na hoście.
+- Ustaw czytelną dla człowieka etykietę `instance`, która odzwierciedla *gdzie* działa usługa, a nie tylko jej nazwę — to ułatwia czytanie paneli Grafana i alertów, gdy ta sama usługa jest wdrożona w wielu środowiskach.

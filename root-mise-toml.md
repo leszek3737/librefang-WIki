@@ -2,70 +2,70 @@
 
 # mise.toml
 
-## Purpose
+## Przeznaczenie
 
-`mise.toml` is the root configuration file for [mise](https://mise.jdx.dev/) (a polyglot tool version manager and task runner). It declares the **pinned versions** of external development tools that every contributor needs installed in their local environment. When a developer runs `mise install` (or opens the repository with mise activated), the tools listed here are provisioned automatically—no manual installs, no version drift.
+`mise.toml` to główny plik konfiguracyjny dla narzędzia [mise](https://mise.jdx.dev/) (wielojęzycznego menedżera wersji narzędzi i uruchamiacza zadań). Deklaruje on **zafiksowane wersje** zewnętrznych narzędzi deweloperskich, które każdy współtwórca musi mieć zainstalowane w swoim środowisku lokalnym. Gdy deweloper uruchomi `mise install` (lub otworzy repozytorium z aktywowanym mise), narzędzia wymienione tutaj są instalowane automatycznie — bez ręcznej instalacji, bez rozjazdów wersji.
 
-This file is the single source of truth for "which versions of these tools does this project expect?"
+Ten plik jest jedynym źródłem prawdy dla pytania „jakich wersji tych narzędzi wymaga ten projekt?"
 
-## Managed Tools
+## Zarządzane narzędzia
 
-| Tool    | Pinned Version | Role in the project                         |
-|---------|---------------|---------------------------------------------|
-| `just`  | `1.48`        | Command runner used for task automation      |
-| `pnpm`  | `10.33`       | JavaScript/TypeScript package manager        |
-| `rust`  | `1.94.1`      | Rust toolchain **floor** (see below)         |
+| Narzędzie    | Zafiksowana wersja | Rola w projekcie                                |
+|--------------|---------------------|--------------------------------------------------|
+| `just`       | `1.48`              | Uruchamiacz poleceń używany do automatyzacji zadań |
+| `pnpm`       | `10.33`             | Menedżer pakietów JavaScript/TypeScript           |
+| `rust`       | `1.94.1`            | **Dolna granica** łańcucha narzędzi Rust (patrz niżej) |
 
-## The Rust Version Nuance
+## Niuanse wersji Rust
 
-The `rust` entry deserves special attention because it interacts with two other configuration sources:
+Wpis `rust` wymaga szczególnej uwagi, ponieważ współdziała z dwoma innymi źródłami konfiguracji:
 
 ```
-rust-toolchain.toml  ──►  Controls the *active* toolchain (currently `stable`)
-mise.toml            ──►  Controls the *minimum installed* floor (1.94.1)
-Cargo.toml           ──►  Declares the workspace MSRV via rust-version
+rust-toolchain.toml  ──►  Kontroluje *aktywny* łańcuch narzędzi (obecnie `stable`)
+mise.toml            ──►  Kontroluje *minimalną zainstalowaną* dolną granicę (1.94.1)
+Cargo.toml           ──►  Deklaruje MSRV obszaru roboczego poprzez rust-version
 ```
 
-mise guarantees that **at least** Rust `1.94.1` is installed when bootstrapping. However, the toolchain that `cargo` actually invokes is determined by `rust-toolchain.toml`, which currently pins `stable`. This means:
+mise gwarantuje, że przy inicjalizacji zainstalowany jest **co najmniej** Rust `1.94.1`. Łańcuch narzędzi faktycznie wywoływany przez `cargo` jest jednak określany przez `rust-toolchain.toml`, który obecnie fixuje `stable`. Oznacza to:
 
-- **`mise.toml`'s rust version is a floor, not the build version.** Its job is to ensure the local environment has a Rust compiler new enough to not trip the MSRV check.
-- **It must match the workspace MSRV** declared in `[workspace.package].rust-version` inside `Cargo.toml`. If the mise floor falls *below* the MSRV, cargo emits an immediate `rustc` version error on bootstrap—a confusing failure mode that looks like a compiler bug rather than a config drift.
+- **Wersja rust w `mise.toml` to dolna granica, a nie wersja buildu.** Jej zadaniem jest zapewnienie, że środowisko lokalne posiada sufficiently nowy kompilator Rust, aby nie naruszyć sprawdzenia MSRV.
+- **Musi odpowiadać MSRV obszaru roboczego** zadeklarowanemu w `[workspace.package].rust-version` w pliku `Cargo.toml`. Jeśli dolna granica mise spadnie *poniżej* MSRV, cargo przy inicjalizacji natychmiast zgłosi błąd wersji `rustc` — mylący tryb awarii wyglądający jak błąd kompilatora, a nie rozjazd konfiguracji.
 
-> **When updating the MSRV:** Update `rust-version` in `Cargo.toml` **and** the `rust` entry here in the same change. These two values must stay in lockstep.
+> **Podczas aktualizacji MSRV:** Zaktualizuj `rust-version` w `Cargo.toml` **oraz** wpis `rust` tutaj w tej samej zmianie. Te dwie wartości muszą pozostać zsynchronizowane.
 
-## How It Connects to the Rest of the Repository
+## Jak to łączy się z resztą repozytorium
 
 ```mermaid
 graph LR
-    A[mise.toml] -->|pins just| B[Justfile / just commands]
-    A -->|pins pnpm| C[package.json / workspace]
-    A -->|pins rust floor| D[rust-toolchain.toml]
-    D -->|active toolchain| E[stable Rust]
-    A -->|must match| F[Cargo.toml rust-version]
+    A[mise.toml] -->|fixuje just| B[Justfile / polecenia just]
+    A -->|fixuje pnpm| C[package.json / obszar roboczy]
+    A -->|fixuje dolną granicę rust| D[rust-toolchain.toml]
+    D -->|aktywny łańcuch narzędzi| E[stable Rust]
+    A -->|musi odpowiadać| F[Cargo.toml rust-version]
 ```
 
-- **`just`** supports the project's `Justfile` (or any `just`-based task definitions). Without the correct version, task definitions may use syntax or features that don't exist in older releases.
-- **`pnpm`** supports the JavaScript/TypeScript workspace. Pinning prevents lockfile incompatibilities and behavioral differences across pnpm major versions.
-- **`rust`** ensures the bootstrapped environment can compile the project without MSRV errors, even though the day-to-day toolchain is governed by `rust-toolchain.toml`.
+- **`just`** obsługuje plik `Justfile` projektu (lub dowolne definicje zadań oparte na `just`). Bez poprawnej wersji definicje zadań mogą używać składni lub funkcji niedostępnych w starszych wydaniach.
+- **`pnpm`** obsługuje obszar roboczy JavaScript/TypeScript. Fiksowanie zapobiega niezgodnościom pliku blokady i różnicom w zachowaniu pomiędzy głównymi wersjami pnpm.
+- **`rust`** zapewnia, że zainicjowane środowisko może skompilować projekt bez błędów MSRV, nawet jeśli bieżący łańcuch narzędzi jest zarządzany przez `rust-toolchain.toml`.
 
-## Developer Workflow
+## Przepływ pracy dewelopera
 
-**First-time setup:**
+**Pierwsze uruchomienie:**
 
 ```sh
-mise install   # installs just 1.48, pnpm 10.33, rust 1.94.1
+mise install   # instaluje just 1.48, pnpm 10.33, rust 1.94.1
 ```
 
-After this, the tools are available in your shell (assuming mise's shims or activation hook are in place).
+Po tym kroku narzędzia są dostępne w powłoce (zakładając, że shims mise lub hook aktywacji są włączone).
 
-**Upgrading a pinned version:**
+**Aktualizacja zafiksowanej wersji:**
 
-1. Update the version string in `mise.toml`.
-2. Run `mise install` to provision the new version locally.
-3. Verify any downstream config (e.g., `Cargo.toml` MSRV, lockfile regeneration, Justfile syntax compatibility).
-4. Commit `mise.toml` alongside any lockfile or config changes.
+1. Zaktualizuj ciąg wersji w `mise.toml`.
+2. Uruchom `mise install`, aby zainstalować nową wersję lokalnie.
+3. Zweryfikuj wszelkie konfiguracje zależne (np. MSRV w `Cargo.toml`, ponowne wygenerowanie pliku blokady, kompatybilność składni Justfile).
+4. Zatwierdź `mise.toml` wraz z ewentualnymi zmianami pliku blokady lub konfiguracji.
 
-## Design Constraints
+## Ograniczenia projektowe
 
-- **No `[env]` or task definitions here.** This file is intentionally scoped to tool versioning only. Environment variables and task automation live elsewhere (e.g., `Justfile`, `.env` files, or `mise.toml` tasks in a different section if added later).
-- **Versions are exact, not ranges.** Each entry uses a precise version string to guarantee reproducibility across all contributor machines and CI environments.
+- **Brak sekcji `[env]` ani definicji zadań.** Ten plik jest celowo ograniczony wyłącznie do zarządzania wersjami narzędzi. Zmienne środowiskowe i automatyzacja zadań znajdują się w innym miejscu (np. `Justfile`, pliki `.env` lub zadania `mise.toml` w osobnej sekcji, jeśli zostaną dodane później).
+- **Wersje są dokładne, a nie zakresowe.** Każdy wpis używa precyzyjnego ciągu wersji, aby zagwarantować powtarzalność na wszystkich maszynach współtwórców i w środowiskach CI.

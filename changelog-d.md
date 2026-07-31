@@ -1,18 +1,18 @@
 # changelog.d
 
-# `changelog.d` — Changelog Fragment System
+# `changelog.d` — System fragmentów changeloga
 
-## Purpose
+## Cel
 
-`changelog.d` is a conflict-free changelog authoring system. Instead of every PR appending a bullet to the single `## [Unreleased]` section of `CHANGELOG.md` — where every PR conflicts with every other — each PR drops a small markdown file into this directory. Two PRs never touch the same fragment file, so the conflict class is eliminated entirely.
+`changelog.d` to wolny od konfliktów system tworzenia changeloga. Zamiast każdego PR-a dopisywać punkt do pojedynczej sekcji `## [Unreleased]` w pliku `CHANGELOG.md` — gdzie każdy PR konfliktuje z każdym innym — każdy PR umieszcza mały plik markdown w tym katalogu. Dwa PR-y nigdy nie modyfikują tego samego pliku fragmentu, więc klasa konfliktów jest całkowicie wyeliminowana.
 
-Fragments are folded into `CHANGELOG.md` by `cargo xtask collect-fragments` (which the release flow runs automatically before cutting a dated release section). Editing `## [Unreleased]` directly still works and remains fully supported; a fragment is simply a deferred bullet.
+Fragmenty są składane do `CHANGELOG.md` przez `cargo xtask collect-fragments` (który proces wydawniczy uruchamia automatycznie przed utworzeniem sekcji z datą wydania). Bezpośrednia edycja `## [Unreleased]` nadal działa i jest w pełni obsługiwana; fragment jest po prostu odroczonym punktem.
 
-## Directory Structure
+## Struktura katalogu
 
-Each subdirectory maps directly to a `### ` heading under `## [Unreleased]`:
+Każdy podkatalog odpowiada bezpośrednio nagłówkowi `### ` w sekcji `## [Unreleased]`:
 
-| Directory | Renders as |
+| Katalog | Renderuje się jako |
 | --- | --- |
 | `added/` | `### Added` |
 | `fixed/` | `### Fixed` |
@@ -20,93 +20,95 @@ Each subdirectory maps directly to a `### ` heading under `## [Unreleased]`:
 | `security/` | `### Security` |
 | `documentation/` | `### Documentation` |
 
-A fragment placed in any other directory is **rejected** by `scripts/check-changelog-attribution.py`. Assembly has no heading to render it under, so it would be silently dropped.
+Fragment umieszczony w dowolnym innym katalogu jest **odrzucany** przez `scripts/check-changelog-attribution.py`. Składanie nie ma pod jakim nagłówkiem go renderować, więc zostałby po cichu pominięty.
 
-## Fragment Format
+## Format fragmentu
 
-**One file = one bullet.** The file holds the bullet body **without** the leading `- ` prefix. Lines wrap at sentence boundaries (no hard column limit), with continuation lines indented two spaces. The entry must end with `(#PR) (@your-github-login)`.
+**Jeden plik = jeden punkt.** Plik zawiera treść punktu **bez** prefiksu `- `. Wiersze zawijają się na granicach zdań (bez sztywnego limitu kolumn), z wierszami kontynuacji wciętymi dwiema spacjami. Wpis musi kończyć się ciągiem `(#PR) (@twoj-github-login)`.
 
-File naming is free-form, but lead with the PR or issue number so fragments sort usefully — bullets are assembled in filename order within each section.
+Nazewnictwo plików jest dowolne, ale zaczyna się od numeru PR-a lub zgłoszenia, aby fragmenty sortowały się użytecznie — punkty są składane w kolejności nazw plików w ramach każdej sekcji.
 
-### Example
+### Przykład
 
 `changelog.d/fixed/6623-wire-max-content-chars.md`:
 
 ```markdown
-Honour `max_content_chars` on the streaming path, which read the compiled-in
-default and ignored the per-agent override entirely. The value was resolved once
-at kernel boot and captured into the driver, so an `agent.toml` edit took effect
-only after a restart. It is now resolved per turn from the manifest, falling back
-to the kernel config and then the compiled default (#6623) (@houko)
+Szanuj `max_content_chars` na ścieżce strumieniowania, która czytała wkompilowaną
+domyślną wartość i całkowicie ignorowała nadpisanie dla poszczególnych agentów.
+Wartość była rozwiązywana raz przy uruchomieniu jądra i przechwytywana do sterownika,
+więc edycja `agent.toml` miała skutek dopiero po ponownym uruchomieniu.
+Teraz jest rozwiązywana przy każdej turze z manifestu, z powrotem do konfiguracji jądra,
+a następnie do wartości domyślnej wkompilowanej (#6623) (@houko)
 ```
 
-After `cargo xtask collect-fragments`, this lands under `### Fixed` in `## [Unreleased]` as:
+Po `cargo xtask collect-fragments` to trafia do sekcji `### Fixed` w `## [Unreleased]` jako:
 
 ```markdown
-- Honour `max_content_chars` on the streaming path, which read the compiled-in
-  default and ignored the per-agent override entirely. The value was resolved once
-  at kernel boot and captured into the driver, so an `agent.toml` edit took effect
-  only after a restart. It is now resolved per turn from the manifest, falling back
-  to the kernel config and then the compiled default (#6623) (@houko)
+- Szanuj `max_content_chars` na ścieżce strumieniowania, która czytała wkompilowaną
+  domyślną wartość i całkowicie ignorowała nadpisanie dla poszczególnych agentów.
+  Wartość była rozwiązywana raz przy uruchomieniu jądra i przechwytywana do sterownika,
+  więc edycja `agent.toml` miała skutek dopiero po ponownym uruchomieniu.
+  Teraz jest rozwiązywana przy każdej turze z manifestu, z powrotem do konfiguracji jądra,
+  a następnie do wartości domyślnej wkompilowanej (#6623) (@houko)
 ```
 
-## Lifecycle of a Fragment
+## Cykl życia fragmentu
 
 ```mermaid
 flowchart LR
-    A[Author writes fragment] --> B[collect-fragments folds into Unreleased]
-    B --> C[release cuts dated section]
-    C --> D[GitHub release body — verbatim]
-    C --> E[release-notify: announcement + social]
+    A[Autor pisze fragment] --> B[collect-fragments składa do Unreleased]
+    B --> C[release tworzy sekcję z datą]
+    C --> D[Treść wydania na GitHub — dosłownie]
+    C --> E[release-notify: ogłoszenie + social]
 ```
 
-1. **Authoring** — PR adds a fragment file to the appropriate section directory.
-2. **Folding** — `cargo xtask collect-fragments` consumes all fragment files, appends their bullets to the matching `### ` subsection of `## [Unreleased]` in `CHANGELOG.md`, and deletes the consumed files.
-3. **Release** — `cargo xtask release` moves the entire `## [Unreleased]` body into a new `## [VERSION]` section, leaving `## [Unreleased]` empty for the next cycle. Subsections and ordering are preserved.
-4. **Publishing** — `.github/workflows/release.yml` extracts that dated section and uses it as the GitHub release notes. `.github/workflows/release-notify.yml` reuses the same slice for the Discord announcement and social posts.
+1. **Tworzenie** — PR dodaje plik fragmentu do odpowiedniego katalogu sekcji.
+2. **Składanie** — `cargo xtask collect-fragments` przetwarza wszystkie pliki fragmentów, dopisuje ich punkty do pasującej podsekcji `### ` w `## [Unreleased]` w `CHANGELOG.md` i usuwa przetworzone pliki.
+3. **Wydanie** — `cargo xtask release` przenosi całą treść `## [Unreleased]` do nowej sekcji `## [WERSJA]`, pozostawiając `## [Unreleased]` pusty dla następnego cyklu. Podsekcje i kolejność są zachowane.
+4. **Publikacja** — `.github/workflows/release.yml` wyciąga tę sekcję z datą i używa jej jako notek wydania na GitHubie. `.github/workflows/release-notify.yml` ponownie wykorzystuje tę samą część dla ogłoszenia na Discordzie i postów w social mediach.
 
-## Generated Lines vs. Curated Fragments
+## Wygenerowane wpisy vs. Kuratorowane fragmenty
 
-Every merged PR in the release range automatically gets a generated entry:
+Każdy scalony PR w zakresie wydania automatycznie otrzymuje wygenerowany wpis:
 
 ```
-- <PR title> (#N) (@author)
+- <Tytuł PR-a> (#N) (@autor)
 ```
 
-When a fragment bullet's trailing `(#N)` group matches a PR number, that PR's generated line is **suppressed** — the curated fragment replaces it. This is why fragments should explain *why* a change matters rather than restating the PR title (the title is already covered for free).
+Gdy końcowy `(#N)` punktu fragmentu odpowiada numerowi PR-a, wygenerowany wiersz tego PR-a jest **pomijany** — skuratorowany fragment go zastępuje. Dlatego fragmenty powinny wyjaśniać *dlaczego* zmiana ma znaczenie, a nie powtarzać tytuł PR-a (tytuł jest już objęty automatycznie).
 
-Key rules for PR-reference matching:
+Kluczowe reguły dopasowywania odwołań do PR-ów:
 
-- Only the **last** `(#N)` group on the bullet's **last non-empty line** is counted.
-- A mid-bullet cross-reference to some other PR is never mistaken for the bullet's own PR.
-- Use `(#1234, #1235)` when one entry covers two PRs.
-- Without a `(#N)` reference, the PR keeps its generated line, so it appears twice in the release body. `cargo xtask release` prints a warning naming the unreferenced bullet, but this does not block anyone else.
+- Tylko **ostatnia** grupa `(#N)` na **ostatnim niepustym wierszu** punktu jest brana pod uwagę.
+- Środkowe odwołanie do innego PR-a wewnątrz punktu nigdy nie zostaje omyłkowo uznane za PR-a własnego punktu.
+- Użyj `(#1234, #1235)`, gdy jeden wpis obejmuje dwa PR-y.
+- Bez odwołania `(#N)` PR zachowuje swój wygenerowany wiersz, więc pojawia się dwa razy w treści wydania. `cargo xtask release` wyświetla ostrzeżenie z nazwą niepowiązanego punktu, ale to nie blokuje innych.
 
-## Enforced Rules
+## Wymuszane reguły
 
-The `pre-commit` hook and the `CHANGELOG Attribution` CI job both run `scripts/check-changelog-attribution.py`:
+Hook `pre-commit` oraz zadanie CI `CHANGELOG Attribution` uruchamiają `scripts/check-changelog-attribution.py`:
 
 ```bash
-# Check only what this commit stages
+# Sprawdzanie tylko tego, co ten commit rejestruje
 python3 scripts/check-changelog-attribution.py --staged
 
-# Check everything pending across all fragments
+# Sprawdzanie wszystkiego oczekującego we wszystkich fragmentach
 python3 scripts/check-changelog-attribution.py --all-unreleased
 ```
 
-Rules enforced:
+Wymuszane reguły:
 
-| Rule | Consequence of violation |
+| Reguła | Konsekwencja naruszenia |
 | --- | --- |
-| Bullet carries `(@github-login)` attribution | Rejected (issue #3400) |
-| Fragment in one of the five section directories | Rejected |
-| Attribution on any line of the bullet, but not past a blank line | Rejected (blank line ends the bullet) |
+| Punkt zawiera atrybucję `(@github-login)` | Odrzucony (issue #3400) |
+| Fragment w jednym z pięciu katalogów sekcji | Odrzucony |
+| Atrybucja na dowolnym wierszu punktu, ale nie za pustym wierszem | Odrzucony (pusty wiersz kończy punkt) |
 
-Not enforced but strongly recommended: end the bullet with its PR reference `(#1234)` so the generated line is suppressed.
+Niewymuszane, ale mocno zalecane: zakończ punkt odwołaniem do PR-a `(#1234)`, aby wygenerowany wiersz został pominięty.
 
-## Implementation Notes
+## Uwagi implementacyjne
 
-- **`.gitkeep` files** in each section directory keep the empty dirs tracked. Leave them alone.
-- **Prose wrapping**: break only at sentence boundaries. There is no column limit.
-- **Sort order**: bullets are assembled in filename order within each section, so numeric-prefixed filenames produce chronological output.
-- **No external code calls**: this module is purely a data directory. The tooling that reads it lives in `cargo xtask` commands and `scripts/`.
+- **Pliki `.gitkeep`** w każdym katalogu sekcji utrzymują puste katalogi w śledzeniu. Zostaw je w spokoju.
+- **Zawijanie tekstu**: zawijaj tylko na granicach zdań. Nie ma limitu kolumn.
+- **Kolejność sortowania**: punkty są składane w kolejności nazw plików w ramach każdej sekcji, więc pliki z prefiksem liczbowym dają wynik chronologiczny.
+- **Brak wywołań zewnętrznego kodu**: ten moduł jest wyłącznie katalogiem danych. Narzędzia, które go czytają, znajdują się w poleceniach `cargo xtask` oraz w `scripts/`.

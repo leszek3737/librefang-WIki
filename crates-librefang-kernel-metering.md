@@ -2,77 +2,77 @@
 
 # librefang-kernel-metering
 
-Cost metering and quota enforcement for the LibreFang kernel. Tracks LLM spending across four scopes — global, per-agent, per-user, and per-provider — and gates calls before they dispatch when configured budgets would be exceeded.
+Mierzanie kosztów i wymuszanie limitów w jądrze LibreFang. Śledzi wydatki na LLM w czterech zakresach — globalnym, na agenta, na użytkownika i na dostawcę — oraz blokuje wywołania przed ich wysłaniem, gdy skonfigurowane budżety zostałyby przekroczone.
 
-## Architecture
+## Architektura
 
 ```mermaid
 flowchart LR
-    subgraph Pre-Call Gate
-        R["reserve_global_budget<br/>(in-memory ledger)"]
+    subgraph Bramka przed wywołaniem
+        R["reserve_global_budget<br/>(lista w pamięci)"]
         CPB["check_provider_budget"]
         CUB["check_user_budget"]
     end
-    subgraph Post-Call Settle
-        CAR["check_all_and_record<br/>(SQLite transaction)"]
+    subgraph Rozliczenie po wywołaniu
+        CAR["check_all_and_record<br/>(transakcja SQLite)"]
         REC["record"]
     end
-    R -->|"reserves estimated USD"| LEDGER["CostReservationLedger<br/>(Mutex f64)"]
-    CPB -->|"flags on breach"| EXH["ProviderExhaustionStore<br/>(BudgetExceeded)"]
-    CAR -->|"atomic write"| DB["UsageStore (SQLite)"]
-    REC -->|"plain write"| DB
-    LEDGER -->|"settled/released"| LEDGER
+    R -->|"rezerwuje szacowany USD"| LEDGER["CostReservationLedger<br/>(Mutex f64)"]
+    CPB -->|"oznacza po przekroczeniu"| EXH["ProviderExhaustionStore<br/>(BudgetExceeded)"]
+    CAR -->|"atomowy zapis"| DB["UsageStore (SQLite)"]
+    REC -->|"zwykły zapis"| DB
+    LEDGER -->|"rozliczono/zwolniono"| LEDGER
 ```
 
-The engine operates in two phases around each LLM call:
+Silnik działa w dwóch fazach wokół każdego wywołania LLM:
 
-1. **Pre-call**: Reserve an estimated cost against the global budget (`reserve_global_budget`), and/or check per-provider / per-user caps (`check_provider_budget`, `check_user_budget`). These gates can reject a call before any network dispatch.
-2. **Post-call**: Record the actual settled usage and verify all caps atomically (`check_all_and_record`), then settle or release the reservation so the in-memory ledger stays accurate.
+1. **Przed wywołaniem**: Rezerwuje szacowany koszt w ramach budżetu globalnego (`reserve_global_budget`) i/lub sprawdza limity na dostawcę/użytkownika (`check_provider_budget`, `check_user_budget`). Te bramki mogą odrzucić wywołanie przed jakimkolwiek wysłaniem w sieci.
+2. **Po wywołaniu**: Zapisuje rzeczywiste rozliczone użycie i weryfikuje wszystkie limity atomowo (`check_all_and_record`), a następnie rozlicza lub zwalnia rezerwację, aby lista w pamięci pozostawała dokładna.
 
-## Key Components
+## Kluczowe komponenty
 
 ### `MeteringEngine`
 
-The central type. Constructed with a `UsageStore` (SQLite-backed) and optionally wired to a `ProviderExhaustionStore` via `with_exhaustion_store`.
+Centralny typ. Konstruowany z `UsageStore` (oparty na SQLite) i opcjonalnie połączony z `ProviderExhaustionStore` przez `with_exhaustion_store`.
 
 ```rust
 let engine = MeteringEngine::new(Arc::new(usage_store))
     .with_exhaustion_store(exhaustion_store);
 ```
 
-The engine exposes four scopes of enforcement, each with hourly, daily, and monthly windows:
+Silnik udostępnia cztery zakresy wymuszania, każdy z oknami godzinowymi, dziennymi i miesięcznymi:
 
-| Scope | Pre-call gate | Post-call check | Atomic check + record |
-|-------|--------------|-----------------|----------------------|
-| Global | `reserve_global_budget` | `check_global_budget` | `check_global_budget_and_record` / `check_all_and_record` |
+| Zakres | Bramka przed wywołaniem | Sprawdzenie po wywołaniu | Atomowe sprawdzenie + zapis |
+|-------|--------------------------|---------------------------|------------------------------|
+| Globalny | `reserve_global_budget` | `check_global_budget` | `check_global_budget_and_record` / `check_all_and_record` |
 | Agent | `check_quota` | — | `check_quota_and_record` / `check_all_and_record` |
-| User | `check_user_budget` | `check_user_budget` | — |
-| Provider | `check_provider_budget` | `check_provider_budget` | `check_all_and_record` (inside the transaction) |
+| Użytkownik | `check_user_budget` | `check_user_budget` | — |
+| Dostawca | `check_provider_budget` | `check_provider_budget` | `check_all_and_record` (wewnątrz transakcji) |
 
-### In-Flight Reservation Ledger (`CostReservationLedger`)
+### Lista rezerwacji w trakcie (`CostReservationLedger`)
 
-A private `Mutex<f64>` that tracks reserved-but-not-settled USD across all in-flight LLM calls. This exists because `check_global_budget` reads settled spend from SQLite, which only reflects completed calls. When N triggers fire concurrently they all observe the same pre-call total, all pass the gate, and all commit — producing multi-x overshoots.
+Prywatny `Mutex<f64>`, który śledzi zarezerwowane, ale nierozliczone USD we wszystkich wywołaniach LLM w trakcie. Istnieje dlatego, że `check_global_budget` odczytuje rozliczone wydatki z SQLite, które odzwierciedlają tylko zakończone wywołania. Gdy N wyzwalaczy uruchamia się współbieżnie, wszystkie obserwują tę samą sumę przed wywołaniem, wszystkie przechodzą przez bramkę i wszystkie się zatwierdzają — tworząc wielokrotne przekroczenia.
 
-The ledger solves this with `check_and_add`, which performs the limit comparison and the `+=` under a single mutex acquisition. Two concurrent callers cannot both observe the pre-add `current()` and both commit, because the second blocks on the mutex until the first has either added or returned.
+Lista rozwiązuje ten problem za pomocą `check_and_add`, który wykonuje porównanie limitu i operację `+=` w ramach jednego przejęcia muteksu. Dwóch współbieżnych wywołujących nie może jednocześnie zaobserwować wartości `current()` przed dodaniem i obu się zatwierdzić, ponieważ drugi blokuje się na muteksie, dopóki pierwszy nie doda lub nie zwróci wartości.
 
-The reservation is returned as a `MeteringReservation` token. Callers must call `.settle()` (after recording actual usage) or `.release()` (on dispatch failure). `Drop` releases as a safety net if neither is called.
+Rezerwacja jest zwracana jako token `MeteringReservation`. Wywołujący muszą wywołać `.settle()` (po zapisaniu rzeczywistego użycia) lub `.release()` (w przypadku niepowodzenia wysłania). `Drop` zwalnia rezerwację jako zabezpieczenie, jeśli żadna z tych metod nie zostanie wywołana.
 
 ### `MeteringReservation`
 
-A `#[must_use]` token returned by `reserve_global_budget`. It holds the estimated USD and a reference to the ledger. The three lifecycle methods are:
+Token `#[must_use]` zwracany przez `reserve_global_budget`. Przechowuje szacowany USD i referencję do listy. Trzy metody cyklu życia:
 
-- **`settle(self)`** — Call after the actual usage record is recorded. Releases the reservation so the ledger no longer double-counts alongside the settled SQLite row.
-- **`release(self)`** — Call when the dispatch failed before any cost was incurred. Releases the reservation.
-- **`estimated_usd()`** — Read-only accessor for the held amount.
+- **`settle(self)`** — Wywołać po zapisaniu rzeczywistego użycia. Zwalnia rezerwację, aby lista nie liczyła podwójnie razem z rozliczonym wierszem SQLite.
+- **`release(self)`** — Wywołać, gdy wysłanie nie powiodło się bez poniesienia kosztów. Zwalnia rezerwację.
+- **`estimated_usd()`** — Akcesor tylko do odczytu dla przechowywanej kwoty.
 
-If neither `settle` nor `release` is called, `Drop` releases the reservation defensively.
+Jeśli ani `settle`, ani `release` nie zostaną wywołane, `Drop` zwalnia rezerwację defensywnie.
 
-### Provider Exhaustion Integration (#4807)
+### Integracja z wyczerpaniem dostawcy (#4807)
 
-When a per-provider budget gate trips, the engine marks the provider as `BudgetExceeded` in the attached `ProviderExhaustionStore` for `DEFAULT_LONG_BACKOFF`. This lets the LLM fallback chain skip the provider on subsequent calls without first dispatching a request that the gate would only deny again.
+Gdy bramka budżetu na dostawcę się uruchomi, silnik oznacza dostawcę jako `BudgetExceeded` w podłączonym `ProviderExhaustionStore` na czas `DEFAULT_LONG_BACKOFF`. Dzięki temu łańcuch awaryjny LLM może pominąć dostawcę w kolejnych wywołaniach bez wcześniejszego wysyłania żądania, które bramka i tak odrzuciłaby ponownie.
 
 ```rust
-// On breach:
+// Po przekroczeniu:
 self.exhaustion.mark_exhausted(
     provider,
     ExhaustionReason::BudgetExceeded,
@@ -80,79 +80,79 @@ self.exhaustion.mark_exhausted(
 );
 ```
 
-When no exhaustion store is wired (legacy callers), `flag_provider_budget_exhausted` is a no-op.
+Gdy żaden sklep wyczerpania nie jest podłączony (starsi wywołujący), `flag_provider_budget_exhausted` jest operacją no-op.
 
-## Cost Estimation
+## Szacowanie kosztów
 
-Two static methods compute estimated USD from token counts:
+Dwie metody statyczne obliczają szacowany USD na podstawie liczby tokenów:
 
-- **`estimate_cost(model, input, output, cache_read, cache_creation)`** — Uses fixed default rates ($1.00/M input, $3.00/M output). Catalog-agnostic; the model parameter is just a label. Intended for unit tests or when no catalog is available.
+- **`estimate_cost(model, input, output, cache_read, cache_creation)`** — Używa stałych domyślnych stawek ($1,00/M wejście, $3,00/M wyjście). Niezależne od katalogu; parametr modelu jest tylko etykietą. Przeznaczone do testów jednostkowych lub gdy katalog jest niedostępny.
 
-- **`estimate_cost_with_catalog(catalog, model, ...)`** — Reads pricing from the model catalog via `find_model`. Falls back to default rates when the model is unknown. Also falls back to conservative non-zero default rates for:
-  - Models where `pricing_known` is `false`
-  - Zero-priced ChatGPT session-auth models (`should_use_legacy_budget_estimate`)
+- **`estimate_cost_with_catalog(catalog, model, ...)`** — Odczytuje ceny z katalogu modeli przez `find_model`. Przechodzi do domyślnych stawek, gdy model jest nieznany. Przechodzi również do konserwatywnych niezerowych domyślnych stawek dla:
+  - Modeli, gdzie `pricing_known` to `false`
+  - Modeli sesji ChatGPT z zerowym cenami (`should_use_legacy_budget_estimate`)
 
-Cache token pricing:
+Cennik tokenów w pamięci podręcznej:
 
-| Token type | Price multiplier |
-|------------|-----------------|
-| Regular input | 1.0× input rate |
-| Cache-read input | 0.10× input rate |
-| Cache-creation input | 1.25× input rate |
-| Output | 1.0× output rate |
+| Typ tokena | Mnożnik ceny |
+|------------|-------------|
+| Zwykłe wejście | 1,0× stawka wejścia |
+| Wejście z pamięci podręcznej (cache-read) | 0,10× stawka wejścia |
+| Wejście tworzące pamięć podręczną (cache-creation) | 1,25× stawka wejścia |
+| Wyjście | 1,0× stawka wyjścia |
 
-The cost computation uses `saturating_add` / `saturating_sub` throughout to handle provider responses returning `u64::MAX/2 + 1` in cache fields without panicking or wrapping.
+Obliczanie kosztu używa `saturating_add` / `saturating_sub` throughout, aby obsługiwać odpowiedzi dostawców zwracające `u64::MAX/2 + 1` w polach pamięci podręcznej bez paniki lub przekroczenia zakresu.
 
-## Gate Comparison Semantics
+## Semantyka porównania w bramkach
 
-The pre-call reservation gate uses `>` (reject when projected spend exceeds the limit), while the post-call budget check uses `>=` (reject once the limit is fully consumed). This asymmetry is intentional: a single call that exactly reaches the cap is allowed through the pre-call gate, but once the limit is consumed, the post-call check denies all subsequent calls.
+Bramka rezerwacji przed wywołaniem używa `>` (odrzucenie, gdy przewidywany wydatek przekracza limit), podczas gdy sprawdzenie budżetu po wywołaniu używa `>=` (odrzucenie, gdy limit jest w pełni zużyty). Ta asymetria jest celowa: pojedyncze wywołanie, które dokładnie osiąga limit, jest przepuszczane przez bramkę przed wywołaniem, ale po zużyciu limitu sprawdzenie po wywołaniu odrzuca wszystkie kolejne wywołania.
 
-For per-agent, per-user, and per-provider checks, all use `>=` (post-call semantics).
+Dla sprawdzeń na agenta, użytkownika i dostawcę wszystkie używają `>=` (semantyka po wywołaniu).
 
-## Atomic Check-and-Record
+## Atomowe sprawdzenie i zapis
 
-The preferred methods for recording usage after an LLM call combine quota verification and insertion into a single SQLite transaction, closing the TOCTOU race between check and record:
+Preferowane metody zapisywania użycia po wywołaniu LLM łączą weryfikację limitu i wstawienie w jedną transakcję SQLite, zamykając wyścig TOCTOU między sprawdzeniem a zapisem:
 
-- **`check_quota_and_record(record, quota)`** — Per-agent caps only.
-- **`check_global_budget_and_record(record, budget)`** — Global caps only.
-- **`check_all_and_record(record, quota, budget)`** — Per-agent, global, and per-provider caps in one transaction. Resolves the provider budget from `budget.providers` by the record's `provider` field. On failure, the record is not inserted.
+- **`check_quota_and_record(record, quota)`** — Tylko limity na agenta.
+- **`check_global_budget_and_record(record, budget)`** — Tylko limity globalne.
+- **`check_all_and_record(record, quota, budget)`** — Limity na agenta, globalne i na dostawcę w jednej transakcji. Rozwiązuje budżet dostawcy z `budget.providers` na podstawie pola `provider` rekordu. W przypadku niepowodzenia rekord nie jest wstawiany.
 
-## Usage Patterns
+## Wzorce użycia
 
-### Typical LLM Call Lifecycle
+### Typowy cykl życia wywołania LLM
 
 ```rust
-// 1. Reserve estimated cost before dispatch
+// 1. Rezerwacja szacowanego kosztu przed wysłaniem
 let reservation = engine.reserve_global_budget(&budget, estimated_usd)?;
 
-// 2. Optionally check per-provider / per-user caps
+// 2. Opcjonalnie sprawdzenie limitów na dostawcę/użytkownika
 engine.check_provider_budget(&provider, &provider_budget)?;
 
-// 3. Dispatch the LLM call (external)
+// 3. Wysłanie wywołania LLM (zewnętrzne)
 let result = llm_call().await;
 
-// 4. Record actual usage and verify all caps atomically
+// 4. Zapisanie rzeczywistego użycia i weryfikacja wszystkich limitów atomowo
 engine.check_all_and_record(&usage_record, &quota, &budget)?;
 reservation.settle();
 ```
 
-### Budget Status and Reporting
+### Status budżetu i raportowanie
 
 ```rust
 let status: BudgetStatus = engine.budget_status(&budget);
-// status.hourly_pct, daily_pct, monthly_pct — fraction of limit consumed
-// status.alert_threshold — operator-configured warning threshold
+// status.hourly_pct, daily_pct, monthly_pct — frakcja zużytego limitu
+// status.alert_threshold — progowe ostrzeżenie konfigurowane przez operatora
 ```
 
-`BudgetStatus` serializes via `serde::Serialize` for API responses and dashboards.
+`BudgetStatus` serializuje przez `serde::Serialize` na potrzeby odpowiedzi API i paneli sterowania.
 
-## Dependencies
+## Zależności
 
-The crate has a deliberately narrow dependency on `librefang-llm-driver`: it imports only `ProviderExhaustionStore`, `ExhaustionReason`, and `DEFAULT_LONG_BACKOFF`. Nothing else from the driver crate is used. This keeps metering decoupled from LLM transport concerns.
+Ten crate ma celowo wąską zależność od `librefang-llm-driver`: importuje tylko `ProviderExhaustionStore`, `ExhaustionReason` i `DEFAULT_LONG_BACKOFF`. Nic innego z crate sterownika nie jest używane. Dzięki temu mierzenie kosztów jest odłączone od kwestii transportu LLM.
 
-The SQLite-backed `UsageStore` (from `librefang-memory`) is the sole persistence layer. All spend queries (`query_global_hourly`, `query_provider_daily`, `query_user_monthly`, etc.) delegate to it. The `ModelCatalog` (from `librefang-runtime`) is the pricing source for `estimate_cost_with_catalog`.
+Oparty na SQLite `UsageStore` (z `librefang-memory`) jest jedyną warstwą trwałości. Wszystkie zapytania o wydatki (`query_global_hourly`, `query_provider_daily`, `query_user_monthly` itd.) delegują do niego. `ModelCatalog` (z `librefang-runtime`) jest źródłem cen dla `estimate_cost_with_catalog`.
 
-## Concurrency Notes
+## Uwagi o współbieżności
 
-- The reservation ledger synchronizes in-process callers only. Two processes — or a process plus an out-of-band SQL writer — can still race. Matching the SQLite atomicity of `check_all_and_record` is the responsibility of the post-call settle path.
-- `reserve_global_budget` reads settled spend from SQLite outside the ledger lock (those queries can be slow and may fail). The lock guards only the in-process `f64`. Settled spend is monotonic within a time window, so using the just-observed value rather than a re-read after the lock cannot under-count the gate.
+- Lista rezerwacji synchronizuje tylko wywołujących w ramach jednego procesu. Dwa procesy — lub proces plus zewnętrzny moduł zapisujący SQL — mogą nadal rywalizować. Dopasowanie do atomowości SQLite w `check_all_and_record` jest odpowiedzialnością ścieżki rozliczania po wywołaniu.
+- `reserve_global_budget` odczytuje rozliczone wydatki z SQLite poza blokadą listy (te zapytania mogą być wolne i mogą się nie udać). Blokada chroni tylko procesowy `f64`. Rozliczone wydatki są monotoniczne w ramach okna czasowego, więc użycie właśnie zaobserwowanej wartości zamiast ponownego odczytu po blokadzie nie może niedoszacować bramki.

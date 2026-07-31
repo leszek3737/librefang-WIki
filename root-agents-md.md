@@ -1,154 +1,154 @@
 # Root — AGENTS.md
 
-# AGENTS.md — Project Operating Manual
+# AGENTS.md — Podręcznik operacyjny projektu
 
-## Purpose
+## Cel
 
-`AGENTS.md` is the single-page entry point for anyone — human or AI — working in the LibreFang repository. It is written in **telegraph style**: short sentences, one idea per line, scannable in a single pass. It is *not* a tutorial; it is the authoritative quick-reference for the stack, layout, build commands, architecture seams, conventions, and the collaboration boundaries that govern AI-assisted contributions.
+`AGENTS.md` to jednostronicowy punkt wejścia dla każdego — człowieka lub AI — pracującego w repozytorium LibreFang. Napisany jest w **stylu telegraficznym**: krótkie zdania, jedna myśl na linię, możliwy do przeskanowania w jednym przejściu. Nie jest to *tutorial*; jest to autorytatywne źródło referencyjne dotyczące stosu, układu, komend budowania, szwów architektonicznych, konwencji oraz granic współpracy rządzących kontrybucjami wspieranymi przez AI.
 
-It pairs with `CLAUDE.md`, which holds the full agent contract (worktree rules, git hooks, CI wait policy, close-comment contracts). `AGENTS.md` is the summary; `CLAUDE.md` is the law.
+Stanowi parę z `CLAUDE.md`, który zawiera pełny kontrakt agenta (reguły worktree, hooki git, politykę oczekiwania na CI, kontrakty komentarzy zamykających). `AGENTS.md` to podsumowanie; `CLAUDE.md` to prawo.
 
-## What It Covers
+## Co obejmuje
 
-The file is organized into nine top-level sections, each self-contained:
+Plik jest zorganizowany w dziewięć sekcji najwyższego poziomu, z których każda jest samowystarczalna:
 
-| Section | Answers |
+| Sekcja | Odpowiada na pytanie |
 |---|---|
-| **Stack** | What language, runtime, web framework, database, config location? |
-| **Layout** | What does each of the 15 crates do? |
-| **Build** | Which `cargo` invocations are allowed / forbidden? |
-| **Architecture** | What are the key traits, bridges, and patterns? |
-| **API routes** | Where do route handlers live? |
-| **Conventions** | Error handling, serialization, naming, async, tests, commits. |
-| **AI Agent Collaboration** | What may an automated contributor do, and what is off-limits? |
-| **Gotchas** | What sharp edges have bitten people before? |
+| **Stack** | Język, runtime, framework webowy, baza danych, lokalizacja konfiguracji? |
+| **Układ** | Co robi każdy z 15 crate'ów? |
+| **Budowanie** | Które wywołania `cargo` są dozwolone / zabronione? |
+| **Architektura** | Jakie są kluczowe traity, pomosty i wzorce? |
+| **Trasy API** | Gdzie znajdują się handlery tras? |
+| **Konwencje** | Obsługa błędów, serializacja, nazewnictwo, async, testy, commity. |
+| **Współpraca agenta AI** | Co może zrobić zautomatyzowany kontrybutor, a co jest poza granicami? |
+| **Pułapki** | Na jakie ostre krawędzie ludzie już się nadziali? |
 
-## How It Fits In
+## Jak to się składa
 
 ```mermaid
 flowchart LR
-  AGENTS["AGENTS.md<br/>(summary)"] -->|points to| CLAUDE["CLAUDE.md<br/>(full contract)"]
-  AGENTS -->|orients| Dev["New developer"]
-  AGENTS -->|bounds| Bot["AI contributor"]
-  CLAUDE -->|enforces via| Hooks["git hooks<br/>commit-msg, pre-push"]
-  CLAUDE -->|enforces via| CI["CI checks"]
-  Bot -->|must follow| Hooks
-  Bot -->|must follow| CI
+  AGENTS["AGENTS.md<br/>(podsumowanie)"] -->|wskazuje| CLAUDE["CLAUDE.md<br/>(pełny kontrakt)"]
+  AGENTS -->|orientuje| Dev["Nowy deweloper"]
+  AGENTS -->|ogranicza| Bot["Kontrybutor AI"]
+  CLAUDE -->|egzekwuje przez| Hooks["hooki git<br/>commit-msg, pre-push"]
+  CLAUDE -->|egzekwuje przez| CI["checki CI"]
+  Bot -->|musi przestrzegać| Hooks
+  Bot -->|musi przestrzegać| CI
 ```
 
-`AGENTS.md` is read first; `CLAUDE.md` is consulted when a boundary needs detail. The git hooks and CI enforce what the docs describe — they are not advisory.
+`AGENTS.md` czyta się jako pierwszy; `CLAUDE.md` konsultuje się, gdy potrzebny jest szczegół dotyczący granicy. Hooki git i CI egzekwują to, co opisano w dokumentacji — nie są one doradcze.
 
-## Stack At A Glance
+## Stack w pigułce
 
-- **Rust 2021 edition**, MSRV **1.94.1**.
-- **tokio** for async runtime.
-- **axum 0.8** for HTTP and WebSocket.
-- **SQLite** via bundled **rusqlite** (no external DB process).
-- **TOML** config at `~/.librefang/config.toml`.
-- Default API endpoint `http://127.0.0.1:4545`.
+- **Rust edycja 2021**, MSRV **1.94.1**.
+- **tokio** jako runtime async.
+- **axum 0.8** dla HTTP i WebSocket.
+- **SQLite** przez dołączony **rusqlite** (bez zewnętrznego procesu bazy danych).
+- Konfiguracja **TOML** w `~/.librefang/config.toml`.
+- Domyślny punkt końcowy API `http://127.0.0.1:4545`.
 
-## Workspace Layout
+## Układ workspace'u
 
-The workspace contains **15 crates** under `crates/` plus `xtask/`. The layout table in `AGENTS.md` is the canonical map; a few load-bearing relationships:
+Workspace zawiera **15 crate'ów** w katalogu `crates/` oraz `xtask/`. Tabela układu w `AGENTS.md` to kanoniczna mapa; kilka nośnych relacji:
 
-- **`librefang-types`** — shared types and traits; everything depends on it, it depends on nothing.
-- **`librefang-kernel`** — the orchestration core: agent registry, scheduling, event bus, metering.
-- **`librefang-runtime`** — the agent loop, LLM drivers, tools, MCP client, context engine, and A2A.
-- **`librefang-api`** — HTTP/WebSocket server and the React dashboard.
+- **`librefang-types`** — współdzielone typy i traity; wszystko od niego zależy, on nie zależy od niczego.
+- **`librefang-kernel`** — rdzeń orkiestracji: rejestr agentów, planowanie, event bus, metering.
+- **`librefang-runtime`** — pętla agenta, sterowniki LLM, narzędzia, klient MCP, silnik kontekstu i A2A.
+- **`librefang-api`** — serwer HTTP/WebSocket oraz dashboard React.
 
-The two crates most likely to trip up a new contributor are `librefang-kernel` and `librefang-runtime`, because they have a circular dependency that is broken by the `KernelHandle` trait (see below).
+Dwa craty, które najprawdopodobniej spowodują problemy nowemu kontrybutorowi, to `librefang-kernel` i `librefang-runtime`, ponieważ mają zależność cykliczną, która jest przerwana przez trait `KernelHandle` (patrz poniżej).
 
-## Build Rules (Enforced)
+## Reguły budowania (egzekwowane)
 
-Three commands are sanctioned; deviation will be rejected in review.
+Sanctionowane są trzy komendy; odchylenia zostaną odrzucone w code review.
 
 ```bash
-cargo check --workspace --lib                          # compile-check only
-cargo test -p <crate>                                  # scoped; workspace-wide tests are forbidden
-cargo clippy --workspace --all-targets -- -D warnings  # zero warnings tolerated
+cargo check --workspace --lib                          # tylko sprawdzenie kompilacji
+cargo test -p <crate>                                  # ograniczone; testy całego workspace'u są zabronione
+cargo clippy --workspace --all-targets -- -D warnings  # zero ostrzeżeń, zero tolerancji
 ```
 
-The **workspace-wide `cargo test`** form is explicitly forbidden because of `target/` contention. Always scope tests to a single crate with `-p`. Full builds run in CI — locally, use `cargo check --workspace --lib`.
+Forma **całoworkspace'owego `cargo test`** jest jawnie zabroniona z powodu rywalizacji o `target/`. Zawsze ograniczaj testy do pojedynczego crate'a za pomocą `-p`. Pełne buildy uruchamiają się w CI — lokalnie używaj `cargo check --workspace --lib`.
 
-## Architecture Seams
+## Szwyny architektoniczne
 
-### `KernelHandle` trait
+### Trait `KernelHandle`
 
-Defined in `librefang-runtime`. The **kernel implements it**; **runtime and API consume it**. This is the indirection that lets the kernel and runtime crates reference each other's behavior without a circular crate dependency. Any new capability the runtime needs from the kernel must surface through this trait.
+Zdefiniowany w `librefang-runtime`. **Kernel go implementuje**; **runtime i API go konsumują**. To jest pośrednictwo, które pozwala crate'om kernel i runtime odwoływać się do zachowań nawzajem bez cyklicznej zależności crate'ów. Każda nowa funkcjonalność, której runtime potrzebuje od kernela, musi wyłonić się przez ten trait.
 
-### `AppState` bridge
+### Pomost `AppState`
 
-Lives in `librefang-api/src/server.rs`. It wires the kernel into route handlers and carries shared state (e.g., `Option<Arc<PeerRegistry>>`). **Adding a route requires two edits**: register it in the `server.rs` router *and* implement it under `librefang-api/src/routes/`.
+Znajduje się w `librefang-api/src/server.rs`. Podłącza kernel do handlerów tras i niesie współdzielony stan (np. `Option<Arc<PeerRegistry>>`). **Dodanie trasy wymaga dwóch edycji**: zarejestruj ją w routerze `server.rs` *oraz* zaimplementuj ją w `librefang-api/src/routes/`.
 
 ### `session_mode`
 
-Two values govern how automated invocations treat conversation history:
+Dwie wartości określają, jak zautomatyzowane wywołania traktują historię konwersacji:
 
-- `"persistent"` (default) — reuses the agent's existing session.
-- `"new"` — starts fresh on every automated invocation (cron, triggers, `agent_send`).
+- `"persistent"` (domyślny) — ponownie używa istniejącej sesji agenta.
+- `"new"` — zaczyna od nowa przy każdym zautomatyzowanym wywołaniu (cron, triggery, `agent_send`).
 
-Override is per-trigger via the trigger registration API. **Hands honor `session_mode`** because they share `AgentManifest` and the execution pipeline.
+Nadpisanie jest per-trigger przez API rejestracji triggerów. **Hands honorują `session_mode`**, ponieważ współdzielą `AgentManifest` i potok wykonawczy.
 
-### `KernelConfig` field pattern
+### Wzorzec pola `KernelConfig`
 
-Adding any field to `KernelConfig` requires **all four** of:
+Dodanie jakiegokolwiek pola do `KernelConfig` wymaga **wszystkich czterech**:
 
-1. The struct field itself.
-2. `#[serde(default)]` on it.
-3. A matching entry in the `Default` impl.
-4. `Serialize` / `Deserialize` derives on the struct.
+1. Samego pola w strukturze.
+2. `#[serde(default)]` na nim.
+3. Odpowiadającego wpisu w impl `Default`.
+4. Pochodnych `Serialize` / `Deserialize` na strukturze.
 
-The build will fail if the `Default` impl is missing the new entry — this is called out in Gotchas because it is a frequent CI break.
+Build nie powiedzie się, jeśli impl `Default` nie zawiera nowego wpisu — jest to wywołane w Pułapkach, ponieważ jest częstym powodem złamania CI.
 
-### Agent manifests and the dashboard
+### Manifesty agentów i dashboard
 
-- Agent manifests live at `agents/<name>/agent.toml`.
-- The dashboard is a **React + TypeScript SPA built with Vite**, located at `crates/librefang-api/dashboard/`. Pages in `dashboard/src/pages/`, components in `dashboard/src/components/`.
+- Manifesty agentów znajdują się w `agents/<name>/agent.toml`.
+- Dashboard to **SPA w React + TypeScript zbudowane w Vite**, zlokalizowane w `crates/librefang-api/dashboard/`. Strony w `dashboard/src/pages/`, komponenty w `dashboard/src/components/`.
 
-## API Route Surface
+## Powierzchnia tras API
 
-Route handlers are organized by domain module under `crates/librefang-api/src/routes/`. The 16 domain modules are:
+Handlery tras są zorganizowane w moduły domenowe w `crates/librefang-api/src/routes/`. 16 modułów domenowych to:
 
 `agents`, `budget`, `channels`, `config`, `goals`, `inbox`, `media`, `memory`, `network`, `plugins`, `prompts`, `providers`, `skills`, `system`, `workflows`.
 
-Each is a self-contained module; new endpoints land in the relevant module and are wired through `server.rs`.
+Każdy jest samowystarczalnym modułem; nowe endpointy trafiają do odpowiedniego modułu i są podłączane przez `server.rs`.
 
-## Conventions
+## Konwencje
 
-These are the rules the codebase is expected to follow. Reviewers check them.
+To są zasady, których codebase ma przestrzegać. Recenzenci je sprawdzają.
 
-- **Errors**: `thiserror` in libraries; `anyhow` in application code.
-- **Serialization**: `serde` + `serde_json` + `toml`.
-- **Naming**: `snake_case` for functions and variables; `PascalCase` for types.
-- **Async**: `async fn` on tokio. `async-trait` **only** when a trait method must be async.
-- **Tests**: `#[cfg(test)]` modules next to the source they test. Cross-crate helpers live in `librefang-testing` (mock kernel, mock LLM, route test utilities).
-- **Commits**: Conventional Commits — `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`.
+- **Błędy**: `thiserror` w bibliotekach; `anyhow` w kodzie aplikacyjnym.
+- **Serializacja**: `serde` + `serde_json` + `toml`.
+- **Nazewnictwo**: `snake_case` dla funkcji i zmiennych; `PascalCase` dla typów.
+- **Async**: `async fn` na tokio. `async-trait` **tylko** gdy metoda traitu musi być async.
+- **Testy**: moduły `#[cfg(test)]` obok testowanego kodu źródłowego. Helpery cross-crate'owe znajdują się w `librefang-testing` (mock kernel, mock LLM, utilitki testowe tras).
+- **Commity**: Conventional Commits — `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`.
 
-## AI Agent Collaboration Boundaries
+## Granice współpracy agenta AI
 
-Because LibreFang has heavy AI-assisted participation, the boundaries section exists to **keep human reviewers in control** and **prevent noisy or destructive behavior**. The list is the single-page summary; `CLAUDE.md` holds the full enforcement detail.
+Ponieważ LibreFang ma mocny udział kontrybucji wspieranych przez AI, sekcja granic istnieje, aby **utrzymać ludzkich recenzentów nad kontrolą** i **zapobiegać głośnemu lub destrukcyjnemu zachowaniu**. Lista jest jednostronicowym podsumowaniem; `CLAUDE.md` zawiera pełne szczegóły egzekwowania.
 
-The rules cluster into four themes:
+Reguły grupują się w cztery tematy:
 
-1. **Don't touch other people's work uninvited.** Don't modify a reviewed/approved PR; don't close a PR or issue you didn't open (recommend closure in a comment instead); don't force-push to someone else's branch.
-2. **Don't bypass verification.** No `--no-verify`, no `--no-gpg-sign`, no skipping hooks. No AI attribution in commits or PR bodies — the `commit-msg` hook rejects it.
-3. **Stay scoped and quiet.** One PR ↔ one issue. At most 2 follow-up comments on a thread without human input. Don't poll CI for more than ~5 minutes — push, report the run URL, stop.
-4. **When blocked, stop and report.** Don't auto-open follow-up issues, don't silently switch plans, don't add reviewers or flip `ready-for-review` unprompted.
+1. **Nie dotykaj cudzej pracy bez zaproszenia.** Nie modyfikuj zrecenzowanego/zatwierdzonego PR; nie zamykaj PR ani issue, którego nie otworzyłeś (zamiast tego zarekomenduj zamknięcie w komentarzu); nie rób force-pusha na cudzą gałąź.
+2. **Nie omijaj weryfikacji.** Bez `--no-verify`, bez `--no-gpg-sign`, bez pomijania hooków. Bez atrybucji AI w commitach lub treści PR — hook `commit-msg` to odrzuca.
+3. **Zachowaj zakres i ciszę.** Jeden PR ↔ jedno issue. Najwyżej 2 komentarze następcze w wątku bez udziału człowieka. Nie odpytuj CI przez więcej niż ~5 minut — wypchnij, podaj URL runu, przestań.
+4. **Gdy jesteś zablokowany, zatrzymaj się i zgłoś.** Nie otwieraj automatycznie issue następczych, nie przełączaj planów po cichu, nie dodawaj recenzentów ani nie zmieniaj `ready-for-review` bez wcześniejszego zapytania.
 
-**Conflict resolution rule**: a human maintainer's most recent intent always wins over an earlier AI-authored change. Never silently drop a maintainer's edit to shrink a diff.
+**Reguła rozwiązywania konfliktów**: najnowsza intencja ludzkiego maintainera zawsze wygrywa z wcześniejszą zmianą autorską AI. Nigdy nie pomijaj po cichu edycji maintainera, by zmniejszyć diff.
 
-## Gotchas
+## Pułapki
 
-These are the concrete traps documented for contributors. They are easy to miss and each has bitten someone.
+To są konkretne pułapki udokumentowane dla kontrybutorów. Łatwo je przeoczyć, a każda już kogoś ugryzła.
 
-- **`librefang-cli` is off-limits** without explicit instruction — it is under active development.
-- **`PeerRegistry` typing is asymmetric**: `Option<PeerRegistry>` on the kernel, `Option<Arc<PeerRegistry>>` on `AppState`. Don't assume one shape.
-- **`KernelConfig` `Default` impl is mandatory** for every new field — the build fails otherwise.
-- **`AgentLoopResult` exposes `.response`**, not `.response_text`.
-- **CLI daemon command is `start`**, not `daemon`.
+- **`librefang-cli` jest poza zasięgiem** bez wyraźnej instrukcji — jest w aktywnym rozwoju.
+- **Typowanie `PeerRegistry` jest asymetryczne**: `Option<PeerRegistry>` w kernelu, `Option<Arc<PeerRegistry>>` w `AppState`. Nie zakładaj jednego kształtu.
+- **Impl `Default` `KernelConfig` jest obowiązkowy** dla każdego nowego pola — w przeciwnym razie build nie powiedzie się.
+- **`AgentLoopResult` eksponuje `.response`**, nie `.response_text`.
+- **Komenda daemona CLI to `start`**, nie `daemon`.
 
-## How To Use This Document
+## Jak korzystać z tego dokumentu
 
-- **As a new contributor**: read top to bottom once. Keep the Layout and Build tables bookmarked. Consult Gotchas before each PR.
-- **As an AI contributor**: the Collaboration Boundaries are non-negotiable. When uncertain whether an action is permitted, default to *stop and ask*. The `CLAUDE.md` link from this file is the source of truth for edge cases.
-- **As a reviewer**: the Conventions and Build sections are your checklist. CI enforces clippy (`-D warnings`) and the `commit-msg` hook enforces conventional commits and no-AI-attribution; anything that slips past CI should still be caught against these rules.
+- **Jako nowy kontrybutor**: przeczytaj raz od góry do dołu. Trzymaj w zakładkach tabele Układu i Budowania. Konsultuj Pułapki przed każdym PR.
+- **Jako kontrybutor AI**: Granice Współpracy są niepodlegające negocjacjom. Gdy nie jesteś pewien, czy akcja jest dozwolona, domyślnie *zatrzymaj się i zapytaj*. Link do `CLAUDE.md` z tego pliku jest źródłem prawdy dla przypadków brzegowych.
+- **Jako recenzent**: sekcje Konwencje i Budowania to Twoja checklista. CI egzekwuje clippy (`-D warnings`) a hook `commit-msg` egzekwuje conventional commits i brak atrybucji AI; wszystko, co umknie CI, powinno zostać złapane względem tych reguł.

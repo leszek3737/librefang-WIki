@@ -2,31 +2,31 @@
 
 # `librefang-llm-driver`
 
-The trait crate for LibreFang's LLM abstraction layer. Defines the `LlmDriver` trait, request/response types, error taxonomy, and the in-memory exhaustion ledger used by fallback chains. **No concrete provider implementations live here** — those live in the sibling `librefang-llm-drivers` crate (note the trailing `s`).
+Krate traitów warstwy abstrakcji LLM LibreFanga. Definiuje trait `LlmDriver`, typy żądań/odpowiedzi, taksonomię błędów oraz rejestr wyczerpania w pamięci używany przez łańcuchy awaryjne. **Tu nie ma żadnych konkretnych implementacji dostawców** — one znajdują się w siostrzanej krate `librefang-llm-drivers` (zwróć uwagę na końcowe `s`).
 
-## Purpose & Boundary
+## Cel i granice
 
-This crate exists to give consumers (kernel, test harnesses, agent loop) a stable trait contract they can depend on *without* transitively pulling in `reqwest`, TLS stacks, or vendored provider SDKs. Every concrete driver (Anthropic, OpenAI, Gemini, Groq, Ollama, Claude Code, Codex CLI, …) is implemented against this trait in `librefang-llm-drivers`.
+Ta krate istnieje, aby dać konsumentom (jądro, test harnesses, pętla agenta) stabilną umowę traitów, której mogą polegać *bez* przechodniego ciągnięcia `reqwest`, stosów TLS lub dostarczonych SDK dostawców. Każdy konkretny sterownik (Anthropic, OpenAI, Gemini, Groq, Ollama, Claude Code, Codex CLI, …) jest zaimplementowany w oparciu o ten trait w `librefang-llm-drivers`.
 
-What this crate owns:
+Co jest zarządzane przez tę kratę:
 
-- `LlmDriver` trait and the supporting `CompletionRequest` / `CompletionResponse` / `StreamEvent` types
-- `LlmError` enum (the only error type allowed in trait return positions)
-- Error classification: `FailoverReason`, `ProviderErrorCode`, `LlmErrorCategory`, `classify_error`
-- Provider exhaustion ledger (`ProviderExhaustionStore`) consulted by fallback chains
-- `DriverConfig` — provider-agnostic configuration handed to the factory
+- trait `LlmDriver` oraz wspierające typy `CompletionRequest` / `CompletionResponse` / `StreamEvent`
+- enum `LlmError` (jedyny typ błędu dopuszczalny w pozycjach zwrotnych traitów)
+- klasyfikacja błędów: `FailoverReason`, `ProviderErrorCode`, `LlmErrorCategory`, `classify_error`
+- rejestr wyczerpania dostawców (`ProviderExhaustionStore`) konsultowany przez łańcuchy awaryjne
+- `DriverConfig` — niezależna od dostawcy konfiguracja przekazywana do fabryki
 
-What it deliberately does **not** own:
+Co celowo **nie** jest zarządzane przez tę kratę:
 
-- Any HTTP wiring, retry strategy, or prompt formatting
-- Provider-specific request/response bodies
-- Tool execution, agent loop, or kernel concerns
+- Żadne okablowanie HTTP, strategia ponawiania ani formatowanie promptów
+- Specyficzne dla dostawcy ciała żądań/odpowiedzi
+- Wykonywanie narzędzi, pętla agenta, czy problemy jądra
 
-## Architecture
+## Architektura
 
 ```mermaid
 flowchart TD
-    subgraph librefang_llm_driver[this crate]
+    subgraph librefang_llm_driver[ta krate]
         Trait[LlmDriver trait]
         Req[CompletionRequest]
         Resp[CompletionResponse]
@@ -34,7 +34,7 @@ flowchart TD
         Exhaust[ProviderExhaustionStore]
         Class[classify_error / FailoverReason]
     end
-    subgraph librefang_llm_drivers[sibling crate]
+    subgraph librefang_llm_drivers[krate siostrzana]
         Anthropic[AnthropicDriver]
         OpenAi[OpenAiDriver]
         Gemini[GeminiDriver]
@@ -44,22 +44,22 @@ flowchart TD
     Kernel[librefang-kernel]
     Tests[librefang-testing]
 
-    Anthropic -.implements.-> Trait
-    OpenAi -.implements.-> Trait
-    Gemini -.implements.-> Trait
-    Cli -.implements.-> Trait
-    Chain -.implements.-> Trait
+    Anthropic -.implementuje.-> Trait
+    OpenAi -.implementuje.-> Trait
+    Gemini -.implementuje.-> Trait
+    Cli -.implementuje.-> Trait
+    Chain -.implementuje.-> Trait
     Chain --> Exhaust
     Chain --> Class
     Kernel --> Trait
     Tests --> Trait
 ```
 
-## Core Types
+## Typy rdzeniowe
 
-### `LlmDriver` trait
+### trait `LlmDriver`
 
-The single abstraction concrete providers implement:
+Jedyna abstrakcja implementowana przez konkretnych dostawców:
 
 ```rust
 #[async_trait]
@@ -71,7 +71,7 @@ pub trait LlmDriver: Send + Sync {
         &self,
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
-    ) -> Result<CompletionResponse, LlmError> { /* default impl */ }
+    ) -> Result<CompletionResponse, LlmError> { /* domyślna implementacja */ }
 
     fn is_configured(&self) -> bool { true }
     fn family(&self) -> LlmFamily { LlmFamily::Other }
@@ -79,168 +79,168 @@ pub trait LlmDriver: Send + Sync {
 }
 ```
 
-- `complete` is the only required method.
-- `stream` has a default that wraps `complete()` and emits a single `TextDelta` + `ContentComplete`. Real streaming drivers override it. The default propagates `tx.send` errors as `LlmError::Http("stream receiver dropped")` so client disconnects surface as cancellation rather than silent swallows (#3543).
-- `family()` returns the high-level wire-format family (`Anthropic`, `OpenAi`, `Google`, `Local`, `Other`). Intentionally coarser than per-driver identity — future cross-cutting policy hooks off this axis.
-- `is_coding_agent()` distinguishes CLI-based coding agents (Claude Code, Codex CLI, Gemini CLI, …) from raw HTTP providers. Coding agents own model selection and may populate `CompletionResponse::actual_model`.
+- `complete` to jedyna wymagana metoda.
+- `stream` ma domyślną implementację, która opakowuje `complete()` i emituje pojedynczy `TextDelta` + `ContentComplete`. Prawdziwe sterowniki strumieniowe nadpisują ją. Domyślna implementacja propaguje błędy `tx.send` jako `LlmError::Http("stream receiver dropped")`, aby rozłączenia klienta ujawniały się jako anulowanie, a nie ciche połykanie (#3543).
+- `family()` zwraca wysokopoziomową rodzinę formatu przewodowego (`Anthropic`, `OpenAi`, `Google`, `Local`, `Other`). Celowo szerszą niż tożsamość poszczególnego sterownika — przyszłe polityki przekrojowe opierają się na tej osi.
+- `is_coding_agent()` odróżnia agentów kodowania opartych na CLI (Claude Code, Codex CLI, Gemini CLI, …) od dostawców surowego HTTP. Agenty kodowania zarządzają wyborem modelu i mogą wypełniać `CompletionResponse::actual_model`.
 
 ### `CompletionRequest`
 
-All fields a driver needs to fulfill a turn. A few design points worth knowing:
+Wszystkie pola potrzebne sterownikowi do obsłużenia tury. Kilka punktów projektowych warto znać:
 
-- `messages` and `tools` are wrapped in `Arc<Vec<_>>`. Retries, fallback, and agent-loop turn sharing only bump refcounts instead of deep-cloning multi-hundred-KB message history (#3586, #3766). Driver code reads through `&request.messages` / `request.tools.iter()` and gets auto-deref.
-- `extra_body` is `BTreeMap<String, serde_json::Value>`, **not** `HashMap`. Deterministic key order is required because the map is flattened into wire requests; unstable ordering silently invalidates provider prompt caches (#3298).
-- `prompt_caching` / `cache_ttl` / `prompt_cache_strategy` drive Anthropic `cache_control` breakpoint placement. The strategy enum (`PromptCacheStrategy::SystemAndN(n)`) is clipped to provider-specific caps (4 on Anthropic).
-- The `agent_id` / `session_id` / `step_id` / `sender_*` fields propagate caller identity. HTTP-compatible drivers surface them as `x-librefang-{agent,session,step}-id` headers; subprocess drivers forward them so MCP bridges can rehydrate `ToolExecContext` on the far side.
-- `reasoning_echo_policy` carries model-catalog metadata that tells the OpenAI driver how to handle `reasoning_content` on historical assistant turns (#4842).
+- `messages` i `tools` są opakowane w `Arc<Vec<_>>`. Ponowienia, awaryjne przejścia i współdzielenie tur w pętli agenta zwiększają tylko liczniki referencji zamiast głęboko klonować wielo-set-kilobajtową historię wiadomości (#3586, #3766). Kod sterownika czyta przez `&request.messages` / `request.tools.iter()` i otrzymuje automatyczne dereferencjonowanie.
+- `extra_body` to `BTreeMap<String, serde_json::Value>`, **nie** `HashMap`. Deterministyczna kolejność kluczy jest wymagana, ponieważ mapa jest spłaszczana do żądań przewodowych; niestabilna kolejność cicho unieważnia pamięć podręczną promptów dostawców (#3298).
+- `prompt_caching` / `cache_ttl` / `prompt_cache_strategy` sterują umiejscowieniem punktów przerwania `cache_control` Anthropic. Enum strategii (`PromptCacheStrategy::SystemAndN(n)`) jest przycinany do limitów specyficznych dla dostawcy (4 w Anthropic).
+- Pola `agent_id` / `session_id` / `step_id` / `sender_*` propagują tożsamość wywołującego. Sterowniki kompatybilne z HTTP ujawniają je jako nagłówki `x-librefang-{agent,session,step}-id`; sterowniki podprocesowe przekazują je dalej, aby mosty MCP mogły odtworzyć `ToolExecContext` po drugiej stronie.
+- `reasoning_echo_policy` niesie metadane katalogu modeli, które mówią sterownikowi OpenAI, jak obsługiwać `reasoning_content` w historycznych turach asystenta (#4842).
 
-`Default` is implemented for ergonomics — every real call site must still set `model` and `messages` explicitly; the default request is not usable as-is.
+`Default` jest zaimplementowane dla wygody — każdy rzeczywisty punkt wywołania musi nadal jawnie ustawić `model` i `messages`; domyślne żądanie nie jest nadające się do użycia jak jest.
 
 ### `CompletionResponse`
 
-Carries the content blocks, stop reason, tool calls, token usage, and two provider attribution fields:
+Niesie bloki treści, powód zatrzymania, wywołania narzędzi, użycie tokenów i dwa pola atrybucji dostawcy:
 
-- `actual_provider` — set by fallback wrappers (`FallbackChain`, `BudgetGatedDriver`) so the billing layer attributes spend to the slot that did the work, not the nominated slot. Always `None` on inner leaf drivers.
-- `actual_model` — set only by coding-agent drivers whose spawned CLI may resolve a different model than the one requested. Raw providers honour the requested id and leave this `None`.
+- `actual_provider` — ustawiane przez opakowania awaryjne (`FallbackChain`, `BudgetGatedDriver`), aby warstwa rozliczeń przypisywała wydatki do gniazda, które wykonało pracę, a nie do nominowanego gniazda. Zawsze `None` w wewnętrznych sterownikach liściowych.
+- `actual_model` — ustawiane tylko przez sterowniki agentów kodowania, których uruchomiony CLI może rozwiązać model inny niż żądany. Dostawcy surowi honorują żądany identyfikator i zostawiają to jako `None`.
 
-`text()` concatenates `ContentBlock::Text` variants, skipping thinking blocks.
+`text()` konkatenuje warianty `ContentBlock::Text`, pomijając bloki myślowe.
 
 ### `StreamEvent`
 
-A non-exhaustive enum emitted through the `mpsc::Sender` passed to `stream()`. Notable variants:
+Enum niekompletny, emitowany przez `mpsc::Sender` przekazany do `stream()`. Wartościowe warianty:
 
-- `TextDelta`, `ThinkingDelta` — incremental text/reasoning
-- `ToolUseStart` / `ToolInputDelta` / `ToolUseEnd` — tool-call lifecycle
-- `ContentComplete { stop_reason, usage }` — terminal
-- `PhaseChange { phase, detail }` — UX lifecycle signal; the canonical `PHASE_RESPONSE_COMPLETE` constant signals that post-processing (session save, proactive memory) is about to start
-- `ToolExecutionResult`, `OwnerNotice` — emitted by the agent loop, **not** LLM drivers; channel-bridge consumers route `OwnerNotice` to the owner's DM
+- `TextDelta`, `ThinkingDelta` — przyrostowy tekst/rezonowanie
+- `ToolUseStart` / `ToolInputDelta` / `ToolUseEnd` — cykl życia wywołania narzędzia
+- `ContentComplete { stop_reason, usage }` — terminalny
+- `PhaseChange { phase, detail }` — sygnał cyklu życia UX; kanoniczna stała `PHASE_RESPONSE_COMPLETE` sygnalizuje, że przetwarzanie końcowe (zapis sesji, proaktywna pamięć) zaraz się rozpocznie
+- `ToolExecutionResult`, `OwnerNotice` — emitowane przez pętlę agenta, **nie** przez sterowniki LLM; konsumenci mostu kanałowego kierują `OwnerNotice` do DM właściciela
 
 ### `LlmFamily`
 
-Five variants serialized as snake_case (`anthropic`, `open_ai`, `google`, `local`, `other`). The `Display` impl matches the serde form so logs and JSON agree.
+Pięć wariantów serializowanych jako snake_case (`anthropic`, `open_ai`, `google`, `local`, `other`). Implementacja `Display` odpowiada formie serde, więc logi i JSON się zgadzają.
 
-## Error Handling
+## Obsługa błędów
 
-Error handling is layered: `LlmError` is the wire type returned from drivers; `FailoverReason` is the structural classification used by fallback chains; `classify_error` / `LlmErrorCategory` is the heuristic classifier used for user-facing diagnostics.
+Obsługa błędów jest warstwowa: `LlmError` to typ przewodowy zwracany ze sterowników; `FailoverReason` to klasyfikacja strukturalna używana przez łańcuchy awaryjne; `classify_error` / `LlmErrorCategory` to heurystyczny klasyfikator używany do diagnostyki dla użytkownika.
 
 ### `LlmError`
 
-`#[non_exhaustive]` enum. Variants include `Http`, `Api`, `RateLimited`, `Parse`, `MissingApiKey`, `Overloaded`, `AuthenticationFailed`, `ModelNotFound`, `TimedOut`, `AllProvidersExhausted`. Notable design constraints enforced throughout the codebase:
+Enum `#[non_exhaustive]`. Warianty obejmują `Http`, `Api`, `RateLimited`, `Parse`, `MissingApiKey`, `Overloaded`, `AuthenticationFailed`, `ModelNotFound`, `TimedOut`, `AllProvidersExhausted`. Godne uwagi ograniczenia projektowe wymuszane w całej bazie kodu:
 
-- **No `String` catch-all variant.** All variants carry structured fields (#3541, #3711).
-- **No `Box<dyn Error>` in trait return types.** Use `LlmError`.
-- `Api` carries an optional `ProviderErrorCode` so classification doesn't depend on substring matching of human-readable messages (#3745).
-- `TimedOut` stores `partial_text: Option<Arc<str>>` so cloning the error is an O(1) refcount bump even for megabyte partials. The `Display` impl references only `partial_text_len` — most consumers never touch the body. Pattern-matching the variant is the supported way to forward the partial (#3552).
-- `AllProvidersExhausted` carries a sorted `details: Vec<ProviderExhaustionDetail>` and an optional `cause: Option<Box<LlmError>>` exposed through `Error::source()` via thiserror's `#[source]`. When every slot was pre-skipped from the exhaustion store, `cause` is `None`.
+- **Żadnego wariantu-łapacza `String`.** Wszystkie warianty przenoszą uporządkowane pola (#3541, #3711).
+- **Żadnego `Box<dyn Error>` w typach zwrotnych traitów.** Używaj `LlmError`.
+- `Api` niesie opcjonalny `ProviderErrorCode`, więc klasyfikacja nie zależy od dopasowywania podłańcuchów czytelnych dla człowieka wiadomości (#3745).
+- `TimedOut` przechowuje `partial_text: Option<Arc<str>>`, więc klonowanie błędu to inkrementacja licznika referencji O(1) nawet dla częściowych wyników o rozmiarze megabajtów. Implementacja `Display` odwołuje się tylko do `partial_text_len` — większość konsumentów nigdy nie dotyka treści. Dopasowywanie wzorców do wariantu to wspierany sposób przekazywania częściowych wyników (#3552).
+- `AllProvidersExhausted` niesie posortowane `details: Vec<ProviderExhaustionDetail>` i opcjonalną `cause: Option<Box<LlmError>>` ujawnianą przez `Error::source()` za pomocą `#[source]` thiserror. Kiedy każde gniazdo zostało z góry pominięte z rejestru wyczerpania, `cause` wynosi `None`.
 
-### `failover_reason()` — structural classification
+### `failover_reason()` — klasyfikacja strukturalna
 
-`LlmError::failover_reason()` is allocation-free, infallible, and purely structural. It maps each variant to one of nine `FailoverReason` values:
+`LlmError::failover_reason()` jest bezalokacyjna, nieomylna i czysto strukturalna. Mapuje każdy wariant na jedną z dziewięciu wartości `FailoverReason`:
 
-| Variant           | Recovery                          |
-|-------------------|-----------------------------------|
-| `RateLimit(ms)`   | sleep, retry same provider        |
-| `CreditExhausted` | skip to next provider             |
-| `ModelUnavailable`| skip to next provider             |
-| `ContextTooLong`  | propagate — caller must compress  |
-| `Timeout`         | skip to next provider             |
-| `HttpError`       | skip to next provider             |
-| `AuthError`       | skip to next provider             |
-| `ChainExhausted`  | terminal — propagate to user      |
-| `Unknown`         | propagate immediately             |
+| Wariant           | Odtworzenie                          |
+|-------------------|--------------------------------------|
+| `RateLimit(ms)`   | uśpienie, ponowienie tego samego dostawcy |
+| `CreditExhausted` | pominięcie do następnego dostawcy  |
+| `ModelUnavailable`| pominięcie do następnego dostawcy  |
+| `ContextTooLong`  | propagacja — wywołujący musi skompresować |
+| `Timeout`         | pominięcie do następnego dostawcy  |
+| `HttpError`       | pominięcie do następnego dostawcy  |
+| `AuthError`       | pominięcie do następnego dostawcy  |
+| `ChainExhausted`  | terminalne — propagacja do użytkownika |
+| `Unknown`         | natychmiastowa propagacja          |
 
-`ChainExhausted` is distinct from `Unknown`: classification succeeded, the chain is simply dry. This split matters because conflating them would cause callers to loop on a known-terminal state.
+`ChainExhausted` jest różne od `Unknown`: klasyfikacja się powiodła, łańcuch jest po prostu suchy. Ten podział ma znaczenie, ponieważ ich pomieszanie spowodowałoby, że wywołujący zapętlą się na znanym stanie terminalnym.
 
 ### `ProviderErrorCode`
 
-Typed tag attached to `LlmError::Api { code, .. }` by drivers that parse the provider's structured error body. Variants: `RateLimit`, `CreditExhausted`, `ContextLengthExceeded`, `ModelNotFound`, `AuthError`, `ServerUnavailable`, `ServerError`, `BadRequest`. When `code` is present, `failover_reason()` classifies via the typed value (exhaustive, locale-independent); otherwise it falls back to status-code-only classification. Drivers that need fine-grained behaviour from ambiguous statuses (403, 404, 400) **must** populate `code`.
+Typowany tag dołączany do `LlmError::Api { code, .. }` przez sterowniki parsujące uporządkowane ciało błędu dostawcy. Warianty: `RateLimit`, `CreditExhausted`, `ContextLengthExceeded`, `ModelNotFound`, `AuthError`, `ServerUnavailable`, `ServerError`, `BadRequest`. Kiedy `code` jest obecne, `failover_reason()` klasyfikuje przez typowaną wartość (wyczerpujące, niezależne od języka); w przeciwnym razie cofa się do klasyfikacji tylko na podstawie kodu statusu. Sterowniki potrzebujące precyzyjnego zachowania od niejednoznacznych statusów (403, 404, 400) **muszą** wypełnić `code`.
 
-### Heuristic classification (`llm_errors.rs`)
+### Klasyfikacja heurystyczna (`llm_errors.rs`)
 
-`classify_error(message, status)` returns a `ClassifiedError` with category, retryability, billing flag, suggested delay, sanitized message, raw message, and optional provider/model context. `classify_error_with_context` enriches the result with provider/model metadata and an actionable `suggestion`.
+`classify_error(message, status)` zwraca `ClassifiedError` z kategorią, możliwość ponowienia, flagą rozliczeń, sugerowanym opóźnieniem, zsanityzowaną wiadomością, surową wiadomością i opcjonalnym kontekstem dostawcy/modelu. `classify_error_with_context` wzbogaca wynik o metadane dostawcy/modelu i akcjęwną `suggestion`.
 
-Classification priority (most specific first):
+Priorytet klasyfikacji (od najbardziej specyficznego):
 
-1. **Status-code fast paths** — 429 → RateLimit, 402 → Billing, 401 → Auth, 404 → ModelNotFound. The 403 case is special: it checks rate-limit, billing, context-overflow, model-not-found patterns, then `FORBIDDEN_NON_AUTH_PATTERNS` (which redirects non-auth 403s to the general pipeline instead of misclassifying them as auth failures — important for Chinese providers that return 403 for quota/region/model-permission issues).
-2. **Pattern matching** in priority order: ContextOverflow → Billing → Auth → RateLimit → ModelNotFound → Format → Overloaded → Timeout. Patterns are case-insensitive substring checks against curated tables; no regex dependency.
-3. **HTML error page detection** (`is_html_error_page`) — catches Cloudflare 521–530 responses masquerading as JSON; classified as Overloaded.
-4. **Fallback** — 5xx → Overloaded, 4xx → Format, network-sounding text → Timeout, else Format.
+1. **Szybkie ścieżki kodu statusu** — 429 → RateLimit, 402 → Billing, 401 → Auth, 404 → ModelNotFound. Przypadek 403 jest specjalny: sprawdza wzorce rate-limit, rozliczeń, przepełnienia kontekstu, model-nieznaleziony, a następnie `FORBIDDEN_NON_AUTH_PATTERNS` (które kieruje nie-autorskie 403 do ogólnej rurociągu zamiast błędnej klasyfikacji jako błędy autoryzacji — ważne dla chińskich dostawców, które zwracają 403 dla problemów z kwotą/regionem/uprawnieniami modelu).
+2. **Dopasowywanie wzorców** w kolejności priorytetu: ContextOverflow → Billing → Auth → RateLimit → ModelNotFound → Format → Overloaded → Timeout. Wzorce to niewrażliwe na wielkość liter sprawdzanie podłańcuchów względem opracowanych tabel; bez zależności od regex.
+3. **Wykrywanie stron błędów HTML** (`is_html_error_page`) — wyłapuje odpowiedzi Cloudflare 521–530 maskujące się jako JSON; klasyfikowane jako Overloaded.
+4. **Rezerwa** — 5xx → Overloaded, 4xx → Format, tekst brzmiący jak sieciowy → Timeout, w przeciwnym razie Format.
 
-Key correctness invariants pinned by tests:
+Kluczowe niezmienniki poprawności przypinane przez testy:
 
-- `insufficient_quota` on a 403 classifies as **Billing**, not Format. This both reports the right thing to operators and triggers the long billing cooldown so an out-of-funds account isn't retried indefinitely.
-- `ssl handshake failure` is intentionally **excluded** from transient SSL patterns — handshake failures are configuration errors that will fail identically on retry.
-- `FORBIDDEN_NON_AUTH_PATTERNS` deliberately overrides generic 403 → Auth when the body mentions quota, region, model-permission, capacity, etc.
+- `insufficient_quota` na 403 klasyfikuje jako **Billing**, nie Format. To jednocześnie zgłasza właściwą rzecz operatorom i uruchamia długą przerwę rozliczeń, aby konto bez środków nie było ponawiane w nieskończoność.
+- `ssl handshake failure` jest celowo **wykluczone** z przejściowych wzorców SSL — błędy handshake to błędy konfiguracji, które będą zawodzić identycznie przy ponowieniu.
+- `FORBIDDEN_NON_AUTH_PATTERNS` celowo nadpisuje ogólny 403 → Auth, gdy ciało wspomina o kwocie, regionie, uprawnieniach modelu, pojemności itp.
 
-### Sanitization
+### Sanityzacja
 
-`sanitize_for_user(category, raw)` produces user-safe messages by extracting a JSON `.error.message` / `.message` / `.detail` field when present, redacting anything that looks like a secret (`sk-…`, `key-…`, `Bearer …`), stripping the `LLM driver error: API error (NNN):` wrapper, and capping length at 200 chars (300 for the final user-facing message). `cap_message` walks back to the nearest UTF-8 char boundary to avoid panicking on CJK/emoji input.
+`sanitize_for_user(category, raw)` tworzy bezpieczne dla użytkownika wiadomości, ekstrahując pole JSON `.error.message` / `.message` / `.detail` gdy obecne, redagując wszystko, co wygląda jak sekret (`sk-…`, `key-…`, `Bearer …`), usuwając otokę `LLM driver error: API error (NNN):` i ograniczając długość do 200 znaków (300 dla ostatecznej wiadomości dla użytkownika). `cap_message` cofa się do najbliższej granicy znaku UTF-8, aby uniknąć paniki na wejściu CJK/emoji.
 
-`extract_retry_delay` parses `retry after N`, `retry-after: N`, `try again in N` from error text and returns milliseconds (an `ms` suffix is honoured; otherwise seconds are converted).
+`extract_retry_delay` parsuje `retry after N`, `retry-after: N`, `try again in N` z tekstu błędu i zwraca milisekundy (przyrostek `ms` jest honorowany; w przeciwnym razie sekundy są konwertowane).
 
-`is_transient(message)` is the quick heuristic used by callers that don't need full classification — it ORs together the timeout, overloaded, rate-limit, and transient-SSL pattern tables.
+`is_transient(message)` to szybka heurystyka używana przez wywołujących, którzy nie potrzebują pełnej klasyfikacji — wykonywa operację OR na tabelach wzorców timeout, overloaded, rate-limit i transient-SSL.
 
-## Provider Exhaustion Store
+## Rejestr wyczerpania dostawców
 
-`ProviderExhaustionStore` is the in-memory ledger consulted by fallback chains before each dispatch and updated by the metering layer when an operator-set budget cap fires. It exists in this crate (not the drivers crate) so the trait-level `AllProvidersExhausted` error and the chain implementation share a single type without a circular import.
+`ProviderExhaustionStore` to rejestr w pamięci konsultowany przez łańcuchy awaryjne przed każdym wysłaniem i aktualizowany przez warstwę pomiarową, gdy limit budżetu ustawiony przez operatora się uruchamia. Istnieje w tej krate (nie w krate sterowników), aby błąd trait-poziomu `AllProvidersExhausted` i implementacja łańcucha dzieliły jeden typ bez cyklicznego importu.
 
-### Semantics
+### Semantyka
 
-- **Process-local.** A daemon restart clears all state by design — persisting exhaustion across restarts would risk locking out a slot whose underlying issue (key rotation, billing top-up) was fixed out-of-band.
-- **Auto-clear on read.** `is_exhausted` returns `None` and atomically removes the entry once `until` passes, so the chain naturally re-attempts the slot without an external sweeper. The removal uses `remove_if` so a concurrent `mark_exhausted` with a fresh `until` is never clobbered.
-- **Indefinite entries.** `until: None` parks a slot until an operator explicitly clears it. Every caller in practice passes `Some(_)`.
-- **Replace-on-mark.** Marking the same provider twice replaces the previous entry — the most recent reason is the actionable one.
+- **Lokalny dla procesu.** Restart demona celowo czyści cały stan — utrzymywanie wyczerpania przez restarty groziłoby zablokowaniem gniazda, którego podstawowy problem (rotacja kluczy, doładowanie rozliczeń) został naprawiony poza pasmem.
+- **Automatyczne czyszczenie przy odczycie.** `is_exhausted` zwraca `None` i atomowo usuwa wpis po przekroczeniu `until`, więc łańcuch naturalnie ponawia gniazdo bez zewnętrznego narzędzia czyszczącego. Usunięcie używa `remove_if`, więc współbieżne `mark_exhausted` z nowym `until` nigdy nie jest nadpisywane.
+- **Wpisy nieograniczone w czasie.** `until: None` parkuje gniazdo, aż operator jawnie je wyczyści. W praktyce każdy wywołujący przekazuje `Some(_)`.
+- **Zastępowanie przy oznaczeniu.** Oznaczenie tego samego dostawcy dwa razy zastępuje poprzedni wpis — najnowszy powód jest tym akcyjnym.
 
-### `ExhaustionReason` variants
+### Warianty `ExhaustionReason`
 
-`RateLimited`, `QuotaExceeded`, `BudgetExceeded`, `AuthFailed`. Variants drive nothing here — they're recorded for logs/metrics/surfaced error detail. The fallback chain treats every variant identically: skip until `until` passes. Each variant exposes `as_metric_label()` returning a stable kebab-case string suitable for Prometheus tags.
+`RateLimited`, `QuotaExceeded`, `BudgetExceeded`, `AuthFailed`. Warianty niczego tu nie napędzają — są rejestrowane dla logów/metryk/uwidocznionych szczegółów błędu. Łańcuch awaryjny traktuje każdy wariant identycznie: pomija aż `until` minie. Każdy wariant ujawnia `as_metric_label()` zwracając stabilny łańcuch kebab-case odpowiedni dla tagów Prometheus.
 
-Reasons without a server-reported reset hint (`QuotaExceeded`, `BudgetExceeded`, `AuthFailed`) use `DEFAULT_LONG_BACKOFF` (1 hour) — short enough that operator fixes heal the chain automatically, long enough that the chain doesn't waste an attempt every minute.
+Powody bez wskazówki resetu raportowanej przez serwer (`QuotaExceeded`, `BudgetExceeded`, `AuthFailed`) używają `DEFAULT_LONG_BACKOFF` (1 godzina) — wystarczająco krótko, aby poprawki operatora automatycznie leczyły łańcuch, wystarczająco długo, aby łańcuch nie marnował próby co minutę.
 
-### Determinism guarantee
+### Gwarancja determinizmu
 
-`DashMap` iteration order is non-deterministic. `snapshot()` returns rows sorted by `provider_id` ascending (via `BTreeMap`) so any stringified output — error messages, logs, prompt-included exhaustion text — is byte-identical across processes. This preserves prompt-cache determinism (#3298) even when exhaustion data leaks into a prompt. `live_count()` and `record_skip()` are observational-only and never affect routing.
+Kolejność iteracji `DashMap` jest niedeterministyczna. `snapshot()` zwraca wiersze posortowane rosnąco po `provider_id` (przez `BTreeMap`), aby jakikolwiek zstringowany wynik — wiadomości błędu, logi, tekst wyczerpania włączony do prompta — był bajtowo identyczny między procesami. To zachowuje determinizm pamięci podręcznej promptów (#3298) nawet gdy dane wyczerpania wyciekają do prompta. `live_count()` i `record_skip()` mają charakter wyłącznie obserwacyjny i nigdy nie wpływają na routing.
 
-### Logging
+### Logowanie
 
-`mark_exhausted` and `record_skip` emit `tracing::info!` events with `target: "metering"`. Exhaustion events are operator-actionable signal, not debug noise — the target lets existing tracing-subscriber filters route metering events to a dashboard without extra wiring.
+`mark_exhausted` i `record_skip` emitują zdarzenia `tracing::info!` z `target: "metering"`. Zdarzenia wyczerpania to sygnał akcjonowalny dla operatora, nie szum debugowania — target pozwala istniejącym filtrom tracing-subscriber kierować zdarzenia pomiarowe do dashboardu bez dodatkowego okablowania.
 
 ## `DriverConfig`
 
-Provider-agnostic configuration handed to the driver factory. Two security properties are pinned by tests and must not regress:
+Konfiguracja niezależna od dostawcy przekazywana do fabryki sterownika. Dwie właściwości bezpieczeństwa są przypinane przez testy i nie mogą ulec regresji:
 
-- `api_key` and `proxy_url` use `#[serde(skip_serializing)]`. Any `serde_json::to_*` / `toml::to_*` of a `DriverConfig` (cache dump, diagnostic snapshot, `mcp_config.json`, cross-process trace) must never emit these fields in cleartext. `Deserialize` is unaffected — config files still populate them on load.
-- The hand-written `Debug` impl redacts `api_key`, `proxy_url`, `vertex_ai.credentials_path` as `<redacted>`.
+- `api_key` i `proxy_url` używają `#[serde(skip_serializing)]`. Jakakolwiek operacja `serde_json::to_*` / `toml::to_*` na `DriverConfig` (zrzut pamięci podręcznej, migawka diagnostyczna, `mcp_config.json`, śledzenie międzyprocesowe) nie może emitować tych pól w czystym tekście. `Deserialize` pozostaje bez zmian — pliki konfiguracyjne nadal je wypełniają przy ładowaniu.
+- Ręczna implementacja `Debug` redaguje `api_key`, `proxy_url`, `vertex_ai.credentials_path` jako `<redacted>`.
 
-Other notable fields:
+Inne godne uwagi pola:
 
-- `skip_permissions` defaults to `true` because LibreFang runs as a daemon with no interactive terminal; permission prompts would block indefinitely. LibreFang's own capability/RBAC layer is the real boundary.
-- `max_retries` defaults to 3 (four total attempts). Set to 0 to disable in-driver retries and rely solely on `FallbackChain`. CLI-based providers ignore this field.
-- `message_timeout_secs` is inactivity-based for CLI providers — the subprocess is killed after this many seconds of stdout silence, not wall-clock time.
-- `emit_caller_trace_headers` lets regulated tenants suppress `x-librefang-{agent,session,step}-id` wire-side regardless of whether the request carries caller-id fields. Currently honoured only by the OpenAI-compatible driver.
-- `mcp_bridge` carries `McpBridgeConfig` so `DriverConfig` can hold CLI-bridge wiring without a circular dependency on `librefang-llm-drivers`. The field is `#[serde(skip)]` — it's only ever populated by the kernel at driver-construction time.
+- `skip_permissions` domyślnie wynosi `true`, ponieważ LibreFang działa jako daemon bez interaktywnego terminala; monity uprawnień blokowałyby na czas nieokreślony. Własna warstwa zdolności/RBAC LibreFanga jest prawdziwą granicą.
+- `max_retries` domyślnie wynosi 3 (cztery próby łącznie). Ustaw na 0, aby wyłączyć ponowienia wewnątrz sterownika i polegać wyłącznie na `FallbackChain`. Dostawcy opartych na CLI ignorują to pole.
+- `message_timeout_secs` jest oparty na nieaktywności dla dostawców CLI — podproces jest zabijany po tej liczbie sekund ciszy na stdout, nie po czasie zegarowym.
+- `emit_caller_trace_headers` pozwala regulowanym najemcom tłumić nagłówki `x-librefang-{agent,session,step}-id` po stronie przewodowej niezależnie od tego, czy żądanie niesie pola caller-id. Obecnie honorowane tylko przez sterownik kompatybilny z OpenAI.
+- `mcp_bridge` niesie `McpBridgeConfig`, więc `DriverConfig` może trzymać okablowanie mostu CLI bez cyklicznej zależności od `librefang-llm-drivers`. Pole to `#[serde(skip)]` — jest wypełniane tylko przez jądro w momencie konstrukcji sterownika.
 
-## Constraints (Taboos)
+## Ograniczenia (Tabu)
 
-These are hard rules, not preferences:
+To są twarde zasady, nie preferencje:
 
-- **No `reqwest`, no TLS deps, no vendored client SDKs.** Pure trait + types. The whole reason this crate is split from `librefang-llm-drivers` is to keep test builds dep-light.
-- **No `librefang-llm-drivers` import.** Circular.
-- **No `librefang-runtime` / `librefang-kernel` imports.** The driver trait must stand alone.
-- **No new `String`-typed error variants** on `LlmError`. Use a structured enum field.
-- **No `Box<dyn Error>` in trait return types.** Use `LlmError`.
-- **Don't merge this crate with `librefang-llm-drivers`** "for simplicity." Test crates depend on the trait alone precisely to avoid pulling in HTTP/TLS deps.
+- **Żadnego `reqwest`, żadnych zależności TLS, żadnych dostarczonych SDK klienta.** Czysty trait + typy. Cały powód istnienia tej kraty jako oddzielonej od `librefang-llm-drivers` to utrzymanie lekkich zależności dla buildów testowych.
+- **Żadnego importu `librefang-llm-drivers`.** Cykliczność.
+- **Żadnych importów `librefang-runtime` / `librefang-kernel`.** Trait sterownika musi istnieć samodzielnie.
+- **Żadnych nowych wariantów błędów z typem `String`** w `LlmError`. Użyj uporządkowanego pola enum.
+- **Żadnego `Box<dyn Error>` w typach zwrotnych traitów.** Używaj `LlmError`.
+- **Nie łącz tej kraty z `librefang-llm-drivers`** „dla prostoty." Krate testowe zależą od traitu samodzielnie, właśnie po to, aby uniknąć ciągnięcia zależności HTTP/TLS.
 
-## Adding a New Driver
+## Dodawanie nowego sterownika
 
-New drivers go in `librefang-llm-drivers`, **not here**. Implementing `LlmDriver` should not require touching this crate at all unless one of the following is genuinely true:
+Nowe sterowniki trafiają do `librefang-llm-drivers`, **nie tutaj**. Implementacja `LlmDriver` nie powinna wymagać dotykania tej kraty, chyba że jeden z poniższych warunków jest prawdziwie spełniony:
 
-- A new method is needed on the trait — rare; discuss in an issue first.
-- A new error variant is needed in `LlmError`. Add it as a typed variant and preserve the `source()` chain (#3745).
-- A new shared driver-side type is genuinely needed by multiple providers.
+- Potrzebna jest nowa metoda w traicie — rzadkie; najpierw omów w issue.
+- Potrzebny jest nowy wariant błędu w `LlmError`. Dodaj go jako typowany wariant i zachowaj łańcuch `source()` (#3745).
+- Nowy wspólny typ po stronie sterownika jest prawdziwie potrzebny przez wielu dostawców.
 
-## Testing
+## Testowanie
 
-- Trait conformance is exercised by mock drivers in `librefang-testing` (`MockKernelBuilder`).
-- **Do not add HTTP fixture tests here.** Those belong in `librefang-llm-drivers` next to the implementation under test.
-- Unit tests in this crate cover: error classification priority and edge cases (insufficient_quota, CJK truncation, SSL-transient exclusion), exhaustion store semantics (auto-clear, replace-on-mark, snapshot ordering, clone-shares-state), `LlmError` source-chain preservation, `DriverConfig` secret redaction on both `Debug` and `Serialize`, default `stream()` behaviour including receiver-dropped error propagation, and `LlmFamily` serde round-tripping.
+- Zgodność z traitem jest sprawdzana przez mock sterowniki w `librefang-testing` (`MockKernelBuilder`).
+- **Nie dodawaj tutaj testów fixture HTTP.** One należą do `librefang-llm-drivers` obok testowanej implementacji.
+- Testy jednostkowe w tej krate obejmują: priorytet klasyfikacji błędów i przypadki brzegowe (insufficient_quota, obcinanie CJK, wykluczenie transient SSL), semantykę rejestru wyczerpania (auto-czyszczenie, zastępowanie przy oznaczeniu, porządkowanie snapshot, klonowanie współdzieli stan), zachowanie łańcucha `LlmError` source, redagowanie sekretów `DriverConfig` zarówno w `Debug` jak i `Serialize`, domyślne zachowanie `stream()` włącznie z propagacją błędu rozłączenia odbiorcy, oraz serde round-tripping `LlmFamily`.

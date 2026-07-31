@@ -2,26 +2,26 @@
 
 # librefang-api
 
-HTTP/WebSocket API server for the LibreFang Agent OS daemon. Exposes agent lifecycle, sessions, channels, approvals, MCP, peer/A2A networking, budget/metering, audit, and the bundled React dashboard SPA over JSON REST, SSE, and WebSocket endpoints. The kernel runs in-process; CLI, desktop, and mobile clients all connect over this surface.
+Serwer HTTP/WebSocket API dla demona LibreFang Agent OS. Udostępnia cykl życia agenta, sesje, kanały, zatwierdzenia, MCP, sieć peer/A2A, budżet/odliczanie, audyt oraz wbudowany panel SPA React w formacie JSON REST, SSE oraz WebSocket. Jądro działa w-procesie; klienci CLI, desktopowi i mobilni łączą się przez ten interfejs.
 
-## Architecture
+## Architektura
 
-The crate is an axum application assembled by `server::build_router(kernel, addr)`, which wires the kernel handle into a shared `AppState` and mounts route groups, middleware, and the embedded SPA.
+Crate to aplikacja axum składana przez `server::build_router(kernel, addr)`, która podłącza uchwyt jądra do współdzielonego `AppState` oraz montuje grupy tras, middleware i osadzony SPA.
 
 ```mermaid
 graph TB
-    Client[Clients: CLI / Desktop / Mobile / Browser]
+    Client[Klienci: CLI / Desktop / Mobilny / Przeglądarka]
 
     subgraph API[librefang-api]
         Router[axum Router]
-        MW[middleware layer: auth, rate-limit, telemetry]
-        Routes[route handlers by domain]
-        WS[WebSocket / SSE handlers]
-        ACP[ACP listeners: pipe + UDS]
+        MW[warstwa middleware: auth, rate-limit, telemetry]
+        Routes[obsługi tras wg domeny]
+        WS[obsługi WebSocket / SSE]
+        ACP[odbiorniki ACP: pipe + UDS]
         Bridge[channel_bridge]
     end
 
-    subgraph Kernel[In-process crates]
+    subgraph Kernel[Crate in-process]
         KH[librefang-kernel-handle]
         Mem[librefang-memory]
         Chan[librefang-channels]
@@ -43,179 +43,179 @@ graph TB
     KH --> Skills
 ```
 
-## Server Construction and Routing
+## Konstrukcja serwera i routingu
 
-`server::build_router(kernel, addr)` is the primary entry point. It:
+`server::build_router(kernel, addr)` to główny punkt wejścia. Funkcja ta:
 
-1. Wraps the kernel handle in an `Arc<AppState>` shared across all handlers.
-2. Registers middleware layers (auth, rate limiting via `governor`, CORS, request tracing).
-3. Mounts route groups under `routes::*`, organized by domain.
-4. Embeds the dashboard SPA via `include_dir!("static/react")` and serves it as a fallback for non-API paths.
+1. Opakowuje uchwyt jądra w `Arc<AppState>` współdzielony przez wszystkie handlery.
+2. Rejestruje warstwy middleware (autoryzacja, ograniczanie rate via `governor`, CORS, śledzenie żądań).
+3. Montuje grupy tras w `routes::*`, zorganizowane wg domen.
+4. Osadza panel SPA przez `include_dir!("static/react")` i serwuje go jako fallback dla ścieżek nie-API.
 
-Route handlers live in `src/routes/` and are grouped by domain — agents (lifecycle, config, sessions, memory, files), channels, approvals, MCP, A2A networking, budget, audit, auth, backups, catalog, comms, skills, workflows, auto-dream, ClawHub, and system config. Each handler receives `State<AppState>` and returns axum `Response` types, with request/response shapes annotated via `utoipa` for OpenAPI generation.
+Handlery tras znajdują się w `src/routes/` i są pogrupowane wg domen — agenci (cykl życia, konfiguracja, sesje, pamięć, pliki), kanały, zatwierdzenia, MCP, sieć A2A, budżet, audyt, autoryzacja, kopie zapasowe, katalog, komunikacja, umiejętności, workflow, auto-dream, ClawHub oraz konfiguracja systemowa. Każdy handler odbiera `State<AppState>` i zwraca typy `Response` axum, z kształtami żądań/odpowiedzi oznaczonymi przez `utoipa` do generowania OpenAPI.
 
 ## Middleware
 
-The middleware layer (`src/middleware.rs`) enforces authentication, rate limiting, and telemetry.
+Warstwa middleware (`src/middleware.rs`) wymusza autoryzację, ograniczanie rate i telemetrię.
 
-### Authentication
+### Autoryzacja
 
-Three sets of public-route allowlists control which endpoints skip auth:
+Trzy zestawy list dozwolonych tras publicznych kontrolują, które endpointy pomijają auth:
 
-- **`PUBLIC_ROUTES_ALWAYS`** — endpoints that never require authentication (health checks, version info, `.well-known/agent.json`).
-- **`PUBLIC_ROUTES_GET_ONLY`** — endpoints where GET is public but writes require auth.
-- **`PUBLIC_ROUTES_DASHBOARD_READS`** — dashboard read endpoints that may be public depending on configuration mode.
+- **`PUBLIC_ROUTES_ALWAYS`** — endpointy, które nigdy nie wymagają autoryzacji (sprawdzanie kondycji, informacje o wersji, `.well-known/agent.json`).
+- **`PUBLIC_ROUTES_GET_ONLY`** — endpointy, gdzie GET jest publiczny, ale zapisy wymagają auth.
+- **`PUBLIC_ROUTES_DASHBOARD_READS`** — endpointy odczytu dashboardu, które mogą być publiczne w zależności od trybu konfiguracji.
 
-The auth middleware resolves the caller's identity from one of three token sources: the `librefang_session` cookie, `Authorization: Bearer <jwt>`, or `X-API-Key`. JWTs are validated against the configured JWKS endpoint with a caching layer (`validate_jwt_cached`). Dashboard credential login uses Argon2id with transparent fallback from legacy plaintext passwords.
+Middleware autoryzacyjny ustala tożsamość dzwoniącego z jednego z trzech źródeł tokenów: ciasteczka `librefang_session`, nagłówka `Authorization: Bearer <jwt>` lub `X-API-Key`. Tokeny JWT są walidowane względem skonfigurowanego endpointu JWKS z warstwą pamięci podręcznej (`validate_jwt_cached`). Logowanie hasłami dashboardu używa Argon2id z przezroczystym powrotem do starszych haseł w plaintext.
 
-### Rate Limiting
+### Ograniczanie rate
 
-Per-IP rate limiting is implemented with the `governor` crate. The limiter is applied as a tower layer before route dispatch.
+Ograniczanie rate per-IP jest zrealizowane za pomocą crate `governor`. Limitator jest stosowany jako warstwa tower przed dispatchem tras.
 
-## ACP Listeners
+## Odbiorniki ACP
 
-The crate provides two transport backends for the Agent Client Protocol, allowing local agents to connect without going through HTTP:
+Crate dostarcza dwa backendy transportowe dla Agent Client Protocol, umożliwiając lokalnym agentom łączenie się bez HTTP:
 
-- **Unix domain sockets** (`src/acp_uds.rs`) — used on Unix targets. `bind_atomic_owner_only` creates the socket file atomically with mode `0600`, sweeping stale PID-locked orphans from crashed daemon instances before binding. `run_listener` spawns per-connection tasks that call `run_with_transport` from `librefang-acp`.
-- **Named pipes** (`src/acp_pipe.rs`) — used on Windows. The pipe DACL is restricted to the daemon owner SID via SDDL → `SECURITY_DESCRIPTOR` conversion (`windows-sys`), preventing other local users from connecting. `handle_connection` splits the stream and delegates to the same `librefang-acp` server.
+- **Gniazda domeny Unix** (`src/acp_uds.rs`) — używane na celach Unixowych. `bind_atomic_owner_only` tworzy plik gniazda atomowo z uprawnieniami `0600`, czyszcząc przestarzałe osierocone PID z awarii demona przed bindowaniem. `run_listener` uruchamia zadania per-połączenie, które wywołują `run_with_transport` z `librefang-acp`.
+- **Potoki nazwane** (`src/acp_pipe.rs`) — używane na Windows. DACL potoku jest ograniczony do SID właściciela demona przez konwersję SDDL → `SECURITY_DESCRIPTOR` (`windows-sys`), zapobiegając łączeniu się innych lokalnych użytkowników. `handle_connection` dzieli strumień i deleguje do tego samego serwera `librefang-acp`.
 
-Both listeners call `librefang-acp`'s `run_with_transport` for protocol handling, so the agent-facing contract is identical regardless of platform.
+Oba odbiorniki wywołują `run_with_transport` z `librefang-acp` do obsługi protokołu, więc kontrakt agent-facing jest identyczny niezależnie od platformy.
 
 ## Channel Bridge
 
-`src/channel_bridge.rs` connects channel adapters to the agent loop. Key responsibilities:
+`src/channel_bridge.rs` łączy adaptery kanałów z pętlą agenta. Kluczowe obowiązki:
 
-- **Session routing** — `route_assistant_by_metadata_for_channel` uses `best_alias_match` from `librefang-channels` to resolve incoming messages to the correct agent, and `for_sender_scope` scopes session operations (reset, reboot, compact) per channel sender.
-- **Reply classification** — `classify_reply_intent` determines whether an inbound message is a new instruction, a continuation, or a silent acknowledgment (delegating to `is_silent_response` from `librefang-runtime`).
-- **Scheduled message handling** — `manage_schedule_text` parses cron directives using `CronJob` from `librefang-types`.
-- **Pending approval lookup** — `resolve_no_pending_message` checks the audit log via `query_audit` to suppress duplicate bot pings when an approval is still outstanding.
+- **Routing sesji** — `route_assistant_by_metadata_for_channel` używa `best_alias_match` z `librefang-channels` do przypisywania wiadomości przychodzących do właściwego agenta, a `for_sender_scope` zakresowuje operacje sesji (reset, reboot, compact) per nadawca kanału.
+- **Klasyfikacja odpowiedzi** — `classify_reply_intent` określa, czy wiadomość przychodząca jest nową instrukcją, kontynuacją, czy cichym potwierdzeniem (delegując do `is_silent_response` z `librefang-runtime`).
+- **Obsługa zaplanowanych wiadomości** — `manage_schedule_text` parsuje dyrektywy cron używając `CronJob` z `librefang-types`.
+- **Wyszukiwanie oczekujących zatwierdzeń** — `resolve_no_pending_message` sprawdza log audytu przez `query_audit`, aby pominąć duplikaty pingów bota, gdy zatwierdzenie jest nadal oczekujące.
 
-### Sidecar Channel Model
+### Model kanałów sidecar
 
-Channel adapters no longer run in-process. Every adapter is an out-of-process sidecar (`librefang.sidecar.adapters.*` in the SDK). The historical `core-channels` / `all-channels` / `channel-*` Cargo features have been removed.
+Adaptery kanałów nie działają już w-process. Każdy adapter to sidecar out-of-process (`librefang.sidecar.adapters.*` w SDK). Historyczne feature Cargo `core-channels` / `all-channels` / `channel-*` zostały usunięte.
 
-Sidecar configuration is schema-driven. `configure_sidecar_channel` (`POST /api/channels/sidecar/{name}/configure`) splits form values across `secrets.env` and `config.toml`, writes a new `[[sidecar_channels]]` block, and triggers a hot-reload so the kernel picks up the change without a restart. `SIDECAR_CATALOG` in `src/routes/channels.rs` is the registry of known sidecar adapters.
+Konfiguracja sidecar jest sterowana schemą. `configure_sidecar_channel` (`POST /api/channels/sidecar/{name}/configure`) dzieli wartości formularza między `secrets.env` i `config.toml`, zapisuje nowy blok `[[sidecar_channels]]` i wyzwala hot-reload, aby jądro odebrało zmianę bez restartu. `SIDECAR_CATALOG` w `src/routes/channels.rs` to rejestr znanych adapterów sidecar.
 
-QR-login state for channel sidecars (e.g., WeChat) is exposed via `GET /api/channels/{name}/qr`, which reads the cached `ChannelStatus.qr` published by the sidecar. Status codes: `200` (QR published), `204` (sidecar running but no QR needed), `404` (no sidecar registered).
+Stan logowania QR dla sidecarów kanałów (np. WeChat) jest eksponowany przez `GET /api/channels/{name}/qr`, który odczytuje buforowany `ChannelStatus.qr` publikowany przez sidecar. Kody statusu: `200` (QR opublikowany), `204` (sidecar działa, ale nie potrzebuje QR), `404` (brak zarejestrowanego sidecara).
 
 ## Streaming
 
-Two streaming mechanisms serve real-time data:
+Dwa mechanizmy streamingowe serwują dane w czasie rzeczywistym:
 
-- **SSE** — `send_message_stream` (`POST /api/agents/:id/message/stream`) streams LLM token deltas. `attach_session_stream` (`GET /api/agents/{id}/sessions/{session_id}/stream`) allows late-joining clients to subscribe to an in-flight turn's events. `comms_events_stream` (`GET /api/comms/events/stream`) polls the audit log every 500ms for inter-agent events.
-- **WebSocket** (`src/ws.rs`) — handles WebSocket auth handshake and bidirectional streaming, used for terminal sessions and live agent interaction.
+- **SSE** — `send_message_stream` (`POST /api/agents/:id/message/stream`) streamuje deltę tokenów LLM. `attach_session_stream` (`GET /api/agents/{id}/sessions/{session_id}/stream`) pozwala klientom dołączającym późno subskrybować wydarzenia trwającej tury. `comms_events_stream` (`GET /api/comms/events/stream`) odpytuje log audytu co 500ms o wydarzenia inter-agent.
+- **WebSocket** (`src/ws.rs`) — obsługuje handshake autoryzacji WebSocket i dwukierunkowy streaming, używany do sesji terminalowych i interakcji z agentem w czasie rzeczywistym.
 
-## Auth System
+## System autoryzacji
 
-Authentication supports multiple modes:
+Autoryzacja obsługuje wiele trybów:
 
-| Mode | Mechanism | Endpoint |
+| Tryb | Mechanizm | Endpoint |
 |------|-----------|----------|
-| OAuth2/OIDC | External IdP with JWKS validation | `GET /api/auth/login/{provider}` → callback |
-| Dashboard credentials | Argon2id password hash | `POST /api/auth/dashboard-login` |
-| API key | Static key in `X-API-Key` header | All endpoints |
-| WebAuthn/Passkey | `webauthn-rs` registration + assertion | Dashboard flow |
+| OAuth2/OIDC | Zewnętrzny IdP z walidacją JWKS | `GET /api/auth/login/{provider}` → callback |
+| Poświadczenia dashboardu | Hash hasła Argon2id | `POST /api/auth/dashboard-login` |
+| Klucz API | Klucz statyczny w nagłówku `X-API-Key` | Wszystkie endpointy |
+| WebAuthn/Passkey | Rejestracja + asercja `webauthn-rs` | Przepływ dashboardu |
 
-`dashboard_auth_check` (`GET /api/auth/dashboard-check`) returns the configured mode (`none`, `credentials`, or `oauth`) so the SPA can render the appropriate login dialog. Token refresh is handled by `POST /api/auth/refresh`, and introspection follows RFC 7662 at `POST /api/auth/introspect`.
+`dashboard_auth_check` (`GET /api/auth/dashboard-check`) zwraca skonfigurowany tryb (`none`, `credentials` lub `oauth`), aby SPA mogło renderować odpowiedni dialog logowania. Odświeżanie tokenów jest obsługiwane przez `POST /api/auth/refresh`, a introspekcja następuje po RFC 7662 na `POST /api/auth/introspect`.
 
-Session tokens are randomly generated with expiration metadata. `POST /api/auth/logout` invalidates the session and clears the cookie. `POST /api/auth/change-password` verifies the current password, updates credentials, and invalidates all existing sessions.
+Tokeny sesyjne są generowane losowo z metadanymi wygaśnięcia. `POST /api/auth/logout` unieważnia sesję i czyści ciasteczko. `POST /api/auth/change-password` weryfikuje obecne hasło, aktualizuje poświadczenia i unieważnia wszystkie istniejące sesje.
 
-The `openssl` dependency is unconditionally vendored because `webauthn-rs` pulls in `openssl-sys` on every target. Without vendoring, cross-compiled release builds probe the host's incompatible system library.
+Zależność `openssl` jest bezwarunkowo vendored, ponieważ `webauthn-rs` dołącza `openssl-sys` na każdym celu. Bez vendorowania, skompilowane release buildy cross-target badają niezgodną bibliotekę systemową hosta.
 
 ## Dashboard SPA
 
-The dashboard is a React 19 + TanStack Router v1 + TanStack Query v5 single-page application under `dashboard/`. It is built by `cargo xtask build-web` and embedded into the binary via `include_dir!("static/react")`. When the embedded directory is empty (fresh clone, no web build), the runtime directory `~/.librefang/dashboard/` serves the assets instead.
+Dashboard to aplikacja jednostronicowa React 19 + TanStack Router v1 + TanStack Query v5 w `dashboard/`. Jest budowany przez `cargo xtask build-web` i osadzany w binary przez `include_dir!("static/react")`. Gdy katalog osadzony jest pusty (świeży clone, brak buildu web), katalog runtime `~/.librefang/dashboard/` serwuje zasoby zamiast tego.
 
-### Data Layer Rules
+### Reguły warstwy danych
 
-All data access goes through the shared hooks layer in `src/lib/`. Pages and components must never call `fetch()` or `api.*` directly.
+Cały dostęp do danych przechodzi przez współdzieloną warstwę hooks w `src/lib/`. Strony i komponenty nie mogą nigdy wywoływać `fetch()` ani `api.*` bezpośrednio.
 
-- **`src/lib/queries/keys.ts`** — query-key factories. Every sub-key is anchored with `[...fooKeys.all]` so broad invalidation works hierarchically.
-- **`src/lib/queries/<domain>.ts`** — `queryOptions` + `useXxx` hooks per domain. Domains: `agents`, `analytics`, `approvals`, `channels`, `config`, `goals`, `hands`, `mcp`, `media`, `memory`, `models`, `network`, `overview`, `plugins`, `providers`, `runtime`, `schedules`, `sessions`, `skills`, `workflows`.
-- **`src/lib/mutations/<domain>.ts`** — mutation hooks with cache invalidation inside the hook. Callers never need to know which keys a mutation touches.
+- **`src/lib/queries/keys.ts`** — fabryki kluczy zapytań. Każdy podklucz jest zakotwiczony przez `[...fooKeys.all]`, aby szeroka invalidacja działała hierarchicznie.
+- **`src/lib/queries/<domain>.ts`** — `queryOptions` + hooki `useXxx` per domena. Domeny: `agents`, `analytics`, `approvals`, `channels`, `config`, `goals`, `hands`, `mcp`, `media`, `memory`, `models`, `network`, `overview`, `plugins`, `providers`, `runtime`, `schedules`, `sessions`, `skills`, `workflows`.
+- **`src/lib/mutations/<domain>.ts`** — hooki mutacji z invalidacją pamięci podręcznej wewnątrz hooka. Wywołujący nie muszą wiedzieć, które klucze dotyka mutacja.
 
-Mutation invalidation uses the narrowest matching keys by default: `fooKeys.detail(id) + fooKeys.lists()` for per-id patches, `fooKeys.lists()` for create/delete, `fooKeys.all` only for bulk operations or cache resets.
+Invalidacja mutacji używa domyślnie najwęższych pasujących kluczy: `fooKeys.detail(id) + fooKeys.lists()` dla łat per-id, `fooKeys.lists()` dla tworzenia/usuwania, `fooKeys.all` tylko dla operacji hurtowych lub resetów pamięci podręcznej.
 
-### Canonical Type Source
+### Kanoniczne źródło typów
 
-`src/api.ts` is the hand-maintained, canonical TypeScript type source consumed by the SPA. `openapi/generated.ts` (produced by `openapi-typescript`) is a regenerable cross-reference — never imported by application code. Refresh it with `pnpm openapi:types`.
+`src/api.ts` to ręcznie utrzymywane, kanoniczne źródło typów TypeScript konsumowane przez SPA. `openapi/generated.ts` (produkowane przez `openapi-typescript`) to odnawialna krzyżowa referencja — nigdy importowana przez kod aplikacji. Odśwież ją przez `pnpm openapi:types`.
 
-### ESLint Policy
+### Polityka ESLint
 
-ESLint 9 flat config (`eslint.config.js`) enforces two security-critical rules as errors:
+ESLint 9 flat config (`eslint.config.js`) wymusza dwie krytyczne dla bezpieczeństwa reguły jako błędy:
 
-- `react/jsx-no-target-blank` — blocks `target="_blank"` without `rel="noopener noreferrer"`.
-- `react/no-danger-withchildren` — rejects `dangerouslySetInnerHTML` combined with children.
-- `no-restricted-properties` / `no-restricted-syntax` — ban raw `navigator.clipboard` access outside `lib/clipboard.ts`, which falls back to `document.execCommand('copy')` for non-secure contexts (plain HTTP on LAN IPs).
+- `react/jsx-no-target-blank` — blokuje `target="_blank"` bez `rel="noopener noreferrer"`.
+- `react/no-danger-withchildren` — odrzuca `dangerouslySetInnerHTML` połączone z dziećmi.
+- `no-restricted-properties` / `no-restricted-syntax` — zabrania surowego dostępu `navigator.clipboard` poza `lib/clipboard.ts`, który cofa do `document.execCommand('copy')` dla kontekstów niebezpiecznych (czyste HTTP na IP LAN).
 
-### Build and Verify
+### Build i weryfikacja
 
 ```bash
-pnpm lint          # eslint — errors fail, warnings allowed
+pnpm lint          # eslint — błędy zawodzą, ostrzeżenia dozwolone
 pnpm typecheck     # tsc --noEmit
 pnpm test --run    # vitest
 pnpm build         # vite build
 ```
 
-All four must pass after changes to `src/lib/queries/`, `src/lib/mutations/`, or `src/api.ts`. Key-factory tests catch anchoring regressions that the TypeScript compiler cannot.
+Wszystkie cztery muszą przejść po zmianach w `src/lib/queries/`, `src/lib/mutations/` lub `src/api.ts`. Testy fabryk kluczy wyłapują regresje kotwiczenia, których kompilator TypeScript nie może.
 
-### E2E Tests
+### Testy E2E
 
-Playwright tests (`dashboard/e2e/`) verify request paths, body shapes, and write ordering against a vite-served dashboard with all backend calls stubbed via `page.route`. The EveryAPI connect test pins that the registry entry is written before the API key (`POST /api/registry/content/provider` before `POST /api/providers/everyapi/key`), and that `models: []` arms the daemon's initial catalog refresh.
+Testy Playwright (`dashboard/e2e/`) weryfikują ścieżki żądań, kształty body i kolejność zapisów względem dashboardu serwowanego przez vite z wszystkimi wywołaniami backend mockowanymi przez `page.route`. Test EveryAPI connect przypina, że wpis rejestru jest zapisany przed kluczem API (`POST /api/registry/content/provider` przed `POST /api/providers/everyapi/key`), a `models: []` uzbraja początkowe odświeżenie katalogu demona.
 
-## Build Script
+## Skrypt buildu
 
-`build.rs` captures build metadata:
+`build.rs` przechwytuje metadane buildu:
 
-- **Git SHA** — prefers `GITHUB_SHA` / `CI_COMMIT_SHA` env vars; falls back to `which("git")` + `git rev-parse --short HEAD`; defaults to `"unknown"`.
-- **Build date** — `chrono::Utc::now()` formatted as `%Y-%m-%d` (no shell-out to `date`).
-- **Rustc version** — `rustc --version` output.
+- **Git SHA** — preferuje zmienne env `GITHUB_SHA` / `CI_COMMIT_SHA`; cofa do `which("git")` + `git rev-parse --short HEAD`; domyślnie `"unknown"`.
+- **Data buildu** — `chrono::Utc::now()` sformatowana jako `%Y-%m-%d` (bez wywołań powłoki do `date`).
+- **Wersja rustc** — wyjście `rustc --version`.
 
-The script also ensures `static/react/` exists so `include_dir!` never fails on fresh clones.
+Skrypt zapewnia również istnienie `static/react/`, aby `include_dir!` nigdy nie zawodził na świeżych clone'ach.
 
 ## OpenAPI
 
-The committed `openapi.json` at the workspace root is regenerated by `cargo xtask codegen --openapi` and verified for drift in CI against hash baselines in `xtask/baselines/`. Route handlers use `utoipa` annotations (`#[utoipa::path(...)]`) to derive the spec at compile time.
+Zacommitowany `openapi.json` w root workspace'u jest regenerowany przez `cargo xtask codegen --openapi` i weryfikowany pod kątem dryfu w CI względem baz linii hash w `xtask/baselines/`. Handlery tras używają adnotacji `utoipa` (`#[utoipa::path(...)]`) do wyprowadzania specyfikacji w czasie kompilacji.
 
-The `dashboard/openapi/generated.ts` file is produced from this spec by `openapi-typescript` and serves only as a cross-reference — application code imports types from `src/api.ts`.
+Plik `dashboard/openapi/generated.ts` jest produkowany z tej specyfikacji przez `openapi-typescript` i służy jedynie jako krzyżowa referencja — kod aplikacji importuje typy z `src/api.ts`.
 
-## Key Dependencies
+## Kluczowe zależności
 
-| Crate | Role |
+| Crate | Rola |
 |-------|------|
-| `librefang-kernel` / `librefang-kernel-handle` | In-process kernel + handle for state access |
-| `librefang-acp` | Agent Client Protocol server (`run_with_transport`) |
-| `librefang-types` | Shared domain types (i18n, scheduler, agent IDs) |
-| `librefang-memory` | KV memory substrate |
-| `librefang-channels` | Channel adapter registry and bridge routing |
-| `librefang-llm-drivers` | LLM provider drivers |
-| `librefang-skills` | Skill installation, evolution, verification |
-| `librefang-http` | HTTP client construction with TLS config |
-| `axum` / `tower` / `tower-http` | Web framework, middleware, CORS |
-| `utoipa` | OpenAPI spec generation |
-| `governor` | Rate limiting |
-| `webauthn-rs` | WebAuthn/passkey support |
-| `argon2` | Dashboard password hashing |
-| `jsonwebtoken` | JWT creation and validation |
+| `librefang-kernel` / `librefang-kernel-handle` | Jądro in-process + uchwyt dostępu do stanu |
+| `librefang-acp` | Serwer Agent Client Protocol (`run_with_transport`) |
+| `librefang-types` | Współdzielone typy domenowe (i18n, scheduler, ID agentów) |
+| `librefang-memory` | Podłoże pamięci KV |
+| `librefang-channels` | Rejestr adapterów kanałów i routing bridge |
+| `librefang-llm-drivers` | Sterowniki dostawców LLM |
+| `librefang-skills` | Instalacja, ewolucja, weryfikacja umiejętności |
+| `librefang-http` | Konstrukcja klienta HTTP z konfiguracją TLS |
+| `axum` / `tower` / `tower-http` | Framework web, middleware, CORS |
+| `utoipa` | Generowanie specyfikacji OpenAPI |
+| `governor` | Ograniczanie rate |
+| `webauthn-rs` | Obsługa WebAuthn/passkey |
+| `argon2` | Hashowanie haseł dashboardu |
+| `jsonwebtoken` | Tworzenie i walidacja JWT |
 
-## Feature Flags
+## Flagi feature
 
-- **`default = ["telemetry"]`** — enables OpenTelemetry tracing export and Prometheus metrics.
-- **`telemetry`** — pulls in `opentelemetry`, `opentelemetry-otlp`, `tracing-opentelemetry`, `metrics-exporter-prometheus`.
-- **`test-util`** — exposes test-only utilities and seams to integration tests.
+- **`default = ["telemetry"]`** — włącza eksport tracingu OpenTelemetry i metryki Prometheus.
+- **`telemetry`** — dołącza `opentelemetry`, `opentelemetry-otlp`, `tracing-opentelemetry`, `metrics-exporter-prometheus`.
+- **`test-util`** — eksponuje narzędzia testowe i seamy do testów integracyjnych.
 
-Platform-specific dependencies:
+Zależności specyficzne dla platformy:
 
-- **Unix** — `rustix` (process introspection), `libc`.
-- **Windows** — `windows-sys` (`Win32_Security_Authorization` for named-pipe DACL restriction).
+- **Unix** — `rustix` (introspekcja procesów), `libc`.
+- **Windows** — `windows-sys` (`Win32_Security_Authorization` dla ograniczenia DACL potoku nazwanego).
 
-## Testing
+## Testowanie
 
-Integration tests live in `tests/` and use the `test-util` feature for access to internal seams. Notable test suites:
+Testy integracyjne znajdują się w `tests/` i używają feature `test-util` do dostępu do wewnętrznych seamów. Godne uwagi zestawy testowe:
 
-- **`auth_public_allowlist.rs`** — verifies the three public-route allowlists.
-- **OIDC enforcement** (`#5128`) — generates RSA keypairs in-process, signs JWTs, and serves a local JWKS endpoint to drive `validate_jwt_cached` end-to-end without a live IdP.
-- **Storage failure routes** (`#6653`/`#6654`) — writes non-JSON blobs through the memory connection pool to verify that goals routes return 500 on substrate read failure rather than empty 200.
-- **Tool-exec backend** (`#3332`) — integration tests against `librefang-runtime`.
+- **`auth_public_allowlist.rs`** — weryfikuje trzy listy tras publicznych.
+- **Wymuszanie OIDC** (`#5128`) — generuje pary kluczy RSA in-process, podpisuje tokeny JWT i serwuje lokalny endpoint JWKS do napędzania `validate_jwt_cached` end-to-end bez aktywnego IdP.
+- **Ścieżki awarii pamięci** (`#6653`/`#6654`) — zapisuje nie-JSON bloby przez pulę połączeń pamięci, aby weryfikować, że trasy goals zwracają 500 przy awarii odczytu podłoża, zamiast pustego 200.
+- **Backend wykonania narzędzi** (`#3332`) — testy integracyjne względem `librefang-runtime`.
 
-Dev dependencies include `wiremock` for HTTP mocking, `rsa` for test JWT signing, and `rusqlite` for direct substrate manipulation.
+Zależności deweloperskie obejmują `wiremock` do mockowania HTTP, `rsa` do podpisywania testowych JWT oraz `rusqlite` do bezpośredniej manipulacji podłożem.

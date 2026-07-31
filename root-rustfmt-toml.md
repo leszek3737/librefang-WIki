@@ -2,59 +2,59 @@
 
 # Root — `rustfmt.toml`
 
-Workspace-level formatting configuration for the LibreFang Rust project. This file has no runtime behavior; it governs how `cargo fmt` and `rustfmt` rewrite source across **every** crate in the workspace.
+Konfiguracja formatowania na poziomie workspace dla projektu LibreFang w języku Rust. Ten plik nie ma wpływu na zachowanie w czasie wykonania; określa sposób, w jaki `cargo fmt` i `rustfmt` przepisują kod źródłowy we **wszystkich** crate'ach w workspace.
 
-## Purpose
+## Cel
 
-Consistent formatting is enforced through CI, and this configuration is the single source of truth for those rules. Every contribution is expected to pass `cargo fmt --check` before merge, and the settings below define exactly what "passing" means.
+Jednolite formatowanie jest egzekwowane przez CI, a ta konfiguracja jest jedynym źródłem prawdy dla tych reguł. Każdy wkład musi przejść `cargo fmt --check` przed scaleniem, a poniższe ustawienia definiują dokładnie, co oznacza „przejście" sprawdzenia.
 
-The file lives at the workspace root so it applies automatically to all member crates without per-crate duplication.
+Plik znajduje się w katalogu głównym workspace, aby miał zastosowanie automatycznie do wszystkich crate'ów członkowskich bez duplikowania w poszczególnych crate'ach.
 
-## Settings
+## Ustawienia
 
-| Setting | Value | Effect |
+| Ustawienie | Wartość | Efekt |
 |---|---|---|
-| `edition` | `2021` | Formats code assuming Rust 2021 edition semantics (e.g., prelude changes, closure capture rules). |
-| `max_width` | `100` | Lines are wrapped to 100 characters. This is the primary knob for visual layout. |
-| `use_field_init_shorthand` | `true` | Rewrites `Foo { x: x }` as `Foo { x }`. |
-| `use_try_shorthand` | `true` | Rewrites `match { Ok(v) => v, Err(e) => return Err(e) }` idioms as `?`. |
+| `edition` | `2021` | Formatuje kod zakładając semantykę edycji Rust 2021 (np. zmiany w prelude, reguły przechwytywania domknięć). |
+| `max_width` | `100` | Wiersze są zawijane do 100 znaków. To jest główny parametr układu wizualnego. |
+| `use_field_init_shorthand` | `true` | Przepisuje `Foo { x: x }` jako `Foo { x }`. |
+| `use_try_shorthand` | `true` | Przepisuje idiomy `match { Ok(v) => v, Err(e) => return Err(e) }` jako `?`. |
 
-Anything **not** listed here falls back to `rustfmt` defaults.
+Wszystko, co **nie** jest wymienione tutaj, wraca do wartości domyślnych `rustfmt`.
 
-## How to Use
+## Jak używać
 
-Before pushing changes, run:
+Przed wysłaniem zmian uruchom:
 
 ```sh
 cargo fmt
 ```
 
-This rewrites files in place across all workspace members to conform to the rules above. To verify formatting without modifying files — mirroring what CI checks — run:
+To przepisuje pliki w miejscu we wszystkich członkach workspace, aby były zgodne z powyższymi regułami. Aby zweryfikować formatowanie bez modyfikowania plików — odzwierciedlając to, co sprawdza CI — uruchom:
 
 ```sh
 cargo fmt --check
 ```
 
-If the check exits non-zero, CI will fail on the pull request.
+Jeśli sprawdzenie zakończy się kodem różnym od zera, CI zawiedzie na pull requeście.
 
-## CI Enforcement
+## Egzekwowanie w CI
 
-The header comment states this is "Enforced by CI." Concretely:
+Komentarz nagłówkowy stwierdza, że jest to „Egzekwowane przez CI". Konkretnie:
 
-- CI runs `cargo fmt --check` (or equivalent) as a gate.
-- Any formatting drift blocks the build until `cargo fmt` is applied and the changes committed.
-- Because the config is at workspace root, there is no ambiguity about which rules apply to which crate.
+- CI uruchamia `cargo fmt --check` (lub odpowiednik) jako bramkę.
+- Każde odchylenie formatowania blokuje budowę, dopóki nie zostanie zastosowane `cargo fmt` i zmiany nie zostaną zatwierdzone.
+- Ponieważ konfiguracja znajduje się w katalogu głównym workspace, nie ma niejednoznaczności, które reguły mają zastosowanie do którego crate'a.
 
-## Interaction with the Rest of the Workspace
+## Interakcja z resztą workspace
 
-This file is purely a formatting contract. It does not:
+Ten plik jest wyłącznie kontraktem formatowania. Nie:
 
-- Affect compilation, type-checking, or runtime behavior.
-- Introduce dependencies or feature flags.
-- Get consumed by any code path (the call graph has no incoming, outgoing, or internal edges).
+- Wpływa na kompilację, sprawdzanie typów ani zachowanie w czasie wykonania.
+- Wprowadza zależności ani flag funkcji.
+- Jest konsumowany przez żadną ścieżkę kodu (graf wywołań nie ma krawędzi przychodzących, wychodzących ani wewnętrznych).
 
-It is, however, coupled to the toolchain: the CI runner's `rustfmt` version determines how unrecognized options or version-specific formatting behave. Contributors should ensure their local nightly/stable `rustfmt` matches what CI uses, since formatting output can differ slightly between toolchain versions.
+Jest jednak powiązany z toolchainem: wersja `rustfmt` w uruchomieniu CI determinuje, jak zachowują się nierozpoznane opcje lub formatowanie specyficzne dla wersji. Kontrybutorzy powinni upewnić się, że ich lokalny nightly/stable `rustfmt` odpowiada temu, czego używa CI, ponieważ wynik formatowania może się nieznacznie różnić między wersjami toolchainu.
 
-## When to Change This File
+## Kiedy zmieniać ten plik
 
-Update this file when you want to change a workspace-wide style convention (e.g., adjusting `max_width` or enabling additional options like `imports_granularity`). Because it applies to every crate simultaneously, such changes typically produce a large diff across the repository and should be coordinated as a dedicated formatting commit rather than mixed into feature work.
+Zaktualizuj ten plik, gdy chcesz zmienić konwencję stylu w całym workspace (np. dostosować `max_width` lub włączyć dodatkowe opcje, takie jak `imports_granularity`). Ponieważ ma zastosowanie do wszystkich crate'ów jednocześnie, takie zmiany zazwyczaj generują duży diff w całym repozytorium i powinny być skoordynowane jako dedykowany commit formatowania, a nie mieszane z pracą nad funkcjonalnością.

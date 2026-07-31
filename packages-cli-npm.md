@@ -1,47 +1,47 @@
 # packages — cli-npm
 
-# `@librefang/cli` — NPM Binary Distribution Package
+# `@librefang/cli` — Pakiet dystrybucyjny binarek NPM
 
-## Purpose
+## Przeznaczenie
 
-The `packages/cli-npm` package is the **npm distribution shim** for the LibreFang Agent OS command-line interface. It is not the CLI itself — it contains no application logic. Instead, it acts as a thin dispatcher that installs the correct platform-native binary as an `optionalDependency` and delegates execution to it.
+Pakiet `packages/cli-npm` jest **prostką dystrybucyjną NPM** dla interfejsu wiersza poleceń LibreFang Agent OS. Nie jest to sam CLI — nie zawiera żadnej logiki aplikacji. Zamiast tego działa jako cienki dyspozytor, który instaluje odpowiedni natywny pakiet binarny danej platformy jako `optionalDependency` i deleguje do niego wykonanie.
 
-This is the package users install when they run:
+To pakiet, który użytkownicy instalują, uruchamiając:
 
 ```bash
 npm install -g @librefang/cli
 ```
 
-## How It Works
+## Jak to działa
 
-The package leverages npm's `optionalDependencies` mechanism to deliver a single install command that pulls in exactly one platform-specific binary package. The flow is:
+Pakiet wykorzystuje mechanizm `optionalDependencies` npm-a, aby dostarczyć jedną komendę instalacyjną, która pobiera dokładnie jeden pakiet binarny specyficzny dla danej platformy. Przepływ wygląda następująco:
 
 ```mermaid
 flowchart TD
-    A[npm install -g @librefang/cli] --> B[optionalDependencies declared]
-    B --> C[npm matches process.platform + arch]
-    C --> D[One platform subpackage installed]
-    D --> E[bin/librefang.js shim]
-    E --> F[Resolves native binary path]
-    F --> G[Spawns native librefang binary]
+    A[npm install -g @librefang/cli] --> B[zadeklarowane optionalDependencies]
+    B --> C[npm dopasowuje process.platform + arch]
+    C --> D[zainstalowany jeden podpakiet platformy]
+    D --> E[prostka bin/librefang.js]
+    E --> F[rozwiązuje ścieżkę do binariów natywnych]
+    F --> G[uruchamia natywny binarek librefang]
 ```
 
-### The Shim (`bin/librefang.js`)
+### Prostka (`bin/librefang.js`)
 
-The sole source file is `bin/librefang.js`, registered as the `librefang` executable via the `bin` field in `package.json`. At runtime it:
+Jedynym plikiem źródłowym jest `bin/librefang.js`, zarejestrowany jako plik wykonywalny `librefang` za pomocą pola `bin` w `package.json`. W czasie wykonywania:
 
-1. Inspects `process.platform` and `process.arch` (with additional logic for musl-based Linux distributions).
-2. Resolves the path to the native binary inside the corresponding `@librefang/cli-*` package.
-3. Spawns the native process, forwarding `argv`, `stdin`, `stdout`, and `stderr`.
-4. Exits with the native binary's exit code.
+1. Sprawdza `process.platform` i `process.arch` (z dodatkową logiką dla dystrybucji Linuksa opartych na musl).
+2. Rozwiązuje ścieżkę do natywnego binarek w odpowiednim pakiecie `@librefang/cli-*`.
+3. Uruchamia proces natywny, przekazując `argv`, `stdin`, `stdout` i `stderr`.
+4. Zakańcza z kodem wyjścia natywnego binarek.
 
-The `files` array restricts the published package to only this shim file, keeping the install footprint minimal.
+Tablica `files` ogranicza publikowany pakiet wyłącznie do tego pliku prostki, co minimalizuje rozmiar instalacji.
 
-## Platform Matrix
+## Macierz platform
 
-Each row maps to a distinct optional dependency. npm installs at most one based on the host environment:
+Każdy wiersz odpowiada osobnej zależności opcjonalnej. npm instaluje co najwyżej jeden z nich, w zależności od środowiska hosta:
 
-| `process.platform` | Architecture | C Library | Optional Dependency |
+| `process.platform` | Architektura | Biblioteka C | Zależność opcjonalna |
 |---|---|---|---|
 | `darwin` | `arm64` | — | `@librefang/cli-darwin-arm64` |
 | `darwin` | `x64` | — | `@librefang/cli-darwin-x64` |
@@ -52,55 +52,55 @@ Each row maps to a distinct optional dependency. npm installs at most one based 
 | `win32` | `x64` | — | `@librefang/cli-win32-x64` |
 | `win32` | `arm64` | — | `@librefang/cli-win32-arm64` |
 
-The glibc/musl distinction for Linux requires runtime detection in the shim since Node.js does not expose the C library via `process`. This is typically done by checking for the presence of `ldd` output or probing `/proc/self/maps`.
+Rozróżnienie glibc/musl dla Linuksa wymaga detekcji w czasie wykonywania w prostce, ponieważ Node.js nie udostępnia biblioteki C przez `process`. Zazwyczaj realizuje się to poprzez sprawdzenie obecności wyniku polecenia `ldd` lub sondowanie `/proc/self/maps`.
 
-## Package Configuration
+## Konfiguracja pakietu
 
-Key fields from `package.json`:
+Kluczowe pola z `package.json`:
 
-| Field | Value | Role |
+| Pole | Wartość | Rola |
 |---|---|---|
-| `name` | `@librefang/cli` | Published package name |
-| `bin` | `./bin/librefang.js` | Global command registration |
-| `files` | `["bin/librefang.js"]` | Only the shim is published |
-| `engines.node` | `>=18` | Minimum Node.js runtime |
-| `optionalDependencies` | 8 entries | Platform-specific binary packages |
+| `name` | `@librefang/cli` | Publikowana nazwa pakietu |
+| `bin` | `./bin/librefang.js` | Rejestracja globalnej komendy |
+| `files` | `["bin/librefang.js"]` | Publikowana jest wyłącznie prostka |
+| `engines.node` | `>=18` | Minimalna wersja środowiska uruchomieniowego Node.js |
+| `optionalDependencies` | 8 wpisów | Pakiety binarne specyficzne dla platformy |
 
-All eight optional dependencies are pinned to the same version (`0.0.0` in the current manifest), released in lockstep. A version mismatch between the shim and any subpackage would cause resolution failures.
+Wszystkie osiem zależności opcjonalnych jest przypiętych do tej samej wersji (`0.0.0` w bieżącym manifeście), publikowanych synchronicznie. Niezgodność wersji między prostką a dowolnym podpakietem spowodowałaby błędy resolucji.
 
-## Relationship to the Codebase
+## Relacja z kodem źródłowym
 
-This package is a **distribution artifact**, not a development target. The actual CLI implementation — command parsing, daemon management, health checks (`librefang doctor`), initialization (`librefang init`), and daemon startup (`librefang start`) — lives in the native binary, built from the core Rust workspace and published to the platform-specific subpackages.
+Ten pakiet jest **artefaktem dystrybucyjnym**, a nie celem deweloperskim. Rzeczywista implementacja CLI — analizowanie komend, zarządzanie demonem, sprawdzanie kondycji (`librefang doctor`), inicjalizacja (`librefang init`) oraz uruchamianie demona (`librefang start`) — znajduje się w natywnym binarek, kompilowanym z rdzennego workspace'u Rust i publikowanym do podpakietów specyficznych dla danej platformy.
 
 ```
-monorepo root
+root monorepo
 ├── packages/
-│   └── cli-npm/          ← This package (shim only)
+│   └── cli-npm/          ← Ten pakiet (tylko prostka)
 │       ├── bin/
 │       │   └── librefang.js
 │       ├── package.json
 │       └── README.md
-└── (Rust workspace)      ← CLI implementation, compiled to native binaries
+└── (workspace Rust)      ← Implementacja CLI, kompilowana do natywnych binarek
 ```
 
-Developers working on CLI behavior should modify the core implementation, not this package. Changes here are limited to:
+Deweloperzy pracujący nad zachowaniem CLI powinni modyfikować implementację rdzenną, a nie ten pakiet. Zmiany tutaj są ograniczone do:
 
-- **Shim logic updates** — new platform support, improved musl detection, error messaging.
-- **Dependency version bumps** — when a new native binary release is published.
-- **Engine requirement changes** — Node.js minimum version policy.
+- **Aktualizacje logiki prostki** — obsługa nowych platform, ulepszone wykrywanie musl, komunikaty błędów.
+- **Aktualizacje wersji zależności** — po publikacji nowej wersji natywnego binarek.
+- **Zmiany wymagań silnika** — polityka minimalnej wersji Node.js.
 
-## Install Verification
+## Weryfikacja instalacji
 
-To confirm the shim correctly resolved a platform binary after install:
+Aby potwierdzić, że prostka poprawnie rozwiązała binarek platformy po instalacji:
 
 ```bash
 librefang doctor
 ```
 
-If no platform package was installed (e.g., behind a proxy that silently drops optional dependencies), the shim will fail with a resolution error identifying which `@librefang/cli-*` package was expected.
+Jeśli żaden pakiet platformy nie został zainstalowany (np. za proxy, które cicho ignoruje zależności opcjonalne), prostka zakończy się błędem resolucji, wskazując, który pakiet `@librefang/cli-*` był oczekiwany.
 
-## Requirements
+## Wymagania
 
-- **Node.js** ≥ 18 (for the shim's module resolution and `child_process` semantics)
-- **npm** (or compatible package manager that honors `optionalDependencies`)
-- One of the eight supported platform/architecture combinations
+- **Node.js** ≥ 18 (do resolucji modułów prostki i semantyki `child_process`)
+- **npm** (lub kompatybilny menedżer pakietów honorujący `optionalDependencies`)
+- Jedna z ośmiu obsługiwanych kombinacji platforma/architektura

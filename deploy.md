@@ -1,32 +1,32 @@
 # deploy
 
-# deploy — Deployment & Observability
+# deploy — Wdrażanie i Obserwowalność
 
-Everything needed to run LibreFang in production, development, or one-click from a browser. This module groups three concerns: container/host deployment definitions, platform-specific deployment automation, and a local observability stack.
+Wszystko, co potrzebne do uruchomienia LibreFang w środowisku produkcyjnym, deweloperskim lub jednym kliknięciem z przeglądarki. Ten moduł grupuje trzy obszary: definicje wdrażania kontenerów/hostów, automatyzację wdrażania specyficzną dla platform oraz lokalny stos obserwowalności.
 
-## Structure at a Glance
+## Struktura w pigułce
 
-| Layer | Modules | Purpose |
-|-------|---------|---------|
-| **Container & Host** | Root-level `docker-compose.yml`, `docker-entrypoint.sh`, `librefang.service` | Docker image entrypoint, systemd unit, and base compose file |
-| **PaaS / Cloud Platforms** | [fly](fly.md), [gcp](gcp.md), [kubernetes](kubernetes.md), [railway](railway.md), `render.yaml` | Infrastructure-as-code and bootstrap scripts per platform |
-| **One-Click Portal** | [worker](worker.md) | Cloudflare Worker powering `deploy.librefang.ai` |
-| **Observability** | [alloy](alloy.md), [loki](loki.md), [tempo](tempo.md), [otel-collector](otel-collector.md), [prometheus](prometheus.md), [grafana](grafana.md) | Local telemetry pipeline via `docker-compose.observability.yml` |
+| Warstwa | Moduły | Przeznaczenie |
+|---------|--------|---------------|
+| **Kontener i Host** | Root-level `docker-compose.yml`, `docker-entrypoint.sh`, `librefang.service` | Punkt wejścia obrazu Docker, jednostka systemd i bazowy plik compose |
+| **PaaS / Platformy chmurowe** | [fly](fly.md), [gcp](gcp.md), [kubernetes](kubernetes.md), [railway](railway.md), `render.yaml` | Infrastructure-as-code i skrypty bootstrapowe dla każdej platformy |
+| **Portal jednym kliknięciem** | [worker](worker.md) | Cloudflare Worker obsługujący `deploy.librefang.ai` |
+| **Obserwowalność** | [alloy](alloy.md), [loki](loki.md), [tempo](tempo.md), [otel-collector](otel-collector.md), [prometheus](prometheus.md), [grafana](grafana.md) | Lokalny pipeline telemetrii poprzez `docker-compose.observability.yml` |
 
-## Deployment Paths
+## Ścieżki wdrażania
 
-The module supports several deployment targets, each self-contained:
+Moduł obsługuje kilka celów wdrażania, każdy samodzielny:
 
-- **Docker / Compose** — The root `docker-compose.yml` pulls the published image and mounts a named volume at `/data`. The [docker-entrypoint.sh](#) handles first-boot init, config rewriting, dual-mode privilege management (root for Docker, uid 1001 for Kubernetes restricted Pods), and a TOML injection guard on `$PORT` / `$LIBREFANG_MODEL`.
-- **Kubernetes** — [Kustomize manifests](kubernetes.md) run a single-replica StatefulSet. Horizontal scaling is architecturally blocked by process-local singletons and an exclusive `flock` on `/data/daemon.lock`.
-- **Fly.io** — Interactive [deploy/uninstall scripts](fly.md) plus a `fly.toml` template. Also reachable through the one-click portal.
-- **GCP** — [Terraform module](gcp.md) provisioning an always-free-tier `e2-micro` with cloud-init handoff to systemd.
-- **Railway / Render** — Schema-validated [Railway config](railway.md) and a `render.yaml` Blueprint targeting Render's free tier.
-- **One-click** — The [Cloudflare Worker](worker.md) serves a landing page and orchestrates Fly.io deployments via `POST /api/deploy`, using the user's Fly.io token to provision app, IPs, volume, and machine.
+- **Docker / Compose** — Rootowy `docker-compose.yml` pobiera opublikowany obraz i montuje nazwany wolumen w `/data`. [docker-entrypoint.sh](#) obsługuje inicjalizację przy pierwszym uruchomieniu, przepisywanie konfiguracji, zarządzanie uprawnieniami w trybie podwójnym (root dla Dockera, uid 1001 dla zablokowanych Podów Kubernetes) oraz guard wstrzykiwania TOML na `$PORT` / `$LIBREFANG_MODEL`.
+- **Kubernetes** — [Manifesty Kustomize](kubernetes.md) uruchamiają StatefulSet z jedną repliką. Skalowanie horyzontalne jest architektonicznie blokowane przez singletony lokalne procesu i wyłączny `flock` na `/data/daemon.lock`.
+- **Fly.io** — Interaktywne [skrypty deploy/uninstall](fly.md) oraz szablon `fly.toml`. Dostępne również przez portal jednym kliknięciem.
+- **GCP** — [Moduł Terraform](gcp.md) aprowizujący instancję `e2-micro` z bezpłatnego tieru z przekazaniem cloud-init do systemd.
+- **Railway / Render** — Walidowany schematem [konfig Railway](railway.md) i Blueprint `render.yaml` celujący w bezpłatny tier Render.
+- **Jednym kliknięciem** — [Cloudflare Worker](worker.md) serwuje stronę lądowania i orkiestruje wdrożenia Fly.io poprzez `POST /api/deploy`, używając tokenu Fly.io użytkownika do aprowizacji aplikacji, IP, wolumenu i maszyny.
 
-## Observability Pipeline
+## Pipeline obserwowalności
 
-When running locally with `docker-compose.observability.yml`, the sub-modules form a complete telemetry stack:
+Przy lokalnym uruchomieniu z `docker-compose.observability.yml`, sub-moduły tworzą kompletny stos telemetrii:
 
 ```mermaid
 flowchart LR
@@ -44,12 +44,12 @@ flowchart LR
     GRAF -->|query| JAEGER
 ```
 
-The [OTel Collector](otel-collector.md) is the central hub: it normalizes ingestion so the daemon only needs one endpoint, then fans out traces to [Tempo](tempo.md) and Jaeger, and bridges metrics to [Prometheus](prometheus.md). [Alloy](alloy.md) tails log files and ships them to [Loki](loki.md). [Grafana](grafana.md) ties everything together with four pre-provisioned datasources and five dashboards — no manual UI configuration required.
+[OTel Collector](otel-collector.md) jest centralnym węzłem: normalizuje pozyskiwanie danych, tak że demon potrzebuje tylko jednego endpointu, a następnie rozdziela trace'y do [Tempo](tempo.md) i Jaegera oraz mostkuje metryki do [Prometheus](prometheus.md). [Alloy](alloy.md) śledzi pliki logów i przesyła je do [Loki](loki.md). [Grafana](grafana.md) spaja wszystko razem za pomocą czterech prekonfigurowanych źródeł danych i pięciu dashboardów — bez konieczności ręcznej konfiguracji UI.
 
-## Key Cross-Module Workflows
+## Kluczowe przepływy pracy między modułami
 
-1. **Entry → Init → Serve** — `docker-entrypoint.sh` validates environment, creates `/data` and `logs/`, runs `librefang init` on first boot, rewrites `config.toml` for container networking, then execs the daemon. This sequence is shared by Docker, Kubernetes (rootless path), and GCP cloud-init.
+1. **Wejście → Inicjalizacja → Serwis** — `docker-entrypoint.sh` weryfikuje środowisko, tworzy `/data` i `logs/`, uruchamia `librefang init` przy pierwszym starcie, przepisuje `config.toml` dla sieci kontenerowej, a następnie wykonuje demona. Ta sekwencja jest wspólna dla Dockera, Kubernetes (ścieżka rootless) i GCP cloud-init.
 
-2. **Portal → Fly.io** — The [worker](worker.md)'s `handleDeploy` orchestrates the full Fly.io lifecycle: app creation, volume allocation, IP assignment, and machine launch — the same steps the interactive [fly/deploy.sh](fly.md) performs, but server-side via the Fly.io REST/GraphQL APIs.
+2. **Portal → Fly.io** — `handleDeploy` w [workerze](worker.md) orkiestruje pełny cykl życia Fly.io: tworzenie aplikacji, alokację wolumenu, przypisanie IP i uruchomienie maszyny — te same kroki co interaktywny [fly/deploy.sh](fly.md), ale po stronie serwera poprzez REST/GraphQL API Fly.io.
 
-3. **Telemetry correlation** — Once the daemon stamps `trace_id` into log lines, Grafana's derived fields will enable click-through from a trace span to the corresponding log stream in Loki, linking the [Tempo](tempo.md) and [Loki](loki.md) halves of the pipeline.
+3. **Korelacja telemetrii** — Gdy demon oznacza logi `trace_id`, pochodne pola w Grafanie umożliwią przejście kliknięciem ze spana trace'a do odpowiadającego strumienia logów w Loki, łącząc połówki [Tempo](tempo.md) i [Loki](loki.md) w pipeline.

@@ -1,19 +1,19 @@
-# docs — examples
+# docs — przykłady
 
-# Examples — Reference Sidecars
+# Przykłady — sidecary referencyjne
 
-The `docs/examples` directory contains dependency-free Python 3 reference implementations of the two sidecar extension points LibreFang exposes: the **context engine** and the **proactive memory extractor**. Each script is a long-lived stdio process that speaks a newline-delimited JSON protocol with the daemon. They are intentionally minimal — their purpose is to demonstrate the wire format, the configuration wiring, and two well-known stdio pitfalls, not to provide production logic.
+Katalog `docs/examples` zawiera referencyjne implementacje w Pythonie 3 (bez zależności) dwóch punktów rozszerzeń sidecar, jakie udostępnia LibreFang: **silnik kontekstowy** oraz **proaktywny ekstraktor pamięci}. Każdy skrypt to długotrwały proces stdio, który komunikuje się z demonem za pomocą protokołu JSON rozdzielonego znakami nowej linii. Są celowo minimalistyczne — ich celem jest zademonstrowanie formatu przesyłania, konfiguracji połączeń oraz dwóch dobrze znanych pułapek stdio, a nie dostarczenie logiki produkcyjnej.
 
-## Files
+## Pliki
 
-| File | Replaces | Config section |
+| Plik | Zastępuje | Sekcja konfiguracji |
 |---|---|---|
-| `context_engine_sidecar.py` | The built-in context windowing / recall engine | `[context_engine.sidecar]` |
-| `memory_extractor_sidecar.py` | The built-in proactive memory extractor | `[proactive_memory.extractor_sidecar]` |
+| `context_engine_sidecar.py` | Wbudowany silnik okienkowania/przypominania kontekstu | `[context_engine.sidecar]` |
+| `memory_extractor_sidecar.py` | Wbudowany proaktywny ekstraktor pamięci | `[proactive_memory.extractor_sidecar]` |
 
-## The Wire Protocol
+## Protokół przesyłania
 
-Both sidecars share the same framing:
+Oba sidecary współdzielą tę samą ramkę:
 
 ```
 daemon  ──>{"id": N, "method": "...", "params": {...}}\n ──>  sidecar
@@ -21,50 +21,50 @@ sidecar ──>{"id": N, "ok": {...}}\n                      ──>  daemon
          ──>{"id": N, "error": "<msg>"}\n                ──>  daemon
 ```
 
-- **One JSON object per line**, terminated by `\n`.
-- Every reply echoes the request's `id` so the daemon can match asynchronous responses.
-- On success, the payload goes under the `ok` key. On failure, the human-readable message goes under `error`.
-- The sidecar must never exit on a single bad request — both scripts wrap handler calls in `try/except` and emit an `error` reply instead of crashing the read loop.
+- **Jeden obiekt JSON na linię**, zakończony przez `\n`.
+- Każda odpowiedź powtarza `id` żądania, aby demon mógł dopasować asynchroniczne odpowiedzi.
+- W przypadku sukcesu ładunek znajduje się pod kluczem `ok`. W przypadku błędu czytelny dla człowieka komunikat znajduje się pod `error`.
+- Sidecar nie może zakończyć działania z powodu pojedynczego błędnego żądania — oba skrypty owijają wywołania obsługi w `try/except` i wysyłają odpowiedź `error` zamiast zamykać pętlę odczytu.
 
-### Two stdio pitfalls the examples guard against
+### Dwie pułapki stdio, przed którymi ostrzegają przykłady
 
-Both docstrings call these out because they are easy to get wrong:
+Oba docstringi o nich wspominają, ponieważ łatwo je popełnić:
 
-1. **Read with `sys.stdin.readline()`, not `for line in sys.stdin`.** The iterator form read-ahead-buffers and will block until EOF, meaning no line is ever delivered while the process is alive. `readline()` returns as soon as one newline is available.
-2. **Call `sys.stdout.flush()` after every reply.** When stdout is a pipe (which it is here), it is block-buffered by default. Without an explicit flush, the daemon would never receive the reply.
+1. **Czytaj za pomocą `sys.stdin.readline()`, a nie `for line in sys.stdin`.** Forma z iteratorem buforuje z wyprzedzeniem i zablokuje się aż do EOF, co oznacza, że żadna linia nie zostanie dostarczona, dopóki proces żyje. `readline()` wraca natychmiast, gdy dostępna jest jedna nowa linia.
+2. **Wywołuj `sys.stdout.flush()` po każdej odpowiedzi.** Gdy stdout jest potokiem (co ma miejsce tutaj), jest domyślnie buforowany blokowo. Bez jawnego opróżnienia demon nigdy nie otrzymałby odpowiedzi.
 
-Both scripts share the same `main()` loop shape:
+Oba skrypty współdzielą ten sam kształt pętli `main()`:
 
 ```python
 def main():
     while True:
         line = sys.stdin.readline()
         if not line:
-            break               # EOF — daemon closed stdin
+            break               # EOF — demon zamknął stdin
         line = line.strip()
         if not line:
             continue
         try:
             req = json.loads(line)
         except ValueError:
-            continue            # skip malformed lines
-        ...build reply...
+            continue            # pomiń źle sformułowane linie
+        ...zbuduj odpowiedź...
         sys.stdout.write(json.dumps(reply) + "\n")
         sys.stdout.flush()
 ```
 
 ## context_engine_sidecar.py
 
-Replaces the in-process context engine. The daemon dispatches one of four methods per turn:
+Zastępuje wbudowany silnik kontekstowy. Demon wywołuje jedną z czterech metod na turę:
 
-| Method | When called | Reference behavior |
+| Metoda | Kiedy wywoływana | Zachowanie referencyjne |
 |---|---|---|
-| `bootstrap` | Sidecar startup | No-op, returns `{}` |
-| `ingest` | After a memory is written | Returns `{"recalled_memories": []}` — no recall in the reference |
-| `assemble` | Before building the LLM request | Trims to the most recent `KEEP_RECENT` (40) messages |
-| `after_turn` | After the assistant reply is committed | No-op, returns `{}` |
+| `bootstrap` | Uruchomienie sidecara | Brak operacji, zwraca `{}` |
+| `ingest` | Po zapisaniu pamięci | Zwraca `{"recalled_memories": []}` — brak przypominania w referencji |
+| `assemble` | Przed zbudowaniem żądania LLM | Przycina do najnowszych `KEEP_RECENT` (40) wiadomości |
+| `after_turn` | Po zatwierdzeniu odpowiedzi asystenta | Brak operacji, zwraca `{}` |
 
-Handlers are registered in a dispatch table:
+Obsługi są zarejestrowane w tabeli dyspozycji:
 
 ```python
 HANDLERS = {
@@ -75,17 +75,17 @@ HANDLERS = {
 }
 ```
 
-### Recovery signaling
+### Sygnalizowanie odzyskiwania
 
-`assemble` is the one handler that does real work. When it trims messages from the window it reports the count back to the daemon via the `recovery` field so the daemon knows history was dropped:
+`assemble` to jedyna obsługa wykonująca właściwą pracę. Gdy przycina wiadomości z okna, zgłasza demonowi liczbę usuniętych wiadomości za pomocą pola `recovery`, aby demon wiedział, że historia została odrzucona:
 
 ```python
 recovery = "None" if removed == 0 else {"AutoCompaction": {"removed": removed}}
 ```
 
-The reply shape is `{"messages": [...], "recovery": recovery}`. Returning `"None"` (the string) signals "nothing was removed"; the `AutoCompaction` object signals the daemon that compaction occurred.
+Kształt odpowiedzi to `{"messages": [...], "recovery": recovery}`. Zwrócenie `"None"` (ciągu znaków) sygnalizuje „nic nie zostało usunięte"; obiekt `AutoCompaction` sygnalizuje demonowi, że nastąpiła kompakcja.
 
-### Configuration
+### Konfiguracja
 
 ```toml
 [context_engine]
@@ -96,37 +96,37 @@ command = "python3"
 args = ["/path/to/context_engine_sidecar.py"]
 ```
 
-Set `engine = "sidecar"` to activate the external process; otherwise the built-in context engine is used.
+Ustaw `engine = "sidecar"`, aby aktywować proces zewnętrzny; w przeciwnym razie używany jest wbudowany silnik kontekstowy.
 
 ## memory_extractor_sidecar.py
 
-Replaces the built-in proactive memory extractor. The daemon sends:
+Zastępuje wbudowany proaktywny ekstraktor pamięci. Demon wysyła:
 
 ```json
 {"id": 7, "method": "extract_memories",
  "params": {"messages": [...], "categories": ["preference", ...]}}
 ```
 
-The sidecar returns a list of memory shards in the simple shape the daemon expects:
+Sidecar zwraca listę odłamków pamięci w prostym kształcie, jakiego oczekuje demon:
 
 ```json
 {"id": 7, "ok": {"memories": [{"content": "...", "category": "preference"}],
                   "has_content": true}}
 ```
 
-The daemon is responsible for assigning `id` (UUID), `created_at`, and `source` — the sidecar only produces `{content, category?, level?, metadata?}`. Extracted memories should be restricted to the categories supplied in `params.categories`.
+Demon odpowiada za przypisanie `id` (UUID), `created_at` i `source` — sidecar produkuje jedynie `{content, category?, level?, metadata?}`. Wyodrębnione pamięci powinny być ograniczone do kategorii dostarczonych w `params.categories`.
 
-### The reference heuristic
+### Heurystyka referencyjna
 
-The toy `extract()` function scans only the most recent user message for a fixed set of trigger phrases:
+Zabawkowa funkcja `extract()` skanuje tylko najnowszą wiadomość użytkownika pod kątem stałego zestawu fraz wyzwalających:
 
 ```python
 TRIGGERS = ("i prefer ", "remember that ", "my name is ", "i like ", "i work ")
 ```
 
-A real extractor would replace this body with a call to a model (local or remote), an embedding pipeline, or any other strategy. The loop inspects messages in reverse, stops at the first user turn, and returns `has_content: false` when nothing matched — which tells the daemon there is nothing to persist.
+Prawdziwy ekstraktor zastąpiłby to ciało wywołaniem modelu (lokalnego lub zdalnego), potokiem osadzania lub dowolną inną strategią. Pętla bada wiadomości w odwrotnej kolejności, zatrzymuje się na pierwszej turze użytkownika i zwraca `has_content: false`, gdy nic nie pasuje — co informuje demona, że nie ma nic do utrwalenia.
 
-### Configuration
+### Konfiguracja
 
 ```toml
 [proactive_memory.extractor_sidecar]
@@ -134,29 +134,29 @@ command = "python3"
 args = ["/path/to/memory_extractor_sidecar.py"]
 ```
 
-## Lifecycle and Data Flow
+## Cykl życia i przepływ danych
 
 ```mermaid
 sequenceDiagram
-    participant D as LibreFang daemon
+    participant D as demon LibreFang
     participant S as Sidecar (stdio)
-    D->>S: spawn process, keep stdin open
+    D->>S: uruchom proces, utrzymuj stdin otwarty
     D->>S: {"id":1,"method":"bootstrap","params":{}}
     S-->>D: {"id":1,"ok":{}}
-    Note over D,S: Per-turn cycle
+    Note over D,S: Cykl na turę
     D->>S: {"id":2,"method":"assemble","params":{messages}}
     S-->>D: {"id":2,"ok":{messages,recovery}}
     D->>S: {"id":3,"method":"after_turn","params":{}}
     S-->>D: {"id":3,"ok":{}}
-    D->>S: close stdin (EOF)
-    S->>S: process exits
+    D->>S: zamknij stdin (EOF)
+    S->>S: proces kończy działanie
 ```
 
-## Extending the Examples
+## Rozszerzanie przykładów
 
-The intended customization points are:
+Przewidziane punkty dostosowania to:
 
-- **`context_engine_sidecar.py`** — replace `ingest` (to return `MemoryFragment` objects for system-prompt injection), `assemble` (to implement your own windowing/retrieval policy), and `after_turn` (to persist state to a vector store or database).
-- **`memory_extractor_sidecar.py`** — replace `extract` with a model call, keeping the same return shape and respecting the `categories` allow-list.
+- **`context_engine_sidecar.py`** — zamień `ingest` (aby zwracać obiekty `MemoryFragment` do wstrzykiwania w prompt systemowy), `assemble` (aby zaimplementować własną politykę okienkowania/pobierania) i `after_turn` (aby utrwalać stan w wektorowym magazynie lub bazie danych).
+- **`memory_extractor_sidecar.py`** — zamień `extract` wywołaniem modelu, zachowując ten sam kształt odpowiedzi i szanując białą listę `categories`.
 
-Because the protocol is language-agnostic and dependency-free, you can rewrite either sidecar in any language; only the newline-delimited JSON framing matters.
+Ponieważ protokół jest niezależny od języka i pozbawiony zależności, możesz przepisać dowolny sidecar w dowolnym języku; liczy się tylko ramkowanie JSON rozdzielone znakami nowej linii.

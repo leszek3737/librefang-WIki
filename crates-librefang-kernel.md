@@ -2,17 +2,17 @@
 
 # librefang-kernel
 
-Core orchestration kernel for the LibreFang Agent OS. Owns agent lifecycles, scheduling, permissions, inter-agent communication, and the message-handling loop that fans requests out to LLM drivers, tools, and the memory substrate.
+Podstawowy kernel orkiestracji dla LibreFang Agent OS. Zarządza cyklami życia agentów, planowaniem, uprawnieniami, komunikacją międzyagentową oraz pętlą obsługi wiadomości, która rozdziela żądania do sterowników LLM, narzędzi i podsześci pamięci.
 
-## Architecture Overview
+## Przegląd architektury
 
 ```mermaid
 graph TB
-    API["librefang-api<br/>(HTTP/WS surface)"]
-    KERNEL["librefang-kernel<br/>(orchestration)"]
-    RT["librefang-runtime<br/>(agent loop, tool dispatch)"]
-    MEM["librefang-memory<br/>(storage substrate)"]
-    CH["librefang-channels<br/>(channel adapters)"]
+    API["librefang-api<br/>(powierzchnia HTTP/WS)"]
+    KERNEL["librefang-kernel<br/>(orkiestracja)"]
+    RT["librefang-runtime<br/>(pętla agenta, dyspozytor narzędzi)"]
+    MEM["librefang-memory<br/>(podsześć pamięci)"]
+    CH["librefang-channels<br/>(adaptery kanałów)"]
 
     API --> KERNEL
     KERNEL --> RT
@@ -23,189 +23,189 @@ graph TB
     RT -.-> KH
 ```
 
-The kernel sits between the HTTP surface (`librefang-api`) and the execution layer (`librefang-runtime`). External crates that need kernel callbacks go through the `KernelHandle` trait (defined in `librefang-kernel-handle`), reversing the dependency direction so the kernel never depends on the API or extensions crates.
+Kernel znajduje się między warstwą HTTP (`librefang-api`) a warstwą wykonawczą (`librefang-runtime`). Zewnętrzne crate wymagające wywołań zwrotnych kernela przechodzą przez trait `KernelHandle` (zdefiniowany w `librefang-kernel-handle`), odwracając kierunek zależności tak, aby kernel nigdy nie zależał od crate'a API ani od rozszerzeń.
 
-## Boot
+## Rozruch
 
-Entry point: `LibreFangKernel::boot_with_config(KernelConfig)`.
+Punkt wejścia: `LibreFangKernel::boot_with_config(KernelConfig)`.
 
-This is a large god-struct (~18k LOC, 50+ fields — tracked in #3565). Do not add new fields without coordination. The boot sequence:
+Jest to duża struktura-god (~18k LOC, 50+ pól — śledzona w #3565). Nie dodawaj nowych pól bez koordynacji. Sekwencja rozruchu:
 
-1. Loads `KernelConfig` (with `Default` fallbacks for missing fields).
-2. Initializes the `AgentRegistry`, `ApprovalManager`, `AgentIdentityRegistry`, event bus, and subsystem modules.
-3. Calls `recover_stale_running_runs` using `KernelConfig.workflow_stale_timeout_minutes` as the cutoff.
-4. Spawns background tasks (approval sweep, cron scheduler, auto-dream).
+1. Wczytuje `KernelConfig` (z wartościami domyślnymi `Default` dla brakujących pól).
+2. Inicjalizuje `AgentRegistry`, `ApprovalManager`, `AgentIdentityRegistry`, magistralę zdarzeń i moduły podsystemów.
+3. Wywołuje `recover_stale_running_runs` używając `KernelConfig.workflow_stale_timeout_minutes` jako punktu odcięcia.
+4. Uruchamia zadania w tle (cykl zatwierdzeń, planista cron, automatyczne „marzenie").
 
-## Key Components
+## Kluczowe komponenty
 
 ### LibreFangKernel
 
-The top-level orchestrator struct. Exposes its surface through `kernel_api.rs` methods:
+Główna struktura orkiestratora. Udostępnia swoją powierzchnię poprzez metody w `kernel_api.rs`:
 
-- `oauth_provider_ref` — returns the pluggable MCP OAuth provider.
-- `skill_registry_ref` — returns the hot-reloadable skill registry.
-- `reload_config` — hot-reloads kernel configuration.
-- `set_user_provider_key` — injects per-user provider API keys.
-- `clear_driver_cache` — flushes cached LLM driver state.
-- `export_session_trajectory` — exports a session's full trajectory for replay/debugging.
+- `oauth_provider_ref` — zwraca podłączalny dostawca MCP OAuth.
+- `skill_registry_ref` — zwraca rejestr umiejętności z obsługą hot-reload.
+- `reload_config` — przeładowuje konfigurację kernela w locie.
+- `set_user_provider_key` — wstrzykuje klucze API dostawcy dla poszczególnych użytkowników.
+- `clear_driver_cache` — opróżnia buforowany stan sterownika LLM.
+- `export_session_trajectory` — eksportuje pełną trajektorię sesji do odtworzenia/debugowania.
 
 ### AgentRegistry
 
-Concurrent agent table providing `spawn`, `lookup`, and `kill` operations. Agents are keyed by `AgentId` (UUID v5 derived from agent name via `AgentId::from_name`).
+Współbieżna tabela agentów udostępniająca operacje `spawn`, `lookup` i `kill`. Agenty są kluczowane przez `AgentId` (UUID v5 wyprowadzony z nazwy agenta poprzez `AgentId::from_name`).
 
 ### AgentIdentityRegistry
 
-Canonical agent UUID registry (`agent_identity_registry.rs`). Persists `agent_name → canonical_uuid` mappings independently of the agent registry so that respawns (after panics, manifest reloads, explicit kills) reuse the same `AgentId` instead of generating a fresh one.
+Kanoniczny rejestr UUID agentów (`agent_identity_registry.rs`). Utrzymuje mapowania `agent_name → canonical_uuid` niezależnie od rejestru agentów, dzięki czemu ponowne uruchomienia (po panikach, przeładowaniach manifestów, jawnych killach) używają tego samego `AgentId` zamiast generować nowy.
 
-**Storage**: TOML file at `<home_dir>/agent_identities.toml`, written atomically (write to `.tmp.<pid>.<seq>.<nanos>`, fsync, rename).
+**Pamięć**: plik TOML w `<home_dir>/agent_identities.toml`, zapisywany atomowo (zapis do `.tmp.<pid>.<seq>.<nanos>`, fsync, rename).
 
-**Semantics**:
-- `register_if_absent` — first UUID wins. Subsequent registrations for the same name return the existing UUID, never overwrite.
-- `purge` — removes the entry entirely. Next spawn gets a clean-slate UUID.
-- A normal `kill_agent` does **not** touch the registry entry — the UUID survives so surviving sessions/memories/cron jobs remain reachable.
-- Malformed files are treated as empty but **never overwritten** — the operator can recover by hand.
+**Semantyka**:
+- `register_if_absent` — pierwszy UUID wygrywa. Kolejne rejestracje dla tej samej nazwy zwracają istniejący UUID, nigdy go nie nadpisują.
+- `purge` — całkowicie usuwa wpis. Kolejne uruchomienie otrzymuje UUID od zera.
+- Zwykłe `kill_agent` **nie** dotyka wpisu w rejestrze — UUID przetrwa, aby pozostałe sesje/pamięci/zadania cron pozostały osiągalne.
+- Zniekształcone pliki są traktowane jako puste, ale **nigdy nie są nadpisywane** — operator może odzyskać je ręcznie.
 
 ### ApprovalManager
 
-Execution approval manager (`approval.rs`). Gates dangerous operations behind human approval with policy-based risk classification, TOTP second-factor support, and persistent audit logging.
+Menedżer zatwierdzeń wykonań (`approval.rs`). Bramkuje niebezpieczne operacje za pomocą zatwierdzenia przez człowieka z klasyfikacją ryzyka opartą na polityce, obsługą drugiego czynnika TOTP i trwałym logowaniem audytowym.
 
-**Risk classification** (`classify_risk`):
+**Klasyfikacja ryzyka** (`classify_risk`):
 
-| Risk Level | Tools |
+| Poziom ryzyka | Narzędzia |
 |---|---|
-| Critical | `shell_exec`, `agent_spawn`, `agent_kill`, `config_set`, `kernel_reload` |
-| High | `file_write`, `file_delete`, `apply_patch`, all `mcp_*` tools |
-| Medium | `web_fetch`, `browser_navigate` |
-| Low | everything else |
+| Krytyczny | `shell_exec`, `agent_spawn`, `agent_kill`, `config_set`, `kernel_reload` |
+| Wysoki | `file_write`, `file_delete`, `apply_patch`, wszystkie narzędzia `mcp_*` |
+| Średni | `web_fetch`, `browser_navigate` |
+| Niski | wszystko inne |
 
-The `trusted_senders` bypass only applies to tools classified below `High`. Code execution, control-plane mutations, and destructive writes always require explicit approval regardless of sender identity.
+Bypass `trusted_senders` dotyczy tylko narzędzi sklasyfikowanych poniżej poziomu `High`. Wykonywanie kodu, mutacje płaszczyzny sterowania i destruktywne zapisy zawsze wymagają jawnego zatwierdzenia, niezależnie od tożsamości nadawcy.
 
-**Two execution paths**:
+**Dwie ścieżki wykonania**:
 
-1. **Blocking** (`request_approval`): the agent loop awaits resolution via a `oneshot` channel. Timeout behavior is governed by `TimeoutFallback` policy (escalate up to 3 times, then resolve with the fallback decision).
+1. **Blokująca** (`request_approval`): pętla agenta oczekuje na rozwiązanie przez kanał `oneshot`. Zachowanie w przypadku przekroczenia czasu jest określane przez politykę `TimeoutFallback` (eskalacja do 3 razy, a następnie rozwiązanie decyzją zastępczą).
 
-2. **Deferred** (`submit_request`): returns immediately with a UUID. The `DeferredToolExecution` payload is stored and returned atomically on `resolve()`, enabling non-blocking tool approval for editor-integrated flows.
+2. **Odłożona** (`submit_request`): zwraca natychmiast UUID. Ładunek `DeferredToolExecution` jest przechowywany i zwracany atomowo przy `resolve()`, umożliwiając nieblokujące zatwierdzanie narzędzi w przepływach zintegrowanych z edytorem.
 
-**Decision caching layers**:
-- `remembered` (`DashMap<(agent_id, tool_name), ApprovalDecision>`) — persistent "allow always" / "reject always" decisions from external surfaces (ACP bridge). In-memory only; does not survive daemon restart.
-- `session_approvals` (`DashMap<(session_id, tool_name), ()>`) — per-session auto-approval cache (#5600). Skipped when the deferred call had `force_human=true` (RBAC per-call requirement).
+**Warstwy buforowania decyzji**:
+- `remembered` (`DashMap<(agent_id, tool_name), ApprovalDecision>`) — trwałe decyzje „zawsze pozwól" / „zawsze odrzuć" z powierzchni zewnętrznych (most ACP). Tylko w pamięci; nie przetrwa restartu demona.
+- `session_approvals` (`DashMap<(session_id, tool_name), ()>`) — pamięć podręczna autoryzacji sesji (#5600). Pomijana, gdy odłożone wywołanie miało `force_human=true` (wymóg RBAC per-wywołanie).
 
-**TOTP second-factor support**:
-- RFC 6238 with SHA-1, 6 digits, 30-second step, ±1 step skew tolerance.
-- Grace period tracking to avoid re-prompting within a configurable window.
-- Brute-force protection: 5 consecutive failures → 300-second lockout. Lockout state is persisted to SQLite and restored across restarts. The `check_and_record_totp_failure` method performs an atomic check-and-record under `failure_rw_mutex` to eliminate TOCTOU races (#3584).
-- Replay prevention: verified codes are hashed (SHA-256) and stored in `totp_used_codes` with a 90-second window.
-- Recovery codes: 8 random hex codes (`XXXX-XXXX-XXXX-XXXX`, 64 bits entropy each). Verified in constant time across all stored codes to prevent timing side-channels (#3591).
+**Obsługa drugiego czynnika TOTP**:
+- RFC 6238 z SHA-1, 6 cyfr, krok 30-sekundowy, tolerancja odchyłki ±1 krok.
+- Śledzenie okresu prolongaty, aby uniknąć ponownego monitowania w konfigurowalnym oknie.
+- Ochrona przed brute-force: 5 kolejnych niepowodzeń → blokada 300 sekund. Stan blokady jest utrwalany w SQLite i odtwarzany po restartach. Metoda `check_and_record_totp_failure` wykonuje atomową kontrolę i zapis pod `failure_rw_mutex`, eliminując wyścigi TOCTOU (#3584).
+- Zapobieganie replay: zweryfikowane kody są haszowane (SHA-256) i przechowywane w `totp_used_codes` z oknem 90 sekund.
+- Kody odzyskiwania: 8 losowych kodów szesnastkowych (`XXXX-XXXX-XXXX-XXXX`, 64 bity entropii każdy). Weryfikowane w stałym czasie we wszystkich przechowywanych kodach, aby zapobiec atakom typu timing side-channel (#3591).
 
-**Persistence**: `ApprovalManager::new_with_db` wires a SQLite connection pool (`r2d2_sqlite`). Pending approvals survive daemon restarts — restored entries have no live `oneshot::Sender`, so they surface in the dashboard for manual operator resolution. Deferred payloads are integrity-checked against the row's `agent_id`, `tool_name`, and `session_id` columns before being trusted for auto-resume (#3313 security review).
+**Trwałość**: `ApprovalManager::new_with_db` łączy pulę połączeń SQLite (`r2d2_sqlite`). Oczekujące zatwierdzenia przetrwają restarty demona — odtworzone wpisy nie mają aktywnego `oneshot::Sender`, więc pojawiają się w dashboardzie do ręcznego rozwiązania przez operatora. Ładunki odłożone są sprawdzane pod kątem integralności względem kolumn `agent_id`, `tool_name` i `session_id` wiersza przed zaufaniem im do automatycznego wznowienia (przegląd bezpieczeństwa #3313).
 
-**Event broadcast**: `subscribe()` returns a `broadcast::Receiver<ApprovalEvent>` (capacity 256) so external transports (ACP adapter) get low-latency notification instead of polling `list_pending`.
+**Rozgłaszanie zdarzeń**: `subscribe()` zwraca `broadcast::Receiver<ApprovalEvent>` (pojemność 256), aby transporty zewnętrzne (adapter ACP) otrzymywały powiadomienia z niskim opóźnieniem zamiast odpytywać `list_pending`.
 
 ### MCP OAuth Provider
 
-Pluggable OAuth flow for MCP tool servers. Defined as `Arc<dyn McpOAuthProvider + Send + Sync>`, implemented in `librefang-api` to keep the daemon free of HTTP concerns. The kernel exposes vault operations (`vault_get`, `vault_set`, `vault_remove`, `vault_key`, `vault_get_or_warn`), client registration (`register_client`), and token endpoint response redaction (`redact_token_endpoint_response`).
+Podłączalny przepływ OAuth dla serwerów narzędzi MCP. Zdefiniowany jako `Arc<dyn McpOAuthProvider + Send + Sync>`, zaimplementowany w `librefang-api`, aby utrzymać demona wolnym od zależności HTTP. Kernel udostępnia operacje na sejfie (`vault_get`, `vault_set`, `vault_remove`, `vault_key`, `vault_get_or_warn`), rejestrację klientów (`register_client`) oraz redakcję odpowiedzi punktu końcowego tokenów (`redact_token_endpoint_response`).
 
-OAuth nonce replay prevention: consumed nonces are hashed and stored in `oauth_used_nonces` with a 1-hour window, preventing replay of captured callback URLs (#3944).
+Zapobieganie replay OAuth nonce: zużyte nonce są haszowane i przechowywane w `oauth_used_nonces` z oknem 1 godziny, zapobiegając replay przechwyconych URL-i zwrotnych (#3944).
 
-### Metering and Router (re-exported)
+### Metering i Router (re-eksportowane)
 
-- `metering` — re-exported from `librefang-kernel-metering`. Token and cost accounting; uses the kernel's `model_catalog`.
-- `router` — re-exported from `librefang-kernel-router`. Model router with alias resolution.
+- `metering` — re-eksportowane z `librefang-kernel-metering`. Księgowanie tokenów i kosztów; używa `model_catalog` kernela.
+- `router` — re-eksportowane z `librefang-kernel-router`. Router modeli z rozwiązywaniem aliasów.
 
-## Lock Strategy for Hot Fields
+## Strategia blokad dla aktywnych pól
 
-| Field | Type | Strategy | Rationale |
+| Pole | Typ | Strategia | Uzasadnienie |
 |---|---|---|---|
-| `model_catalog` | `ArcSwap<ModelCatalog>` | RCU via `model_catalog_update(\|cat\| ...)` | Atomic-load reads (#3384). Do not switch to `RwLock`. |
-| `skill_registry` | `RwLock<SkillRegistry>` | `std::sync::RwLock` | Hot-reload on install/uninstall. Keep reads brief. |
-| `running_tasks` | `DashMap<(AgentId, SessionId), RunningTask>` | DashMap | Keyed by `(agent, session)` tuple, not `AgentId` alone (#3172). The old keying silently overwrote concurrent loops. |
-| `event_bus` history | `Mutex<VecDeque<Arc<Event>>>` | `parking_lot::Mutex` | Append-only history (#3385). Do not switch to `RwLock<VecDeque<Event>>`. |
+| `model_catalog` | `ArcSwap<ModelCatalog>` | RCU poprzez `model_catalog_update(\|cat\| ...)` | Odczyty atomowego ładowania (#3384). Nie przechodź na `RwLock`. |
+| `skill_registry` | `RwLock<SkillRegistry>` | `std::sync::RwLock` | Hot-reload przy instalacji/deinstalacji. Utrzymuj krótkie odczyty. |
+| `running_tasks` | `DashMap<(AgentId, SessionId), RunningTask>` | DashMap | Kluczowane krotką `(agent, session)`, nie samym `AgentId` (#3172). Stare kluczowanie cicho nadpisywało współbieżne pętle. |
+| Historia `event_bus` | `Mutex<VecDeque<Arc<Event>>>` | `parking_lot::Mutex` | Historia tylko-do-dodawania (#3385). Nie przechodź na `RwLock<VecDeque<Event>>`. |
 
-When adding a new field, choose:
-- **Hot read, rare write** → `arc_swap::ArcSwap`
-- **Hot read, hot write** → `parking_lot::Mutex` or `dashmap::DashMap`
-- **Append-only history** → `parking_lot::Mutex<VecDeque<Arc<T>>>`
+Dodając nowe pole, wybierz:
+- **Częsty odczyt, rzadki zapis** → `arc_swap::ArcSwap`
+- **Częsty odczyt, częsty zapis** → `parking_lot::Mutex` lub `dashmap::DashMap`
+- **Historia tylko-do-dodawania** → `parking_lot::Mutex<VecDeque<Arc<T>>>`
 
-## Determinism
+## Determinizm
 
-Anything that reaches an LLM prompt **must** be ordered before stringification. Use `BTreeMap` / `BTreeSet`. `HashMap` iteration order varies across processes and silently invalidates provider prompt caches (#3298). Regression tests live next to each boundary — see `kernel::tests::mcp_summary_is_byte_identical_across_input_orders`.
+Wszystko, co trafia do promptu LLM, **musi** być uporządkowane przed konwersją na ciąg znaków. Używaj `BTreeMap` / `BTreeSet`. Kolejność iteracji `HashMap` różni się między procesami i cicho unieważnia bufory promptów dostawcy (#3298). Testy regresji znajdują się obok każdej granicy — patrz `kernel::tests::mcp_summary_is_byte_identical_across_input_orders`.
 
-This is a hard taboo: no `HashMap<K, V>` in any field that ends up in an LLM prompt.
+To jest twarde tabu: brak `HashMap<K, V>` w żadnym polu, które trafia do promptu LLM.
 
-## Configuration Knobs
+## Przełączniki konfiguracji
 
-| Knob | Default | Notes |
+| Przełącznik | Domyślnie | Uwagi |
 |---|---|---|
-| `max_history_messages` | — | Global default; clamped up to `MIN_HISTORY_MESSAGES = 4` with a WARN log. Per-agent override in `agent.toml`. |
-| `queue.concurrency.trigger_lane` | 8 | Global semaphore on `Lane::Trigger`. |
-| `queue.concurrency.default_per_agent` | 1 | Fallback when `agent.toml: max_concurrent_invocations` is unset. |
-| `workflow_stale_timeout_minutes` | — | `recover_stale_running_runs` cutoff at boot. |
+| `max_history_messages` | — | Domyślna globalna; ograniczona od góry do `MIN_HISTORY_MESSAGES = 4` z logiem WARN. Nadpisanie per-agent w `agent.toml`. |
+| `queue.concurrency.trigger_lane` | 8 | Globalny semafor na `Lane::Trigger`. |
+| `queue.concurrency.default_per_agent` | 1 | Wartość zastępcza gdy `agent.toml: max_concurrent_invocations` nie jest ustawione. |
+| `workflow_stale_timeout_minutes` | — | Punkt odcięcia `recover_stale_running_runs` przy rozruchu. |
 
-## Subsystem Modules
+## Moduły podsystemów
 
-| Module | Responsibility |
+| Moduł | Odpowiedzialność |
 |---|---|
-| `registry` | `AgentRegistry` — spawn / lookup / kill agents |
-| `kernel::cron` | Cron scheduling. `session_mode` resolution: per-job > manifest > historical Persistent |
-| `kernel::cron_compaction` | Cron compaction mode resolution and keep-count computation |
-| `kernel::event_bus` | Broadcast event bus |
-| `kernel::session_lifecycle` | Session state machine |
-| `approval` | `ApprovalManager` — gates dangerous operations |
-| `auth` | Role parsing (`from_str_role` / `try_from_str_role`) |
-| `auto_dream` | Background "dreaming" / consolidation |
-| `inbox` | Agent inbox |
-| `pairing` | Device pairing (`PairedDevice`) |
-| `scheduler` | Task scheduling |
-| `triggers` | Trigger persistence and workflow execution |
-| `capabilities` | Tool capability enumeration (`available_tools`, `list`) |
-| `skill_workshop` | Skill approval workflow with candidate storage |
-| `supervised_spawn` | Supervised task spawning for MCP servers |
-| `mcp_oauth_provider` | MCP OAuth vault and client registration |
+| `registry` | `AgentRegistry` — spawn / lookup / kill agentów |
+| `kernel::cron` | Planowanie cron. Rozwiązywanie `session_mode`: per-zadanie > manifest > historyczne Persistent |
+| `kernel::cron_compaction` | Rozwiązywanie trybu kompakcji cron i obliczanie liczby zachowań |
+| `kernel::event_bus` | Magistrala rozgłaszania zdarzeń |
+| `kernel::session_lifecycle` | Maszyn stanów sesji |
+| `approval` | `ApprovalManager` — bramkuje niebezpieczne operacje |
+| `auth` | Parsowanie ról (`from_str_role` / `try_from_str_role`) |
+| `auto_dream` | Tło „marzenia" / konsolidacja |
+| `inbox` | Skrzynka odbiorcza agenta |
+| `pairing` | Parowanie urządzeń (`PairedDevice`) |
+| `scheduler` | Planowanie zadań |
+| `triggers` | Trwałość wyzwalaczy i wykonywanie przepływów pracy |
+| `capabilities` | Wyliczanie zdolności narzędzi (`available_tools`, `list`) |
+| `skill_workshop` | Przepływ pracy zatwierdzania umiejętności z przechowywaniem kandydatów |
+| `supervised_spawn` | Nadzorowane uruchamianie zadań dla serwerów MCP |
+| `mcp_oauth_provider` | Sejf OAuth MCP i rejestracja klientów |
 | `workspace_setup` | `generate_identity_files`, `create_new_or_cleanup` |
-| `persist_tmp_path` | Atomic file write helper |
+| `persist_tmp_path` | Pomocnik atomowego zapisu pliku |
 
-## Testing
+## Testowanie
 
-- Unit tests live inside `crates/librefang-kernel/src/kernel/` (inline `#[cfg(test)]` modules).
-- Integration tests against a real router live in `librefang-api/tests/` — that's where `#[tokio::test]` against `TestServer` belongs (#3721).
-- Dev dependencies include `tokio` with `test-util` (for `time::pause`/`advance`/`resume` in workflow/cron timing tests), `wiremock` for HTTP mocking, `proptest`, and `librefang-testing`.
+- Testy jednostkowe znajdują się w `crates/librefang-kernel/src/kernel/` (wbudowane moduły `#[cfg(test)]`).
+- Testy integracyjne z prawdziwym routerem znajdują się w `librefang-api/tests/` — tam należą testy `#[tokio::test]` względem `TestServer` (#3721).
+- Zależności deweloperskie obejmują `tokio` z `test-util` (dla `time::pause`/`advance`/`resume` w testach czasu przepływów pracy/cron), `wiremock` do mockowania HTTP, `proptest` oraz `librefang-testing`.
 
-**Commands**:
+**Polecenia**:
 ```
 cargo test -p librefang-kernel
 cargo check --workspace --lib
 ```
 
-Workspace-wide `cargo test` and `cargo build` are forbidden (target/ contention). Real builds run in CI.
+Przestrzeniowe `cargo test` i `cargo build` są zabronione (konkurencja w target/). Prawdziwe kompilacje uruchamiają się w CI.
 
-## Cross-Cutting Execution Flows
+## Przecinające przepływy wykonania
 
-**MCP OAuth authorization** (`auth_start` → TLS/proxy configuration):
-The API route calls `register_client` on the kernel's OAuth provider, which builds an HTTP client through `librefang-http`'s `oauth_client_builder` → `proxied_client_builder` → `build_http_client` → `tls_config` / `active_proxy`. This is the path that connects MCP server registration to the HTTP layer's proxy and TLS infrastructure.
+**Autoryzacja MCP OAuth** (`auth_start` → konfiguracja TLS/proxy):
+Trasa API wywołuje `register_client` na dostawcy OAuth kernela, który buduje klienta HTTP przez `oauth_client_builder` z `librefang-http` → `proxied_client_builder` → `build_http_client` → `tls_config` / `active_proxy`. To jest ścieżka łącząca rejestrację serwera MCP z infrastrukturą proxy i TLS warstwy HTTP.
 
-**Background agent startup → artifact GC**:
-`start_background_agents` triggers `run_startup_gc_once` in the runtime's artifact store, which evicts stale artifacts via `gc_evict_older_than` → `remove_file` in the catalog sync layer.
+**Uruchomienie agenta w tle → GC artefaktów**:
+`start_background_agents` wyzwala `run_startup_gc_once` w magazynie artefaktów runtime'u, który ewiktuje nieaktualne artefakty poprzez `gc_evict_older_than` → `remove_file` w warstwie synchronizacji katalogu.
 
-**Terminal authorization → role parsing**:
-`terminal_ws` → `authorize_terminal_request` → `configured_user_api_keys` → `from_str_role` → `try_from_str_role` in the kernel's `auth` module.
+**Autoryzacja terminala → parsowanie ról**:
+`terminal_ws` → `authorize_terminal_request` → `configured_user_api_keys` → `from_str_role` → `try_from_str_role` w module `auth` kernela.
 
-## Taboos
+## Tabu
 
-- No daemon spawning. The CLI binary owns `start`. The kernel just runs.
-- No `tokio::block_on` in this crate. The kernel is always inside a runtime.
-- No direct LLM HTTP calls. Go through `librefang-runtime` drivers.
-- No `KernelHandle::*` method returning `Result<_, String>` (#3541). Use a typed error.
-- No `HashMap<K, V>` in any field that ends up in an LLM prompt (#3298). Use `BTreeMap`.
+- Brak uruchamiania demonów. Binarny CLI odpowiada za `start`. Kernel po prostu działa.
+- Brak `tokio::block_on` w tym crate. Kernel zawsze znajduje się wewnątrz runtime'u.
+- Brak bezpośrednich wywołań HTTP LLM. Przechodź przez sterowniki `librefang-runtime`.
+- Brak metody `KernelHandle::*` zwracającej `Result<_, String>` (#3541). Użyj typowanego błędu.
+- Brak `HashMap<K, V>` w żadnym polu, które trafia do promptu LLM (#3298). Używaj `BTreeMap`.
 
-## Adding a New Field to LibreFangKernel
+## Dodawanie nowego pola do LibreFangKernel
 
-1. Field must be `pub(crate)` unless an external crate truly needs read access.
-2. Add a config-side counterpart to the `Default` impl on `KernelConfig` — otherwise the build is silently broken.
-3. If the field is `Option<Arc<dyn Trait>>`, mark it `#[serde(skip)]` and implement `Serialize`/`Deserialize`/`Clone`/`Debug` manually.
-4. Pick a lock strategy per the table above.
+1. Pole musi być `pub(crate)`, chyba że zewnętrzny crate naprawdę potrzebuje dostępu do odczytu.
+2. Dodaj odpowiednik po stronie konfiguracji do impl `Default` na `KernelConfig` — w przeciwnym razie kompilacja jest cicho zepsuta.
+3. Jeśli pole to `Option<Arc<dyn Trait>>`, oznacz je `#[serde(skip)]` i zaimplementuj `Serialize`/`Deserialize`/`Clone`/`Debug` ręcznie.
+4. Wybierz strategię blok zgodnie z tabelą powyżej.
 
-## Dependencies
+## Zależności
 
-The kernel pulls in the core type system (`librefang-types`), memory substrate (`librefang-memory`, `librefang-memory-wiki`), routing and metering sub-crates (`librefang-kernel-router`, `librefang-kernel-metering`), the execution layer (`librefang-runtime`), skills (`librefang-skills`, `librefang-hands`), extensions (`librefang-extensions`), LLM drivers (`librefang-llm-driver`, `librefang-llm-drivers`), wire protocol (`librefang-wire`), channels (`librefang-channels`), and RL export (`librefang-rl-export`).
+Kernel korzysta z podstawowego systemu typów (`librefang-types`), podsześci pamięci (`librefang-memory`, `librefang-memory-wiki`), sub-crate'ów routingu i meteringu (`librefang-kernel-router`, `librefang-kernel-metering`), warstwy wykonawczej (`librefang-runtime`), umiejętności (`librefang-skills`, `librefang-hands`), rozszerzeń (`librefang-extensions`), sterowników LLM (`librefang-llm-driver`, `librefang-llm-drivers`), protokołu liniowego (`librefang-wire`), kanałów (`librefang-channels`) oraz eksportu RL (`librefang-rl-export`).
 
-Notable workspace dependencies: `tokio`, `dashmap`, `arc-swap`, `parking_lot`, `rusqlite`/`r2d2`/`r2d2_sqlite`, `tera` (sandboxed templating for workflow Transform operators), `totp-rs`, `subtle` (constant-time comparison), `cron` (0.17).
+Znaczące zależności workspace'u: `tokio`, `dashmap`, `arc-swap`, `parking_lot`, `rusqlite`/`r2d2`/`r2d2_sqlite`, `tera` (szablonowanie izolowane dla operatorów Transform przepływów pracy), `totp-rs`, `subtle` (porównanie w stałym czasie), `cron` (0.17).

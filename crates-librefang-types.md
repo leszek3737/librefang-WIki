@@ -2,15 +2,15 @@
 
 # librefang-types
 
-The schema spine of the LibreFang Agent OS. Every cross-crate data structure lives here: agent identity, session keys, configuration, error enums, capabilities, memory descriptors, tool definitions, scheduling types, and wire-protocol payloads. The crate is a leaf in the workspace dependency graph — it imports no other `librefang-*` crate, and every other crate imports it.
+Strukturalny szkielet schematów LibreFang Agent OS. Każda struktura danych współdzielona między skrzynkami znajduje się tutaj: tożsamość agenta, klucze sesji, konfiguracja, enumeracje błędów, możliwości, deskryptory pamięci, definicje narzędzi, typy harmonogramów i ładunki protokołu transmisyjnego. Skrzynka jest liściem w grafie zależności obszaru roboczego — nie importuje żadnej innej skrzynki `librefang-*`, a każda inna skrzynka importuje ją.
 
-## Role in the architecture
+## Rola w architekturze
 
 ```mermaid
 graph TD
-    TYPES["librefang-types<br/>(schema only)"]
+    TYPES["librefang-types<br/>(tylko schemat)"]
 
-    subgraph consumers
+    subgraph konsumenci
         KERNEL[librefang-kernel]
         RUNTIME[librefang-runtime]
         API[librefang-api]
@@ -22,7 +22,7 @@ graph TD
     API --> TYPES
     SIDECAR --> TYPES
 
-    subgraph externals
+    subgraph zewnętrzne
         SERDE[serde / serde_json]
         CHRONO[chrono]
         UUID[uuid]
@@ -39,177 +39,177 @@ graph TD
     TYPES --> FLUENT
 ```
 
-The crate enforces a strict boundary: **types only, no implementation**. If a function body grows beyond a few lines of derive-only helper logic, it belongs in a consumer crate. There is no `tokio`, no `reqwest`, no async runtime — everything is synchronous data.
+Skrzynka wymusza ścisłą granicę: **tylko typy, bez implementacji**. Jeśli ciało funkcji rośnie poza kilka linii logiki pomocniczej opartej na makrach derive, należy je przenieść do skrzynki konsumenta. Brak `tokio`, brak `reqwest`, brak asynchronicznego środowiska uruchomieniowego — wszystko to synchroniczne dane.
 
-## Module layout
+## Układ modułów
 
-| Module | Domain |
+| Moduł | Dziedzina |
 |---|---|
-| `agent` | Agent identity (`AgentId`, `UserId`), session keys (`SessionId`), manifests, lifecycle state, tool profiles, resource quotas |
-| `approval` | Human-in-the-loop approval policies, notification config |
-| `capability` | Manifest capability declarations, glob-based permission matching |
-| `comms` | Inter-agent and channel communication envelopes |
-| `config` | `KernelConfig` and all sub-configuration structs consumed by the kernel |
-| `error` / `error_code` | `LibreFangError` enum, typed error codes |
-| `event` | Event bus payloads (agent lifecycle, health, cron, triggers) |
-| `goal` | Goal tree types (hierarchical objectives with status tracking) |
-| `i18n` | Fluent-based localization resolver, `t()` / `t_args()` translation functions |
-| `manifest_signing` | Ed25519 manifest signature verification, envelope integrity checks |
-| `media` | File upload / attachment descriptors |
-| `memory` | Memory store descriptors, access policies, `UserMemoryAccess` |
-| `message` | Chat message types, tool-call/result envelopes |
-| `model_catalog` | Provider/model registry entries, capability flags |
-| `oauth` | OAuth flow state, token descriptors |
-| `registry_schema` | Plugin/skill registry manifest schemas |
-| `scheduler` | Cron schedules, triggers, workflow actions, delivery targets |
-| `serde_compat` | Serde helpers for backward-compatible field migrations |
-| `subagent` | Multi-agent hand orchestration types |
-| `taint` | Data taint tracking for MCP/tool output isolation |
-| `task` | Task/job descriptors for the async work queue |
-| `tool` / `tool_class` | Tool definitions, tool-class taxonomy |
+| `agent` | Tożsamość agenta (`AgentId`, `UserId`), klucze sesji (`SessionId`), manifesty, stan cyklu życia, profile narzędzi, przydziały zasobów |
+| `approval` | Zasady zatwierdzania z udziałem człowieka, konfiguracja powiadomień |
+| `capability` | Deklaracje możliwości w manifeście, dopasowywanie uprawnień oparte na globach |
+| `comms` | Obwolutki komunikacji międzyagentowej i kanałowej |
+| `config` | `KernelConfig` i wszystkie podrzędne struktury konfiguracyjne konsumowane przez jądro |
+| `error` / `error_code` | Enumeracja `LibreFangError`, typizowane kody błędów |
+| `event` | Ładunki szyny zdarzeń (cykl życia agenta, zdrowie, cron, wyzwalacze) |
+| `goal` | Typy drzewa celów (hierarchiczne obiekty ze śledzeniem statusu) |
+| `i18n` | Resolver lokalizacji oparty na Fluent, funkcje tłumaczenia `t()` / `t_args()` |
+| `manifest_signing` | Weryfikacja podpisów Ed25519 manifestów, sprawdzenia integralności obwolutki |
+| `media` | Deskryptory przesyłania plików / załączników |
+| `memory` | Deskryptory magazynu pamięci, zasady dostępu, `UserMemoryAccess` |
+| `message` | Typy wiadomości czatu, obwolutki wywołań/wyników narzędzi |
+| `model_catalog` | Wpisy rejestru dostawców/modeli, flagi możliwości |
+| `oauth` | Stan przepływu OAuth, deskryptory tokenów |
+| `registry_schema` | Schematy manifestów rejestru wtyczek/umiejętności |
+| `scheduler` | Harmonogramy cron, wyzwalacze, akcje przepływu pracy, cele dostarczenia |
+| `serde_compat` | Pomocnicy Serde do migracji pól z zachowaniem kompatybilności wstecznej |
+| `subagent` | Typy orkiestracji przekazywania międzyagentowego |
+| `taint` | Śledzenie zanieczyszczenia danych w celu izolacji wyników MCP/narzędzi |
+| `task` | Deskryptory zadań/zleceń dla asynchronicznej kolejki pracy |
+| `tool` / `tool_class` | Definicje narzędzi, taksonomia klas narzędzi |
 
-## Core identity types
+## Podstawowe typy tożsamości
 
 ### AgentId
 
-`AgentId(pub Uuid)` identifies an agent instance. Two construction strategies:
+`AgentId(pub Uuid)` identyfikuje instancję agenta. Dwie strategie konstruktora:
 
-- **`AgentId::new()`** — random UUID v4. Used when the agent's identity is ephemeral or managed by an external system.
-- **`AgentId::from_name(name)`** — deterministic UUID v5 derived from a fixed namespace constant and the agent name. Same name always produces the same ID across daemon restarts, preserving session and audit-log continuity.
+- **`AgentId::new()`** — losowy UUID v4. Używany, gdy tożsamość agenta jest ulotna lub zarządzana przez system zewnętrzny.
+- **`AgentId::from_name(name)`** — deterministyczny UUID v5 wywodzący się ze stałej przestrzeni nazw i nazwy agenta. Ta sama nazwa zawsze daje ten sam identyfikator po restarcie demona, zachowując ciągłość sesji i dziennika audytu.
 
-The namespace UUID (`AgentId::NAMESPACE`) is shared across three derivation paths, disambiguated by string prefixes:
+UUID przestrzeni nazw (`AgentId::NAMESPACE`) jest współdzielony przez trzy ścieżki wywodzenia, rozróżniane przez prefiksy ciągów:
 
-- `from_name` → hashes `"agent:{name}"`
-- `from_hand_id` → hashes the bare `hand_id` (backward compat with pre-prefix hands)
-- `from_hand_agent` → hashes `"{hand_id}:{role}"` (legacy) or `"{hand_id}:{role}:{instance_id}"` (multi-instance)
+- `from_name` → haszuje `"agent:{name}"`
+- `from_hand_id` → haszuje sam `hand_id` (kompatybilność wsteczna z pre-prefiksowymi rękami)
+- `from_hand_agent` → haszuje `"{hand_id}:{role}"` (legacy) lub `"{hand_id}:{role}:{instance_id}"` (multi-instancyjny)
 
 ### SessionId
 
-`SessionId(pub Uuid)` identifies a conversation session. The construction method determines session isolation semantics:
+`SessionId(pub Uuid)` identyfikuje sesję konwersacji. Metoda konstruktora określa semantykę izolacji sesji:
 
-| Method | Scope | Use case |
+| Metoda | Zakres | Przypadek użycia |
 |---|---|---|
-| `SessionId::new()` | Random | Ad-hoc / programmatic sessions |
-| `SessionId::for_channel(agent, channel)` | Per agent+channel | Persistent channel sessions (Telegram, Discord, etc.) |
-| `SessionId::for_sender_scope(agent, channel, chat_id)` | Per agent+channel+chat | Multi-chat isolation within a single channel |
-| `SessionId::for_cron_run(agent, run_key)` | Per cron fire | Isolated cron invocation (`session_mode = "new"`) |
-| `SessionId::for_trigger_fire(agent, trigger_id, fire_time)` | Per trigger fire | Isolated event-trigger invocation |
-| `SessionId::from_route_key(agent, channel, account, conversation)` | Per structured route | Multi-tenant routing with account dimension |
+| `SessionId::new()` | Losowy | Sesje ad-hoc / programistyczne |
+| `SessionId::for_channel(agent, channel)` | Na agenta+kanał | Trwałe sesje kanałowe (Telegram, Discord itp.) |
+| `SessionId::for_sender_scope(agent, channel, chat_id)` | Na agenta+kanał+cześć | Izolacja wieloczatowa w ramach jednego kanału |
+| `SessionId::for_cron_run(agent, run_key)` | Na wyzwolenie cron | Izolowane wywołanie cron (`session_mode = "new"`) |
+| `SessionId::for_trigger_fire(agent, trigger_id, fire_time)` | Na wyzwolenie wyzwalacza | Izolowane wywołanie ze zdarzenia |
+| `SessionId::from_route_key(agent, channel, account, conversation)` | Na ustrukturyzowaną trasę | Routing wielodostępcowy z wymiarem konta |
 
-Each deterministic derivation uses a **distinct UUID v5 namespace** (`CHANNEL_SESSION_NAMESPACE`, `CRON_RUN_SESSION_NAMESPACE`, `TRIGGER_FIRE_SESSION_NAMESPACE`) to guarantee no cross-flavor collisions — a cron-fire session ID can never equal a channel session ID even if the input strings happen to coincide.
+Każda deterministyczna derivacja używa **osobnej przestrzeni nazw UUID v5** (`CHANNEL_SESSION_NAMESPACE`, `CRON_RUN_SESSION_NAMESPACE`, `TRIGGER_FIRE_SESSION_NAMESPACE`), aby zagwarantować brak kolizji międzywariantowych — identyfikator sesji crona nigdy nie będzie równy identyfikatorowi sesji kanałowej, nawet jeśli ciągi wejściowe przypadkowo się pokryją.
 
-The scope-string formula (`compose_sender_scope`) is centralized here because multiple consumers — the kernel's inbound resolver, the channel-bridge reset commands, and the runtime's memory-scope filter — must agree on exactly how `(channel, chat_id)` maps to a session scope. Any divergence would cause cross-chat data leakage.
+Formuła ciągu zakresu (`compose_sender_scope`) jest scentralizowana tutaj, ponieważ wieloracy konsumenci — resolver przychodzący jądra, komendy resetu mostu kanałowego i filtr zakresów pamięci środowiska uruchomieniowego — muszą zgadzać się co do sposobu mapowania `(kanał, chat_id)` na zakres sesji. Każda rozbieżność spowodowałaby wyciek danych między czatami.
 
 ### UserId
 
-`UserId` follows the same pattern: `from_name` uses UUID v5 with `LIBREFANG_USER_NAMESPACE` (a frozen constant). Renaming a user intentionally produces a new ID — rename means new identity, old audit history stays attached to the old ID.
+`UserId` podąża za tym samym wzorcem: `from_name` używa UUID v5 z `LIBREFANG_USER_NAMESPACE` (zamrożona stała). Zmiana nazwy użytkownika celowo produkuje nowy identyfikator — zmiana nazwy oznacza nową tożsamość, stara historia audytu pozostaje przypisana do starego identyfikatora.
 
-## Agent manifest and configuration
+## Manifest agenta i konfiguracja
 
-`AgentManifest` is the central configuration type consumed by the kernel at spawn time. It composes:
+`AgentManifest` jest centralnym typem konfiguracyjnym konsumowanym przez jądro w momencie uruchomienia. Składa się z:
 
-- **`ModelConfig`** — provider, model, temperature, system prompt, optional `context_window` / `max_output_tokens` overrides
-- **`AutonomousConfig`** — 24/7 guardrails: `max_iterations`, `max_restarts`, heartbeat interval/timeout, quiet hours cron, block-stall degrade threshold
-- **`ResourceQuota`** — memory/CPU/tool-call/token/cost/network limits with effective-value resolution helpers
-- **`ToolProfile`** — named presets (`Minimal`, `Coding`, `Research`, `Messaging`, `Automation`, `Full`, `Custom`) that expand to tool lists and derive `ManifestCapabilities`
-- **`AgentMode`** — permission level (`Observe`, `Assist`, `Full`) that filters the available tool set at runtime
-- **`ScheduleMode`** — `Reactive` (event-driven), `Periodic` (cron), `Proactive` (condition-based), or `Continuous` (polling loop)
-- **`SessionMode`** — `Persistent` (reuse agent session) or `New` (fresh session per invocation)
+- **`ModelConfig`** — dostawca, model, temperatura, prompt systemowy, opcjonalne nadpisanie `context_window` / `max_output_tokens`
+- **`AutonomousConfig`** — zabezpieczenia 24/7: `max_iterations`, `max_restarts`, interwał/czas oczekiwania heartbeat, cron godzin ciszy, próg degradacji zablokowanego przestoju
+- **`ResourceQuota`** — limity pamięci/CPU/wywołań narzędzi/tokenów/kosztów/sieci z funkcjami pomocniczymi rozpoznawania wartości efektywnych
+- **`ToolProfile`** — nazwane presety (`Minimal`, `Coding`, `Research`, `Messaging`, `Automation`, `Full`, `Custom`) rozwijające się do list narzędzi i wywodzące `ManifestCapabilities`
+- **`AgentMode`** — poziom uprawnień (`Observe`, `Assist`, `Full`) filtrujący dostępny zestaw narzędzi w czasie wykonywania
+- **`ScheduleMode`** — `Reactive` (zdarzeniowy), `Periodic` (cron), `Proactive` (warunkowy) lub `Continuous` (pętla odpytywania)
+- **`SessionMode`** — `Persistent` (ponowne użycie sesji agenta) lub `New` (nowa sesja przy każdym wywołaniu)
 
-All config structs implement `Default` and use `#[serde(default)]` on every field for forward compatibility with old TOML files.
+Wszystkie struktury konfiguracyjne implementują `Default` i używają `#[serde(default)]` na każdym polu dla kompatybilności wprzód ze starymi plikami TOML.
 
-### Resource quota resolution
+### Rozpoznawanie przydziałów zasobów
 
-`ResourceQuota` provides two resolution helpers that consumer crates call at enforcement time:
+`ResourceQuota` dostarcza dwie funkcje pomocnicze rozpoznawania wywoływane przez skrzynki konsumentów w momencie egzekwowania:
 
-- **`effective_token_limit()`** — returns `u64`; `None` and `Some(0)` both collapse to `0` (unlimited). Callers skip enforcement when the result is `0`.
-- **`effective_burst_ratio(global_default)`** — resolves agent override → global default → hardcoded `0.2`, clamped to `[0.01, 1.0]`. NaN/Inf fall back to `0.2`.
+- **`effective_token_limit()`** — zwraca `u64`; `None` i `Some(0)` oba zwijają się do `0` (brak limitu). Wywołujący pomijają egzekwowanie, gdy wynik to `0`.
+- **`effective_burst_ratio(global_default)`** — rozpoznaje nadpisanie agenta → globalna wartość domyślna → zakodowany na sztywno `0.2`, ograniczone do `[0.01, 1.0]`. NaN/Inf wracają do `0.2`.
 
-## KernelConfig and the schema-mirror invariant
+## KernelConfig i niezmiennik lustrzanej odbicie schematu
 
-`KernelConfig` (in the `config` module) is the root configuration struct loaded from TOML at boot. It derives `schemars::JsonSchema`, which generates a JSON Schema used for validation and documentation.
+`KernelConfig` (w module `config`) jest główną strukturą konfiguracyjną ładowaną z TOML przy starcie. Implementuje `schemars::JsonSchema`, co generuje schemat JSON używany do walidacji i dokumentacji.
 
-The golden-file fixture that validates the generated schema lives in **`librefang-api`'s test suite** (`kernel_config_schema_matches_golden_fixture`), not in this crate. This creates a cross-crate coupling that CI enforces via the changed-lanes rule: a PR touching only `librefang-types` automatically pulls `librefang-api` into the affected test set. The canonical TOML/OpenAPI baselines are tracked under `xtask/baselines/`.
+Testowa fixture pliku wzorcowego walidująca wygenerowany schemat znajduje się w **zestawie testów `librefang-api`** (`kernel_config_schema_matches_golden_fixture`), a nie w tej skrzynce. Tworzy to sprzężenie między-skrzynkowe wymuszane przez CI za pomocą reguły changed-lanes: PR dotykający tylko `librefang-types` automatycznie dołącza `librefang-api` do zestawu dotkniętych testów. Kanoniczne baseline'y TOML/OpenAPI są śledzone w `xtask/baselines/`.
 
-**When you change any `KernelConfig` field** — addition, rename, type change — you must regenerate the golden fixture in `librefang-api`'s tests. CI will fail otherwise.
+**Gdy zmieniasz dowolne pole `KernelConfig`** — dodanie, zmiana nazwy, zmiana typu — musisz wygenerować ponownie fixture wzorcową w testach `librefang-api`. CI w przeciwnym razie zakończy się niepowodzeniem.
 
-## Error types
+## Typy błędów
 
-The crate exports `LibreFangError` and related error enums. The codebase is migrating away from `Result<_, String>` and `anyhow::Error` in trait boundaries (refs #3541 / #3711); new error variants belong here.
+Skrzynka eksportuje `LibreFangError` i powiązane enumeracje błędów. Baza kodu migruje od `Result<_, String>` i `anyhow::Error` w granicach cech (ref. #3541 / #3711); nowe warianty błędów należą tutaj.
 
-When adding a variant:
-1. Use `#[from]` on wrapped inner types to preserve the `source()` chain (#3745).
-2. Assign a stable `ErrorCode` so the API layer and clients can switch on it without parsing strings.
+Przy dodawaniu wariantu:
+1. Użyj `#[from]` na opakowanych typach wewnętrznych, aby zachować łańcuch `source()` (#3745).
+2. Przypisz stabilny `ErrorCode`, aby warstwa API i klienci mogły przełączać się na niego bez parsowania ciągów.
 
-`error_code.rs` provides `ErrorCode` with an `as_str()` method for stable string representation.
+`error_code.rs` dostarcza `ErrorCode` z metodą `as_str()` dla stabilnej reprezentacji ciągu.
 
-## Internationalization (i18n)
+## Internacjonalizacja (i18n)
 
-The `i18n` module provides:
+Moduł `i18n` dostarcza:
 
-- **`resolve_language()`** — resolves the active locale from request context
-- **`new()`** — constructs a Fluent bundle loader
-- **`t(key)`** — translates a message key with no arguments
-- **`t_args(key, args)`** — translates with interpolated arguments
+- **`resolve_language()`** — rozpoznaje aktywną lokalizację z kontekstu żądania
+- **`new()`** — konstruuje loader pakietów Fluent
+- **`t(key)`** — tłumaczy klucz wiadomości bez argumentów
+- **`t_args(key, args)`** — tłumaczy z interpolowanymi argumentami
 
-Translation files are Fluent `.ftl` format under `locales/{lang}/errors.ftl`. Supported locales: `en`, `de`, `es`, `fr`, `ja`, `ko`, `uk`, `zh-CN`.
+Pliki tłumaczeń są w formacie Fluent `.ftl` w katalogu `locales/{lang}/errors.ftl`. Obsługiwane lokalizacje: `en`, `de`, `es`, `fr`, `ja`, `ko`, `uk`, `zh-CN`.
 
-The English locale is the canonical source — it contains the full key set. Other locales may lag behind; missing keys fall back to English. The key `api-error-generic` is a catch-all used by 41+ HTTP 500 handlers to interpolate the underlying error string verbatim. It must always exist in every locale file; without it, `t_args("api-error-generic", …)` returns the literal key as the response body.
+Lokalizacja angielska jest kanonicznym źródłem — zawiera pełny zestaw kluczy. Inne lokalizacje mogą być z tyłu; brakujące klucze wracają do angielskich. Klucz `api-error-generic` jest uniwersalnym zastępnikiem używanym przez 41+ obsługi HTTP 500 do interpolacji dosłownego ciągu błędu źródłowego. Musi zawsze istnieć w każdym pliku lokalizacji; bez niego `t_args("api-error-generic", …)` zwraca dosłowny klucz jako treść odpowiedzi.
 
-## Manifest signing
+## Podpisywanie manifestów
 
-The `manifest_signing` module provides Ed25519 signature types and integrity verification for signed agent manifests. Key functions include:
+Moduł `manifest_signing` dostarcza typy podpisów Ed25519 i weryfikację integralności dla podpisanych manifestów agentów. Kluczowe funkcje obejmują:
 
-- Constructing signing keys from raw bytes (`from_bytes`)
-- Hashing manifest content (`hash_manifest`) with deterministic encoding
-- Verifying envelope integrity (`check_envelope_integrity`)
+- Konstruowanie kluczy podpisujących z surowych bajtów (`from_bytes`)
+- Haszowanie zawartości manifestu (`hash_manifest`) z deterministycznym kodowaniem
+- Weryfikację integralności obwolutki (`check_envelope_integrity`)
 
-This enables tamper-evident agent distribution: a signed manifest carries an Ed25519 signature over its TOML content, and the kernel rejects any manifest where the signature doesn't match.
+Umożliwia to dystrybucję agentów z wykrywaniem manipulacji: podpisany manifest niesie podpis Ed25519 nad swoją zawartością TOML, a jądro odrzuca każdy manifest, w którym podpis się nie zgadza.
 
-## Conventions and constraints
+## Konwencje i ograniczenia
 
-### Derive quartet
+### Kwartet derive
 
-Every public type derives at minimum: `Debug`, `Clone`, `Serialize`, `Deserialize`. Additional derives:
+Każdy publiczny typ implementuje co najmniej: `Debug`, `Clone`, `Serialize`, `Deserialize`. Dodatkowe derive:
 
-- `PartialEq`, `Eq`, `Hash` — only when downstream code needs comparisons or HashMap keys
-- `utoipa::ToSchema` — for types exposed on the OpenAPI surface
-- `schemars::JsonSchema` — for configuration types driven by the kernel-config golden fixture
+- `PartialEq`, `Eq`, `Hash` — tylko gdy kod podrzędny potrzebuje porównań lub kluczy HashMap
+- `utoipa::ToSchema` — dla typów eksponowanych na powierzchni OpenAPI
+- `schemars::JsonSchema` — dla typów konfiguracyjnych napędzanych przez wzorcową fixture kernel-config
 
-### Serde discipline
+### Dyscyplina Serde
 
-- Every config field gets `#[serde(default)]` for forward compatibility with old TOML.
-- Fields that should not serialize when `None` use `#[serde(default, skip_serializing_if = "Option::is_none")]`.
-- No field is ever silently dropped. Either `#[serde(default)]` provides a fallback, or deserialization fails at compile time.
-- Unknown serde variants error hard — `SessionMode` intentionally has no `#[serde(other)]` fallback arm so a typo like `"New"` (capitalized) fails rather than silently mapping to `Persistent`.
+- Każde pole konfiguracyjne otrzymuje `#[serde(default)]` dla kompatybilności wprzód ze starymi TOML.
+- Pola, które nie powinny być serializowane gdy wynoszą `None`, używają `#[serde(default, skip_serializing_if = "Option::is_none")]`.
+- Żadne pole nie jest nigdy cicho pomijane. Albo `#[serde(default)]` dostarcza wartość zastępczą, albo deserializacja kończy się niepowodzeniem w czasie kompilacji.
+- Nieznane warianty serde błędzą ostro — `SessionMode` celowo nie ma łapki `#[serde(other)]`, aby literówka taka jak `"New"` (z wielkiej litery) zawiodła, a nie zmapowała się cicho na `Persistent`.
 
-### Deterministic ordering for LLM prompts
+### Deterministyczna kolejność dla promptów LLM
 
-Any field that ends up serialized into an LLM prompt must use `BTreeMap` / `BTreeSet`, not `HashMap` / `HashSet` (refs #3298). Hash map iteration order is non-deterministic across runs, which causes subtle prompt instability.
+Każde pole, które trafia do serializacji w prompcie LLM, musi używać `BTreeMap` / `BTreeSet`, nie `HashMap` / `HashSet` (ref. #3298). Kolejność iteracji hash map jest niedeterministyczna między przebiegami, co powoduje subtelną niestabilność promptów.
 
-### Reserved namespaces
+### Zarezerwowane przestrzenie nazw
 
-- Agent names starting with `_operator:` are rejected by `validate_agent_name()` — this prefix is reserved for workflow engine synthetic operator-node names (#4980).
-- `SENDER_ACCOUNT_ID_METADATA_KEY` is a load-bearing constant for the cross-account dispatch security guard. A typo divergence between the stamp site and the read site would silently disable the guard.
+- Nazwy agentów zaczynające się od `_operator:` są odrzucane przez `validate_agent_name()` — ten prefiks jest zarezerwowany dla syntetycznych nazw węzłów operatora silnika przepływu pracy (#4980).
+- `SENDER_ACCOUNT_ID_METADATA_KEY` jest obciążającym stałą dla zabezpieczenia cross-accountowego wysyłania. Rozbieżność literowa między miejscem stemplowania a miejscem odczytu cicho wyłączy zabezpieczenie.
 
-## Adding a new type
+## Dodawanie nowego typu
 
-1. **Choose the module.** If the type is used by only one crate, it may belong there instead. This crate is for cross-crate types only.
-2. **Derive the quartet** (`Debug`, `Clone`, `Serialize`, `Deserialize`). Add `PartialEq`/`Eq`/`Hash` only if downstream needs them.
-3. **Add schema derives** if applicable: `ToSchema` for API types, `JsonSchema` for config types.
-4. **Use `BTreeMap`/`BTreeSet`** if the type will be serialized into an LLM prompt.
-5. **Implement `Default`** if the type appears in a config struct. The build silently breaks if a `Default` impl is missing where `#[serde(default)]` is used on a container.
+1. **Wybierz moduł.** Jeśli typ jest używany tylko przez jedną skrzynkę, może należeć tam. Ta skrzynka jest tylko dla typów między-skrzynkowych.
+2. **Zaimplementuj kwartet derive** (`Debug`, `Clone`, `Serialize`, `Deserialize`). Dodaj `PartialEq`/`Eq`/`Hash` tylko jeśli kod podrzędny tego potrzebuje.
+3. **Dodaj schema derive**, jeśli dotyczy: `ToSchema` dla typów API, `JsonSchema` dla typów konfiguracyjnych.
+4. **Użyj `BTreeMap`/`BTreeSet`**, jeśli typ będzie serializowany w prompcie LLM.
+5. **Zaimplementuj `Default`**, jeśli typ pojawia się w strukturze konfiguracyjnej. Kompilacja cicho się psuje, jeśli brakuje implementacji `Default` tam, gdzie `#[serde(default)]` jest używane na kontenerze.
 
-### Adding a config field
+### Dodawanie pola konfiguracyjnego
 
-1. Add the field with `#[serde(default)]`.
-2. Add it to the `Default` impl (the build breaks otherwise).
-3. Add a doc comment — `schemars` surfaces it as the field's `description` in the JSON Schema.
-4. Re-run the kernel-config golden fixture in `librefang-api`.
+1. Dodaj pole z `#[serde(default)]`.
+2. Dodaj je do implementacji `Default` (w przeciwnym razie kompilacja się zepsuje).
+3. Dodaj komentarz dokumentacyjny — `schemars` prezentuje go jako `description` pola w schemacie JSON.
+4. Uruchom ponownie wzorcową fixture kernel-config w `librefang-api`.
 
-## Public API surface
+## Publiczna powierzchnia API
 
-- **`VERSION: &str`** — workspace version, compiled from `CARGO_PKG_VERSION`.
-- All modules listed in the table above.
-- Key constants: `STABLE_PREFIX_MODE_METADATA_KEY`, `SENDER_ACCOUNT_ID_METADATA_KEY`, `LIBREFANG_USER_NAMESPACE`, `RESERVED_OPERATOR_AGENT_NAME_PREFIX`.
-- Key functions: `validate_agent_name()`, `compose_sender_scope()`.
+- **`VERSION: &str`** — wersja obszaru roboczego, skompilowana z `CARGO_PKG_VERSION`.
+- Wszystkie moduły wymienione w powyższej tabeli.
+- Kluczowe stałe: `STABLE_PREFIX_MODE_METADATA_KEY`, `SENDER_ACCOUNT_ID_METADATA_KEY`, `LIBREFANG_USER_NAMESPACE`, `RESERVED_OPERATOR_AGENT_NAME_PREFIX`.
+- Kluczowe funkcje: `validate_agent_name()`, `compose_sender_scope()`.

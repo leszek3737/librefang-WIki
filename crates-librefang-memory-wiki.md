@@ -2,39 +2,39 @@
 
 # `librefang-memory-wiki`
 
-A durable markdown knowledge vault for the LibreFang Agent OS. Each page is a hand-editable Markdown file carrying YAML frontmatter that records **who captured the claim** (agent, session, channel, turn, timestamp) and a content hash the vault uses to detect external edits. The vault is designed to be opened in Obsidian, edited by humans, and re-read safely by the compiler on the next run.
+Trwały magazyn wiedzy w formacie Markdown dla systemu LibreFang Agent OS. Każda strona to edytowalny ręcznie plik Markdown z nagłówkiem YAML rejestrującym **kto uchwycił daną informację** (agent, sesja, kanał, tura, znacznik czasu) oraz skrótem treści, którego magazyn używa do wykrywania zewnętrznych edycji. Magazyn jest zaprojektowany tak, aby można go było otwierać w Obsidian, edytować przez ludzi i bezpiecznie odczytywać ponownie przez kompilator przy kolejnym uruchomieniu.
 
-It is the *navigable* counterpart to `librefang-memory` (the SQLite + vector substrate). Where the memory substrate answers "find me the K nearest snippets", this crate answers "give me a navigable knowledge base with audit trails".
+Jest to *nawigowalny* odpowiednik `librefang-memory` (podłoża SQLite + wektorowe). Tam gdzie podłoże pamięci odpowiada na pytanie „znajdź K najbliższych fragmentów", ten crate odpowiada na pytanie „udostępnij mi nawigowalną bazę wiedzy z audytem zmian".
 
-The vault is **off by default** and v1 wires only `isolated` mode — an own vault, own writes, no dependency on the active memory plugin. `bridge` and `unsafe_local` modes are reserved variants on the same trait surface, stubbed with `WikiError::ModeNotImplemented`.
+Magazyn jest **domyślnie wyłączony**, a v1 obsługuje tylko tryb `isolated` — własny magazyn, własne zapisy, bez zależności od aktywnego wtyczki pamięci. Tryby `bridge` i `unsafe_local` to zastrzeżone warianty na tej samej powierzchni traitu, zrealizowane jako stuby zwracające `WikiError::ModeNotImplemented`.
 
-## Enabling
+## Włączanie
 
 ```toml
 [memory_wiki]
 enabled = true
-mode = "isolated"              # isolated | bridge | unsafe_local  (only isolated is wired)
+mode = "isolated"              # isolated | bridge | unsafe_local  (tylko isolated jest podłączony)
 vault_path = "~/.librefang/wiki/main"
 render_mode = "native"         # native | obsidian
-ingest_filter = "tagged"       # tagged | all  (all has no effect in v1)
+ingest_filter = "tagged"       # tagged | all  (all nie ma efektu w v1)
 ```
 
-Construction returns `WikiError::Disabled` unless `enabled = true`, and `WikiError::ModeNotImplemented("bridge"|"unsafe_local")` for the two reserved modes. When `vault_path` is unset the vault root is resolved under the caller-supplied `home_dir` (the kernel's `KernelConfig.home_dir`, not the env-derived `LIBREFANG_HOME`), so embedded profiles and tests don't silently share data with a developer's personal vault.
+Konstrukcja zwraca `WikiError::Disabled`, chyba że `enabled = true`, oraz `WikiError::ModeNotImplemented("bridge"|"unsafe_local")` dla dwóch zastrzeżonych trybów. Gdy `vault_path` nie jest ustawiony, główny katalog magazynu jest określany na podstawie `home_dir` dostarczonego przez wywołującego (`KernelConfig.home_dir` jądra, a nie pochodzący ze zmiennej środowiskowej `LIBREFANG_HOME`), dzięki czemu wbudowane profile i testy nie współdzielą po cichu danych z osobistym magazynem dewelopera.
 
-## On-disk layout
+## Struktura na dysku
 
 ```text
 <vault_path>/
-  <topic>.md              # one page per topic: frontmatter + body
-  index.md                # auto-generated alphabetical index (rebuilt every write)
+  <topic>.md              # jedna strona na temat: frontmatter + treść
+  index.md                # automatycznie generowany indeks alfabetyczny (odbudowywany przy każdym zapisie)
   _meta/
-    compile-state.json    # { topic -> { mtime_ns, sha256 } } from last compile
-    backlinks.json        # { target -> [source, ...] } from every [[link]]
+    compile-state.json    # { temat -> { mtime_ns, sha256 } } z ostatniej kompilacji
+    backlinks.json        # { cel -> [źródło, ...] } z każdego [[linku]]
 ```
 
-`index.md` and the `_meta/` directory are owned by the compiler. Topics starting with `_` and the literal topic `index` are rejected by `validate_topic`.
+`index.md` i katalog `_meta/` są zarządzane przez kompilator. Tematy zaczynające się od `_` oraz dosłowny temat `index` są odrzucane przez `validate_topic`.
 
-## Page format
+## Format strony
 
 ```markdown
 ---
@@ -50,163 +50,163 @@ provenance:
     at: 2026-05-06T10:30:00Z
 ---
 
-body markdown ...
+treść markdown ...
 ```
 
-`content_sha256` is `Frontmatter::hash_body`, computed over the body with a single trailing newline stripped so an editor adding/removing a final newline doesn't flip the hash. It is the field the compiler uses to detect external edits.
+`content_sha256` to `Frontmatter::hash_body`, obliczany na podstawie treści z usuniętym pojedynczym końcowym znakiem nowej linii, aby edytor dodający/usuwający końcową nową linię nie zmieniał skrótu. To pole służy kompilatorowi do wykrywania zewnętrznych edycji.
 
-### Tolerant parsing
+### Tolerancyjna analiza
 
-`frontmatter::split` and `read_page_if_present` are deliberately forgiving:
+`frontmatter::split` i `read_page_if_present` są celowo pobłażliwe:
 
-- **No frontmatter block** — returns the raw text as the body; the caller synthesises a default header (`Frontmatter::default_for` sets `created = updated = now`, empty provenance, empty hash recomputed on the next compiler pass).
-- **Malformed YAML** — `read_page_if_present` logs a warning and falls back to a synthetic header instead of bricking every subsequent `get`. The next successful `wiki_write` re-renders the page with a clean header.
-- **CRLF line endings** — raw bytes are normalised to LF on read before `split`, so hand-authored pages saved by Windows editors or `git core.autocrlf=true` checkouts parse correctly. The vault's own `render()` always emits LF.
+- **Brak bloku frontmatter** — zwraca surowy tekst jako treść; wywołujący syntetyzuje domyślny nagłówek (`Frontmatter::default_for` ustawia `created = updated = teraz`, pustą historię pochodzenia, pusty skrót przeliczany przy kolejnym przebiegu kompilatora).
+- **Zniekształcony YAML** — `read_page_if_present` loguje ostrzeżenie i przechodzi do syntetycznego nagłówka zamiast psuć każdy kolejny `get`. Kolejny udany `wiki_write` ponownie renderuje stronę z czystym nagłówkiem.
+- **Zakończenia linii CRLF** — surowe bajty są normalizowane do LF przy odczycie przed `split`, więc ręcznie tworzone strony zapisane przez edytory Windows lub checkuty z `git core.autocrlf=true` są poprawnie analizowane. Własna funkcja `render()` magazynu zawsze emituje LF.
 
-## Authoring contract
+## Umowa autorska
 
-`wiki_write` callers pass body markdown using `[[topic]]` placeholders for cross-references — this is the canonical authoring form, portable across render modes. The vault rewrites placeholders at flush time:
+Wywołujący `wiki_write` przekazują treść markdown używając symboli zastępczych `[[temat]]` dla odniesień krzyżowych — to kanoniczna forma autorska, przenośna między trybami renderowania. Magazyn przepisuje symbole zastępcze w momencie zapisu:
 
-| `RenderMode` | `[[topic]]` becomes |
+| `RenderMode` | `[[temat]]` staje się |
 | --- | --- |
-| `Native` (default) | `[topic](topic.md)` |
-| `Obsidian` | `[[topic]]` (identity) |
+| `Native` (domyślny) | `[temat](temat.md)` |
+| `Obsidian` | `[[temat]]` (bez zmian) |
 
-Because the body itself is otherwise unchanged, a vault can be re-rendered in the other mode without losing data.
+Ponieważ treść jest inaczej niezmieniona, magazyn może być ponownie renderowany w drugim trybie bez utraty danych.
 
-`RenderMode::extract_links` recognises **both** forms for backlink indexing (the canonical `[[topic]]` *and* the rewritten native `[topic](topic.md)`), so the backlinks map is invariant under render-mode flips and works against pages on disk regardless of which mode wrote them. Native-form links are only counted as backlinks when the visible text equals the target stem — `[click here](foo.md)` is a generic link, not a topic reference.
+`RenderMode::extract_links` rozpoznaje **oba** formaty do indeksowania odwrotnych odniesień (kanoniczny `[[temat]]` *oraz* przepisany natywny `[temat](temat.md)`), więc mapa odwrotnych odniesień jest niezmienna przy przełączaniu trybów renderowania i działa na stronach na dysku niezależnie od tego, który tryb je zapisał. Linki w formie natywnej są traktowane jako odwrotne odniesienia tylko wtedy, gdy widoczny tekst jest równy rdzeniowi celu — `[kliknij tutaj](foo.md)` to ogólny link, a nie odniesienie do tematu.
 
-## The write path and hand-edit safety
+## Ścieżka zapisu i bezpieczeństwo ręcznych edycji
 
-Every `write` goes through this sequence. The hand-edit detector is the central safety property (acceptance criterion #4 from issue #3329): if a human edited the file between compiler runs, the edit is preserved rather than silently overwritten.
+Każdy `write` przechodzi przez tę sekwencję. Detektor ręcznych edycji jest centralną właściwością bezpieczeństwa (kryterium akceptacji #4 z issue #3329): jeśli człowiek edytował plik między uruchomieniami kompilatora, edycja jest zachowana, a nie po cichu nadpisana.
 
 ```mermaid
 flowchart TD
     A[WikiVault::write] --> B[validate_topic]
-    B --> C{raw body > 1 MiB?}
-    C -- yes --> X1[BodyTooLarge]
-    C -- no --> D[acquire write_lock]
-    D --> E[load_compile_state]
+    B --> C{surowa treść > 1 MiB?}
+    C -- tak --> X1[BodyTooLarge]
+    C -- nie --> D[uzyskaj write_lock]
+    D --> E[załaduj compile_state]
     E --> F[read_page_if_present]
-    F --> G{mtime or sha drifted?}
-    G -- yes, not force --> X2[HandEditConflict]
-    G -- yes, force --> H[preserve external body]
-    G -- no --> I[rewrite_links on caller body]
-    H --> J{materialized body > 1 MiB?}
+    F --> G{mtime lub sha się zmieniły?}
+    G -- tak, nie wymuszone --> X2[HandEditConflict]
+    G -- tak, wymuszone --> H[zachowaj zewnętrzną treść]
+    G -- nie --> I[rewrite_links na treści wywołującego]
+    H --> J{zmateriałizowana treść > 1 MiB?}
     I --> J
-    J -- yes --> X1
-    J -- no --> K[append provenance, update frontmatter]
-    K --> L[atomic_write page]
-    L --> M[save compile_state]
-    M --> N[rebuild index + backlinks]
+    J -- tak --> X1
+    J -- nie --> K[dodaj provenance, zaktualizuj frontmatter]
+    K --> L[atomic_write strony]
+    L --> M[zapisz compile_state]
+    M --> N[odbuduj indeks + odwrotne odniesienia]
 ```
 
-Key invariants of the write path:
+Kluczowe niezmienniki ścieżki zapisu:
 
-- **Provenance is monotonic.** Every `write` appends to the existing provenance list; the vault never drops history. Repeated writes to the same topic accumulate entries.
-- **Body-size cap is enforced on the materialised body.** `Native` render mode expands each `[[topic]]` (5 bytes) into `[topic](topic.md)` (≥9 bytes), so a raw body just under the 1 MiB cap can exceed it on disk. The pre-rewrite check is a cheap early reject; the authoritative check runs on `chosen_body` after rewrite.
-- **Forced writes preserve the external body verbatim.** When `force = true` and the on-disk content has drifted, the caller's body is discarded and the external body is kept (only link rewriting and provenance appending happen). `WikiWriteOutcome::merged_with_external_edit` is `true` so the caller can report that a human edit was preserved.
-- **Writes are atomic.** `atomic_write` lands bytes to `<page>.tmp.write` then renames into place, so a crash mid-write never leaves a truncated page.
-- **Writes are serialised per-vault.** A `Mutex` inside `WikiVault` prevents two concurrent `write` calls from racing on compile-state; the acceptance test `concurrent_writes_to_same_topic_are_serialised` asserts that every thread either lands cleanly or is rejected by the hand-edit detector — never data loss.
+- **Historia pochodzenia jest monotoniczna.** Każdy `write` dołącza do istniejącej listy provenance; magazyn nigdy nie usuwa historii. Powtarzające się zapisy tego samego tematu akumulują wpisy.
+- **Limit rozmiaru treści jest egzekwowany na zmateriałizowanej treści.** Tryb renderowania `Native` rozwija każdy `[[temat]]` (5 bajtów) do `[temat](temat.md)` (≥9 bajtów), więc surowa treść ledwie poniżej limitu 1 MiB może go przekroczyć na dysku. Sprawdzenie przed przepisaniem to tani wczesny odrzut; autorytatywne sprawdzenie wykonuje się na `chosen_body` po przepisaniu.
+- **Wymuszone zapisy zachowują zewnętrzną treść dosłownie.** Gdy `force = true` i treść na dysku uległa zmianie, treść wywołującego jest odrzucana, a zewnętrzna treść jest zachowana (następuje tylko przepisywanie linków i dołączanie provenance). `WikiWriteOutcome::merged_with_external_edit` ma wartość `true`, dzięki czemu wywołujący może zgłosić, że edycja człowieka została zachowana.
+- **Zapisy są atomowe.** `atomic_write` zapisuje bajty do `<strona>.tmp.write`, a następnie zmienia nazwę na właściwą, więc awaria w trakcie zapisu nigdy nie pozostawia obciętej strony.
+- **Zapisy są serializowane per magazyn.** `Mutex` wewnątrz `WikiVault` zapobiega rywalizacji dwóch współbieżnych wywołań `write` na stanie kompilacji; test akceptacji `concurrent_writes_to_same_topic_are_serialised` potwierdza, że każdy wątek albo zapisuje poprawnie, albo jest odrzucany przez detektor ręcznych edycji — nigdy nie dochodzi do utraty danych.
 
-## Compile state and drift detection
+## Stan kompilacji i wykrywanie zmian
 
-`_meta/compile-state.json` maps each topic to a `PageState`:
+`_meta/compile-state.json` mapuje każdy temat na `PageState`:
 
 ```rust
 struct PageState {
-    mtime_ns: String,   // SystemTime::modified as decimal nanoseconds since UNIX_EPOCH
-    sha256: String,     // Frontmatter::hash_body of the body emitted by the last compile
+    mtime_ns: String,   // SystemTime::modified jako dziesiętne nanosekundy od UNIX_EPOCH
+    sha256: String,     // Frontmatter::hash_body treści emitowanej przez ostatnią kompilację
 }
 ```
 
-A page is considered *drifted* when either field differs from the current on-disk value. The dual check survives filesystems with coarse (1-second) mtime precision — a human save with identical mtime still flips the SHA. `mtime_ns` is stored as a canonical decimal string so two snapshots compare equal byte-for-byte.
+Strona jest uważana za *zmienioną*, gdy którekolwiek z pól różni się od bieżącej wartości na dysku. Podwójne sprawdzenie przetrwa systemy plików z grubą (1-sekundową) precyzją mtime — zapis człowieka z identycznym mtime wciąż zmienia SHA. `mtime_ns` jest przechowywany jako kanoniczny ciąg dziesiętny, więc dwa migawki porównują się równo bajt po bajcie.
 
-## Topic validation
+## Walidacja tematów
 
-`validate_topic` enforces:
+`validate_topic` egzekwuje:
 
-- Non-empty, ≤ 100 characters.
-- Character class `[a-zA-Z0-9_-]+`.
-- Not the reserved word `index`.
-- Must not start with `_` (reserved for vault metadata).
+- Niepusty, ≤ 100 znaków.
+- Klasa znaków `[a-zA-Z0-9_-]+`.
+- Nie zastrzeżone słowo `index`.
+- Nie może zaczynać się od `_` (zastrzeżone dla metadanych magazynu).
 
-Violations return `WikiError::InvalidTopic` with a static `reason` string.
+Naruszenia zwracają `WikiError::InvalidTopic` z statycznym ciągiem `reason`.
 
-## Search
+## Wyszukiwanie
 
-`WikiVault::search` is a v1-naive case-insensitive substring scan across every page body and topic, kept dependency-free. Scoring:
+`WikiVault::search` to naiwne skanowanie podciągów bez uwzględnienia wielkości liter w v1, obejmujące treść i temat każdej strony, utrzymywane bez zależności. Punktacja:
 
-- Topic-name match: `+10.0`
-- Each body occurrence: `+ln(1 + count)` (sub-linear so one long page can't bury short topic-only matches)
+- Dopasowanie nazwy tematu: `+10.0`
+- Każde wystąpienie w treści: `+ln(1 + liczba)` (sub-liniowe, aby jedna długa strona nie mogła zakopać krótkich dopasowań tylko w temacie)
 
-Results are sorted by score descending, then topic ascending, and truncated to `limit` (minimum 1). Snippets are built by `build_snippet`, which is Unicode-correct: because `str::to_lowercase` is not length-preserving (e.g. `İ` U+0130 → `i̇` grows 2→3 bytes), the snippet builder maintains a byte-offset map from the lowercased copy back to the original body so match offsets stay aligned. Surrounding context is clipped at ±60 bytes on char boundaries, newlines are flattened to spaces, and `…` ellipses mark truncation.
+Wyniki są sortowane malejąco według wyniku, następnie rosnąco według tematu i obcięte do `limit` (minimum 1). Fragmenty są budowane przez `build_snippet`, który jest poprawny pod kątem Unicode: ponieważ `str::to_lowercase` nie zachowuje długości (np. `İ` U+0130 → `i̇` rośnie z 2 do 3 bajtów), budowniczy fragmentów utrzymuje mapę przesunięć bajtowych z kopii z małymi literami z powrotem do oryginalnej treści, aby przesunięcia dopasowań pozostały wyrównane. Kontekst jest przycinany o ±60 bajtów na granicach znaków, nowe linie są spłaszczane do spacji, a wielokropki `…` oznaczają obcięcie.
 
-Vector / FTS5 ranking is tracked as a #3329 follow-up.
+Ranking wektorowy / FTS5 jest śledzony jako następstwo w ramach #3329.
 
-## Index and backlinks
+## Indeks i odwrotne odniesienia
 
-`rebuild_index_and_backlinks` runs after every successful write. It scans every `<topic>.md`, extracts links from each body, and writes:
+`rebuild_index_and_backlinks` uruchamia się po każdym udanym zapisie. Skanuje każdy `<temat>.md`, wyodrębnia linki z każdej treści i zapisuje:
 
-- `index.md` — alphabetical topic list with per-page `updated` timestamps, rendered in the active `RenderMode`.
-- `_meta/backlinks.json` — `{ target: [source, ...] }` with sources sorted and de-duplicated.
+- `index.md` — alfabetyczną listę tematów z sygnaturami czasowymi `updated` dla każdej strony, renderowaną w aktywnym `RenderMode`.
+- `_meta/backlinks.json` — `{ cel: [źródło, ...] }` ze źródłami posortowanymi i bez duplikatów.
 
-`WikiVault::backlinks` reads the JSON back and returns a flat `Vec<BacklinkEntry>` sorted by `(target, source)`.
+`WikiVault::backlinks` odczytuje JSON z powrotem i zwraca płaski `Vec<BacklinkEntry>` posortowany według `(cel, źródło)`.
 
-## Key types
+## Kluczowe typy
 
-| Type | Role |
+| Typ | Rola |
 | --- | --- |
-| `WikiVault` | The store. Constructed via `WikiVault::new` (config-gated) or `WikiVault::with_root` (tests / post-validation). Holds the vault root, `RenderMode`, `ingest_filter`, and the write `Mutex`. |
-| `WikiPage` | A read page: `topic`, `Frontmatter`, `body`. |
-| `Frontmatter` | Typed YAML header. `default_for(topic)` synthesises a blank one; `hash_body` computes the canonical SHA. |
-| `ProvenanceEntry` | One audit record: `agent`, optional `session` / `channel` / `turn`, required `at`. |
-| `WikiWriteOutcome` | Return value of `write`: resolved `path`, `content_sha256`, and `merged_with_external_edit` flag. |
-| `SearchHit` | One search result: `topic`, `snippet`, `score`. |
-| `BacklinkEntry` | One `(source, target)` edge. |
-| `RenderMode` | `Native` \| `Obsidian`, with `link`, `rewrite_links`, and `extract_links`. |
+| `WikiVault` | Magazyn. Konstruowany przez `WikiVault::new` (warunkowo wg konfiguracji) lub `WikiVault::with_root` (testy / po walidacji). Przechowuje główny katalog magazynu, `RenderMode`, `ingest_filter` oraz `Mutex` zapisu. |
+| `WikiPage` | Odczytana strona: `topic`, `Frontmatter`, `body`. |
+| `Frontmatter` | Typizowany nagłówek YAML. `default_for(topic)` syntetyzuje pusty; `hash_body` oblicza kanoniczny SHA. |
+| `ProvenanceEntry` | Jeden rekord audytu: `agent`, opcjonalne `session` / `channel` / `turn`, wymagane `at`. |
+| `WikiWriteOutcome` | Wartość zwracana przez `write`: rozstrzygnięta `path`, `content_sha256` oraz flaga `merged_with_external_edit`. |
+| `SearchHit` | Jeden wynik wyszukiwania: `topic`, `snippet`, `score`. |
+| `BacklinkEntry` | Jedna krawędź `(źródło, cel)`. |
+| `RenderMode` | `Native` \| `Obsidian`, z metodami `link`, `rewrite_links` i `extract_links`. |
 
-## Error model
+## Model błędów
 
-`WikiError` is a `thiserror::Error` enum. Notable variants:
+`WikiError` to enum `thiserror::Error`. Godne uwagi warianty:
 
-- `Disabled` — operator hasn't set `enabled = true`.
-- `ModeNotImplemented("bridge"|"unsafe_local")` — reserved modes.
-- `InvalidTopic { topic, reason }` — failed `validate_topic`.
-- `BodyTooLarge { topic, size, cap }` — body exceeded the 1 MiB cap (checked on both raw and materialised body).
-- `NotFound(topic)` — `get` on a missing page.
-- `HandEditConflict { topic }` — external edit detected and `force` was not passed.
-- `Frontmatter { topic, source }` — YAML parse error.
-- `Io { path, source }` — filesystem failure; constructed via the crate-local `WikiError::io(path, source)` helper.
+- `Disabled` — operator nie ustawił `enabled = true`.
+- `ModeNotImplemented("bridge"|"unsafe_local")` — zastrzeżone tryby.
+- `InvalidTopic { topic, reason }` — nieudane `validate_topic`.
+- `BodyTooLarge { topic, size, cap }` — treść przekroczyła limit 1 MiB (sprawdzane na surowej i zmateriałizowanej treści).
+- `NotFound(topic)` — `get` na nieistniejącej stronie.
+- `HandEditConflict { topic }` — wykryto zewnętrzną edycję, a `force` nie zostało przekazane.
+- `Frontmatter { topic, source }` — błąd analizy YAML.
+- `Io { path, source }` — awaria systemu plików; konstruowany przez lokalną funkcję pomocniczą `WikiError::io(path, source)` crat'u.
 
 `WikiResult<T> = Result<T, WikiError>`.
 
-## `WikiAccess` trait contract
+## Kontrakt traitu `WikiAccess`
 
-`librefang-kernel-handle` defines the JSON shape the builtin tools (`wiki_get`, `wiki_search`, `wiki_write`) must return when a kernel impl wires the vault. The kernel-handle crate has no vault to test against, and the kernel impl's full build is unavailable in the sandboxed image — so `tests/wiki_handle_contract.rs` ships a shadow `WikiHandle` adaptor (mirroring the production kernel-side adaptor verbatim) and pins the JSON shape every caller is allowed to rely on:
+`librefang-kernel-handle` definiuje kształt JSON, jaki wbudowane narzędzia (`wiki_get`, `wiki_search`, `wiki_write`) muszą zwracać, gdy implementacja jądra podłącza magazyn. Crate kernel-handle nie ma magazynu do testowania, a pełna kompilacja implementacji jądra jest niedostępna w sandboxowanym obrazie — dlatego `tests/wiki_handle_contract.rs` dostarcza cień `WikiHandle` adaptor (odzwierciedlający produkcyjny adaptor po stronie jądra dosłownie) i przypina kształt JSON, na którym każdy wywołujący może polegać:
 
 - `wiki_get(topic)` → `{ topic, frontmatter: { topic, created, updated, content_sha256, provenance: [...] }, body }`
 - `wiki_search(query, limit)` → `[{ topic, snippet, score }, ...]`
-- `wiki_write(topic, body, provenance, force)` → `{ topic, path, content_sha256, merged_with_external_edit }`; rejects malformed `provenance` with `KernelOpError::InvalidInput`.
+- `wiki_write(topic, body, provenance, force)` → `{ topic, path, content_sha256, merged_with_external_edit }`; odrzuca niepoprawne `provenance` z `KernelOpError::InvalidInput`.
 
-When the vault is absent (disabled config), each method returns `KernelOpError::Unavailable("<method>")` — the per-method channel name lets callers distinguish *feature off* from *transient failure*.
+Gdy magazyn jest nieobecny (wyłączona konfiguracja), każda metoda zwraca `KernelOpError::Unavailable("<metoda>")` — nazwa kanału dla każdej metody pozwala wywołującym rozróżnić *funkcja wyłączona* od *przejściowej awarii*.
 
-## Out of scope for v1
+## Poza zakresem v1
 
-Tracked under #3329 follow-ups:
+Śledzone jako następstwa w ramach #3329:
 
-- **`bridge` mode** — read shared artifacts from the memory substrate via public seams. Trait surface is the same (`WikiVault`); the `MemoryWikiMode` variant already exists; read path stubbed with `ModeNotImplemented`.
-- **`unsafe_local` mode** — same-machine escape hatch for an existing Obsidian vault. Same trait, same stub.
-- **Memory-event subscription** — the `ingest_filter = "all"` setting is reserved; v1 ingests only via explicit `wiki_write` calls, so the field has no behavioural effect today (a non-default value logs a warning). The hook contract is left to #3326's `before_prompt_build` infrastructure.
-- **LLM-assisted topic extraction** — v1 requires explicit `topic` tags.
-- **`memory_search` cross-corpus parameter** (`corpus = all|kv|wiki`) — the builtin lives in `librefang-runtime`; extending it touches the runtime tool surface and should land as a follow-up so this crate stays independently usable.
+- **Tryb `bridge`** — odczyt współdzielonych artefaktów z podłoża pamięci przez publiczne szwy. Powierzchnia traitu jest ta sama (`WikiVault`); wariant `MemoryWikiMode` już istnieje; ścieżka odczytu zrealizowana jako stub z `ModeNotImplemented`.
+- **Tryb `unsafe_local`** — drzwi awaryjne na tej samej maszynie dla istniejącego magazynu Obsidian. Ten sam trait, ten sam stub.
+- **Subskrypcja zdarzeń pamięci** — ustawienie `ingest_filter = "all"` jest zastrzeżone; v1 przyjmuje tylko przez jawne wywołania `wiki_write`, więc pole nie ma dziś wpływu behawioralnego (niedomyślna wartość loguje ostrzeżenie). Kontrakt haka jest pozostawiony infrastrukturze `before_prompt_build` z #3326.
+- **Ekstrakcja tematów wspomagana przez LLM** — v1 wymaga jawnych tagów `topic`.
+- **Parametr `memory_search` cross-corpus** (`corpus = all|kv|wiki`) — wbudowane narzędzie znajduje się w `librefang-runtime`; rozszerzenie go dotyka powierzchni narzędzi runtime'u i powinno trafić jako następstwo, aby ten crate pozostał niezależnie użyteczny.
 
-## External consumers
+## Zewnętrzni konsumenci
 
-`frontmatter::split` is also called from outside the crate:
+`frontmatter::split` jest również wywoływane spoza crat'u:
 
 - `librefang-api::acp_pipe::handle_connection`
 - `librefang-cli::acp::run_pipe_proxy`
 - `tool_runner::shell::tool_shell_exec`
 
-These rely on the documented tolerant split contract (missing or malformed frontmatter returns the raw text as body). Changes to the delimiter matching or the round-trip property (`split(render(fm, body)) == body`) must be coordinated with those callers.
+Te moduły opierają się na udokumentowanej tolerancyjnej umowie split (brakujący lub zniekształcony frontmatter zwraca surowy tekst jako treść). Zmiany w dopasowywaniu ogranicznika lub właściwości round-trip (`split(render(fm, body)) == body`) muszą być skoordynowane z tymi wywołującymi.

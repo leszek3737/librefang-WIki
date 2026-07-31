@@ -2,13 +2,13 @@
 
 # librefang-runtime-sandbox-docker
 
-OS-level isolation for agent code execution. Spawns commands inside Docker containers with strict resource limits, network isolation, capability dropping, and bind-mount validation.
+Izolacja na poziomie systemu operacyjnego dla wykonywania kodu agenta. Uruchamia polecenia wewnątrz kontenerów Docker z rygorystycznymi limitami zasobów, izolacją sieciową, usuwaniem uprawnień (capabilities) oraz walidacją montowań bind.
 
-Extracted from `librefang-runtime` as part of the #3710 god-crate split. The parent crate re-exports this at its historical path (`runtime::docker_sandbox`) behind the default-on `docker-sandbox` feature, so downstream imports are unchanged.
+Wyodrębniony z `librefang-runtime` w ramach podziału „god-crate" (#3710). Crate nadrzędny re-eksportuje go pod historyczną ścieżką (`runtime::docker_sandbox`) za domyślnie włączoną flagą `docker-sandbox`, dzięki czemu importy w dół łańcucha pozostają bez zmian.
 
 ---
 
-## Architecture
+## Architektura
 
 ```mermaid
 flowchart TD
@@ -34,80 +34,80 @@ flowchart TD
 
 ---
 
-## Security Model
+## Model bezpieczeństwa
 
-Every `docker run` and `docker exec` invocation passes through a layered validation pipeline before shelling out. Each layer fails closed with a typed `Err(String)` and an `error!` log line, so a rejection is recorded even if the caller swallows the `Result`.
+Każde wywołanie `docker run` i `docker exec` przechodzi przez warstwową ścieżkę walidacji przed przekazaniem do powłoki. Każda warstwa kończy się niepowodzeniem z zachowaniem bezpieczeństwa (fail-closed), zwracając typowany `Err(String)` i wpisując log `error!`, dzięki czemu odrzucenie jest rejestrowane nawet jeśli wywołujący ignoruje `Result`.
 
-### Capability Allowlist (`SAFE_CAPS`)
+### Biała lista uprawnień (`SAFE_CAPS`)
 
-Capabilities are dropped entirely (`--cap-drop ALL`), then specific ones are added back from a pinned 14-entry allowlist derived from Docker's defaults. Dangerous capabilities that collapse the sandbox are excluded by design:
+Uprawnienia (capabilities) są całkowicie usunięte (`--cap-drop ALL`), a następnie specyficzne są dodawane z powrotem z ustalonej 14-elementowej białej listy pochodzącej z domyślnych wartości Dockera. Niebezpieczne uprawnienia, które niszczą izolację sandboxa, są z założenia wykluczone:
 
-| Capability | Why excluded |
+| Uprawnienie | Powód wykluczenia |
 |---|---|
-| `SYS_ADMIN` | Mount, kexec, BPF, namespace manipulation |
-| `NET_ADMIN` | Interface/firewall reconfiguration, raw sockets |
-| `SYS_PTRACE` | Process inspection; defeats `no-new-privileges` |
-| `SYS_MODULE`, `SYS_BOOT` | Kernel/module tampering |
-| `BPF`, `PERFMON` | eBPF-based escape |
-| `MAC_ADMIN`, `MAC_OVERRIDE` | SELinux/AppArmor bypass |
+| `SYS_ADMIN` | Mount, kexec, BPF, manipulacja przestrzeniami nazw |
+| `NET_ADMIN` | Rekonfiguracja interfejsów/zapory sieciowej, surowe gniazda |
+| `SYS_PTRACE` | Inspekcja procesów; omija `no-new-privileges` |
+| `SYS_MODULE`, `SYS_BOOT` | Modyfikacja jądra/modułów |
+| `BPF`, `PERFMON` | Ucieczka oparta na eBPF |
+| `MAC_ADMIN`, `MAC_OVERRIDE` | Omijanie SELinux/AppArmor |
 
-`NET_RAW` is retained for ping/traceroute utility; the network-namespace boundary (see below) is the real SSRF protection.
+`NET_RAW` jest zachowane na potrzeby narzędzi ping/traceroute; rzeczywistą ochroną przed SSRF jest granica przestrzeni nazw sieciowych (patrz niżej).
 
-The allowlist is size-pinned in tests (`SAFE_CAPS.len() == 14`) so any future widening requires a conscious diff.
+Rozmiar białej listy jest przypięty w testach (`SAFE_CAPS.len() == 14`), więc każde przyszłe rozszerzenie wymaga świadomej zmiany.
 
-### Network Isolation
+### Izolacja sieciowa
 
-`validate_network` rejects three categories before they reach `docker run`:
+`validate_network` odrzuca trzy kategorie przed dotarciem do `docker run`:
 
-- **`host`** — shares the host network namespace, exposing loopback, cloud-metadata (`169.254.169.254`), and the daemon port.
-- **`container:<name>`** — inherits another container's namespace, transitively defeating isolation.
-- **Invalid characters** — anything outside `[A-Za-z0-9_-]+`; Docker would reject it anyway, but we fail fast with a typed error.
+- **`host`** — współdzieli przestrzeń nazw sieciowych hosta, ujawniając loopback, cloud-metadata (`169.254.169.254`) oraz port demona.
+- **`container:<nazwa>`** — dziedziczy przestrzeń nazw innego kontenera, transitywnie niwecząc izolację.
+- **Niedozwolone znaki** — wszystko poza `[A-Za-z0-9_-]+`; Docker odrzuciłby to i tak, ale my kończymy z typowanym błędem natychmiast.
 
-Allowed: `bridge`, `none`, and user-defined network names.
+Dozwolone: `bridge`, `none` oraz nazwy sieci definiowanych przez użytkownika.
 
-### Bind Mount Validation
+### Walidacja montowań bind
 
-`validate_bind_mount` runs **before** `docker run` on the workspace path. Without this gate, the blocked-path checks were dead code — a symlinked workspace resolving into `/etc` would still be mounted.
+`validate_bind_mount` uruchamia się **przed** `docker run` na ścieżce obszaru roboczego. Bez tej bramki, sprawdzenia zablokowanych ścieżek byłyby martwym kodem — symlinkowany obszar roboczy rozwiązywany do `/etc` nadal zostałby zamontowany.
 
-**Blocked by default** (`BLOCKED_MOUNT_PATHS`):
+**Zablokowane domyślnie** (`BLOCKED_MOUNT_PATHS`):
 
 ```
 /etc  /proc  /sys  /dev  /var/run/docker.sock
 /run/docker.sock  /run  /root  /boot
 ```
 
-`/run` and `/run/docker.sock` are explicitly blocked because systemd hosts symlink `/var/run` → `/run`, and the Docker socket is a host-root escape vector.
+`/run` i `/run/docker.sock` są jawnie zablokowane, ponieważ hosty z systemd symlinkują `/var/run` → `/run`, a gniazdo Dockera jest wektorem ucieczki z uprawnieniami roota hosta.
 
-**Containment check** (`path_is_within`): component-aware — `"/development"` is NOT inside `"/dev"`. Uses path-component boundaries, not naive `starts_with`, and normalizes trailing slashes on configured blocked paths.
+**Sprawdzenie zawierania** (`path_is_within`): uwzględnia komponenty ścieżki — `"/development"` NIE jest wewnątrz `"/dev"`. Używa granic komponentów ścieżki, a nie naiwnego `starts_with`, i normalizuje końcowe ukośniki na skonfigurowanych zablokowanych ścieżkach.
 
-**Symlink escape**: the path is canonicalized (or the nearest existing ancestor is canonicalized for not-yet-existing paths), and the resolved target is re-checked against blocked paths. This prevents a symlink created at a non-existent path from later resolving into `/etc`, `/proc`, etc.
+**Ucieczka przez symlink**: ścieżka jest kanonizowana (lub najbliższy istniejący przodek jest kanonizowany dla ścieżek jeszcze nieistniejących), a rozwiązany cel jest ponownie sprawdzany względem zablokowanych ścieżek. Zapobiega to stworzeniu symlinka w nieistniejącej ścieżce, który później rozwiązałby się do `/etc`, `/proc` itd.
 
-**Path traversal**: any `..` component is rejected.
+**Traversing ścieżki**: każdy komponent `..` jest odrzucany.
 
-### Shell Metacharacter Denylist
+### Czarna lista metaznaków powłoki
 
-`validate_command` delegates to `helpers::contains_shell_metacharacters`, which blocks injection vectors before the command reaches `sh -c`:
+`validate_command` deleguje do `helpers::contains_shell_metacharacters`, który blokuje wektory wstrzykiwania zanim polecenie dotrze do `sh -c`:
 
-| Metacharacter | Reason |
+| Metaznak | Powód |
 |---|---|
-| `` ` `` | Backtick command substitution |
-| `$(` | `$()` command substitution |
-| `${` | Variable expansion |
-| `;` | Command chaining |
-| `\|` | Pipe operator |
-| `>`, `<` | I/O redirection |
-| `{`, `}` | Brace expansion |
-| `&` | Background/job control |
-| `\n`, `\r` | Embedded newlines |
-| `\0` | Null bytes |
+| `` ` `` | Podstawianie polecenia w odwróconych apostrofach |
+| `$(` | Podstawianie polecenia `$()` |
+| `${` | Rozszerzanie zmiennych |
+| `;` | Łączenie poleceń |
+| `\|` | Operator potoku |
+| `>`, `<` | Przekierowanie wejścia/wyjścia |
+| `{`, `}` | Rozszerzanie nawiasów klamrowych |
+| `&` | Tło/kontrola zadań |
+| `\n`, `\r` | Osadzone znaki nowej linii |
+| `\0` | Zera bajtowe |
 
-**Quoting-aware**: command substitution and variable expansion sequences are scanned on the raw string (they fire inside double quotes under `sh -c`). Chaining/redirection/globbing metacharacters are scanned on a `strip_quoted_regions` output so legitimate quoted arguments aren't false-positive rejected.
+**Uwzględnia cytowanie**: sekwencje podstawiania poleceń i rozszerzania zmiennych są skanowane na surowym ciągu (działają wewnątrz podwójnych cudzysłowów pod `sh -c`). Metaznaki łączenia/przekierowania/globowania są skanowane na wyniku `strip_quoted_regions`, aby legalne cytowane argumenty nie były fałszywie odrzucane.
 
-The `helpers` module is a **deliberate duplicate** of `librefang-runtime::subprocess_sandbox` and `librefang-runtime::str_utils`, kept public so the parent crate can drive a parity test (`crates/librefang-runtime/tests/docker_sandbox_helpers_parity.rs`) asserting byte-for-byte equivalence. This prevents silent drift when the canonical denylist gains a new entry.
+Moduł `helpers` jest **celowym duplikatem** `librefang-runtime::subprocess_sandbox` i `librefang-runtime::str_utils`, utrzymywanym jako publiczny, aby crate nadrzędny mógł napędzać test parzystości (`crates/librefang-runtime/tests/docker_sandbox_helpers_parity.rs`) potwierdzający bajt-po-bajcie równoważność. Zapobiega to cichemu rozjazdowi, gdy kanoniczna czarna lista zyskuje nowy wpis.
 
 ---
 
-## Container Lifecycle
+## Cykl życia kontenera
 
 ### `create_sandbox`
 
@@ -119,18 +119,18 @@ pub async fn create_sandbox(
 ) -> Result<SandboxContainer, String>
 ```
 
-Spawns a detached container (`docker run -d`) configured with:
+Uruchamia odłączony kontener (`docker run -d`) skonfigurowany z:
 
-- **Resource limits**: `--memory`, `--cpus`, `--pids-limit`
-- **Security**: `--cap-drop ALL` + allowlisted `--cap-add`, `--security-opt no-new-privileges`, optional `--read-only`
-- **Network**: validated `--network` value
-- **tmpfs**: configured mounts (default: `/tmp:size=64m`)
-- **Workspace**: host path mounted read-only into `config.workdir` (validated via `validate_bind_mount`)
-- **Entry point**: `sleep infinity` to keep the container alive for `exec`
+- **Limitami zasobów**: `--memory`, `--cpus`, `--pids-limit`
+- **Bezpieczeństwo**: `--cap-drop ALL` + uprawnienia z białej listy `--cap-add`, `--security-opt no-new-privileges`, opcjonalny `--read-only`
+- **Siecią**: zwalidowaną wartością `--network`
+- **tmpfs**: skonfigurowanymi montowaniami (domyślnie: `/tmp:size=64m`)
+- **Obszarem roboczym**: ścieżką hosta zamontowaną tylko-do-odczytu w `config.workdir` (zwalidowaną przez `validate_bind_mount`)
+- **Punktem wejścia**: `sleep infinity` aby utrzymać kontener przy życiu dla `exec`
 
-**Container naming**: `{container_prefix}-{sha256(agent_id)[..8]}`. The SHA-256 hex suffix is bijective (8 hex chars = 2³² space), replacing a lossy truncation that previously collapsed distinct agent IDs like `"foo/bar"` and `"foo-bar"` into the same Docker container name.
+**Nazewnictwo kontenerów**: `{container_prefix}-{sha256(agent_id)[..8]}`. Szesnastkowy sufiks SHA-256 jest bijektywny (8 znaków hex = przestrzeń 2³²), zastępując stratne obcinanie, które wcześniej zrównywało różne identyfikatory agenta takie jak `"foo/bar"` i `"foo-bar"` do tej samej nazwy kontenera Docker.
 
-Validation order: `validate_image_name` → `validate_sandbox_config` (network + caps) → `sanitize_container_name` → `validate_bind_mount`.
+Kolejność walidacji: `validate_image_name` → `validate_sandbox_config` (sieć + uprawnienia) → `sanitize_container_name` → `validate_bind_mount`.
 
 ### `exec_in_sandbox`
 
@@ -142,13 +142,13 @@ pub async fn exec_in_sandbox(
 ) -> Result<ExecResult, String>
 ```
 
-Runs `docker exec sh -c "<command>"` with:
+Uruchamia `docker exec sh -c "<command>"` z:
 
-- **`kill_on_drop(true)`**: tokio does not kill the child on drop by default; without this, a timeout would leak a host-side `docker exec` process per timed-out call.
-- **Streaming output cap** (`read_capped`): stdout and stderr are drained into 50 KB buffers while continuing to read to EOF. A runaway command (`head -c 20G /dev/zero`) cannot OOM the daemon by buffering unbounded output. If truncated, a `[truncated, N total bytes]` marker is appended.
-- **Timeout**: enforced via `tokio::time::timeout`; returns a typed error on expiry.
+- **`kill_on_drop(true)`**: tokio domyślnie nie zabija procesu potomnego przy zniszczeniu; bez tego, przekroczenie timeoutu wyciekłoby proces `docker exec` po stronie hosta dla każdego przekroczonego wywołania.
+- **Limitami strumieniowania wyjścia** (`read_capped`): stdout i stderr są opróżniane do 50 KB buforów, jednocześnie czytając do EOF. Bujne polecenie (`head -c 20G /dev/zero`) nie może spowodować braku pamięci demona przez buforowanie nieograniczonego wyjścia. Jeśli obcięte, dodawany jest znacznik `[obcięte, N bajtów łącznie]`.
+- **Timeoutem**: wymuszanym przez `tokio::time::timeout`; zwraca typowany błąd po upływie czasu.
 
-The three futures (stdout drain, stderr drain, child wait) run concurrently via `tokio::join!`.
+Trzy futures (opróżnianie stdout, opróżnianie stderr, oczekiwanie na proces potomny) działają współbieżnie przez `tokio::join!`.
 
 ### `destroy_sandbox`
 
@@ -156,7 +156,7 @@ The three futures (stdout drain, stderr drain, child wait) run concurrently via 
 pub async fn destroy_sandbox(container: &SandboxContainer) -> Result<(), String>
 ```
 
-Runs `docker rm -f`. Failures are logged at `warn!` level but still return `Ok(())` — the container may already be gone.
+Uruchamia `docker rm -f`. Błędy są logowane na poziomie `warn!`, ale nadal zwracają `Ok(())` — kontener może już nie istnieć.
 
 ### `is_docker_available`
 
@@ -164,32 +164,32 @@ Runs `docker rm -f`. Failures are logged at `warn!` level but still return `Ok((
 pub async fn is_docker_available() -> bool
 ```
 
-Probes `docker version --format '{{.Server.Version}}'`. Returns `false` on any failure.
+Sonduje `docker version --format '{{.Server.Version}}'`. Zwraca `false` przy dowolnym niepowodzeniu.
 
 ---
 
-## Container Pool
+## Pula kontenerów
 
-`ContainerPool` reuses containers across sessions to avoid the startup cost of repeated `docker run`.
+`ContainerPool` używa kontenerów ponownie między sesjami, aby uniknąć kosztu uruchamiania przy powtarzanych `docker run`.
 
 ```rust
-pub struct ContainerPool { /* DashMap-backed */ }
+pub struct ContainerPool { /* oparty na DashMap */ }
 
 let pool = ContainerPool::new();
 ```
 
-| Method | Behavior |
+| Metoda | Zachowanie |
 |---|---|
-| `release(container, config_hash)` | Returns a container to the pool, stamped with `last_used` and `created` timestamps. |
-| `acquire(config_hash, cool_secs)` | Returns a container matching the hash whose `last_used` age exceeds `cool_secs`. Removes it from the pool. Returns `None` if no match. |
-| `cleanup(idle_timeout_secs, max_age_secs)` | Destroys containers idle longer than `idle_timeout_secs` or older than `max_age_secs`. |
-| `len()` / `is_empty()` | Pool occupancy. |
+| `release(container, config_hash)` | Zwraca kontener do puli, oznaczony znacznikami czasu `last_used` i `created`. |
+| `acquire(config_hash, cool_secs)` | Zwraca kontener pasujący do skrótu, którego wiek `last_used` przekracza `cool_secs`. Usuwa go z puli. Zwraca `None` jeśli brak dopasowania. |
+| `cleanup(idle_timeout_secs, max_age_secs)` | Niszczy kontenery bezczynne dłużej niż `idle_timeout_secs` lub starsze niż `max_age_secs`. |
+| `len()` / `is_empty()` | Zajętość puli. |
 
-`config_hash` hashes `image`, `network`, `memory_limit`, and `workdir` from `DockerSandboxConfig` into a `u64`. Containers with different configs are never reused for each other.
+`config_hash` haszuje `image`, `network`, `memory_limit` i `workdir` z `DockerSandboxConfig` do `u64`. Kontenery z różnymi konfiguracjami nigdy nie są używane wzajemnie.
 
 ---
 
-## Types
+## Typy
 
 ### `SandboxContainer`
 
@@ -201,7 +201,7 @@ pub struct SandboxContainer {
 }
 ```
 
-Handle to a running sandbox container. Passed to `exec_in_sandbox` and `destroy_sandbox`.
+Uchwyt do uruchomionego kontenera sandbox. Przekazywany do `exec_in_sandbox` i `destroy_sandbox`.
 
 ### `ExecResult`
 
@@ -213,15 +213,15 @@ pub struct ExecResult {
 }
 ```
 
-If output was truncated, the respective field ends with `... [truncated, N total bytes]`.
+Jeśli wyjście zostało obcięte, odpowiednie pole kończy się `... [obcięte, N bajtów łącznie]`.
 
 ---
 
-## Configuration
+## Konfiguracja
 
-Consumes `DockerSandboxConfig` from `librefang-types`. Default values:
+Konsumuje `DockerSandboxConfig` z `librefang-types`. Wartości domyślne:
 
-| Field | Default |
+| Pole | Domyślne |
 |---|---|
 | `enabled` | `false` |
 | `image` | `"python:3.12-slim"` |
@@ -232,34 +232,34 @@ Consumes `DockerSandboxConfig` from `librefang-types`. Default values:
 | `cpu_limit` | `1.0` |
 | `timeout_secs` | `60` |
 | `read_only_root` | `true` |
-| `cap_add` | `[]` (empty) |
+| `cap_add` | `[]` (puste) |
 | `tmpfs` | `["/tmp:size=64m"]` |
 | `pids_limit` | `100` |
 
-Call `validate_sandbox_config(&config)` at daemon startup to fail fast on dangerous network or capability settings. This also emits `error!` logs so the rejection is recorded even if the caller swallows the `Result`.
+Wywołaj `validate_sandbox_config(&config)` przy starcie demona, aby szybko zakończyć niepowodzeniem przy niebezpiecznych ustawieniach sieci lub uprawnień. To również emituje logi `error!`, aby odrzucenie było rejestrowane nawet jeśli wywołujący ignoruje `Result`.
 
 ---
 
-## Internal Helpers
+## Wewnętrzne pomocnicze funkcje
 
 ### `read_capped<R>(reader, cap)`
 
-Drains an `AsyncReadExt` into a `Vec<u8>` capped at `cap` bytes, continuing to EOF so the pipe never blocks the child. Returns `(captured_bytes, true_total, was_truncated)`. Mirrors `LocalBackend::read_capped` in `librefang-runtime/src/tool_exec_backend.rs`; kept module-level for deterministic testing without a live Docker daemon.
+Opróżnia `AsyncReadExt` do `Vec<u8>` z limitem `cap` bajtów, kontynuując do EOF, aby potok nigdy nie blokował procesu potomnego. Zwraca `(captured_bytes, true_total, was_truncated)`. Odbija `LocalBackend::read_capped` w `librefang-runtime/src/tool_exec_backend.rs`; utrzymywane na poziomie modułu dla deterministycznych testów bez aktywnego demona Docker.
 
-### `helpers` module
+### Moduł `helpers`
 
-Public module exposing `safe_truncate_str` and `contains_shell_metacharacters`. These are intentional duplicates of the canonical implementations in the parent crate, kept under 60 LOC of pure-string logic to avoid a cyclic dependency. The parity test in `crates/librefang-runtime/tests/docker_sandbox_helpers_parity.rs` guards against drift.
+Moduł publiczny eksponujący `safe_truncate_str` i `contains_shell_metacharacters`. Są to celowe duplikaty kanonicznych implementacji w crate nadrzędnym, utrzymywane poniżej 60 LOC czystej logiki ciągów znaków, aby uniknąć zależności cyklicznej. Test parzystości w `crates/librefang-runtime/tests/docker_sandbox_helpers_parity.rs` chroni przed rozjazdem.
 
 ---
 
-## Testing
+## Testowanie
 
-The test suite covers security boundaries without requiring a live Docker daemon:
+Suite testowa pokrywa granice bezpieczeństwa bez wymagania aktywnego demona Docker:
 
-- **`test_agent_id_suffix_sweep_distinct`**: 1000 distinct agent IDs produce 1000 distinct 8-char suffixes.
-- **`test_docker_metachar_command_substitution_in_double_quotes_blocked`**: parity assertion that `` ` ``, `$()`, and `${}` are blocked inside double quotes.
-- **`create_sandbox_rejects_blocked_workspace_mount`**: verifies `validate_bind_mount` runs on the creation path (regression for dead-code bug).
-- **`test_read_capped_bounds_unbounded_output`**: 200 KB producer capped at 50 KB with correct total count and truncation flag.
-- **`test_safe_caps_size_and_contents`**: pins `SAFE_CAPS.len() == 14` and spot-checks inclusion/exclusion.
-- **`test_validate_bind_mount_sibling_prefix_not_blocked`**: component-aware containment — `/development` is not inside `/dev`.
-- **`test_validate_bind_mount_blocks_run_docker_sock`**: systemd `/run` symlink coverage.
+- **`test_agent_id_suffix_sweep_distinct`**: 1000 unikalnych identyfikatorów agenta daje 1000 unikalnych 8-znakowych sufiksów.
+- **`test_docker_metachar_command_substitution_in_double_quotes_blocked`**: asercja parzystości, że `` ` ``, `$()` i `${}` są blokowane wewnątrz podwójnych cudzysłowów.
+- **`create_sandbox_rejects_blocked_workspace_mount`**: weryfikuje, że `validate_bind_mount` uruchamia się na ścieżce tworzenia (regresja dla błędu martwego kodu).
+- **`test_read_capped_bounds_unbounded_output`**: producent 200 KB obcięty do 50 KB z poprawnym całkowitym licznikiem i flagą obcięcia.
+- **`test_safe_caps_size_and_contents`**: przypina `SAFE_CAPS.len() == 14` i wyrywkowo sprawdza włączenia/wykluczenia.
+- **`test_validate_bind_mount_sibling_prefix_not_blocked`**: zawieranie uwzględniające komponenty — `/development` nie jest wewnątrz `/dev`.
+- **`test_validate_bind_mount_blocks_run_docker_sock`**: pokrycie symlinków systemd `/run`.

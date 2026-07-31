@@ -2,31 +2,31 @@
 
 # `librefang-kernel-handle`
 
-Role traits that define the contract between the LibreFang agent runtime and the kernel. Every kernel operation the runtime needs—spawning agents, reading/writing memory, posting tasks, running workflows, sending channel messages, querying the model catalog—is declared here as a trait method. The concrete `LibreFangKernel` implements these traits; the runtime consumes them through `Arc<dyn SomeRole>` or `Arc<dyn KernelHandle>`.
+Role traits definiujące kontrakt między środowiskiem uruchomieniowym agenta LibreFang a jądrem. Każda operacja jądra wymagana przez środowisko uruchomieniowe — tworzenie agentów, odczyt/zapis pamięci, publikowanie zadań, uruchamianie przepływów pracy, wysyłanie wiadomości kanałowych, odpytywanie katalogu modeli — jest zadeklarowana tutaj jako metoda traita. Konkretny `LibreFangKernel` implementuje te traity; środowisko uruchomieniowe korzysta z nich poprzez `Arc<dyn SomeRole>` lub `Arc<dyn KernelHandle>`.
 
-## Architecture
+## Architektura
 
-The crate was refactored (issue #3746) from a single 50+ method `KernelHandle` god-trait into **20 focused role traits**, each living in its own module file. The original `KernelHandle` is preserved as a supertrait alias with a blanket impl, so all existing `Arc<dyn KernelHandle>` call sites continue to work while new code can narrow its bounds.
+Ten crate został zrefaktoryzowany (issue #3746) z pojedynczego „bogotraita" `KernelHandle` obejmującego 50+ metod na **20 wyspecjalizowanych role traits**, z których każdy znajduje się we własnym pliku modułu. Oryginalny `KernelHandle` jest zachowany jako alias supertraita z blanket impl, dzięki czemu wszystkie istniejące punkty wywołań `Arc<dyn KernelHandle>` działają bez zmian, a nowy kod może zawężać swoje granice.
 
 ```mermaid
 graph TD
-    subgraph "Consumers"
+    subgraph "Konsumenci"
         RT[librefang-runtime]
         API[librefang-api]
         ACP[librefang-acp]
     end
 
     subgraph "librefang-kernel-handle"
-        KH["KernelHandle<br/>(supertrait alias)"]
+        KH["KernelHandle<br/>(alias supertraita)"]
         AC[AgentControl]
         MA[MemoryAccess]
         TQ[TaskQueue]
         EB[EventBus]
         KG[KnowledgeGraph]
-        Other["16 more role traits"]
+        Other["16 kolejnych role traits"]
     end
 
-    subgraph "Implementors"
+    subgraph "Implementatory"
         K[LibreFangKernel]
         ST[Test Stubs / Mocks]
     end
@@ -42,21 +42,21 @@ graph TD
     KH --> KG
     KH --> Other
 
-    K -.->|impl all 20| KH
-    ST -.->|impl subset / defaults| KH
+    K -.->|impl wszystkie 20| KH
+    ST -.->|impl podzbiór / domyślne| KH
 ```
 
-### Why role traits?
+### Dlaczego role traits?
 
-1. **Narrower bounds** — A function that only needs memory access can take `T: MemoryAccess` instead of pulling the entire kernel surface.
-2. **Compile-time capability checking** — A missing capability is a compile error in the role-trait impl, not a silent `Err("not available")` at first runtime call.
-3. **Testable stubs** — Mocks group fakes by capability. A stub that doesn't need cron can use the default `CronControl` impl without writing any code for it.
+1. **Węższe granice** — funkcja potrzebująca tylko dostępu do pamięci może przyjmować `T: MemoryAccess` zamiast ciągnąć całą powierzchnię jądra.
+2. **Sprawdzanie możliwości w czasie kompilacji** — brakująca możliwość to błąd kompilacji w implu role traita, a nie ciche `Err("not available")` przy pierwszym wywołaniu w środowisku uruchomieniowym.
+3. **Testowalne stuby** — Mocki grupują fałszywe implementacje według możliwości. Stub niepotrzebujący crona może użyć domyślnego impla `CronControl` bez pisania dla niego żadnego kodu.
 
-## Error Handling
+## Obsługa błędów
 
-All trait methods return `KernelResult<T>`, which is `Result<T, KernelOpError>`. `KernelOpError` is a re-export of `librefang_types::error::LibreFangError`—the canonical structured business-error enum used across the workspace.
+Wszystkie metody traitów zwracają `KernelResult<T>`, czyli `Result<T, KernelOpError>`. `KernelOpError` to re-eksport `librefang_types::error::LibreFangError` — kanonicznego, ustrukturyzowanego enumu błędów biznesowych używanego w całym workspace.
 
-This replaced the previous `Result<_, String>` pattern, which forced callers to substring-match error messages. Now callers can pattern-match on variants:
+To zastąpiło poprzedni wzorzec `Result<_, String>`, który wymuszał na wywołujących dopasowywanie substringów w komunikatach błędów. Teraz wywołujący mogą dopasowywać wzorce do wariantów:
 
 ```rust
 match err {
@@ -69,182 +69,182 @@ match err {
 
 ## Role Traits
 
-### AgentControl — Agent Lifecycle & Inter-Agent Communication
+### AgentControl — Cykl życia agenta i komunikacja międzyagentowa
 
-The largest and most complex role trait. Covers spawning agents, sending messages, async delegation, heartbeats, and forked one-shot calls.
+Największy i najbardziej złożony role trait. Obejmuje tworzenie agentów, wysyłanie wiadomości, asynchroniczne delegowanie, heartbeaty i rozforkowane wywołania jednorazowe.
 
-**Core operations:**
+**Podstawowe operacje:**
 - `spawn_agent(manifest_toml, parent_id)` → `(agent_id, agent_name)`
-- `spawn_agent_checked(manifest_toml, parent_id, parent_caps)` — enforces capability inheritance; default delegates to `spawn_agent`
-- `send_to_agent(agent_id, message)` → response string
+- `spawn_agent_checked(manifest_toml, parent_id, parent_caps)` — wymusza dziedziczenie możliwości; domyślnie deleguje do `spawn_agent`
+- `send_to_agent(agent_id, message)` → ciąg odpowiedzi
 - `list_agents()` / `find_agents(query)` / `kill_agent(agent_id)`
-- `touch_heartbeat(agent_id)` — prevents heartbeat false-positives during long LLM calls
-- `run_forked_agent_oneshot(agent_id, prompt, allowed_tools)` — structured-output via forked call; used by the proactive memory extractor for prompt-cache alignment
+- `touch_heartbeat(agent_id)` — zapobiega fałszywym alarmom heartbeat podczas długich wywołań LLM
+- `run_forked_agent_oneshot(agent_id, prompt, allowed_tools)` — wyjście ustrukturyzowane poprzez wywołanie rozforkowane; używane przez proaktywny ekstraktor pamięci do wyrównania prompt-cache
 
-**Cancel cascade and session pinning:**
-- `send_to_agent_as(agent_id, message, parent_agent_id)` — records the call lineage so `/stop` on the parent cascades into the callee (#3044)
-- `send_to_agent_with_key(agent_id, message, conversation_key)` — pins the callee to a deterministic session derived from the key
-- `send_to_agent_as_with_key(...)` — combines both behaviors
+**Kaskada anulowań i przypinanie sesji:**
+- `send_to_agent_as(agent_id, message, parent_agent_id)` — rejestruje linię wywołań, aby `/stop` na nadrzędnym kaskadował do wywoływanego (#3044)
+- `send_to_agent_with_key(agent_id, message, conversation_key)` — przypina wywoływanego do deterministycznej sesji pochodzącej z klucza
+- `send_to_agent_as_with_key(...)` — łączy oba zachowania
 
-**Async tracked delegation:**
+**Asynchroniczne śledzone delegowanie:**
 
-`send_to_agent_async_tracked` registers a delegation on the kernel's async-task tracker and returns immediately with a task id, rather than blocking. The callee's reply is later injected into the caller's session as a `TaskCompletionEvent`. This method returns `AsyncSendOutcome`, **not** a bare string:
+`send_to_agent_async_tracked` rejestruje delegację w asynchronicznym trackerze zadań jądra i zwraca natychmiast identyfikator zadania, zamiast blokować. Odpowiedź wywoływanego jest później wstrzykiwana do sesji wywołującego jako `TaskCompletionEvent`. Ta metoda zwraca `AsyncSendOutcome`, **nie** surowy ciąg:
 
 ```rust
 pub enum AsyncSendOutcome {
-    Tracked(String),  // task id — reply arrives later
-    Inline(String),   // blocking fallback — reply is already complete
+    Tracked(String),  // task id — odpowiedź przychodzi później
+    Inline(String),   // awaryjne blokowanie — odpowiedź jest już gotowa
 }
 ```
 
-This distinction fixes #6650, where both outcomes previously shared a single `String` slot, causing the caller to label an already-complete response body as a `task_id` and tell the model to wait for a reply that would never arrive.
+To rozróżnienie naprawia #6650, gdzie wcześniej oba wyniki współdzieliły pojedynczy slot `String`, co powodowało, że wywołujący oznaczał już gotową treść odpowiedzi jako `task_id` i nakazywał modelowi oczekiwać na odpowiedź, która nigdy by nie nadeszła.
 
-### MemoryAccess — Per-Agent Key/Value Store
+### MemoryAccess — Per-agentowy magazyn klucz/wartość
 
-Scoped memory with three-tier namespacing:
+Pamięć z zakresem i trójpoziomową przestrzenią nazw:
 
-| `agent_id` | `peer_id` | Namespace |
+| `agent_id` | `peer_id` | Przestrzeń nazw |
 |---|---|---|
-| `Some(id)` | `Some(peer)` | Agent + peer scoped |
-| `Some(id)` | `None` | Agent scoped |
-| `None` | `None` | Shared (backward compat) |
+| `Some(id)` | `Some(peer)` | Zakres agent + peer |
+| `Some(id)` | `None` | Zakres agenta |
+| `None` | `None` | Współdzielona (wsteczna kompatybilność) |
 
-**Design note:** Internal kernel subsystems (messaging, prompt_context, goal_control) write to the shared namespace via `shared_memory_agent_id()`. LLM-facing tools must use per-agent scoping (`Some(caller_uuid)`).
+**Uwaga projektowa:** Wewnętrzne podsystemy jądra (messaging, prompt_context, goal_control) zapisują do współdzielonej przestrzeni nazw poprzez `shared_memory_agent_id()`. Narzędzia skierowane do LLM muszą używać zakresu per-agent (`Some(caller_uuid)`).
 
-`memory_acl_for_sender` resolves per-user RBAC access for proactive-memory reads (#3054). Returns `None` when RBAC is disabled.
+`memory_acl_for_sender` rozwiązuje dostęp RBAC per-użytkownika dla odczytów proaktywnej pamięci (#3054). Zwraca `None`, gdy RBAC jest wyłączone.
 
-### WikiAccess — Durable Markdown Knowledge Vault
+### WikiAccess — Trwała wiedza w Markdown
 
-Mirrors `MemoryAccess` but targets the `librefang-memory-wiki` vault. Results cross the seam as `serde_json::Value` so this trait doesn't depend on the wiki crate's owned types.
+Odbija `MemoryAccess`, ale celuje w skarbiec `librefang-memory-wiki`. Wyniki przechodzą granicę jako `serde_json::Value`, więc ten trait nie zależy od typów własnościowych crate'a wiki.
 
-- `wiki_get(topic)` — returns `{ topic, frontmatter, body }`
-- `wiki_search(query, limit)` — case-insensitive substring search, topic-name hits outrank body hits
-- `wiki_write(topic, body, provenance, force)` — supports `[[topic]]` cross-references; `force = false` refuses to silently overwrite externally-modified pages (returns `conflict`)
+- `wiki_get(topic)` — zwraca `{ topic, frontmatter, body }`
+- `wiki_search(query, limit)` — wyszukiwanie substringów bez uwzględniania wielkości liter, trafienia w nazwie tematu mają wyższy priorytet niż trafienia w treści
+- `wiki_write(topic, body, provenance, force)` — obsługuje odnośniki krzyżowe `[[topic]]`; `force = false` odmawia cichego nadpisywania stron zmodyfikowanych zewnętrznie (zwraca `conflict`)
 
-Provenance is monotonic — the vault appends, never overwrites.
+Provenance jest monotoniczne — skarbiec dopisuje, nigdy nie nadpisuje.
 
-### TaskQueue — Shared Task Queue
+### TaskQueue — Współdzielona kolejka zadań
 
-CRUD operations for the shared task queue: `task_post`, `task_claim`, `task_complete`, `task_list`, `task_get`, `task_delete`, `task_retry`, `task_update_status`.
+Operacje CRUD dla współdzielonej kolejki zadań: `task_post`, `task_claim`, `task_complete`, `task_list`, `task_get`, `task_delete`, `task_retry`, `task_update_status`.
 
-### EventBus — Fire-and-Forget Proactive Triggers
+### EventBus — Proaktywne wyzwalacze fire-and-forget
 
-Single method: `publish_event(event_type, payload)`. Events can trigger proactive agents.
+Pojedyncza metoda: `publish_event(event_type, payload)`. Zdarzenia mogą wyzwalać agentów proaktywnych.
 
-### KnowledgeGraph — Entity/Relation Graph
+### KnowledgeGraph — Graf encji/relacji
 
-- `knowledge_add_entity(&entity, agent_id, peer_id)` — takes entity by reference to avoid forced moves (#3553)
-- `knowledge_add_relation(&relation, agent_id, peer_id)` — same by-reference pattern
-- `knowledge_query(pattern, peer_id)` — pattern query returning `GraphMatch` results
+- `knowledge_add_entity(&entity, agent_id, peer_id)` — przyjmuje encję przez referencję, aby uniknąć wymuszonych przeniesień (#3553)
+- `knowledge_add_relation(&relation, agent_id, peer_id)` — ten sam wzorzec przez referencję
+- `knowledge_query(pattern, peer_id)` — zapytanie wzorcem zwracające wyniki `GraphMatch`
 
-Entities and relations are scoped by `agent_id` (agent-scoped reads/deletes) and optionally `peer_id` (per-user isolation, #6494).
+Encje i relacje są ograniczone przez `agent_id` (odczyty/usuwanie w zakresie agenta) i opcjonalnie `peer_id` (izolacja per-użytkownik, #6494).
 
-### CronControl — Agent-Owned Scheduled Jobs
+### CronControl — Zaplanowane zadania własne agenta
 
-- `cron_create(agent_id, job_json)` → job id
+- `cron_create(agent_id, job_json)` → id zadania
 - `cron_list(agent_id)` / `cron_cancel(job_id)`
-- `cron_set_enabled(job_id, enabled)` — pauses without losing config (#6159); agent tools route "stop" here, hard deletion is human-only
+- `cron_set_enabled(job_id, enabled)` — pauzuje bez utraty konfiguracji (#6159); narzędzia agenta kierują „stop" tutaj, twarde usunięcie jest tylko dla ludzi
 
-### ApprovalGate — Tool Approval Policy & Lifecycle
+### ApprovalGate — Polityka zatwierdzania narzędzi i cykl życia
 
-- `requires_approval(tool_name)` and contextual variants (`requires_approval_with_context`, `is_tool_denied_with_context`)
-- `resolve_user_tool_decision(tool, sender, channel, system_call)` — per-user RBAC gate (#3054). Returns `Allow`, `Deny`, or `NeedsApproval`. The `system_call` flag bypasses the per-user gate for daemon-internal forks (e.g., auto_dream) that have no attributable user (#6463).
-- `request_approval(...)` — blocking, returns `ApprovalDecision`
-- `submit_tool_approval(...)` / `resolve_tool_approval(...)` — non-blocking approval workflow with deferred execution payloads
+- `requires_approval(tool_name)` i warianty kontekstowe (`requires_approval_with_context`, `is_tool_denied_with_context`)
+- `resolve_user_tool_decision(tool, sender, channel, system_call)` — bramka RBAC per-użytkownik (#3054). Zwraca `Allow`, `Deny` lub `NeedsApproval`. Flaga `system_call` omija bramkę per-użytkownik dla wewnętrznych forków demona (np. auto_dream), które nie mają przypisanego użytkownika (#6463).
+- `request_approval(...)` — blokujące, zwraca `ApprovalDecision`
+- `submit_tool_approval(...)` / `resolve_tool_approval(...)` — nieblokujący przepływ zatwierdzania z odroczonymi ładunkami wykonania
 
-### HandsControl — Specialized Agent Lifecycle
+### HandsControl — Specjalizowany cykl życia agentów
 
-Manages "Hands"—specialized autonomous agents: `hand_list`, `hand_install`, `hand_activate`, `hand_status`, `hand_deactivate`.
+Zarządza „Hands" — specjalizowanymi agentami autonomicznymi: `hand_list`, `hand_install`, `hand_activate`, `hand_status`, `hand_deactivate`.
 
-### A2ARegistry — Discovered External Agents
+### A2ARegistry — Odkryci agenci zewnętrzni
 
-Read-only directory of external A2A agents: `list_a2a_agents()` returns `(name, url)` pairs, `get_a2a_agent_url(name)` returns `Option<String>`.
+Katalog tylko do odczytu agentów zewnętrznych A2A: `list_a2a_agents()` zwraca pary `(name, url)`, `get_a2a_agent_url(name)` zwraca `Option<String>`.
 
-### ChannelSender — Outbound Channel Adapters
+### ChannelSender — Adaptery kanałów wychodzących
 
-Multi-channel message delivery (email, Telegram, etc.):
+Wielokanałowa dostarczanie wiadomości (email, Telegram itp.):
 
 - `send_channel_message(channel, recipient, message, thread_id, account_id)`
-- `send_channel_media(...)` — image/file via URL
-- `send_channel_file_data(channel, recipient, data: Bytes, ...)` — raw bytes; uses `bytes::Bytes` for zero-cost cloning in wrapping layers (#3553)
+- `send_channel_media(...)` — obraz/plik przez URL
+- `send_channel_file_data(channel, recipient, data: Bytes, ...)` — surowe bajty; używa `bytes::Bytes` dla klonowania bezkosztowego w warstwach opakowujących (#3553)
 - `send_channel_poll(...)`
-- Roster management: `roster_upsert`, `roster_members`, `roster_remove_member`
-- `resolve_channel_owner(channel, chat_id)` — finds the agent that owns a channel/chat pair, used to mirror outbound messages into the inbound-routing session
+- Zarządzanie listą: `roster_upsert`, `roster_members`, `roster_remove_member`
+- `resolve_channel_owner(channel, chat_id)` — znajduje agenta będącego właścicielem pary kanał/czat, używane do mirroringu wiadomości wychodzących do sesji routingu przychodzącego
 
-### PromptStore — Prompt Versioning & Experiments
+### PromptStore — Wersjonowanie i eksperymenty z promptami
 
-Full prompt lifecycle: versions, experiments with A/B metrics, auto-tracking when system prompts change. Key methods: `get_running_experiment`, `record_experiment_request`, `list_prompt_versions`, `create_prompt_version` (by reference, #3553), `set_active_prompt_version`, `create_experiment`, `update_experiment_status`, `get_experiment_metrics`, `auto_track_prompt_version`.
+Pełny cykl życia promptów: wersje, eksperymenty z metrykami A/B, automatyczne śledzenie przy zmianach promptów systemowych. Kluczowe metody: `get_running_experiment`, `record_experiment_request`, `list_prompt_versions`, `create_prompt_version` (przez referencję, #3553), `set_active_prompt_version`, `create_experiment`, `update_experiment_status`, `get_experiment_metrics`, `auto_track_prompt_version`.
 
-### WorkflowRunner — Declarative Workflow Execution
+### WorkflowRunner — Wykonanie deklaratywnych przepływów pracy
 
-Workflow discovery, execution, and status tracking.
+Odkrywanie, wykonywanie i śledzenie statusu przepływów pracy.
 
-**Discovery types** (all `#[non_exhaustive]`, constructed via `new()`):
-- `WorkflowSummary` — id, name, description, step_count, `has_input_schema`
-- `WorkflowDescription` — step names in declaration order, `input_schema` sorted by name for deterministic LLM output (#3298)
-- `WorkflowInputParam` — name, `param_type` (`"string" | "number" | "boolean" | "file" | "image" | "agent_id"`), required, description
-- `WorkflowRunSummary` — run state, timing, output, per-step `StepOutputSummary` in execution order
+**Typy odkrywania** (wszystkie `#[non_exhaustive]`, konstruowane przez `new()`):
+- `WorkflowSummary` — id, nazwa, opis, step_count, `has_input_schema`
+- `WorkflowDescription` — nazwy kroków w kolejności deklaracji, `input_schema` posortowane po nazwie dla deterministycznego wyjścia LLM (#3298)
+- `WorkflowInputParam` — nazwa, `param_type` (`"string" | "number" | "boolean" | "file" | "image" | "agent_id"`), wymagany, opis
+- `WorkflowRunSummary` — stan uruchomienia, czasy, wyjście, per-krokowe `StepOutputSummary` w kolejności wykonania
 
-**Execution:**
-- `run_workflow(workflow_id, input)` → `(run_id, output)` — blocking
+**Wykonywanie:**
+- `run_workflow(workflow_id, input)` → `(run_id, output)` — blokujące
 - `start_workflow_async(workflow_id, input)` → `run_id` — fire-and-forget
-- `start_workflow_async_tracked(workflow_id, input, caller_agent_id, caller_session_id)` — registers on the async-task tracker for completion event injection (#4983)
+- `start_workflow_async_tracked(workflow_id, input, caller_agent_id, caller_session_id)` — rejestruje w asynchronicznym trackerze zadań dla wstrzykiwania zdarzenia ukończenia (#4983)
 - `cancel_workflow_run(run_id)`
 
-### GoalControl — Agent Goals
+### GoalControl — Cele agenta
 
-- `goal_list_active(agent_id)` — pending/in_progress goals
-- `goal_update(goal_id, status, progress)` → updated goal JSON
+- `goal_list_active(agent_id)` — cele pending/in_progress
+- `goal_update(goal_id, status, progress)` → zaktualizowany JSON celu
 
-### ToolPolicy — Tool Configuration Queries
+### ToolPolicy — Zapytania konfiguracji narzędzi
 
-Read-side surface for tool execution parameterization:
+Powierzchnia odczytowa dla parametryzacji wykonania narzędzi:
 
-- `tool_timeout_secs()` / `tool_timeout_secs_for(tool_name)` — resolution: exact match → longest glob → global default
-- `skill_env_passthrough_policy()` — operator gate over skill env requests
-- `readonly_workspace_prefixes(agent_id)` / `named_workspace_prefixes(agent_id)` — sandbox access modes
-- `channel_file_download_dir()` — widens sandbox for bridge-downloaded attachments (#4434)
-- `deduplicate_file_reads()` — collapse repeated reads within a session (#4971)
-- `effective_upload_dir()` — honors `[channels].file_download_dir` or falls back to `<temp>/librefang_uploads`
-- `protected_write_paths()` — paths the WASM sandbox must never write to
+- `tool_timeout_secs()` / `tool_timeout_secs_for(tool_name)` — rozdzielczość: dokładne dopasowanie → najdłuższy glob → domyślny globalny
+- `skill_env_passthrough_policy()` — bramka operatora nad żądaniami env skilla
+- `readonly_workspace_prefixes(agent_id)` / `named_workspace_prefixes(agent_id)` — tryby dostępu piaskownicy
+- `channel_file_download_dir()` — poszerza piaskownicę dla załączników pobranych przez mostek (#4434)
+- `deduplicate_file_reads()` — zwijanie powtarzających się odczytów w ramach sesji (#4971)
+- `effective_upload_dir()` — honoruje `[channels].file_download_dir` lub cofa do `<temp>/librefang_uploads`
+- `protected_write_paths()` — ścieżki, których piaskownica WASM nigdy nie może zapisywać
 
-### ApiAuth — Auth Config Snapshot
+### ApiAuth — Migawka konfiguracji autoryzacji
 
-`auth_snapshot()` returns an `ApiAuthSnapshot` capturing every auth-relevant config field from a single `config.load()` so all fields observe the same hot-reload generation. Contains: `api_key`, `api_key_hash`, dashboard credentials (`DashboardRawConfig`), `home_dir`, `device_api_keys`, and `config_users` (`ApiUserConfigSnapshot`). The HTTP server resolves raw values (env-var override, `vault:` prefix) independently.
+`auth_snapshot()` zwraca `ApiAuthSnapshot` przechwytującą każde pole konfiguracji związane z autoryzacją z pojedynczego `config.load()`, dzięki czemu wszystkie pola obserwują tę samą generację hot-reload. Zawiera: `api_key`, `api_key_hash`, dane logowania dashboardu (`DashboardRawConfig`), `home_dir`, `device_api_keys` oraz `config_users` (`ApiUserConfigSnapshot`). Serwer HTTP rozwiązuje surowe wartości (nadpisanie env-var, prefiks `vault:`) niezależnie.
 
-### SessionWriter — Pre-Turn Content Injection
+### SessionWriter — Wstrzykiwanie zawartości przed turą
 
-- `inject_attachment_blocks(agent_id, session_id, blocks)` — pre-inserts content blocks as a User message before the next LLM turn (#3744). **Session isolation invariant:** callers must derive `session_id` with the same resolver used by the matching `send_message_*` call. Passing the wrong session causes cross-chat leaks.
-- `append_to_session(session_id, agent_id, message)` — best-effort message append for outbound message mirroring
+- `inject_attachment_blocks(agent_id, session_id, blocks)` — wstawia bloki zawartości jako wiadomość User przed następną turą LLM (#3744). **Niezmiennik izolacji sesji:** wywołujący muszą wywodzić `session_id` za pomocą tego samego resolvera używanego przez pasujące wywołanie `send_message_*`. Przekazanie błędnej sesji powoduje przecieki między czatami.
+- `append_to_session(session_id, agent_id, message)` — dołączanie wiadomości best-effort dla mirroringu wiadomości wychodzących
 
-> **Blocking I/O notice:** The current implementation calls `MemorySubstrate::save_session` synchronously (SQLite write). Callers in async contexts should wrap in `tokio::task::spawn_blocking` (#3579 will make this async).
+> **Uwaga o blokującym I/O:** Obecna implementacja wywołuje `MemorySubstrate::save_session` synchronicznie (zapis SQLite). Wywołujący w kontekstach asynchronicznych powinni otaczać to `tokio::task::spawn_blocking` (#3579 uczyni to asynchronicznym).
 
-### AcpFsBridge & AcpTerminalBridge — Editor-Backed Reverse-RPC
+### AcpFsBridge i AcpTerminalBridge — Reverse-RPC wspierany przez edytor
 
-Route file I/O and terminal commands through an attached ACP editor instead of the agent's local filesystem/process spawning (#3313).
+Kieruje operacje I/O plików i polecenia terminala przez podłączony edytor ACP zamiast lokalnego systemu plików/procesów agenta (#3313).
 
-**Client traits** (implemented by `librefang-acp`):
+**Traity klienta** (implementowane przez `librefang-acp`):
 - `AcpFsClient` — `read_text_file`, `write_text_file`, `capabilities() -> (bool, bool)`
-- `AcpTerminalClient` — `run_command(...)` (full create→wait→output→release cycle), `capabilities() -> bool`
+- `AcpTerminalClient` — `run_command(...)` (pełny cykl create→wait→output→release), `capabilities() -> bool`
 
-**Bridge traits** (implemented by the kernel):
+**Traity mostka** (implementowane przez jądro):
 - `register_acp_fs_client(session_id, client)` / `unregister_acp_fs_client(session_id)` / `acp_fs_client(session_id)` → `Option<Arc<dyn AcpFsClient>>`
-- Convenience: `acp_read_text_file(session_id, path, line, limit)` / `acp_write_text_file(session_id, path, content)` — returns `Unavailable` when no editor is bound
-- Same registration/lookup/convenience pattern for `AcpTerminalBridge`
+- Wygoda: `acp_read_text_file(session_id, path, line, limit)` / `acp_write_text_file(session_id, path, content)` — zwraca `Unavailable`, gdy żaden edytor nie jest powiązany
+- Ten sam wzorzec rejestracji/lookup/wygody dla `AcpTerminalBridge`
 
-When no editor is bound (dashboard/TUI/cron/channel-bridge cases), these return `Unavailable` and runtime tools should **fall back to local fs/process spawning**, not error out.
+Gdy żaden edytor nie jest powiązany (przypadki dashboard/TUI/cron/channel-bridge), te zwracają `Unavailable` i narzędzia środowiska uruchomieniowego powinny **cofać do lokalnego fs/process spawning**, a nie rzucać błąd.
 
-### CatalogQuery — Model Catalog Metadata
+### CatalogQuery — Metadane katalogu modeli
 
-Read-side projection for request-build-time decisions:
+Projekcja odczytowa dla decyzji w czasie budowania żądania:
 
-- `reasoning_echo_policy_for(model)` — how the OpenAI-compat driver handles `reasoning_content` on historical turns (#4842). Default: `None` (fall back to substring detection).
-- `supports_vision_for(model)` — whether to send image content blocks or redact to text. Default: `true` (fail open, #6010).
-- `proactive_memory_extraction_model_for(agent_id)` — effective extraction model (#5475). Default: `None`.
+- `reasoning_echo_policy_for(model)` — jak sterownik OpenAI-compat obsługuje `reasoning_content` na turach historycznych (#4842). Domyślnie: `None` (cofnięcie do wykrywania substringów).
+- `supports_vision_for(model)` — czy wysyłać bloki zawartości obrazu, czy redukować do tekstu. Domyślnie: `true` (fail open, #6010).
+- `proactive_memory_extraction_model_for(agent_id)` — efektywny model ekstrakcji (#5475). Domyślnie: `None`.
 
-## The `KernelHandle` Supertrait Alias
+## Alias supertraita `KernelHandle`
 
-`KernelHandle` requires all 20 role traits plus `Send + Sync`. A blanket impl means any type implementing every role trait automatically gets `KernelHandle`:
+`KernelHandle` wymaga wszystkich 20 role traits oraz `Send + Sync`. Blanket impl oznacza, że każdy typ implementujący każdy role trait automatycznie otrzymuje `KernelHandle`:
 
 ```rust
 impl<T> KernelHandle for T where
@@ -257,24 +257,24 @@ impl<T> KernelHandle for T where
 {}
 ```
 
-This keeps ~117 existing `Arc<dyn KernelHandle>` call sites working unchanged. New code should prefer narrower bounds.
+To utrzymuje ~117 istniejących punktów wywołań `Arc<dyn KernelHandle>` działających bez zmian. Nowy kod powinien preferować węższe granice.
 
-## Default Implementations
+## Implementacje domyślne
 
-Default impls follow a consistent pattern:
+Domyślne imple dla następują spójnego wzorca:
 
-| Category | Default behavior | Reason |
+| Kategoria | Domyślne zachowanie | Powód |
 |---|---|---|
-| Read queries (lists, lookups) | Empty vec / `None` / `false` | Stubs compile without wiring |
-| Write operations (create, store, send) | `Err(KernelOpError::unavailable(...))` | Fail loudly at runtime |
-| Policy gates | Permissive (`Allow`, `true` for vision) | Preserve pre-existing behavior |
-| Convenience wrappers | Delegate to the core method | Composability without re-impl |
+| Zapytania odczytowe (listy, lookupy) | Pusty wektor / `None` / `false` | Stuby kompilują się bez podłączania |
+| Operacje zapisu (create, store, send) | `Err(KernelOpError::unavailable(...))` | Jawne błędy w czasie działania |
+| Bramki polityki | Przechodzące (`Allow`, `true` dla vision) | Zachowanie zachowujące dotychczasowe |
+| Wrappery wygody | Delegują do metody podstawowej | Komponowalność bez reimplementacji |
 
-These defaults are deliberately preserved to keep the role-trait split a pure structural refactor. Follow-up PRs can tighten individual contracts independently.
+Te domyślne zachowania są celowo zachowane, aby podział role traits był czystą refaktoryzacją strukturalną. Kolejne PR-y mogą zaostrzać indywidualne kontrakty niezależnie.
 
-## Usage Patterns
+## Wzorce użycia
 
-**Broad bound (legacy, still works):**
+**Szeroka granica (legacy, nadal działa):**
 ```rust
 use librefang_kernel_handle::KernelHandle;
 
@@ -283,7 +283,7 @@ async fn do_stuff(kernel: &dyn KernelHandle) {
 }
 ```
 
-**Narrow bound (preferred for new code):**
+**Wąska granica (preferowane dla nowego kodu):**
 ```rust
 use librefang_kernel_handle::ApprovalGate;
 
@@ -294,22 +294,22 @@ async fn check_approval<T: ApprovalGate + Send + Sync>(gate: &T) {
 }
 ```
 
-**Prelude for convenience:**
+**Prelude dla wygody:**
 ```rust
 use librefang_kernel_handle::prelude::*;
 ```
 
-This brings `KernelHandle`, every role trait, and all public structs (`AgentInfo`, `AsyncSendOutcome`, `ApiAuthSnapshot`, `WorkflowRunSummary`, `AcpTerminalRunResult`, etc.) into scope.
+To wprowadza do zakresu `KernelHandle`, każdy role trait oraz wszystkie publiczne struktury (`AgentInfo`, `AsyncSendOutcome`, `ApiAuthSnapshot`, `WorkflowRunSummary`, `AcpTerminalRunResult` itd.).
 
-## Test Infrastructure
+## Infrastruktura testowa
 
-The crate includes compile-time tests (`src/tests.rs`) that verify:
+Crate zawiera testy w czasie kompilacji (`src/tests.rs`), które weryfikują:
 
-1. `stub_satisfies_kernel_handle_via_blanket_impl` — a `StubKernel` implementing all role traits reaches `KernelHandle` through the blanket impl
-2. `dyn_kernel_handle_is_object_safe` — `Arc<dyn KernelHandle>` can be constructed
-3. `role_traits_are_individually_object_safe` — each role trait can be used as `Arc<dyn Role>` independently
+1. `stub_satisfies_kernel_handle_via_blanket_impl` — `StubKernel` implementujący wszystkie role traits osiąga `KernelHandle` przez blanket impl
+2. `dyn_kernel_handle_is_object_safe` — `Arc<dyn KernelHandle>` może być skonstruowany
+3. `role_traits_are_individually_object_safe` — każdy role trait może być używany jako `Arc<dyn Role>` niezależnie
 
-Integration tests (`tests/`) verify default-method delegation behavior:
-- `defaults_approval.rs` — approval defaults auto-approve, context methods delegate
+Testy integracyjne (`tests/`) weryfikują zachowanie delegacji metod domyślnych:
+- `defaults_approval.rs` — domyślne zatwierdzenia auto-approve, metody kontekstowe delegują
 - `defaults_delegation.rs` — `send_to_agent_as` → `send_to_agent`, `spawn_agent_checked` → `spawn_agent`, `requires_approval_with_context` → `requires_approval`
-- `defaults_returns.rs` — typed error variants on default impls (`KernelOpError::Unavailable`)
+- `defaults_returns.rs` — typowane warianty błędów na domyślnych implach (`KernelOpError::Unavailable`)

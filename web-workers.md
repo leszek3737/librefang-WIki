@@ -2,180 +2,180 @@
 
 # web/workers
 
-Cloudflare Workers powering the LibreFang web presence: the FangHub marketplace API, the plugin registry proxy, GitHub stats collection, and a lightweight visit counter. All four workers are single-file ES modules deployed via Wrangler and share a single D1 (SQLite) database.
+Cloudflare Workers obsługujące obecność LibreFang w sieci: API rynku FangHub, proxy rejestru wtyczek, zbieranie statystyk GitHuba oraz lekki licznik odwiedzin. Wszystkie cztery workery to pojedyncze pliki ES modułów wdrażane przez Wrangler, współdzielące jedną bazę D1 (SQLite).
 
-## Architecture
+## Architektura
 
 ```mermaid
 graph TD
   subgraph "GitHub"
-    REG[librefang-registry repo]
-    MAIN[librefang/librefang repo]
+    REG[repo librefang-registry]
+    MAIN[repo librefang/librefang]
   end
 
   subgraph "Cloudflare Workers"
     MW[marketplace-worker<br/>FangHub API]
-    RW[registry-worker<br/>registry proxy + signed index]
-    SW[stats-worker<br/>GitHub metrics]
+    RW[registry-worker<br/>proxy rejestru + podpisany indeks]
+    SW[stats-worker<br/>metryki GitHuba]
     VC[visit-counter-worker]
   end
 
   D1[(D1: librefang-marketplace)]
 
-  MW -- D1 binding --> D1
-  RW -- D1 binding --> D1
-  SW -- D1 binding --> D1
-  VC -- D1 binding --> D1
+  MW -- powiązanie D1 --> D1
+  RW -- powiązanie D1 --> D1
+  SW -- powiązanie D1 --> D1
+  VC -- powiązanie D1 --> D1
 
-  REG -- CI commits signed index --> RW
+  REG -- commity CI podpisany indeks --> RW
   RW -- raw fetch --> REG
   SW -- API --> MAIN
   MW -- OAuth --> MAIN
 ```
 
-All workers bind to the same D1 database (`database_id: 1bbf40ca-...`). Each worker owns distinct tables but can read shared ones (e.g., `kv_store`, `visit_counts`).
+Wszystkie workery są powiązane z tą samą bazą D1 (`database_id: 1bbf40ca-...`). Każdy worker jest właścicielem odrębnych tabel, ale może odczytywać tabele współdzielone (np. `kv_store`, `visit_counts`).
 
 ---
 
-## Workers
+## Workery
 
 ### marketplace-worker (`librefang-marketplace`)
 
-The FangHub package registry. Handles GitHub OAuth authentication, package CRUD, version publishing with Ed25519 signing, download redirects with async count batching, and star tracking.
+Rejestr pakietów FangHub. Obsługuje uwierzytelnianie GitHub OAuth, CRUD pakietów, publikowanie wersji z podpisywaniem Ed25519, przekierowania pobierania z asynchronicznym grupowym zliczaniem oraz śledzenie gwiazdek.
 
-**Key endpoints:**
+**Kluczowe endpointy:**
 
-| Route | Method | Handler | Auth |
+| Ścieżka | Metoda | Obsługa | Autoryzacja |
 |---|---|---|---|
-| `/v1/packages` | GET | `handleListPackages` | Public |
-| `/v1/packages` | POST | `handleCreatePackage` | Cookie |
-| `/v1/packages/{slug}` | GET/PUT/DELETE | `handleGetPackage` / `handleUpdatePackage` / `handleDeletePackage` | Public / Owner / Owner |
-| `/v1/packages/{slug}/versions` | GET/POST | `handleListVersions` / `handlePublishVersion` | Public / Owner |
-| `/v1/download/{slug}/{version}` | GET | `handleDownload` | Public (302 redirect) |
-| `/v1/packages/{slug}/star` | POST/DELETE | `handleStar` | Cookie |
-| `/v1/pubkey` | GET | `handlePubkey` | Public |
-| `/v1/download/{slug}/{version}/signature` | GET | `handleVersionSignature` | Public |
-| `/auth/github`, `/auth/github/callback`, `/auth/me`, `/auth/logout` | GET | OAuth flow | — |
+| `/v1/packages` | GET | `handleListPackages` | Publiczny |
+| `/v1/packages` | POST | `handleCreatePackage` | Ciasteczko |
+| `/v1/packages/{slug}` | GET/PUT/DELETE | `handleGetPackage` / `handleUpdatePackage` / `handleDeletePackage` | Publiczny / Właściciel / Właściciel |
+| `/v1/packages/{slug}/versions` | GET/POST | `handleListVersions` / `handlePublishVersion` | Publiczny / Właściciel |
+| `/v1/download/{slug}/{version}` | GET | `handleDownload` | Publiczny (przekierowanie 302) |
+| `/v1/packages/{slug}/star` | POST/DELETE | `handleStar` | Ciasteczko |
+| `/v1/pubkey` | GET | `handlePubkey` | Publiczny |
+| `/v1/download/{slug}/{version}/signature` | GET | `handleVersionSignature` | Publiczny |
+| `/auth/github`, `/auth/github/callback`, `/auth/me`, `/auth/logout` | GET | Przepływ OAuth | — |
 
-**Auth model:** Stateless HS256 JWT stored in an `mp_token` HttpOnly cookie. `authenticate()` extracts and verifies the JWT on every protected request. JWTs expire after 30 days. GitHub user records are upserted into the `users` table on each callback.
+**Model autoryzacji:** Bezstanowy JWT HS256 przechowywany w ciasteczku HttpOnly `mp_token`. `authenticate()` wyciąga i weryfikuje JWT przy każdym chronionym żądaniu. Tokeny JWT wygasają po 30 dniach. Rekordy użytkowników GitHuba są upsertowane do tabeli `users` przy każdym wywołaniu zwrotnym.
 
-**Download counting:** Downloads are not counted synchronously. `handleDownload` fires a `ctx.waitUntil()` that upserts into `download_counts_pending` (keyed by package, version, ISO week). The weekly cron (`flushDownloadCounts`) resets `weekly_downloads` to zero, then folds pending counts into `total_downloads`, `weekly_downloads`, and per-version `downloads` columns.
+**Zliczanie pobierań:** Pobrania nie są zliczane synchronicznie. `handleDownload` uruchamia `ctx.waitUntil()`, który wykonuje upsert do `download_counts_pending` (kluczowane wg pakiet, wersja, tydzień ISO). Cotygodniowy cron (`flushDownloadCounts`) zeruje `weekly_downloads`, a następnie agreguje oczekujące liczniki do `total_downloads`, `weekly_downloads` oraz kolumn `downloads` dla poszczególnych wersji.
 
-**Bundle host allowlist:** `handlePublishVersion` rejects `bundle_url` values that don't match `ALLOWED_BUNDLE_LOCATIONS`. This is a security-critical check — without it, an author could point the registry signature at an attacker-controlled URL. The validation uses parsed `(host, pathRegex)` tuples rather than string-prefix matching to prevent WHATWG URL normalization bypasses. Allowed hosts:
+**Lista dozwolonych hostów bundle:** `handlePublishVersion` odrzuca wartości `bundle_url`, które nie pasują do `ALLOWED_BUNDLE_LOCATIONS`. Jest to kontrola krytyczna dla bezpieczeństwa — bez niej autor mógłby skierować podpis rejestru na URL kontrolowany przez atakującego. Walidacja używa sparsowanych krotek `(host, pathRegex)` zamiast dopasowywania prefiksów ciągu, aby zapobiec obejściu poprzez normalizację URL WHATWG. Dozwolone hosty:
 
-- `github.com` — path must match `/^\/[^/]+\/[^/]+\/releases\/download\//` (immutable release assets only)
-- `objects.githubusercontent.com` — GitHub's asset CDN
-- `marketplace.librefang.ai` — path must be under `/bundles/`
+- `github.com` — ścieżka musi pasować do `/^\/[^/]+\/[^/]+\/releases\/download\//` (tylko niezmienn zasoby wydania)
+- `objects.githubusercontent.com` — CDN zasobów GitHuba
+- `marketplace.librefang.ai` — ścieżka musi znajdować się pod `/bundles/`
 
-URLs with credentials, hash fragments, or non-HTTPS schemes are rejected.
+URL-e z danymi uwierzytelniającymi, fragmentami hash lub schematami innymi niż HTTPS są odrzucane.
 
 ### registry-worker (`librefang-registry`)
 
-Proxies the `librefang/librefang-registry` GitHub repo. Serves two distinct payloads:
+Proxy repozytorium GitHuba `librefang/librefang-registry`. Serwuje dwa odrębne ładunki:
 
-1. **Dashboard payload** (`GET /api/registry`) — dict-shaped JSON (hands/channels/plugins/skills/...) consumed by the marketplace UI. Stored in D1 `kv_store['registry_data']`.
-2. **Daemon payload** (`GET /api/registry/index.json`) — flat JSON array of `{name, version?, description?, needs?}` entries. This is what gets Ed25519-signed and what the daemon verifies.
+1. **Ładunek dashboardu** (`GET /api/registry`) — JSON w postaci słownika (hands/channels/plugins/skills/...) konsumowany przez UI rynku. Przechowywany w D1 `kv_store['registry_data']`.
+2. **Ładunek demona** (`GET /api/registry/index.json`) — płaska tablica JSON wpisów `{name, version?, description?, needs?}`. To, co jest podpisywane Ed25519 i co demon weryfikuje.
 
-**Sync flow (`doSyncFromRepo`):** Fetches three files from `raw.githubusercontent.com` in parallel — `plugins-index.json`, `plugins-index.json.sig`, and `registry-index.json` — and writes them verbatim to D1. The worker performs no signing; it is pure transport. The signature is produced by the registry repo's GitHub Actions CI, which holds the Ed25519 private key as an Actions secret.
+**Przepływ synchronizacji (`doSyncFromRepo`):** Pobiera równolegle trzy pliki z `raw.githubusercontent.com` — `plugins-index.json`, `plugins-index.json.sig` i `registry-index.json` — i zapisuje je dosłownie w D1. Worker nie wykonuje podpisywania; jest czystym transportem. Podpis jest generowany przez CI GitHub Actions repozytorium rejestru, które przechowuje klucz prywatny Ed25519 jako sekret Actions.
 
-**Two sync triggers:**
+**Dwa wyzwalacze synchronizacji:**
 
-- **Forced refresh** (`POST /api/registry/refresh`): Invoked by the registry repo's GitHub Action after a push. Authenticated via bearer token (`REGISTRY_REFRESH_TOKEN`) compared with `constantTimeEqual()`. Returns 503 until the token is configured.
-- **Cron backstop** (`scheduled`): Daily at 02:00 UTC. No auth (the worker calls itself). Guards against CI outages.
+- **Wymuszone odświeżenie** (`POST /api/registry/refresh`): Wywoływane przez GitHub Action repozytorium rejestru po pushu. Uwierzytelniane przez bearer token (`REGISTRY_REFRESH_TOKEN`) porównywany za pomocą `constantTimeEqual()`. Zwraca 503, dopóki token nie jest skonfigurowany.
+- **Cron zapasowy** (`scheduled`): Codziennie o 02:00 UTC. Bez autoryzacji (worker wywołuje sam siebie). Zabezpieczenie przed awariami CI.
 
-**Caching layers:**
+**Warstwy cachowania:**
 
-- **Cache API** — `caches.default` with 1h TTL for registry data, 6h for commit metadata, 10m for trending. The forced-refresh path purges the registry data cache key after D1 write so the dashboard sees fresh data immediately.
-- **Staleness window** — If D1 data is younger than `REGISTRY_STALE_TTL` (24h), the worker serves it even when `?refresh=1` is passed. A full rebuild makes 30+ GitHub subrequests, which exceeds the Workers free-tier per-request subrequest budget; only cron runs have the higher quota.
+- **Cache API** — `caches.default` z TTL 1h dla danych rejestru, 6h dla metadanych commitów, 10m dla trendów. Ścieżka wymuszonego odświeżenia czyści klucz cache danych rejestru po zapisie do D1, aby dashboard natychmiast widział świeże dane.
+- **Okno nieświeżości** — Jeśli dane D1 są młodsze niż `REGISTRY_STALE_TTL` (24h), worker serwuje je nawet gdy przesłano `?refresh=1`. Pełna odbudowa wykonuje 30+ subzapytań do GitHuba, co przekracza budżet subzapytań na żądanie w darmowym planie Workers; tylko uruchomienia cron mają wyższy limit.
 
-**Other registry endpoints:** Raw file proxy (`/api/registry/raw`), commit metadata (`/api/registry/commit`), click tracking (`/api/registry/click` → D1 `registry_clicks`), trending (`/api/registry/trending`), aggregate metrics (`/api/registry/metrics`), and UI error reporting (`/api/errors` POST/GET → D1 `ui_errors`, auto-pruned after 30 days).
+**Inne endpointy rejestru:** Proxy surowych plików (`/api/registry/raw`), metadane commitów (`/api/registry/commit`), śledzenie kliknięć (`/api/registry/click` → D1 `registry_clicks`), trendy (`/api/registry/trending`), zagregowane metryki (`/api/registry/metrics`) oraz raportowanie błędów UI (`/api/errors` POST/GET → D1 `ui_errors`, automatycznie czyszczone po 30 dniach).
 
 ### stats-worker (`librefang-github-stats`)
 
-Collects GitHub metrics for the main `librefang/librefang` repo. Daily cron at 00:00 UTC calls `recordDailyStats()`, which fetches repo metadata and open PR count, then upserts into `github_stats_history` keyed by date.
+Zbiera metryki GitHuba dla głównego repozytorium `librefang/librefang`. Codzienny cron o 00:00 UTC wywołuje `recordDailyStats()`, który pobiera metadane repozytorium i liczbę otwartych PR-ów, a następnie wykonuje upsert do `github_stats_history` kluczowany po dacie.
 
-**Endpoints:**
+**Endpointy:**
 
-- `GET /api/github` — Current stats (stars, forks, issues, PRs, downloads, 30-day star history). 30min Cache API TTL. `?refresh=1` bypasses cache.
-- `GET /api/releases` — Latest 20 releases (proxied from GitHub API). 30min cache.
+- `GET /api/github` — Bieżące statystyki (gwiazdki, forki, issue, PR-y, pobrania, 30-dniowa historia gwiazdek). TTL 30min w Cache API. `?refresh=1` omija cache.
+- `GET /api/releases` — Najnowsze 20 wydań (proxy z GitHub API). Cache 30min.
 
-PR counts are extracted from GitHub's `Link` header pagination (`parseLinkHeaderCount`) rather than counting a page of results, which avoids rate-limit issues on repos with many open PRs.
+Liczby PR-ów są wydobywane z paginacji nagłówka `Link` GitHuba (`parseLinkHeaderCount`) zamiast zliczania strony wyników, co unika problemów z limitami zapytań w repozytoriach z wieloma otwartymi PR-ami.
 
 ### visit-counter-worker (`librefang-visit-counter`)
 
-Minimal page-visit counter. Two special rows in `visit_counts`: `__total__` (all-time) and the current date (daily). `GET /script.js` returns an inline tracking script that POSTs to `/api/track` with `keepalive: true` for reliability on page unload.
+Minimalny licznik odwiedzin stron. Dwa specjalne wiersze w `visit_counts`: `__total__` (wszechczasowe) i bieżąca data (dzienna). `GET /script.js` zwraca wbudowany skrypt śledzący, który wysyła POST do `/api/track` z `keepalive: true` dla niezawodności przy zamykaniu strony.
 
 ---
 
-## Plugin Signing
+## Podpisywanie wtyczek
 
-Two distinct signing architectures exist, both using the same Ed25519 keypair (generated by `keygen.mjs`):
+Istnieją dwie odrębne architektury podpisywania, obie wykorzystujące tę samą parę kluczy Ed25519 (wygenerowaną przez `keygen.mjs`):
 
-### Registry index signing (registry-worker)
+### Podpisywanie indeksu rejestru (registry-worker)
 
-The worker holds **no private key**. The trust chain is:
+Worker **nie przechowuje klucza prywatnego**. Łańcuch zaufania to:
 
-1. Registry repo CI builds `plugins-index.json` (flat array of plugin entries).
-2. CI signs it locally with the Ed25519 private key (stored as a GitHub Actions secret).
-3. CI commits both `plugins-index.json` and `plugins-index.json.sig` to the repo, then calls `POST /api/registry/refresh`.
-4. The worker fetches the committed files and stores them verbatim in D1.
-5. The daemon fetches `GET /api/registry/index.json` and `GET /api/registry/index.json.sig`, verifies the signature against the TOFU-pinned public key.
+1. CI repozytorium rejestru buduje `plugins-index.json` (płaska tablica wpisów wtyczek).
+2. CI podpisuje go lokalnie kluczem prywatnym Ed25519 (przechowywanym jako sekret GitHub Actions).
+3. CI commituje zarówno `plugins-index.json`, jak i `plugins-index.json.sig` do repozytorium, a następnie wywołuje `POST /api/registry/refresh`.
+4. Worker pobiera commitowane pliki i zapisuje je dosłownie w D1.
+5. Demon pobiera `GET /api/registry/index.json` i `GET /api/registry/index.json.sig`, weryfikując podpis względem przypiętego przez TOFU klucza publicznego.
 
-The worker validates that the index is a JSON array, the registry data is a JSON object, and the signature is 86 or 88 base64 characters (64 raw bytes for Ed25519). Malformed payloads are rejected before D1 write.
+Worker weryfikuje, że indeks jest tablicą JSON, dane rejestru są obiektem JSON, a podpis ma 86 lub 88 znaków base64 (64 surowe bajty dla Ed25519). Zniekształcone ładunki są odrzucane przed zapisem do D1.
 
-### Bundle signing (marketplace-worker)
+### Podpisywanie bundle (marketplace-worker)
 
-The worker holds the private key as a Cloudflare secret (`REGISTRY_PRIVATE_KEY`). At publish time, `handlePublishVersion` constructs the canonical string:
+Worker przechowuje klucz prywatny jako sekret Cloudflare (`REGISTRY_PRIVATE_KEY`). W momencie publikacji, `handlePublishVersion` konstruuje ciąg kanoniczny:
 
 ```
 <slug>@<version>|<bundle_url>|<bundle_sha256>
 ```
 
-signs it with `signWithRegistryKey()`, and stores the base64 signature in `package_versions.bundle_sig`. The daemon fetches `GET /v1/download/{slug}/{version}/signature`, reconstructs the same canonical string locally, and verifies.
+podpisuje go za pomocą `signWithRegistryKey()` i zapisuje podpis base64 w `package_versions.bundle_sig`. Demon pobiera `GET /v1/download/{slug}/{version}/signature`, rekonstruuje ten sam ciąg kanoniczny lokalnie i weryfikuje.
 
-### Public key distribution
+### Dystrybucja klucza publicznego
 
-Both workers expose the raw 32-byte Ed25519 public key (base64) at their respective endpoints:
+Oba workery eksponują surowy 32-bajtowy klucz publiczny Ed25519 (base64) na swoich odpowiednich endpointach:
 
 - `marketplace-worker`: `GET /v1/pubkey`
-- `registry-worker`: `GET /.well-known/registry-pubkey` and `GET /api/registry/pubkey` (the `/api/*` alias exists because the custom domain only routes `/api/*` to the worker)
+- `registry-worker`: `GET /.well-known/registry-pubkey` oraz `GET /api/registry/pubkey` (alias `/api/*` istnieje, ponieważ domena niestandardowa kieruje tylko `/api/*` do workera)
 
-The daemon uses TOFU (trust on first use): it fetches the public key on first contact, caches it at `~/.librefang/registry.pub`, and pins it for all subsequent verifications.
+Demon używa TOFU (trust on first use): pobiera klucz publiczny przy pierwszym kontakcie, cachuje go w `~/.librefang/registry.pub` i przypina dla wszystkich kolejnych weryfikacji.
 
-### Graceful degradation
+### Łagodna degradacja
 
-Signing is fully opt-in. When keys are unconfigured:
+Podpisywanie jest w pełni opcjonalne. Gdy klucze nie są skonfigurowane:
 
-- `REGISTRY_PRIVATE_KEY` unset → `signWithRegistryKey()` returns `null`; `bundle_sig` columns are written as `NULL`; the cron skips signature storage.
-- `REGISTRY_PUBLIC_KEY` unset → pubkey and signature endpoints return HTTP 503.
-- All existing endpoints (`/api/registry`, `/v1/packages`, `/v1/download/...`) remain functional.
-- The daemon falls back to SHA-256-only bundle verification.
+- `REGISTRY_PRIVATE_KEY` nieustawiony → `signWithRegistryKey()` zwraca `null`; kolumny `bundle_sig` są zapisywane jako `NULL`; cron pomija przechowywanie podpisów.
+- `REGISTRY_PUBLIC_KEY` nieustawiony → endpointy klucza publicznego i podpisu zwracają HTTP 503.
+- Wszystkie istniejące endpointy (`/api/registry`, `/v1/packages`, `/v1/download/...`) pozostają funkcjonalne.
+- Demon przechodzi na weryfikację bundle wyłącznie SHA-256.
 
-### Key management
+### Zarządzanie kluczami
 
-Use `node web/workers/keygen.mjs` to generate a keypair. The script outputs:
+Użyj `node web/workers/keygen.mjs` aby wygenerować parę kluczy. Skrypt wypisuje:
 
-- `REGISTRY_PUBLIC_KEY` — raw 32-byte pubkey, base64. Non-secret. Goes in `wrangler.toml` `[vars]` for both workers.
-- `REGISTRY_PRIVATE_KEY` — PKCS#8 DER, base64. Secret. Deploy via `wrangler secret put` to both workers.
+- `REGISTRY_PUBLIC_KEY` — surowy 32-bajtowy klucz publiczny, base64. Niejawny. Trafia do `[vars]` w `wrangler.toml` dla obu workerów.
+- `REGISTRY_PRIVATE_KEY` — PKCS#8 DER, base64. Tajny. Wdrażany przez `wrangler secret put` do obu workerów.
 
-For rotation, provisioning, and the full daemon-side trust model, see [`SIGNING.md`](./SIGNING.md) and `docs/architecture/plugin-signing.md`.
+Aby uzyskać informacje o rotacji, inicjalizacji i pełnym modelu zaufania po stronie demona, patrz [`SIGNING.md`](./SIGNING.md) oraz `docs/architecture/plugin-signing.md`.
 
 ---
 
-## Shared D1 Schema
+## Współdzielony schemat D1
 
-Defined in `marketplace-worker/schema.sql`. Tables are partitioned by owning worker:
+Zdefiniowany w `marketplace-worker/schema.sql`. Tabele są podzielone wg właściciela workera:
 
-| Worker | Tables |
+| Worker | Tabele |
 |---|---|
 | marketplace-worker | `users`, `packages`, `package_versions`, `stars`, `download_counts_pending` |
 | registry-worker | `registry_clicks`, `ui_errors`, `kv_store` |
 | stats-worker | `github_stats_history` |
 | visit-counter-worker | `visit_counts` |
 
-`kv_store` is a general-purpose key-value table used for singleton state: `registry_data` (dashboard payload), `plugins_index` (daemon payload), `plugins_index_sig` (Ed25519 signature), and related timestamps.
+`kv_store` to ogólnego przeznaczenia tabela klucz-wartość używana dla stanu typu singleton: `registry_data` (ładunek dashboardu), `plugins_index` (ładunek demona), `plugins_index_sig` (podpis Ed25519) i powiązanych znaczników czasu.
 
-The `bundle_sig` column on `package_versions` was added for signing. For existing databases, D1 ignores duplicate `ALTER TABLE` statements, so the migration is idempotent:
+Kolumna `bundle_sig` w `package_versions` została dodana dla podpisywania. Dla istniejących baz danych, D1 ignoruje zduplikowane instrukcje `ALTER TABLE`, więc migracja jest idempotentna:
 
 ```sql
 ALTER TABLE package_versions ADD COLUMN bundle_sig TEXT;
@@ -183,9 +183,9 @@ ALTER TABLE package_versions ADD COLUMN bundle_sig TEXT;
 
 ---
 
-## Deployment
+## Wdrażanie
 
-Each worker has its own `wrangler.toml` and deploys independently:
+Każdy worker ma swój własny `wrangler.toml` i jest wdrażany niezależnie:
 
 ```bash
 cd web/workers/registry-worker      && wrangler deploy
@@ -194,38 +194,38 @@ cd web/workers/stats-worker          && wrangler deploy
 cd web/workers/visit-counter-worker  && wrangler deploy
 ```
 
-**Secrets** (deploy with `wrangler secret put`):
+**Sekrety** (wdrażane przez `wrangler secret put`):
 
-| Secret | Worker | Purpose |
+| Sekret | Worker | Przeznaczenie |
 |---|---|---|
-| `REGISTRY_PRIVATE_KEY` | marketplace-worker, registry-worker* | Ed25519 PKCS#8 private key for signing |
-| `REGISTRY_REFRESH_TOKEN` | registry-worker | Bearer token for forced-refresh endpoint |
-| `JWT_SECRET` | marketplace-worker | HS256 signing key for session JWTs |
-| `GITHUB_CLIENT_SECRET` | marketplace-worker | GitHub OAuth app secret |
-| `GITHUB_TOKEN` | registry-worker, stats-worker | GitHub API token (higher rate limits) |
+| `REGISTRY_PRIVATE_KEY` | marketplace-worker, registry-worker* | Klucz prywatny Ed25519 PKCS#8 do podpisywania |
+| `REGISTRY_REFRESH_TOKEN` | registry-worker | Bearer token dla endpointu wymuszonego odświeżenia |
+| `JWT_SECRET` | marketplace-worker | Klucz podpisywania HS256 dla tokenów sesyjnych JWT |
+| `GITHUB_CLIENT_SECRET` | marketplace-worker | Sekret aplikacji GitHub OAuth |
+| `GITHUB_TOKEN` | registry-worker, stats-worker | Token GitHub API (wyższe limity zapytań) |
 
-*Note: As of the current design, `registry-worker` does not use `REGISTRY_PRIVATE_KEY` for signing — it only serves the pre-signed index committed by CI. The secret is listed for backward compatibility and potential future use.
+*Uwaga: W obecnym projekcie, `registry-worker` nie używa `REGISTRY_PRIVATE_KEY` do podpisywania — serwuje jedynie pre-podpisany indeks commitowany przez CI. Sekret jest wymieniony dla wstecznej kompatybilności i potencjalnego przyszłego użycia.
 
-**Vars** (in `wrangler.toml`, non-secret):
+**Zmienne** (w `wrangler.toml`, niejawne):
 
-- `REGISTRY_PUBLIC_KEY` — raw 32-byte Ed25519 public key, base64. Currently `joY8IYrUbbACfKRyp2CTcEbcEty8wcBwP1MTxU+vjaM=` for both signing workers.
-- `GITHUB_CLIENT_ID` — OAuth app client ID.
-- `GITHUB_REDIRECT_URI`, `AUTH_SUCCESS_REDIRECT` — OAuth flow URLs.
+- `REGISTRY_PUBLIC_KEY` — surowy 32-bajtowy klucz publiczny Ed25519, base64. Obecnie `joY8IYrUbbACfKRyp2CTcEbcEty8wcBwP1MTxU+vjaM=` dla obu workerów podpisujących.
+- `GITHUB_CLIENT_ID` — ID klienta aplikacji OAuth.
+- `GITHUB_REDIRECT_URI`, `AUTH_SUCCESS_REDIRECT` — URL-e przepływu OAuth.
 
-**Cron triggers:**
+**Wyzwalacze cron:**
 
-| Worker | Schedule (UTC) | Action |
+| Worker | Harmonogram (UTC) | Akcja |
 |---|---|---|
-| stats-worker | `0 0 * * *` (daily midnight) | `recordDailyStats` |
-| registry-worker | `0 2 * * *` (daily 02:00) | `doSyncFromRepo` (backstop) |
-| marketplace-worker | `0 1 * * SUN` (weekly Sunday 01:00) | `flushDownloadCounts` |
+| stats-worker | `0 0 * * *` (codziennie o północy) | `recordDailyStats` |
+| registry-worker | `0 2 * * *` (codziennie o 02:00) | `doSyncFromRepo` (zapasowy) |
+| marketplace-worker | `0 1 * * SUN` (cotygodniowo w niedzielę o 01:00) | `flushDownloadCounts` |
 
 ---
 
-## Security Considerations
+## Uwagi dotyczące bezpieczeństwa
 
-- **Bundle URL allowlist** (`isAllowedBundleHost`): Prevents authors from getting registry-signed signatures on mutable or attacker-controlled URLs. Uses parsed URL validation, not string prefixes, to resist WHATWG normalization attacks.
-- **Constant-time token comparison** (`constantTimeEqual`): The forced-refresh bearer token check iterates the full length of both strings without early return, folding the length delta into the mismatch accumulator.
-- **Registry worker as pure transport**: The worker never holds registry signing key material. The trust root is the registry repo's branch protection + Actions secret, not a worker-held key. This eliminates the sign-anything oracle vulnerability present in earlier designs.
-- **Input validation**: SHA-256 values are validated as exactly 64 lowercase hex characters. Error report messages are length-capped. Registry paths are validated against `CATEGORY_RE` and reject `..` traversal.
-- **CORS**: marketplace-worker restricts origins to `https://librefang.ai` with credentials. Other workers use `*` (read-only public data).
+- **Lista dozwolonych hostów bundle** (`isAllowedBundleHost`): Zapobiega uzyskiwaniu przez autorów podpisów rejestru na modyfikowalnych lub kontrolowanych przez atakującego URL-ach. Używa walidacji sparsowanego URL-a, a nie prefiksów ciągu, aby opierać się atakom normalizacji WHATWG.
+- **Porównanie tokenów w stałym czasie** (`constantTimeEqual`): Sprawdzenie bearer tokena wymuszonego odświeżenia iteruje przez pełną długość obu ciągów bez wczesnego powrotu, składając deltę długości do akumulatora niezgodności.
+- **Worker rejestru jako czysty transport**: Worker nigdy nie przechowuje materiału klucza podpisywania rejestru. Korzeń zaufania to ochrona gałęzi repozytorium rejestru + sekret Actions, a nie klucz trzymany przez workera. Eliminuje to lukę orakula podpisującego-wszystko obecną we wcześniejszych projektach.
+- **Walidacja wejścia**: Wartości SHA-256 są walidowane jako dokładnie 64 małe znaki hex. Komunikaty raportów błędów mają ograniczoną długość. Ścieżki rejestru są walidowane względem `CATEGORY_RE` i odrzucają traversację `..`.
+- **CORS**: marketplace-worker ogranicza origins do `https://librefang.ai` z danymi uwierzytelniającymi. Pozostałe workery używają `*` (tylko do odczytu danych publicznych).

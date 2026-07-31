@@ -1,26 +1,26 @@
-# web — scripts
+# web — skrypty
 
-# Web Scripts
+# Skrypty web
 
-Build-time and developer tooling for the LibreFang web application. These scripts run via `pnpm` scripts (typically `prebuild` hooks) and CLI invocations — they are **not** bundled into the runtime app.
+Narzędzia czasu budowania i deweloperskie dla aplikacji webowej LibreFang. Te skrypty uruchamiane są przez `pnpm` scripts (zazwyczaj hooki `prebuild`) oraz wywołania CLI — **nie są** dołączane do aplikacji w czasie wykonywania.
 
-## Overview
+## Przegląd
 
-| Script | Purpose | Trigger |
+| Skrypt | Przeznaczenie | Wyzwalacz |
 |---|---|---|
-| `fetch-registry.ts` | Pull registry data from GitHub, emit `public/registry.json` | `pnpm fetch-registry` |
-| `gen-og-images.ts` | Generate per-category and per-item OpenGraph SVG cards | `pnpm build` (prebuild) |
-| `gen-rss.ts` | Convert `CHANGELOG.md` into an Atom feed at `public/feed.xml` | `pnpm build` (prebuild) |
-| `audit-locale-completeness.ts` | Verify translation locale trees match English keys | `pnpm i18n:audit <locale\|--all>` |
-| `worker.test.ts` | Test the Cloudflare Pages `_worker.js` UA-based install routing | `pnpm test` |
+| `fetch-registry.ts` | Pobiera dane rejestru z GitHuba, generuje `public/registry.json` | `pnpm fetch-registry` |
+| `gen-og-images.ts` | Generuje karty SVG OpenGraph dla każdej kategorii i pozycji | `pnpm build` (prebuild) |
+| `gen-rss.ts` | Konwertuje `CHANGELOG.md` na kanał Atom w `public/feed.xml` | `pnpm build` (prebuild) |
+| `audit-locale-completeness.ts` | Sprawdza, czy drzewa tłumaczeń odpowiadają kluczom angielskim | `pnpm i18n:audit <locale\|--all>` |
+| `worker.test.ts` | Testuje routing instalacji oparty na UA w Cloudflare Pages `_worker.js` | `pnpm test` |
 
 ```mermaid
 flowchart LR
     GH[GitHub registry repo] -->|fetch-registry| REG[public/registry.json]
     REG -->|gen-og-images| OG[public/og/*.svg]
     CL[CHANGELOG.md] -->|gen-rss| FEED[public/feed.xml]
-    SRC[src/i18n] -->|audit-locale| STDERR[pass/fail report]
-    REG --> APP[Runtime app]
+    SRC[src/i18n] -->|audit-locale| STDERR[raport pass/fail]
+    REG --> APP[Aplikacja w czasie wykonywania]
     OG --> APP
     FEED --> APP
 ```
@@ -29,26 +29,26 @@ flowchart LR
 
 ## fetch-registry.ts
 
-Fetches manifest files from the `librefang/librefang-registry` GitHub repository and writes a consolidated `public/registry.json`. This is the bridge between the external registry monorepo and the web app's static data.
+Pobiera pliki manifestowe z repozytorium GitHub `librefang/librefang-registry` i zapisuje skonsolidowany `public/registry.json`. To jest pomost między zewnętrznym monorepo rejestru a danymi statycznymi aplikacji webowej.
 
-### How it works
+### Jak to działa
 
-1. **Directory listing** — `fetchDir(path)` calls the GitHub Contents API to enumerate directories or `.toml` files under each category (`hands`, `channels`, `providers`, `workflows`, `agents`, `plugins`, `skills`, `mcp`). A 404 is silently ignored for optional categories.
-2. **Manifest parsing** — `fetchBatch()` processes items in chunks of 10 with `Promise.all`, delegating to one of two fetchers:
-   - `fetchToml` → `parseToml()`: line-oriented TOML parser for `HAND.toml`, `agent.toml`, `plugin.toml`, `MCP.toml`, and standalone `.toml` files. Extracts `id`, `name`, `description`, `category`, `icon`, `tags`, and `[i18n.<lang>]` sections with localized name/description pairs.
-   - `fetchSkillMd()`: parses YAML frontmatter from `SKILL.md` files. Skills always have `category = "skills"` and `icon = ""`.
-3. **Output** — writes a JSON object with one array per category plus `*Count` fields and a `fetchedAt` ISO timestamp.
+1. **Wyliczanie katalogu** — `fetchDir(path)` wywołuje GitHub Contents API, aby wyliczyć katalogi lub pliki `.toml` w każdej kategorii (`hands`, `channels`, `providers`, `workflows`, `agents`, `plugins`, `skills`, `mcp`). Błąd 404 dla opcjonalnych kategorii jest ignorowany.
+2. **Analiza manifestów** — `fetchBatch()` przetwarza pozycje w porcjach po 10 z `Promise.all`, delegując do jednego z dwóch pobieraczy:
+   - `fetchToml` → `parseToml()`: parser TOML zorientowany na linie dla plików `HAND.toml`, `agent.toml`, `plugin.toml`, `MCP.toml` oraz samodzielnych plików `.toml`. Wyodrębnia `id`, `name`, `description`, `category`, `icon`, `tags` oraz sekcje `[i18n.<lang>]` z zlokalizowanymi parami name/description.
+   - `fetchSkillMd()`: analizuje YAML frontmatter z plików `SKILL.md`. Skille zawsze mają `category = "skills"` oraz `icon = ""`.
+3. **Wynik** — zapisuje obiekt JSON z jedną tablicą na kategorię oraz polami `*Count` i znacznikiem czasu ISO `fetchedAt`.
 
-### TOML parsing details
+### Szczegóły analizy TOML
 
-`parseToml()` uses a **line-oriented** approach rather than a capturing regex for `[i18n.<lang>]` sections. This is deliberate — a naive "content between two headers" regex breaks when a value contains a `[` character (e.g. `tags = ["popular"]`). The parser:
+`parseToml()` korzysta z podejścia **zorientowanego na linie**, a nie z przechwytującego wyrażenia regularnego dla sekcji `[i18n.<lang>]`. Jest to celowe — naiwne wyrażenie regularne „treść między dwoma nagłówkami" zawodzi, gdy wartość zawiera znak `[` (np. `tags = ["popular"]`). Parser:
 
-- Matches only top-level `[i18n.<lang>]` headers (no dots in the lang token), ignoring nested subsections like `[i18n.zh.agents.main]`.
-- Scans forward from each header until the next `[`-prefixed line, collecting the first `name` and `description` assignments.
+- Dopasowuje tylko nagłówki najwyższego poziomu `[i18n.<lang>]` (bez kropek w tokenie języka), ignorując zagnieżdżone podsekcje takie jak `[i18n.zh.agents.main]`.
+- Skanuje w przód od każdego nagłówka do następnej linii zaczynającej się od `[`, zbierając pierwsze przypisania `name` i `description`.
 
-### GitHub API rate limiting
+### Ograniczanie liczby zapytań GitHub API
 
-Set `GITHUB_TOKEN` in the environment to authenticate requests and avoid the 60 requests/hour anonymous limit:
+Ustaw `GITHUB_TOKEN` w środowisku, aby uwierzytelnić żądania i uniknąć limitu 60 zapytań/godzinę dla anonimowych użytkowników:
 
 ```bash
 GITHUB_TOKEN=ghp_xxx pnpm fetch-registry
@@ -58,98 +58,98 @@ GITHUB_TOKEN=ghp_xxx pnpm fetch-registry
 
 ## gen-og-images.ts
 
-Generates OpenGraph preview images as SVG (1200×630) so that sharing links to `/skills`, `/channels`, etc. on Twitter/Slack/Discord shows a category-specific card instead of a generic default.
+Generuje obrazy podglądu OpenGraph jako SVG (1200×630), aby udostępnianie linków do `/skills`, `/channels` itp. na Twitterze/Slacku/Discordzie pokazywało kartę specyficzną dla kategorii zamiast domyślnego obrazu.
 
-### Exports
+### Eksporty
 
-- **`CATEGORIES`** — array of 8 `CategoryDef` objects, one per registry category. Each has a `slug`, `title`, `subtitle`, `accent` colour, and `icon` glyph. Accents are chosen from the Tailwind palette for visual distinction in social feeds.
-- **`render(def: CategoryDef): string`** — pure function producing the category-level SVG. Tested directly.
+- **`CATEGORIES`** — tablica 8 obiektów `CategoryDef`, po jednym dla każdej kategorii rejestru. Każdy ma `slug`, `title`, `subtitle`, kolor `accent` i glif `icon`. Kolory accent są wybierane z palety Tailwind dla rozróżnienia wizualnego w kanałach społecznościowych.
+- **`render(def: CategoryDef): string`** — czysta funkcja generująca SVG na poziomie kategorii. Testowana bezpośrednio.
 
-### Image generation
+### Generowanie obrazów
 
-`main()` runs when executed as a script (guarded by `import.meta.url === file://${process.argv[1]}`):
+`main()` uruchamia się przy wykonaniu jako skrypt (strzeżone przez `import.meta.url === file://${process.argv[1]}`):
 
-1. Writes 8 category SVGs to `public/og/<slug>.svg`.
-2. If `public/registry.json` exists, iterates each category array and writes `public/og/<slug>/<id>.svg` for every item.
-3. **Security**: item IDs are validated against `/^[a-z0-9][a-z0-9_-]*$/i` before being used in file paths. This prevents path traversal via crafted registry entries containing `..` or absolute paths.
-4. Registry text is escaped via `esc()` to prevent SVG/XML injection from user-contributed content. Icons using the `lucide:` prefix fall back to the category glyph since React components can't render into static SVG.
+1. Zapisuje 8 SVG kategorii do `public/og/<slug>.svg`.
+2. Jeśli `public/registry.json` istnieje, iteruje każdą tablicę kategorii i zapisuje `public/og/<slug>/<id>.svg` dla każdej pozycji.
+3. **Bezpieczeństwo**: identyfikatory pozycji są walidowane względem `/^[a-z0-9][a-z0-9_-]*$/i` przed użyciem w ścieżkach plików. Zapobiega to przechodzeniu ścieżek poprzez spreparowane wpisy rejestru zawierające `..` lub ścieżki bezwzględne.
+4. Tekst rejestru jest uciekany przez `esc()`, aby zapobiec wstrzykiwaniu SVG/XML z treści wprowadzanej przez użytkowników. Ikony z prefiksem `lucide:` mają zastępczo glif kategorii, ponieważ komponenty React nie mogą renderować do statycznego SVG.
 
-### Why SVG over PNG?
+### Dlaczego SVG zamiast PNG?
 
-Every major OG consumer accepts SVG. SVGs are ~50× smaller than equivalent PNGs, live in the repo as readable text, and are resolution-independent on high-DPI displays.
+Każdy główny konsument OG akceptuje SVG. Pliki SVG są ~50× mniejsze niż odpowiednie PNG, znajdują się w repozytorium jako czytelny tekst i są niezależne od rozdzielczości na wyświetlaczach o wysokiej gęstości pikseli.
 
 ---
 
 ## gen-rss.ts
 
-Parses `CHANGELOG.md` and emits an Atom feed to `public/feed.xml`. The changelog uses a convention of versioned H2 headings: `## [2026.4.15] - 2026-04-15`.
+Analizuje `CHANGELOG.md` i generuje kanał Atom do `public/feed.xml`. Dziennik zmian używa konwencji wersjonowanych nagłówków H2: `## [2026.4.15] - 2026-04-15`.
 
-### Exports
+### Eksporty
 
-- **`parseEntries(md: string, max: number): Entry[]`** — scans for `## [version] - date` headings, then slices the body between consecutive headings. Returns entries in document order (newest first).
-- **`escapeXml(s: string): string`** — escapes `& < > "`.
-- **`renderEntry(e: Entry): string`** — wraps the markdown body in CDATA inside an Atom `<entry>`. The version anchor uses dashes (`2026-4-15` → `#2026-4-15`) to match heading ID generation.
-- **`buildFeed(md, opts?)`** — assembles the full Atom XML. Accepts `site`, `author`, and `max` overrides for testing. Returns `{ xml, entries }` so callers can inspect both.
+- **`parseEntries(md: string, max: number): Entry[]`** — skanuje w poszukiwaniu nagłówków `## [version] - date`, a następnie wycina treść między kolejnymi nagłówkami. Zwraca wpisy w kolejności dokumentu (od najnowszego).
+- **`escapeXml(s: string): string`** — ucieka `& < > "`.
+- **`renderEntry(e: Entry): string`** — owija treść markdown w CDATA wewnątrz Atom `<entry>`. Kotwica wersji używa myślników (`2026-4-15` → `#2026-4-15`), aby dopasować generowanie ID nagłówków.
+- **`buildFeed(md, opts?)`** — składa pełny XML Atom. Akceptuje nadpisanie `site`, `author` i `max` do celów testowych. Zwraca `{ xml, entries }`, aby wywołujący mogli sprawdzić oba.
 
-The author string defaults to `LibreFang <noreply@librefang.ai>` — the angle brackets are XML-escaped in output to avoid producing invalid Atom.
+Ciąg autora domyślnie to `LibreFang <noreply@librefang.ai>` — nawiasy ostrokątne są uciekane w XML w wyniku, aby uniknąć wygenerowania nieprawidłowego Atom.
 
 ---
 
 ## audit-locale-completeness.ts
 
-CLI tool that checks whether a locale's translation tree has the same leaf structure as English (`en`).
+Narzędzie CLI sprawdzające, czy drzewo tłumaczeń danej lokalizacji ma tę samą strukturę liści co angielski (`en`).
 
-### Usage
+### Użycie
 
 ```bash
-pnpm i18n:audit zh          # check one locale
-pnpm i18n:audit --all       # check every non-English locale
+pnpm i18n:audit zh          # sprawdź jedną lokalizację
+pnpm i18n:audit --all       # sprawdź każdą nieangielską lokalizację
 ```
 
-Prints usage and exits with code 2 if no argument or too many arguments are given.
+Wyświetla użycie i kończy z kodem 2, jeśli nie podano argumentu lub podano za dużo argumentów.
 
-### How it works
+### Jak to działa
 
-`leafPaths()` recursively walks a translation object and returns an array of dot-paths to every leaf value. Arrays are treated as leaves with a `[length=N]` suffix so array length mismatches are caught. The script compares the English path set against the target locale's and reports any missing paths. Exits with code 1 if any locale is incomplete or unknown.
+`leafPaths()` rekursywnie przechodzi przez obiekt tłumaczeń i zwraca tablicę ścieżek z kropkami do każdej wartości liścia. Tablice są traktowane jako liście z sufiksem `[length=N]`, aby wykryć niezgodności długości tablic. Skrypt porównuje zbiór ścieżek angielskich z docelową lokalizacją i zgłasza brakujące ścieżki. Kończy z kodem 1, jeśli jakakolwiek lokalizacja jest niekompletna lub nieznana.
 
-Imports `languages` and `rawTranslations` from `../src/i18n`, so this script validates the actual translation data consumed at runtime.
+Importuje `languages` i `rawTranslations` z `../src/i18n`, więc ten skrypt weryfikuje rzeczywiste dane tłumaczeń konsumowane w czasie wykonywania.
 
 ---
 
 ## worker.test.ts
 
-Tests the Cloudflare Pages `_worker.js` (located at `public/_worker.js`) that powers the `/install` endpoint's user-agent-based content negotiation.
+Testuje Cloudflare Pages `_worker.js` (znajdujący się w `public/_worker.js`), który obsługuje negocjację treści opartą na user-agent dla endpointu `/install`.
 
-### Routing logic under test
+### Testowana logika routingu
 
-The worker inspects the `User-Agent` header on requests to `/install` and rewrites the path:
+Worker sprawdza nagłówek `User-Agent` w żądaniach do `/install` i przepisuje ścieżkę:
 
-| User-Agent contains | Served file |
+| User-Agent zawiera | Serwowany plik |
 |---|---|
 | `curl` | `install.sh` |
 | `Wget` | `install.sh` |
 | `PowerShell/7` | `install.ps1` |
 | `WindowsPowerShell/5` | `install.ps1` |
-| Browser or no UA | Falls through to SPA (HTML) |
+| Przeglądarka lub brak UA | Przechodzi do SPA (HTML) |
 
-Key edge cases covered:
-- **Windows PowerShell 5.1** sends a `Mozilla/5.0`-prefixed UA but must still get `.ps1`, not the shell script. The regex checks CLI tool tokens, not the Mozilla prefix.
-- **Direct `/install.sh` requests** bypass the rewrite entirely (single asset fetch, no hop).
-- **Unrelated paths with curl UA** (e.g. `/about`) are not misrouted.
+Kluczowe przypadki brzegowe objęte testami:
+- **Windows PowerShell 5.1** wysyła UA z prefiksem `Mozilla/5.0`, ale nadal musi otrzymać `.ps1`, a nie skrypt powłoki. Wyrażenie regularne sprawdza tokeny narzędzi CLI, a nie prefiks Mozilla.
+- **Bezpośrednie żądania `/install.sh`** pomijają przepisanie całkowicie (pobranie pojedynczego zasobu, bez przeskoku).
+- **Nierelacyjne ścieżki z curl UA** (np. `/about`) nie są błędnie kierowane.
 
-### Test harness
+### Aparat testowy
 
-- `makeEnv()` creates a mock `ASSETS.fetch` binding backed by a path-to-response map.
-- `req()` constructs `Request` objects with optional User-Agent.
-- `calledPaths()` extracts the pathname from each `ASSETS.fetch` call to assert routing decisions.
+- `makeEnv()` tworzy atrapy powiązania `ASSETS.fetch` oparte na mapie ścieżka-odpowiedź.
+- `req()` konstruuje obiekty `Request` z opcjonalnym User-Agent.
+- `calledPaths()` wyodrębnia ścieżkę z każdego wywołania `ASSETS.fetch`, aby sprawdzać decyzje routingu.
 
 ---
 
-## Testing
+## Testowanie
 
-All test files use **Vitest** and co-locate with their subject (`*.test.ts`). The pure functions (`render`, `parseEntries`, `escapeXml`, `renderEntry`, `buildFeed`) are exported specifically to enable unit testing without filesystem or network access.
+Wszystkie pliki testowe używają **Vitest** i są współlokowane z testowanym obiektem (`*.test.ts`). Czyste funkcje (`render`, `parseEntries`, `escapeXml`, `renderEntry`, `buildFeed`) są eksportowane specjalnie, aby umożliwić testowanie jednostkowe bez dostępu do systemu plików lub sieci.
 
 ```bash
-pnpm test              # run all script tests
+pnpm test              # uruchom wszystkie testy skryptów
 pnpm test -- --reporter=verbose
 ```

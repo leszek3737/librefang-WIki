@@ -2,37 +2,37 @@
 
 # librefang-hands
 
-Curated autonomous capability packages — the type system, TOML schema, marketplace client, and local registry for LibreFang "Hands."
+Kuratowane pakiety autonomicznych możliwości — system typów, schemat TOML, klient marketplace'u oraz lokalny rejestr dla „Rąk" LibreFang.
 
-A **Hand** is a pre-built, domain-complete agent configuration that users activate from a marketplace. Unlike regular agents (which users chat with interactively), Hands run *for* the user on a schedule or in reaction to events — the user checks in on them rather than driving them turn-by-turn.
+**Ręka** (Hand) to gotowa, kompletna w danej domenie konfiguracja agenta, którą użytkownicy aktywują z marketplace'u. W przeciwieństwie do zwykłych agentów (z którymi użytkownicy rozmawiają interaktywnie), Ręce działają *za* użytkownika zgodnie z harmonogramem lub w reakcji na zdarzenia — użytkownik sprawdza ich stan, zamiast sterować nimi ruch po ruchu.
 
-## Module layout
+## Układ modułu
 
-| File | Responsibility |
-|------|---------------|
-| `src/lib.rs` | Core types, error enum, `HAND.toml` schema, settings resolution, agent-format normalization |
-| `src/hands_hub.rs` | Remote marketplace client (`HandsHubClient`) — index browsing, bundle download, checksum verification |
-| `src/registry.rs` | Local hand registry — install, activate, deactivate, persist state, scan disk, supply-chain scan |
+| Plik | Odpowiedzialność |
+|------|-----------------|
+| `src/lib.rs` | Typy podstawowe, enum błędów, schemat `HAND.toml`, rozwiązywanie ustawień, normalizacja formatu agenta |
+| `src/hands_hub.rs` | Zdalny klient marketplace'u (`HandsHubClient`) — przeglądanie indeksu, pobieranie pakietów, weryfikacja sum kontrolnych |
+| `src/registry.rs` | Lokalny rejestr rąk — instalacja, aktywacja, deaktywacja, utrwalanie stanu, skanowanie dysku, skanowanie łańcucha dostaw |
 
-## Core data model
+## Podstawowy model danych
 
 ### HandDefinition
 
-`HandDefinition` is the parsed representation of a `HAND.toml` file. It is `Serialize` (but has a custom `Deserialize` that runs validation and agent-format normalization during deserialization).
+`HandDefinition` to sparsowana reprezentacja pliku `HAND.toml`. Implementuje `Serialize` (ale posiada niestandardową `Deserialize`, która uruchamia walidację i normalizację formatu agenta podczas deserializacji).
 
-Key fields:
+Kluczowe pola:
 
-- **`id`** — filesystem-safe identifier (validated against path traversal; becomes `home/workspaces/{id}/`).
-- **`agents`** — `BTreeMap<String, HandAgentManifest>`, keyed by role name. Single-agent hands are stored under `"main"` with `coordinator = true`.
-- **`settings`** — schema of configurable settings shown in the activation modal.
-- **`requires`** — environment/binary prerequisites checked before activation.
-- **`skill_content` / `agent_skill_content`** — populated at load time from `SKILL.md` / `SKILL-{role}.md` files; not part of TOML.
-- **`i18n`** — localized name/description/agent/setting strings keyed by language code.
-- **`routing`** — strong (`aliases`, ×3) and weak (`weak_aliases`, ×1) keywords for deterministic hand selection.
+- **`id`** — identyfikator bezpieczny dla systemu plików (walidowany pod kątem przechodzenia ścieżek; staje się `home/workspaces/{id}/`).
+- **`agents`** — `BTreeMap<String, HandAgentManifest>`, indeksowany po nazwie roli. Ręki jednagentowe są przechowywane pod kluczem `"main"` z `coordinator = true`.
+- **`settings`** — schemat konfigurowalnych ustawień wyświetlanych w modalu aktywacji.
+- **`requires`** — wymagania środowiskowe/binarne sprawdzane przed aktywacją.
+- **`skill_content` / `agent_skill_content`** — wypełniane w czasie ładowania z plików `SKILL.md` / `SKILL-{role}.md`; nie jest częścią TOML.
+- **`i18n`** — zlokalizowane ciągi znaków nazwy/opisu/agenta/ustawień indeksowane kodem języka.
+- **`routing`** — silne (`aliases`, ×3) i słabe (`weak_aliases`, ×1) słowa kluczowe dla deterministycznego wyboru ręki.
 
 ### HandInstance
 
-A runtime record linking a `HandDefinition` to its spawned agents:
+Rekord środowiska uruchomieniowego łączący `HandDefinition` z uruchomionymi agentami:
 
 ```rust
 pub struct HandInstance {
@@ -48,27 +48,27 @@ pub struct HandInstance {
 }
 ```
 
-`HandAgentRuntimeOverride` allows per-agent model/provider/token/temperature overrides that survive daemon restarts but are cleared on deactivation.
+`HandAgentRuntimeOverride` pozwala na nadpisywanie modelu/dostawcy/tokena/temperatury dla poszczególnych agentów, które przetrwają restarty demona, ale są czyszczone przy deaktywacji.
 
-### Coordinator resolution
+### Rozwiązywanie koordynatora
 
-`HandDefinition::coordinator()` returns the agent marked `coordinator = true`, falling back to the first agent by role name (BTreeMap ordering). `HandInstance::coordinator_role()` applies the same logic against the spawned `agent_ids` map, with an explicit `coordinator_role` field taking precedence.
+`HandDefinition::coordinator()` zwraca agenta oznaczonego `coordinator = true`, z awarią na pierwszego agenta według nazwy roli (porządek BTreeMap). `HandInstance::coordinator_role()` stosuje tę samą logikę względem uruchomionej mapy `agent_ids`, z priorytetem jawnego pola `coordinator_role`.
 
-## HAND.toml parsing
+## Parsowanie HAND.toml
 
-### Two agent formats
+### Dwa formaty agentów
 
-A hand declares agents in one of two mutually exclusive shapes:
+Ręka deklaruje agentów w jednym z dwóch wzajemnie wykluczających się formatów:
 
-**Single-agent** (`[agent]`):
+**Jednoagentowy** (`[agent]`):
 ```toml
 [agent]
 name = "clip-agent"
 system_prompt = "..."
 ```
-Auto-converted to `{"main": HandAgentManifest { coordinator: true, .. }}`.
+Automatycznie konwertowany do `{"main": HandAgentManifest { coordinator: true, .. }}`.
 
-**Multi-agent** (`[agents.<role>]`):
+**Wieloagentowy** (`[agents.<role>]`):
 ```toml
 [agents.planner]
 coordinator = true
@@ -78,175 +78,175 @@ invoke_hint = "Use planner for task decomposition"
 system_prompt = "..."
 ```
 
-### Flat vs nested model format
+### Płaski vs zagnieżdżony format modelu
 
-Each agent section supports two model-description shapes:
+Każda sekcja agenta obsługuje dwa formaty opisu modelu:
 
-- **Flat (legacy):** `provider`, `model`, `system_prompt`, `max_tokens`, `temperature`, `api_key_env`, `base_url` as top-level scalars in the agent section. Parsed via `LegacyHandAgentConfig`.
-- **Nested:** a `[agents.<role>.model]` sub-table. Parsed via `AgentManifest::deserialize`.
+- **Płaski (legacy):** `provider`, `model`, `system_prompt`, `max_tokens`, `temperature`, `api_key_env`, `base_url` jako skalary najwyższego poziomu w sekcji agenta. Parsowane przez `LegacyHandAgentConfig`.
+- **Zagnieżdżony:** podtabela `[agents.<role>.model]`. Parsowane przez `AgentManifest::deserialize`.
 
-The parser detects which shape is present by checking whether the section contains a `model` *table* (not the scalar `model = "..."`). For flat sections, `LegacyHandAgentConfig` is tried first — it has no `deny_unknown_fields`, so `schedule`, `[autonomous]`, and `exec_policy` are explicitly passed through (issues #6594, #6595).
+Parser wykrywa obecny format, sprawdzając czy sekcja zawiera *tabelę* `model` (nie skalar `model = "..."`). Dla sekcji płaskich próbowane jest najpierw `LegacyHandAgentConfig` — nie ma `deny_unknown_fields`, więc `schedule`, `[autonomous]` i `exec_policy` są jawnie przepuszczane (zagadnienia #6594, #6595).
 
-### Autonomous schedule resolution
+### Rozwiązywanie autonomicznego harmonogramu
 
-`apply_explicit_autonomous_schedule` is the load-bearing function for scheduling semantics:
+`apply_explicit_autonomous_schedule` to funkcja krytyczna dla semantyki harmonogramowania:
 
 ```mermaid
 flowchart TD
-    A[Raw TOML agent section] --> B{Has 'autonomous' key?}
-    B -- No --> Z[Leave schedule as-is]
-    B -- Yes --> C{Has 'schedule' key?}
-    C -- Yes --> Z
-    C -- No --> D{manifest.schedule is Reactive?}
-    D -- No --> Z
-    D -- Yes --> E{manifest.autonomous is Some?}
-    E -- Yes --> F[Set schedule = Continuous at heartbeat_interval_secs]
-    E -- No --> Z
+    A[Surowa sekcja agenta TOML] --> B{Ma klucz 'autonomous'?}
+    B -- Nie --> Z[Zostaw harmonogram bez zmian]
+    B -- Tak --> C{Ma klucz 'schedule'?}
+    C -- Tak --> Z
+    C -- Nie --> D{manifest.schedule to Reactive?}
+    D -- Nie --> Z
+    D -- Tak --> E{manifest.autonomous to Some?}
+    E -- Tak --> F[Ustaw schedule = Continuous przy heartbeat_interval_secs]
+    E -- Nie --> Z
 ```
 
-The critical distinction: `manifest.autonomous` alone cannot answer "did the author ask for autonomy?" because `From<LegacyHandAgentConfig>` synthesizes an `AutonomousConfig` just to carry the flat `max_iterations` loop-depth cap. Only the *raw TOML table* can distinguish an author-written `[autonomous]` block from a synthesized one. This is why the decision is made at parse time against `toml::Value`, not downstream against the deserialized manifest.
+Kluczowe rozróżnienie: samo `manifest.autonomous` nie może odpowiedzieć na pytanie „czy autor poprosił o autonomię?", ponieważ `From<LegacyHandAgentConfig>` syntetyzuje `AutonomousConfig` tylko po to, by przenieść płaski limit głębokości pętli `max_iterations`. Tylko *surowa tabela TOML* potrafi odróżnić blok `[autonomous]` napisany przez autora od zsyntetyzowanego. Dlatego decyzja jest podejmowana w czasie parsowania względem `toml::Value`, a nie w dół strumienia względem zdeserializowanego manifestu.
 
-This resolution is **idempotent across serialize/reparse round trips**: the resolved `schedule` field is always serialized (no `skip_serializing_if`), so the `schedule`-key check prevents re-parsing from re-triggering continuous scheduling.
+To rozwiązanie jest **idempotentne przez cykle serializacji/re-parsowania**: rozwiązane pole `schedule` jest zawsze serializowane (bez `skip_serializing_if`), więc sprawdzenie klucza `schedule` zapobiega ponownemu wyzwoleniu harmonogramowania ciągłego przy re-parsowaniu.
 
-This rule is deliberately hand-specific — standalone `agent.toml` files spawned directly do not get this treatment, even though the same file used as a `base =` template does.
+Ta zasada jest celowo specyficzna dla rąk — samodzielne pliki `agent.toml` uruchamiane bezpośrednio nie podlegają temu traktowaniu, mimo że ten sam plik użyty jako szablon `base =` nim podlega.
 
-### Base template inheritance
+### Dziedziczenie szablonu bazowego
 
-Multi-agent entries can reference a shared agent template:
+Wpisy wieloagentowe mogą odwoływać się do współdzielonego szablonu agenta:
 
 ```toml
 [agents.writer]
-base = "my-writer"           # loads agents/my-writer/agent.toml
+base = "my-writer"           # ładuje agents/my-writer/agent.toml
 
 [agents.writer.model]
-system_prompt = "Override"   # deep-merged on top of base
+system_prompt = "Override"   # głęboko scalone na szczycie bazy
 ```
 
-Resolution flow in `parse_multi_agent_entry`:
+Przepływ rozwiązywania w `parse_multi_agent_entry`:
 
-1. Validate template name (no `..`, `/`, or `\` — path traversal guard).
-2. Read `agents/<name>/agent.toml`.
-3. `normalize_flat_to_nested` — move legacy flat model fields into a `[model]` sub-table so deep-merge works correctly.
-4. `deep_merge_toml(base, overlay)` — hand fields override base; tables merge recursively, scalars/arrays replace.
-5. Parse the merged value via `parse_single_agent_section`.
+1. Walidacja nazwy szablonu (brak `..`, `/` lub `\` — zabezpieczenie przed przechodzeniem ścieżek).
+2. Odczyt `agents/<name>/agent.toml`.
+3. `normalize_flat_to_nested` — przeniesienie płaskich pól modelu legacy do podtabeli `[model]` aby głębokie scalanie działało poprawnie.
+4. `deep_merge_toml(base, overlay)` — pola ręki nadpisują bazę; tabele scalają się rekursywnie, skalary/tablice zastępują.
+5. Parsowanie scalonej wartości przez `parse_single_agent_section`.
 
-### Hand ID validation
+### Walidacja identyfikatora ręki
 
-`validate_hand_id` rejects values that would be unsafe as filesystem path components (`../`, `/`, `\`, `.`, leading dots, control chars, whitespace). Enforced inside `build_hand_from_raw` so every parse path — the `Deserialize` impl and `parse_hand_definition` — is covered.
+`validate_hand_id` odrzuca wartości, które byłyby niebezpieczne jako składniki ścieżki systemu plików (`../`, `/`, `\`, `.`, początkowe kropki, znaki kontrolne, białe znaki). Wymuszane wewnątrz `build_hand_from_raw`, aby każdy ścieżka parsowania — implementacja `Deserialize` i `parse_hand_definition` — była objęta.
 
-## Settings resolution
+## Rozwiązywanie ustawień
 
-Settings are declared in `[[settings]]` blocks with a schema (`HandSetting`), and users provide values via a `HashMap<String, serde_json::Value>` config map.
+Ustawienia są deklarowane w blokach `[[settings]]` ze schematem (`HandSetting`), a użytkownicy dostarczają wartości przez mapę konfiguracyjną `HashMap<String, serde_json::Value>`.
 
-### Effective value computation
+### Obliczanie efektywnej wartości
 
-`effective_setting_value` is the single source of truth for "what is this setting set to":
+`effective_setting_value` jest jedynym źródłem prawdy dla „na co jest ustawione to ustawienie":
 
-1. Look up the stored value; coerce scalars via `setting_value_as_str` (strings pass through, `true`/`false` → `"true"`/`"false"`, numbers → their string form). Non-scalars (arrays, objects, null) return `None`.
-2. For `Select` settings with declared options, verify the coerced value matches a declared option. If not, fall back to `setting.default`.
-3. Otherwise, the coerced value wins.
+1. Wyszukanie zapisanej wartości; wymuszenie typów skalarów przez `setting_value_as_str` (ciągi znaków przechodzą, `true`/`false` → `"true"`/`"false"`, liczby → ich forma tekstowa). Nieskalary (tablice, obiekty, null) zwracają `None`.
+2. Dla ustawień `Select` z zadeklarowanymi opcjami, sprawdzenie czy wymuszona wartość odpowiada zadeklarowanej opcji. Jeśli nie, awaria na `setting.default`.
+3. W przeciwnym razie wymuszona wartość wygrywa.
 
-This prevents a stored `{"trading_mode": true}` from rendering `- Trading Mode: true (true)` in the prompt and silently dropping the matched option's `provider_env` from the subprocess env allowlist (issue #6636).
+To zapobiega sytuacji, w której zapisane `{"trading_mode": true}` renderuje w prompcie `- Trading Mode: true (true)` i cicho pomija `provider_env` dopasowanej opcji z allowlisty zmiennych środowiskowych podprocesu (zagadnienie #6636).
 
-`resolve_settings` builds a `ResolvedSettings` containing:
-- A `## User Configuration` markdown block appended to the system prompt.
-- A list of env var names the agent's subprocess should receive (from matched option `provider_env` or text setting `env_var`).
+`resolve_settings` buduje `ResolvedSettings` zawierające:
+- Blok markdown `## User Configuration` dołączany do system promptu.
+- Listę nazw zmiennych środowiskowych, które podproces agenta powinien otrzymać (z dopasowanej opcji `provider_env` lub ustawienia tekstowego `env_var`).
 
-`undeclared_setting_keys` reports saved keys the schema doesn't declare — catches typos like `tradingmode` vs `trading_mode` that are stored permanently but affect nothing.
+`undeclared_setting_keys` raportuje zapisane klucze, których schemat nie deklaruje — wyłapuje literówki takie jak `tradingmode` vs `trading_mode`, które są przechowywane trwale, ale nic nie wpływają.
 
-## Security model
+## Model bezpieczeństwa
 
-### Path traversal
+### Przechodzenie ścieżek
 
-Hand `id` is validated at parse time (ASCII alphanumeric + `-`/`_`, starting alphanumeric, max 128 chars). This value flows into `home/workspaces/{id}/` directory paths.
+`id` ręki jest walidowane w czasie parsowania (alphanumeric ASCII + `-`/`_`, początek alfanumeryczny, max 128 znaków). Ta wartość trafia do ścieżek katalogów `home/workspaces/{id}/`.
 
-### Marketplace SSRF hardening
+### Uodparnianie na SSRF marketplace'u
 
-The `HandsHubClient` applies three layers of defense:
+`HandsHubClient` stosuje trzy warstwy obrony:
 
-1. **API-boundary SSRF check** — performed by the caller (`routes::skills::install_hand_from_marketplace`) before the client is built.
-2. **Disabled auto-redirects** — `reqwest::redirect::Policy::none()`. A 3xx from the registry is surfaced as an error rather than followed into an internal address. The registry serves `/index` and `/bundle` directly; no legitimate flow needs a redirect.
-3. **DNS pinning** — `HandsHubClient::with_pinned_url` pins the hostname to the exact `IpAddr` values the SSRF check validated, closing the DNS-rebinding TOCTOU window.
+1. **Sprawdzenie SSRF na granicy API** — wykonywane przez wywołującego (`routes::skills::install_hand_from_marketplace`) przed zbudowaniem klienta.
+2. **Wyłączone automatyczne przekierowania** — `reqwest::redirect::Policy::none()`. Odpowiedź 3xx z rejestru jest zgłaszana jako błąd zamiast być podążaną do adresu wewnętrznego. Rejestr serwuje `/index` i `/bundle` bezpośrednio; żaden prawidłowy przepływ nie wymaga przekierowania.
+3. **Pinning DNS** — `HandsHubClient::with_pinned_url` przypina nazwę hosta do dokładnych wartości `IpAddr` zwalidowanych przez sprawdzenie SSRF, zamykając okno TOCTOU rebindingu DNS.
 
-### Bundle integrity
+### Integralność pakietu
 
-`download_bundle` streams the response body, hashing with SHA-256 as chunks arrive:
+`download_bundle` strumieniuje treść odpowiedzi, haszując SHA-256 w miarę napływu fragmentów:
 
-- **Size cap** — 8 MiB hard limit (`MAX_BUNDLE_BYTES`). `Content-Length` is a fast pre-reject; the streaming guard is authoritative and aborts the instant the running total exceeds the cap.
-- **Checksum verification** — compared against `expected_sha256` from the index entry *before* the body is parsed or written. If the registry advertises no digest, the bundle installs unverified (logged as a warning).
+- **Limit rozmiaru** — 8 MiB twardy limit (`MAX_BUNDLE_BYTES`). `Content-Length` to szybkie wstępne odrzucenie; strumieniowa guardia jest autorytatywna i przerywa w momencie przekroczenia limitu przez bieżącą sumę.
+- **Weryfikacja sumy kontrolnej** — porównywana z `expected_sha256` z wpisu indeksu *przed* parsowaniem lub zapisem treści. Jeśli rejestr nie reklamuje digestu, pakiet instaluje się niezweryfikowany (logowane jako ostrzeżenie).
 
-A bundle is a JSON envelope:
+Pakiet to koperta JSON:
 ```json
-{ "toml": "<HAND.toml contents>", "skill": "<SKILL.md contents>" }
+{ "toml": "<zawartość HAND.toml>", "skill": "<zawartość SKILL.md>" }
 ```
-The `skill` field is optional (prompt-less hands omit it).
+Pole `skill` jest opcjonalne (ręki bez promptu je pomijają).
 
-## HandsHub client API
+## API klienta HandsHub
 
 ```rust
-// Default registry
+// Domyślny rejestr
 let client = HandsHubClient::new();
 
-// Custom registry (no DNS pinning — tests only)
+// Niestandardowy rejestr (bez pinningu DNS — tylko testy)
 let client = HandsHubClient::with_url("https://custom.registry/api/v1");
 
-// Production: pinned DNS
+// Produkcyjny: przypięty DNS
 let client = HandsHubClient::with_pinned_url(url, hostname, &validated_ips);
 ```
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `fetch_index()` | `GET /index` | Full registry catalog |
-| `browse(limit)` | `GET /index` | Sorted-by-id entries, truncated |
-| `search(query, limit)` | `GET /index` | Case-insensitive substring over id/name/description |
-| `get_entry(id)` | `GET /index` | Single entry lookup |
-| `download_bundle(id, sha)` | `GET /hands/{id}/bundle` | Streamed, size-capped, checksum-verified |
+| Metoda | Endpoint | Opis |
+|--------|----------|-----|
+| `fetch_index()` | `GET /index` | Pełny katalog rejestru |
+| `browse(limit)` | `GET /index` | Wpisy posortowane po id, obcięte |
+| `search(query, limit)` | `GET /index` | Niewrażliwy na wielkość liter podciąg po id/nazwa/opis |
+| `get_entry(id)` | `GET /index` | Wyszukiwanie pojedynczego wpisu |
+| `download_bundle(id, sha)` | `GET /hands/{id}/bundle` | Strumieniowane, z limitem rozmiaru, weryfikacją sumy kontrolnej |
 
-All HTTP calls go through `get_with_retry`: exponential backoff (1.5s base, 30s cap, 5 attempts max) on 429/5xx with `Retry-After` header honored. Redirects are always refused.
+Wszystkie wywołania HTTP przechodzą przez `get_with_retry`: wykładnicze wycofywanie (baza 1.5s, limit 30s, max 5 prób) przy 429/5xx z poszanowaniem nagłówka `Retry-After`. Przekierowania są zawsze odrzucane.
 
-## Registry (local persistence)
+## Rejestr (lokalna persystencja)
 
-The `registry` module manages the on-disk hand lifecycle. Key operations surfaced to the kernel:
+Moduł `registry` zarządza cyklem życia ręki na dysku. Kluczowe operacje udostępnione kernelowi:
 
-- **`install_from_content` / `install_from_content_persisted`** — parse HAND.toml + SKILL.md, run supply-chain scan (`librefang_skills::supply_chain::scan`), persist to `workspaces/` or registry dir.
-- **`install_from_remote`** — downloads via `HandsHubClient::download_bundle`, then delegates to the local installer.
-- **`activate` / `deactivate`** — manage `HandInstance` lifecycle, spawn/pause agents.
-- **`reload_from_disk` / `scan_hands_dir`** — re-scan registry + override directories, re-parse definitions.
-- **`check_requirements`** — evaluate `HandRequirement` checks (binary on PATH, env var set, API key present).
-- **`persist_state` / `load_state_detailed`** — serialize/restore `HandInstance` records across daemon restarts.
+- **`install_from_content` / `install_from_content_persisted`** — parsowanie HAND.toml + SKILL.md, uruchomienie skanowania łańcucha dostaw (`librefang_skills::supply_chain::scan`), utrwalenie w `workspaces/` lub katalogu rejestru.
+- **`install_from_remote`** — pobieranie przez `HandsHubClient::download_bundle`, następnie delegacja do lokalnego instalatora.
+- **`activate` / `deactivate`** — zarządzanie cyklem życia `HandInstance`, uruchamianie/pauzowanie agentów.
+- **`reload_from_disk` / `scan_hands_dir`** — ponowne skanowanie rejestru + katalogów nadpisań, re-parsowanie definicji.
+- **`check_requirements`** — ewaluacja sprawdzeń `HandRequirement` (binary na PATH, zmienna środowiskowa ustawiona, klucz API obecny).
+- **`persist_state` / `load_state_detailed`** — serializacja/przywracanie rekordów `HandInstance` przez restarty demona.
 
-The registry supports a **layered override model**: an operator can edit a registry hand's `HAND.toml` or `SKILL.md` in a workspace override directory, and those edits survive registry resets while the base registry hand still provides defaults.
+Rejestr obsługuje **warstwowy model nadpisań**: operator może edytować `HAND.toml` lub `SKILL.md` ręki z rejestru w katalogu nadpisań przestrzeni roboczej, a te edycje przetrwają resetowanie rejestru, podczas gdy bazowa ręka z rejestru nadal dostarcza wartości domyślne.
 
-## Integration with LibreFang
+## Integracja z LibreFang
 
 ```
 librefang-types     ← AgentManifest, ModelConfig, ScheduleMode, ExecPolicy
-librefang-skills    ← supply_chain::scan (prompt-injection / security check on install)
-librefang-runtime   ← registry_sync, mcp_migrate (filesystem helpers used in tests)
+librefang-skills    ← supply_chain::scan (sprawdzanie wstrzyknięcia promptu / bezpieczeństwa przy instalacji)
+librefang-runtime   ← registry_sync, mcp_migrate (pomocnicy systemu plików używani w testach)
 ```
 
-The kernel consumes this crate through:
+Kernel konsumuje ten crate przez:
 
-- **`hands_lifecycle.rs`** — activation, deactivation, config updates, runtime override management.
-- **`background_lifecycle.rs`** — `load_state_detailed` on boot to restore active hands.
-- **`assistant_routing.rs`** — `check_requirements` before routing to a hand.
-- **`kernel-router`** — `parse_hand_toml_with_agents_dir` + `hand_override_dir` to build route candidates from installed hands.
-- **`routes/skills/hands.rs`** — HTTP API for marketplace install, manifest retrieval, settings reporting (`effective_setting_values`, `undeclared_setting_keys`).
-- **`routes/agents/config.rs`** — `HandAgentRuntimeOverride` for per-agent model config patching.
+- **`hands_lifecycle.rs`** — aktywacja, deaktywacja, aktualizacje konfiguracji, zarządzanie nadpisami środowiska uruchomieniowego.
+- **`background_lifecycle.rs`** — `load_state_detailed` przy starcie do przywrócenia aktywnych rąk.
+- **`assistant_routing.rs`** — `check_requirements` przed trasowaniem do ręki.
+- **`kernel-router`** — `parse_hand_toml_with_agents_dir` + `hand_override_dir` do budowania kandydatów tras z zainstalowanych rąk.
+- **`routes/skills/hands.rs`** — API HTTP dla instalacji z marketplace'u, pobierania manifestu, raportowania ustawień (`effective_setting_values`, `undeclared_setting_keys`).
+- **`routes/agents/config.rs`** — `HandAgentRuntimeOverride` do łatania konfiguracji modelu poszczególnych agentów.
 
-## Error handling
+## Obsługa błędów
 
-`HandError` covers all failure modes:
+`HandError` pokrywa wszystkie tryby awarii:
 
-| Variant | When |
-|---------|------|
-| `NotFound` | Hand id not in registry |
-| `AlreadyActive` | Duplicate activation attempt |
-| `AlreadyRegistered` | Install conflict |
-| `BuiltinHand` | Attempt to uninstall a built-in |
-| `InstanceNotFound` | UUID not in active instances |
-| `ActivationFailed` | Spawn or requirement failure |
-| `TomlParse` | Invalid HAND.toml |
-| `Io` | Filesystem error |
-| `Config` | Marketplace/transport/validation errors |
-| `SecurityBlocked` | Supply-chain scan rejection |
+| Wariant | Kiedy |
+|---------|-------|
+| `NotFound` | Id ręki nie w rejestrze |
+| `AlreadyActive` | Próba duplikatnej aktywacji |
+| `AlreadyRegistered` | Konflikt instalacji |
+| `BuiltinHand` | Próba odinstalowania ręki wbudowanej |
+| `InstanceNotFound` | UUID nie w aktywnych instancjach |
+| `ActivationFailed` | Awaria uruchamiania lub wymagań |
+| `TomlParse` | Nieprawidłowy HAND.toml |
+| `Io` | Błąd systemu plików |
+| `Config` | Błędy marketplace'u/transportu/walidacji |
+| `SecurityBlocked` | Odrzucenie przez skan łańcucha dostaw |

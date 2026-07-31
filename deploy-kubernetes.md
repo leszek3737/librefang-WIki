@@ -2,11 +2,11 @@
 
 # deploy/kubernetes
 
-Kustomize manifests that run the LibreFang daemon as a single-replica StatefulSet on Kubernetes. The deployment shape is intentionally constrained to one replica — this is the architecture the daemon actually supports, not a placeholder for horizontal scaling that is coming later. A second pod against the same state is prevented by `/data/daemon.lock` (an exclusive `flock` held by `run_daemon`), and even giving each replica its own volume would not fix the process-local singletons in cron dispatch, session ownership, budget enforcement, and the audit hash chain. See `docs/architecture/multi-replica-rfc.md` for what lifting this would require.
+Manifesty Kustomize uruchamiające demona LibreFang jako jednoreplikowy StatefulSet w Kubernetes. Kształt wdrożenia jest celowo ograniczony do jednej repliki — to architektura, którą demon faktycznie obsługuje, a nie miejsce na horyzontalne skalowanie, które ma pojawić się później. Drugi pod współdzielący ten sam stan jest blokowany przez `/data/daemon.lock` (wyłączny `flock` trzymany przez `run_daemon`), a nawet przydzielenie każdej replice własnego wolumenu nie rozwiąże problemu lokalnych singletonów procesowych w wysyłaniu zadań cron, własności sesji, wymuszaniu budżetu i łańcuchu hashy audytu. Zobacz `docs/architecture/multi-replica-rfc.md`, co by było potrzebne do zniesienia tego ograniczenia.
 
-The manifests apply with plain `kubectl` — no Helm, no operators, no CRDs.
+Manifesty aplikuje się zwykłym `kubectl` — bez Helm, bez operatorów, bez CRD.
 
-## Architecture Overview
+## Przegląd architektury
 
 ```mermaid
 graph TB
@@ -18,7 +18,7 @@ graph TB
     PVC[PVC data-librefang-0<br/>RWO 10Gi]
   end
   AUTH[(Secret:<br/>librefang-auth)]
-  PROV[(Secret:<br/>librefang-providers<br/>optional)]
+  PROV[(Secret:<br/>librefang-providers<br/>opcjonalny)]
   IMG[ghcr.io/librefang<br/>librefang:latest]
 
   SVC --> POD
@@ -30,74 +30,74 @@ graph TB
   IMG --> POD
 ```
 
-Clients talk to the `librefang` ClusterIP Service. The headless Service exists solely to satisfy the StatefulSet contract (`spec.serviceName`) and give the pod its stable DNS name. The PVC is created from `volumeClaimTemplates` and outlives both the pod and the StatefulSet itself.
+Klienci łączą się z ClusterIP Service `librefang`. Headless Service istnieje wyłącznie, aby spełnić wymóg StatefulSet (`spec.serviceName`) i nadać podowi jego stabilną nazwę DNS. PVC jest tworzony z `volumeClaimTemplates` i przetrwa zarówno pod, jak i sam StatefulSet.
 
-## Manifests
+## Manifesty
 
 ### `base/kustomization.yaml`
 
-Bundles `statefulset.yaml` and `service.yaml`. Applies a `app.kubernetes.io/part-of: librefang` label to all resources. Pins the image to `ghcr.io/librefang/librefang:latest` — override per-environment with `kustomize edit set image` to avoid an untested build rolling forward unintentionally.
+Pakuje `statefulset.yaml` i `service.yaml`. Aplikuje etykietę `app.kubernetes.io/part-of: librefang` do wszystkich zasobów. Pinuje obraz do `ghcr.io/librefang/librefang:latest` — nadpisz w środowisku za pomocą `kustomize edit set image`, aby nieprzetestowana wersja nie wdrożyła się przypadkowo.
 
-The kustomization deliberately does **not** create the Secrets the StatefulSet references. This is by design: a credential should never land in version control, and a missing mandatory key produces a `CreateContainerConfigError` at the kubelet — a better failure point than a daemon that boots open on a non-loopback bind.
+Kustomizacja celowo **nie** tworzy Secretów, do których odwołuje się StatefulSet. Jest to zamierzone: poświadczenia nigdy nie powinny trafić do repozytorium, a brakujący obowiązkowy klucz powoduje `CreateContainerConfigError` w kubelecie — lepszy punkt awarii niż demon uruchamiający się otwarcie na binde nie-loopback.
 
 ### `base/statefulset.yaml`
 
-The core resource. Key configuration decisions:
+Główny zasób. Kluczowe decyzje konfiguracyjne:
 
-| Setting | Value | Rationale |
+| Ustawienie | Wartość | Uzasadnienie |
 | --- | --- | --- |
-| `replicas` | `1` | Hard constraint — see [Single-replica constraint](#single-replica-constraint) |
-| `serviceName` | `librefang-headless` | Headless Service required by the StatefulSet contract |
-| `updateStrategy` | `RollingUpdate` | StatefulSet terminates the old pod before creating the replacement, so two daemons never contend for the RWO volume |
-| `runAsUser` / `runAsGroup` | `1001` | Matches the uid the Docker entrypoint drops to via `gosu`; pinning it here removes the root start entirely |
-| `fsGroup` | `1001` | Makes the kubelet `chgrp` a fresh PVC so the unprivileged process can write to it |
-| `fsGroupChangePolicy` | `OnRootMismatch` | Skips recursive relabelling when ownership already matches — matters as `/data` grows |
-| `terminationGracePeriodSeconds` | `60` | Covers SQLite WAL checkpoint plus in-flight agent turns |
-| `readOnlyRootFilesystem` | not set | The daemon writes outside `/data`: MCP server venvs, plugin installs, `$TMPDIR` scratch |
+| `replicas` | `1` | Twarde ograniczenie — zobacz [Ograniczenie jednej repliki](#ograniczenie-jednej-repliki) |
+| `serviceName` | `librefang-headless` | Headless Service wymagany przez kontrakt StatefulSet |
+| `updateStrategy` | `RollingUpdate` | StatefulSet terminatinguje stary pod przed utworzeniem zastępstwa, więc dwa demony nigdy nie rywalizują o wolumen RWO |
+| `runAsUser` / `runAsGroup` | `1001` | Zgodne z uid, na który Docker entrypoint przechodzi przez `gosu`; przypięcie tutaj eliminuje całkowicie start jako root |
+| `fsGroup` | `1001` | Sprawia, że kubelet wykonuje `chgrp` świeżego PVC, aby nieuprzywilejowany proces mógł do niego pisać |
+| `fsGroupChangePolicy` | `OnRootMismatch` | Pomija rekursywne przypisywanie praw, gdy własność już pasuje — istotne, gdy `/data` rośnie |
+| `terminationGracePeriodSeconds` | `60` | Pokrywa checkpoint SQLite WAL plus aktualne tury agenta |
+| `readOnlyRootFilesystem` | nie ustawione | Demon pisze poza `/data`: środowiska wirtualne serwera MCP, instalacje wtyczek, pliki tymczasowe `$TMPDIR` |
 
-The container listens on `0.0.0.0:4545` (`LIBREFANG_LISTEN`). The pod's loopback is unreachable from the kubelet and from other pods, so a wildcard bind is mandatory. A non-loopback bind refuses to start without configured authentication, which is why the `librefang-auth` Secret is mandatory rather than optional hardening.
+Kontener nasłuchuje na `0.0.0.0:4545` (`LIBREFANG_LISTEN`). Loopback poda jest nieosiągalny z kubeleta i innych podów, więc bind na wszystkie interfejsy jest obowiązkowy. Bind nie-loopback odmawia startu bez skonfigurowanego uwierzytelnienia, dlatego Secret `librefang-auth` jest obowiązkowy, a nie opcjonalnym wzmocnieniem.
 
 ### `base/service.yaml`
 
-Defines two Services:
+Definiuje dwa Servisy:
 
-- **`librefang`** (ClusterIP, port 4545) — what clients talk to. ClusterIP only: the API exposes shell exec, the credential vault, and provider keys behind one bearer token. Reaching it from outside the cluster should be deliberate — use an Ingress with TLS, or `kubectl port-forward`.
-- **`librefang-headless`** (`clusterIP: None`) — satisfies `StatefulSet.spec.serviceName` and gives the pod its stable DNS name (`librefang-0.librefang-headless.<ns>.svc`). Not for client traffic.
+- **`librefang`** (ClusterIP, port 4545) — to, z czym łączą się klienci. Tylko ClusterIP: API eksponuje wykonanie powłoki, sejf poświadczeń i klucze providerów za jednym tokenem bearer. Dostęp z zewnątrz klastra powinien być celowy — użyj Ingress z TLS lub `kubectl port-forward`.
+- **`librefang-headless`** (`clusterIP: None`) — spełnia wymóg `StatefulSet.spec.serviceName` i nadaje podowi stabilną nazwę DNS (`librefang-0.librefang-headless.<ns>.svc`). Nie przeznaczony dla ruchu klienckiego.
 
-## Secrets Model
+## Model Secretów
 
-Two Secrets, split by obligation:
+Dwa Secrety, podzielone według obowiązkowości:
 
-### `librefang-auth` — mandatory
+### `librefang-auth` — obowiązkowy
 
-| Key | Purpose | Generation |
+| Klucz | Przeznaczenie | Generowanie |
 | --- | --- | --- |
-| `api-key` | Bearer token for all `/api/*` calls | `openssl rand -hex 32` |
-| `vault-key` | Credential-vault master key; must base64-decode to exactly 32 bytes | `openssl rand -base64 32` |
-| `dashboard-user` | Web UI login (also satisfies the non-loopback bind auth guard) | — |
-| `dashboard-pass` | Web UI password | `openssl rand -hex 24` |
-| `state-secret` | HMAC key for OAuth/OIDC state tokens; same 32-byte shape as `vault-key` | `openssl rand -base64 32` |
+| `api-key` | Token bearer dla wszystkich wywołań `/api/*` | `openssl rand -hex 32` |
+| `vault-key` | Klucz główny sejfu poświadczeń; po zdekodowaniu base64 musi mieć dokładnie 32 bajty | `openssl rand -base64 32` |
+| `dashboard-user` | Login interfejsu webowego (spełnia też warunek auth dla binda nie-loopback) | — |
+| `dashboard-pass` | Hasło interfejsu webowego | `openssl rand -hex 24` |
+| `state-secret` | Klucz HMAC dla tokenów stanu OAuth/OIDC; ta sama 32-bajtowa długość co `vault-key` | `openssl rand -base64 32` |
 
-`state-secret` is marked `optional: true` in the StatefulSet because it only matters when `[external_auth] enabled = true`. With external auth off, an absent value means each boot derives a random per-process key — which invalidates any external login in flight across a pod replacement, but does not prevent boot. With external auth on, `boot.rs`'s `validate_state_secret_env` refuses to start without it.
+`state-secret` jest oznaczony jako `optional: true` w StatefulSet, ponieważ ma znaczenie tylko przy `[external_auth] enabled = true`. Przy wyłączonym auth zewnętrznym, brak wartości oznacza, że każde uruchomienie generuje losowy klucz procesowy — co unieważnia logowania zewnętrzne w toku podczas wymiany poda, ale nie blokuje startu. Przy włączonym auth zewnętrznym, `validate_state_secret_env` w `boot.rs` odmawia startu bez niego.
 
-### `librefang-providers` — optional
+### `librefang-providers` — opcjonalny
 
-Provider API keys (`anthropic-api-key`, `openai-api-key`, `groq-api-key`). All marked `optional: true`. Omit the entire Secret for a local-model-only cluster — the daemon boots without them and reports the missing provider when an agent first needs it.
+Klucze API providerów (`anthropic-api-key`, `openai-api-key`, `groq-api-key`). Wszystkie oznaczone jako `optional: true`. Pomiń cały Secret dla klastra opartego tylko na modelach lokalnych — demon uruchomi się bez nich i zgłosi brakującego providera, gdy agent go po raz pierwszy potrzebuje.
 
-`secrets.example.yaml` documents the exact key names but is a reference, not something to apply. Filling it in and committing puts credentials in git.
+`secrets.example.yaml` dokumentuje dokładne nazwy kluczy, ale jest to materiał referencyjny, a nie coś do zaaplikowania. Wypełnienie i zatwierdzenie go umieści poświadczenia w gicie.
 
-## Pod Security: `restricted`
+## Bezpieczeństwo poda: `restricted`
 
-The manifests satisfy the `restricted` Pod Security Standard with no exemptions:
+Manifesty spełniają Pod Security Standard `restricted` bez żadnych wyjątków:
 
 - `runAsNonRoot: true`, `runAsUser: 1001`, `runAsGroup: 1001`
 - `allowPrivilegeEscalation: false`
 - `capabilities.drop: [ALL]`
 - `seccompProfile.type: RuntimeDefault`
 
-The published image declares no `USER` directive because under plain Docker its entrypoint starts as root to `chown` a bind-mounted volume, then drops to uid 1001 via `gosu`. Pinning `runAsUser: 1001` in the pod spec takes that root start away: `deploy/docker-entrypoint.sh` detects the drop (`id -u` is not 0), skips both the `chown` and the `gosu` call, and execs the daemon directly. One image serves both Docker and Kubernetes — there is no separate rootless tag.
+Opublikowany obraz nie deklaruje dyrektywy `USER`, ponieważ pod zwykłym Dockerem jego entrypoint startuje jako root, aby wykonać `chown` na podmontowanym wolumenie, a następnie przechodzi na uid 1001 przez `gosu`. Przypięcie `runAsUser: 1001` w specie poda eliminuje ten start jako root: `deploy/docker-entrypoint.sh` wykrywa zrzut (`id -u` nie jest 0), pomija zarówno `chown`, jak i wywołanie `gosu`, i bezpośrednio wywołuje demona. Jeden obraz obsługuje zarówno Docker, jak i Kubernetes — nie ma osobnego taga rootless.
 
-Label the namespace to have the API server enforce the standard:
+Oznacz namespace, aby serwer API wymuszał standard:
 
 ```bash
 kubectl label namespace librefang \
@@ -105,80 +105,80 @@ kubectl label namespace librefang \
   pod-security.kubernetes.io/enforce-version=latest
 ```
 
-## Storage and Volume Ownership
+## Pamięć masowa i własność wolumenów
 
-### `ReadWriteOnce` only
+### Tylko `ReadWriteOnce`
 
-The PVC is `ReadWriteOnce`. Shared network storage (NFS, CIFS) is **not supported** unless you have explicitly validated its locking guarantees. Runtime state under `/data` is a SQLite database in WAL mode, whose consistency depends on:
+PVC jest `ReadWriteOnce`. Współdzielona pamięć sieciowa (NFS, CIFS) jest **nieobsługiwana**, chyba że jednoznacznie zweryfikowano jej gwarancje blokowania. Stan runtime pod `/data` to baza danych SQLite w trybie WAL, której spójność zależy od:
 
-- POSIX advisory locking
-- `mmap`-visible shared-memory (`-shm`) semantics
+- blokowania doradczego POSIX
+- semantyki pamięci współdzielonej widocznej przez `mmap` (`-shm`)
 
-These are commonly implemented incorrectly or not at all on network filesystems. The same applies to `/data/daemon.lock`, the `flock` that prevents two daemons from sharing a state directory: on a filesystem where `flock` is a no-op, that safety check silently passes and both processes corrupt each other's writes.
+Są one powszechnie implementowane niepoprawnie lub wcale w systemach plików sieciowych. To samo dotyczy `/data/daemon.lock`, blokady `flock` zapobiegającej dwóm demonom współdzieleniu katalogu stanu: na systemie plików, gdzie `flock` jest no-opem, ten test bezpieczeństwa cicho przechodzi i oba procesy uszkadzają nawzajem swoje zapisy.
 
-### Volume ownership
+### Własność wolumenu
 
-An unprivileged process cannot take ownership of a freshly provisioned volume. The manifests use `fsGroup: 1001`, which makes the kubelet `chgrp` the volume to gid 1001 at mount time. This works with every in-tree CSI driver that reports `fsGroupPolicy: File` or `ReadWriteOnceWithFSType`.
+Nieuprzywilejowany proces nie może przejąć własności świeżo provisionowanego wolumenu. Manifesty używają `fsGroup: 1001`, co sprawia, że kubelet wykonuje `chgrp` wolumenu na gid 1001 w momencie montowania. Działa to z każdym wbudowanym sterownikiem CSI raportującym `fsGroupPolicy: File` lub `ReadWriteOnceWithFSType`.
 
-**Some drivers ignore `fsGroup` entirely** — most NFS and CIFS provisioners, and any driver reporting `fsGroupPolicy: None`. On those, the entrypoint exits non-zero with a message pointing to this constraint rather than letting SQLite fail later on an opaque `EACCES`.
+**Niektóre sterowniki całkowicie ignorują `fsGroup`** — większość provisionerów NFS i CIFS oraz każdy sterownik raportujący `fsGroupPolicy: None`. Na nich entrypoint kończy się z kodem błędu z komunikatem wskazującym na to ograniczenie, zamiast pozwolić SQLiteowi awariować później na niejasnym `EACCES`.
 
-Check your driver:
+Sprawdź swój sterownik:
 
 ```bash
 kubectl get csidriver -o custom-columns=NAME:.metadata.name,FSGROUP:.spec.fsGroupPolicy
 ```
 
-If your driver ignores `fsGroup`, either pre-own the volume as `1001:1001` out of band (privileged Job, or backend export options like NFS `all_squash` with `anonuid=1001,anongid=1001`), or use a StorageClass whose driver honours it.
+Jeśli Twój sterownik ignoruje `fsGroup`, albo nadaj wolumenowi z góry własność `1001:1001` poza pasmem (uprzywilejowany Job lub opcje eksportu backendu jak NFS `all_squash` z `anonuid=1001,anongid=1001`), albo użyj StorageClass, którego sterownik go honoruje.
 
-## Health Probes
+## Sondy kondycji
 
-Three probes, two contracts. Confusing them causes restart loops.
+Trzy sondy, dwa kontrakty. Pomieszanie ich powoduje pętle restartów.
 
 ```mermaid
 graph LR
-  START["startupProbe<br/>/api/ready<br/>period 5s × 24"] --> LIVE
-  subgraph LIVE["Steady state"]
+  START["startupProbe<br/>/api/ready<br/>okres 5s × 24"] --> LIVE
+  subgraph LIVE["Stan ustalony"]
     direction LR
-    LIV["liveness<br/>/api/health<br/>period 15s × 4"] -->|process wedged?| RESTART[Pod restarted]
-    LIV -->|HTTP answers| OK1[200 OK]
-    RDY["readiness<br/>/api/ready<br/>period 10s × 3"] -->|dependency down| DRAIN[Removed from Service]
-    RDY -->|can accept work| OK2[200 OK]
+    LIV["liveness<br/>/api/health<br/>okres 15s × 4"] -->|proces zawieszony?| RESTART[Pod zrestartowany]
+    LIV -->|HTTP odpowiada| OK1[200 OK]
+    RDY["readiness<br/>/api/ready<br/>okres 10s × 3"] -->|zależność niedostępna| DRAIN[Usunięty z Service]
+    RDY -->|może przyjmować pracę| OK2[200 OK]
   end
 ```
 
-| Probe | Endpoint | Meaning | On failure |
+| Sonda | Endpoint | Znaczenie | Przy awarii |
 | --- | --- | --- | --- |
-| `startupProbe` | `/api/ready` | First boot finished (`librefang init`, registry seed) | Pod restarted after 24 × 5s (120s) |
-| `livenessProbe` | `/api/health` | The process is responsive | **Pod restarted** |
-| `readinessProbe` | `/api/ready` | The daemon can accept work | Pod removed from Service endpoints |
+| `startupProbe` | `/api/ready` | Pierwsze uruchomienie zakończone (`librefang init`, seed rejestru) | Pod zrestartowany po 24 × 5s (120s) |
+| `livenessProbe` | `/api/health` | Proces odpowiada | **Pod zrestartowany** |
+| `readinessProbe` | `/api/ready` | Demon może przyjmować pracę | Pod usunięty z endpointów Service |
 
-### Why `/api/health` returns 200 even when degraded
+### Dlaczego `/api/health` zwraca 200 nawet przy degradacji
 
-`/api/health` returns 200 whenever the HTTP server can answer, even when its body reports `status: degraded`. This is intentional: a recoverable storage or provider incident must not get the pod killed and restarted into the same incident. Liveness asks "is the process wedged?" — not "is everything perfect?"
+`/api/health` zwraca 200 za każdym razem, gdy serwer HTTP może odpowiadać, nawet gdy jego treść raportuje `status: degraded`. Jest to zamierzone: odwracalny incydent pamięci masowej lub providera nie powinien powodować zabicie i restartu poda do tego samego incydentu. Liveness pyta „czy proces jest zawieszony?" — nie „czy wszystko jest idealne?"
 
-### Why `/api/ready` returns 503
+### Dlaczego `/api/ready` zwraca 503
 
-`/api/ready` returns 503 when a dependency required to accept work is unavailable — the SQLite substrate, or an embedding provider the operator pinned explicitly while leaving vector search on. An unset or `"auto"` embedding provider is an optional enhancement and never fails readiness, because falling back to FTS text search is a supported mode rather than a degradation.
+`/api/ready` zwraca 503, gdy zależność wymagana do przyjmowania pracy jest niedostępna — substrat SQLite lub provider embeddingu, który operator jednoznacznie przypiął, pozostawiając włączonym wyszukiwanie wektorowe. Nieustawiony lub `"auto"` provider embeddingu jest opcjonalnym ulepszeniem i nigdy nie zawiesza gotowości, ponieważ fallback do wyszukiwania tekstowego FTS jest obsługiwanym trybem, a nie degradacją.
 
-### Both endpoints are public
+### Oba endpointy są publiczne
 
-The kubelet issues probes with no credential, and a 401 would pin the pod out of Service endpoints permanently. Payloads are minimal — check names and a coarse status, no version, hostname, provider id, or error text. Detailed diagnostics stay behind the authenticated `/api/health/detail`.
+Kubelet wysyła sondy bez poświadczeń, a 401 trwale usunęłoby poda z endpointów Service. Ładunki są minimalne — nazwy sprawdzanych elementów i ogólny status, bez wersji, nazwy hosta, id providera lub tekstu błędu. Szczegółowa diagnostyka pozostaje za uwierzytelnionym `/api/health/detail`.
 
-## Pod Lifecycle and Updates
+## Cykl życia poda i aktualizacje
 
-### Ordered replacement
+### Uporządkowana wymiana
 
-A StatefulSet terminates its pod before creating the replacement, so two daemons never contend for the volume. State survives pod replacement because the PVC created from `volumeClaimTemplates` outlives the pod — and outlives the StatefulSet itself, which is why deleting the StatefulSet does not delete your agents.
+StatefulSet terminatinguje pod przed utworzeniem zastępstwa, więc dwa demony nigdy nie rywalizują o wolumen. Stan przetrwa wymianę poda, ponieważ PVC utworzony z `volumeClaimTemplates` przetrwa pod — a także przetrwa sam StatefulSet, dlatego usunięcie StatefulSet nie usuwa Twoich agentów.
 
-### Graceful shutdown
+### Łagodne zamykanie
 
-`terminationGracePeriodSeconds: 60` covers the SQLite WAL checkpoint plus any in-flight agent turn. The daemon stops accepting new work on SIGTERM; the window is for finishing what it already started, so a turn mid-LLM-call is not killed with its tool results unpersisted.
+`terminationGracePeriodSeconds: 60` pokrywa checkpoint SQLite WAL oraz ewentualną aktualną turę agenta. Po SIGTERM demon przestaje przyjmować nową pracę; okno służy dokończeniu tego, co już zaczął, więc tura w trakcie wywołania LLM nie zostanie zabita z niezachowanymi wynikami narzędzi.
 
-### If you prefer a Deployment
+### Jeśli preferujesz Deployment
 
-A Deployment must set `strategy: Recreate`. The default `RollingUpdate` briefly runs both pods, and the new one either fails to attach the ReadWriteOnce PVC or — on a driver that permits multi-attach — fails the `daemon.lock` flock.
+Deployment musi ustawić `strategy: Recreate`. Domyślny `RollingUpdate` przez krótki czas uruchamia oba pody, a nowy albo nie może podłączyć PVC ReadWriteOnce, albo — na sterowniku pozwalającym na multi-attach — zawodzi blokadą `daemon.lock` flock.
 
-### Resource defaults
+### Domyślne zasoby
 
 ```yaml
 requests:
@@ -188,44 +188,44 @@ limits:
   memory: 2Gi
 ```
 
-These are starting values, not tuned recommendations — the honest floor for a daemon running an axum server, a SQLite substrate, and the agent supervisor. Memory scales with concurrent agent turns and history size. No CPU limit is set: throttling the reactor during an LLM stream shows up as latency, not as a clean failure.
+To wartości początkowe, nie dostrojone rekomendacje — uczciwe minimum dla demona uruchamiającego serwer axum, substrat SQLite i nadzorcę agentów. Pamięć rośnie wraz z jednoczesnymi turami agenta i rozmiarem historii. Nie ustawiono limitu CPU: dławienie reaktora podczas strumieniowania LLM objawia się jako latencja, a nie jako czysta awaria.
 
-## Single-Replica Constraint
+## Ograniczenie jednej repliki
 
-`replicas` must remain `1`. The hard stop is `/data/daemon.lock`: `run_daemon` holds an exclusive flock, so a second pod sharing the volume cannot boot. Giving each replica its own volume removes that error without fixing the real problem, because the coordination gaps are in the daemon, not the storage:
+`replicas` musi pozostać `1`. Twarde zatrzymanie to `/data/daemon.lock`: `run_daemon` trzyma wyłączny flock, więc drugi pod współdzielący wolumen nie może się uruchomić. Przydzielenie każdej replice własnego wolumenu usuwa ten błąd bez naprawy rzeczywistego problemu, ponieważ luki koordynacji są w demonie, a nie w pamięci masowej:
 
-| Subsystem | Failure mode with N replicas |
+| Podsystem | Tryb awarii przy N replikach |
 | --- | --- |
-| Cron and trigger dispatch | No leader election — every replica fires every job |
-| `(agent_id, session_id)` execution ownership | Process-local — two replicas racing one session interleave writes |
-| Budget enforcement | Reads per-process metering — N replicas enforce roughly N× the cap |
-| Audit hash chain | Single tip per process — replicas diverge into unverifiable chains |
+| Wysyłanie zadań cron i wyzwalaczy | Brak wyboru lidera — każda replika odpala każde zadanie |
+| Własność wykonania `(agent_id, session_id)` | Lokalna dla procesu — dwie repliki konkurujące o jedną sesję przeplatają zapisy |
+| Wymuszanie budżetu | Odczyty z pomiaru procesowego — N replik wymusza około N× limit |
+| Łańcuch hashy audytu | Pojedynczy szczyt na proces — repliki rozbiegają się do niezweryfikowalnych łańcuchów |
 
-These are architecture questions, not configuration ones. `docs/architecture/multi-replica-rfc.md` enumerates every singleton subsystem and the coordination mechanism each would need.
+To pytania architektoniczne, nie konfiguracyjne. `docs/architecture/multi-replica-rfc.md` wylicza każdy podsystem-singleton i mechanizm koordynacji, którego każdy z nich potrzebowałby.
 
-## Migration from Docker Compose
+## Migracja z Docker Compose
 
-`deploy/docker-compose.yml` and these manifests run the same image with the same `/data` layout, so the migration is a volume copy:
+`deploy/docker-compose.yml` i te manifesty uruchamiają ten sam obraz z tym samym układem `/data`, więc migracja to kopia wolumenu:
 
-1. Stop the Compose stack so nothing is mid-write.
-2. Tar the volume out (preserves uid/gid 1001 ownership).
-3. Apply the manifests, scale to zero, seed the PVC from the tar, scale back to one.
+1. Zatrzymaj stos Compose, aby nic nie było w trakcie zapisu.
+2. Spakuj wolumen do tar (zachowuje własność uid/gid 1001).
+3. Zaaplikuj manifesty, skaluj do zera, zasiej PVC z tar, skaluj z powrotem do jednego.
 
-Credentials move from `.env` / `environment:` entries to the two Secrets. `LIBREFANG_API_KEY` is the env var the Kubernetes path uses to supply `api_key`, since `config.toml` lives inside the daemon's own writable data dir and cannot be mounted from a Secret.
+Poświadczenia przechodzą z wpisów `.env` / `environment:` do dwóch Secretów. `LIBREFANG_API_KEY` to zmienna środowiskowa używana przez ścieżkę Kubernetes do dostarczenia `api_key`, ponieważ `config.toml` znajduje się w zapisywalnym katalogu danych demona i nie może być zamontowany z Secretu.
 
-See the README quick start for the full command sequence.
+Pełną sekwencję poleceń znajdziesz w quick starcie README.
 
-## Observability
+## Obserwowalność
 
-`deploy/docker-compose.observability.yml` (Prometheus / Tempo / Grafana / OTel collector) has no Kubernetes counterpart in this module.
+`deploy/docker-compose.observability.yml` (Prometheus / Tempo / Grafana / OTel collector) nie ma odpowiednika Kubernetes w tym module.
 
-The daemon exposes `/api/metrics` in Prometheus format on the same port (4545), so a `ServiceMonitor` or a `prometheus.io/scrape` annotation is enough for metrics. Tracing needs `OTEL_EXPORTER_OTLP_ENDPOINT` pointed at your collector.
+Demon eksponuje `/api/metrics` w formacie Prometheus na tym samym porcie (4545), więc `ServiceMonitor` lub adnotacja `prometheus.io/scrape` wystarczą do metryk. Tracing wymaga `OTEL_EXPORTER_OTLP_ENDPOINT` wskazującego na Twój collector.
 
-## Key Invariants
+## Kluczowe niezmienniki
 
-- **One replica, one volume, one daemon.** The flock, the SQLite WAL, and the process-local singletons all depend on it.
-- **Secrets are out-of-band.** The kustomization never creates them; a missing mandatory key fails at the kubelet, not at runtime.
-- **`0.0.0.0` bind with mandatory auth.** The pod's loopback is unreachable from the kubelet; a non-loopback bind without authentication refuses to start.
-- **`restricted` PSS, no exemptions.** One image serves both Docker (root entrypoint + gosu drop) and Kubernetes (direct exec as uid 1001).
-- **RWO storage only.** POSIX locking and `mmap` semantics are non-negotiable for SQLite WAL correctness.
-- **Liveness ≠ readiness.** `/api/health` answers 200 to avoid restart loops through recoverable incidents; `/api/ready` returns 503 to drain when the daemon cannot accept work.
+- **Jedna replika, jeden wolumen, jeden demon.** Flock, SQLite WAL i lokalne singletony procesowe od tego zależą.
+- **Secrety są out-of-band.** Kustomizacja nigdy ich nie tworzy; brakujący obowiązkowy klucz zawodzi w kubelecie, nie w runtime.
+- **Bind `0.0.0.0` z obowiązkowym authem.** Loopback poda jest nieosiągalny z kubeleta; bind nie-loopback bez uwierzytelnienia odmawia startu.
+- **PSS `restricted`, bez wyjątków.** Jeden obraz obsługuje zarówno Docker (entrypoint root + zrzut gosu), jak i Kubernetes (bezpośrednie exec jako uid 1001).
+- **Tylko pamięć RWO.** Blokowanie POSIX i semantyka `mmap` są niepodlegające negocjacjom dla poprawności SQLite WAL.
+- **Liveness ≠ gotowość.** `/api/health` odpowiada 200, aby uniknąć pętli restartów przez odwracalne incydenty; `/api/ready` zwraca 503, aby odprowadzić, gdy demon nie może przyjmować pracy.

@@ -1,110 +1,110 @@
 # xtask — src
 
-# xtask — Workspace Development Tasks
+# xtask — Zadania Rozwojowe Workspace
 
-The `xtask` crate is a Cargo workspace member that serves as the project's task runner. Each source file implements one `cargo xtask <subcommand>` entry point. The pattern replaces ad-hoc shell scripts with type-checked Rust, giving every development workflow — from benchmarking to release cutting — a single, discoverable CLI surface.
+Kratek `xtask` jest członkiem workspace Cargo pełniącym rolę uruchamiacza zadań projektu. Każdy plik źródłowy implementuje jeden punkt wejścia `cargo xtask <podkomenda>`. Ten wzorzec zastępuje doraźne skrypty powłoki sprawdzanym typowo Rustem, nadając każdemu przepływowi pracy rozwojowej — od benchmarków po tworzenie wydań — pojedynczą, łatwą do odkrycia powierzchnię CLI.
 
-## Architecture
+## Architektura
 
 ```
-cargo xtask <command> [args]
+cargo xtask <polecenie> [argumenty]
         │
         ├── common::repo_root()          ← resolves the workspace root once
         │
         ├── api_docs     ← OpenAPI → Swagger UI HTML
-        ├── bench        ← criterion baselines, throttling detection
-        ├── build-timings ← cargo --timings parsing, regression diffing
-        ├── build-web    ← pnpm builds for dashboard/web/docs
-        ├── changelog    ← PR extraction, fragment folding, release notes
-        └── ...          ← ci, clean-all, deps, dev, dist, release, etc.
+        ├── bench        ← punkt odniesienia criterion, wykrywanie dławienia
+        ├── build-timings ← analiza cargo --timings, porównywanie regresji
+        ├── build-web    ← kompilacje pnpm dla dashboard/web/docs
+        ├── changelog    ← ekstrakcja PR, składanie fragmentów, notki wydania
+        └── ...          ← ci, clean-all, deps, dev, dist, release itd.
 ```
 
-Every subcommand follows the same contract:
-- Accept a `clap::Parser` args struct
-- Resolve the workspace root via `crate::common::repo_root()`
-- Shell out to external tools (`cargo`, `pnpm`, `gh`, `claude`, `git`) as needed
-- Return `Result<(), Box<dyn std::error::Error>>` so `main` can propagate failures
+Każda podkomenda podąża za tym samym kontraktem:
+- Akceptuje strukturę argumentów `clap::Parser`
+- Rozwiązuje katalog główny workspace poprzez `crate::common::repo_root()`
+- Wywołuje zewnętrzne narzędzia (`cargo`, `pnpm`, `gh`, `claude`, `git`) w razie potrzeby
+- Zwraca `Result<(), Box<dyn std::error::Error>>`, aby `main` mógł propagować błędy
 
 ---
 
-## Subcommand Reference
+## Podręcznik Podkomend
 
-### `api_docs` — OpenAPI Documentation Generator
+### `api_docs` — Generator Dokumentacji OpenAPI
 
-Generates a standalone Swagger UI HTML page from the workspace's `openapi.json`.
+Generuje samodzielny plik HTML Swagger UI na podstawie `openapi.json` workspace.
 
-**Entry point:** `api_docs::run(ApiDocsArgs)`
+**Punkt wejścia:** `api_docs::run(ApiDocsArgs)`
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--output` | `api-docs` | Output directory (relative to repo root) |
-| `--open` | — | Open the generated page in a browser |
-| `--refresh` | — | Regenerate `openapi.json` via `cargo test -p librefang-api -- openapi_spec` before building docs |
+| Flaga | Domyślnie | Opis |
+|-------|-----------|-----|
+| `--output` | `api-docs` | Katalog wyjściowy (względem katalogu głównego repozytorium) |
+| `--open` | — | Otwórz wygenerowaną stronę w przeglądarce |
+| `--refresh` | — | Przegeneruj `openapi.json` poprzez `cargo test -p librefang-api -- openapi_spec` przed zbudowaniem dokumentacji |
 
-The spec file is located by `find_openapi_spec`, which checks three candidate paths in order: repo root, `crates/librefang-api/`, and `docs/`. The generated `index.html` references `openapi.json` via CDN-hosted Swagger UI bundle, and the spec is copied alongside it.
+Plik specyfikacji jest lokalizowany przez `find_openapi_spec`, który sprawdza trzy kandydujące ścieżki po kolei: katalog główny repozytorium, `crates/librefang-api/` oraz `docs/`. Wygenerowany `index.html` odwołuje się do `openapi.json` za pomocą pakietu Swagger UI hostowanego przez CDN, a specyfikacja jest kopiowana obok niego.
 
-### `bench` — Criterion Benchmark Runner
+### `bench` — Uruchamiacz Benchmarków Criterion
 
-**Entry point:** `bench::run(BenchArgs)`
+**Punkt wejścia:** `bench::run(BenchArgs)`
 
-| Flag | Description |
-|------|-------------|
-| `--name` | Filter to a specific benchmark by name |
-| `--save-baseline` | Save results under a named criterion baseline |
-| `--baseline` | Compare against a previously saved baseline |
-| `--open` | Open the HTML report after completion |
+| Flaga | Opis |
+|-------|-----|
+| `--name` | Filtruj do konkretnego benchmarku po nazwie |
+| `--save-baseline` | Zapisz wyniki pod nazwanym punktem odniesienia criterion |
+| `--baseline` | Porównaj z wcześniej zapisanym punktem odniesienia |
+| `--open` | Otwórz raport HTML po zakończeniu |
 
-**Throttling awareness:** `bench` calls `local_check_mode::detect()` to probe CPU and memory resources. When running on a throttled host (low-spec CI or local dev machine), it emits a warning that benchmark numbers are unreliable. Critically, it does **not** apply throttled cargo settings (`jobs=1`, `codegen-units=1`) — those settings corrupt benchmark results. Criterion arguments are forwarded after `--`.
+**Świadomość dławienia:** `bench` wywołuje `local_check_mode::detect()`, aby sprawdzić zasoby CPU i pamięci. Podczas uruchamiania na zdławionym hoście (niskospecyfikacyjne CI lub lokalna maszyna deweloperska), emituje ostrzeżenie, że wyniki benchmarków są niewiarygodne. Co kluczowe, **nie** aplikuje dławionych ustawień cargo (`jobs=1`, `codegen-units=1`) — te ustawienia psują wyniki benchmarków. Argumenty criterion są przekazywane po `--`.
 
-### `build-timings` / `compare-build-timings` — Compile-Time Regression Tracking
+### `build-timings` / `compare-build-timings` — Śledzenie Regresji Czasu Kompilacji
 
-**Entry points:** `build_timings::run_collect(BuildTimingsArgs)` and `build_timings::run_compare(CompareBuildTimingsArgs)`
+**Punkty wejścia:** `build_timings::run_collect(BuildTimingsArgs)` oraz `build_timings::run_compare(CompareBuildTimingsArgs)`
 
-#### Collection
+#### Zbieranie
 
-Runs `cargo build --workspace --timings`, then parses the generated HTML report to extract per-crate self-compile times. The parser handles two cargo report formats:
+Uruchamia `cargo build --workspace --timings`, a następnie analizuje wygenerowany raport HTML, aby wyodrębnić czas samodzielnej kompilacji dla każdej kratki. Analizator obsługuje dwa formaty raportów cargo:
 
-1. **Literal array:** `const UNIT_DATA = [...]` — walked with bracket-depth tracking to handle `]` inside string values.
-2. **JSON.parse form:** `const UNIT_DATA = JSON.parse('...')` — un-escapes JS single-quoted string literals.
+1. **Tablica dosłowna:** `const UNIT_DATA = [...]` — przechodzona ze śledzeniem głębokości nawiasów, aby obsłużyć `]` wewnątrz wartości łańcuchowych.
+2. **Forma JSON.parse:** `const UNIT_DATA = JSON.parse('...')` — odwraca escaping jednocudzysłowych literałów łańcuchowych JS.
 
-Each crate's total is the **sum of all its units** (lib, tests, benches, integration tests). This aggregation is intentional: individual units shift around as tests are added or split, but the per-package total remains a stable signal.
+Suma dla każdej kratki to **suma wszystkich jej jednostek** (lib, testy, benchmarke, testy integracyjne). Ta agregacja jest celowa: poszczególne jednostki przesuwają się w miarę dodawania lub dzielenia testów, ale suma per-pakiet pozostaje stabilnym sygnałem.
 
-Snapshots are written to `bench-results/build-timings/<git-sha>.json` as sorted JSON objects with 3-decimal-place rounding, keeping git diffs minimal.
+Migawki są zapisywane do `bench-results/build-timings/<git-sha>.json` jako posortowane obiekty JSON z zaokrągleniem do 3 miejsc po przecinku, co minimalizuje gitty diffy.
 
-#### Comparison
+#### Porównanie
 
-Diffs the newest snapshot against `bench-results/build-timings/baseline.json`. Key behaviors:
+Różnicuje najnowszą migawkę względem `bench-results/build-timings/baseline.json`. Kluczowe zachowania:
 
-- Crates with baseline compile time ≤ 0.5s are skipped (small absolute deltas produce meaningless percentages).
-- Exits non-zero when any crate regresses beyond the threshold (default 10%).
-- Designed for a **soft CI alert** (`continue-on-error: true`), not a blocking gate.
-- Returns exit 0 with a notice when no baseline exists yet, so the first weekly run can seed it.
+- Kratki z punktem odniesienia czasu kompilacji ≤ 0,5 s są pomijane (małe delty bezwzględne dają bezsensowne procenty).
+- Zwraca niezerowy kod wyjścia, gdy jakakolwiek kratka ulega regresji powyżej progu (domyślnie 10%).
+- Zaprojektowane jako **miękki alert CI** (`continue-on-error: true`), a nie blokująca brama.
+- Zwraca kod wyjścia 0 z powiadomieniem, gdy punkt odniesienia nie istnieje jeszcze, aby pierwszy tygodniowy przebieg mógł go zainicjować.
 
-### `build-web` — Frontend Build Orchestrator
+### `build-web` — Orkiestrator Kompilacji Frontendu
 
-**Entry point:** `build_web::run(BuildWebArgs)`
+**Punkt wejścia:** `build_web::run(BuildWebArgs)`
 
-| Flag | Description |
-|------|-------------|
-| `--dashboard` | Build only `crates/librefang-api/dashboard` |
-| `--web` | Build only `web/` |
-| `--docs` | Build only `docs/` |
+| Flaga | Opis |
+|-------|-----|
+| `--dashboard` | Zbuduj tylko `crates/librefang-api/dashboard` |
+| `--web` | Zbuduj tylko `web/` |
+| `--docs` | Zbuduj tylko `docs/` |
 
-With no flags, builds all three. Each target runs `pnpm install --frozen-lockfile` followed by `pnpm run build`, timed with an `Instant` stopwatch. Directories without a `package.json` are silently skipped.
+Bez flag buduje wszystkie trzy. Każdy cel uruchamia `pnpm install --frozen-lockfile`, po czym `pnpm run build`, mierzone stoperem `Instant`. Katalogi bez `package.json` są po cichu pomijane.
 
 ---
 
-## `changelog` — Release Notes Generation
+## `changelog` — Generowanie Notek Wydania
 
-The most complex subcommand. It assembles a dated `## [VERSION]` section in `CHANGELOG.md` from three sources:
+Najbardziej złożona podkomenda. Składa datowaną sekcję `## [WERSJA]` w `CHANGELOG.md` z trzech źródeł:
 
-1. **Curated `[Unreleased]` prose** — hand-written bullets contributors add under `## [Unreleased]`
-2. **Generated PR entries** — titles fetched via `gh` CLI, classified by conventional-commit prefix
-3. **`changelog.d/` fragments** — per-PR markdown files folded in before the release is cut
+1. **Kuratowane prozy `[Unreleased]`** — ręcznie pisane punkty dodawane przez współtwórców pod `## [Unreleased]`
+2. **Generowane wpisy PR** — tytuły pobierane przez CLI `gh`, klasyfikowane według prefiksu conventional-commit
+3. **Fragmenty `changelog.d/`** — pliki markdown per PR składane przed wydaniem wersji
 
-### `cargo xtask changelog <version>`
+### `cargo xtask changelog <wersja>`
 
-**Entry point:** `changelog::run(ChangelogArgs)`
+**Punkt wejścia:** `changelog::run(ChangelogArgs)`
 
 ```mermaid
 flowchart TD
@@ -119,55 +119,55 @@ flowchart TD
     E --> J[write_changelog: compose body, verify no loss]
 ```
 
-#### PR Extraction and Classification
+#### Ekstrakcja i Klasyfikacja PR
 
-`parse_pr_numbers` walks `git log --oneline` output and takes only the **last** `(#N)` per line — GitHub squash merges append the PR reference as the trailing `(#N)`, and any earlier `#N` is a cross-reference to an unrelated issue or prior PR.
+`parse_pr_numbers` przechodzi przez wynik `git log --oneline` i pobiera tylko **ostatnie** `(#N)` z każdej linii — GitHub squash-merges dodaje odniesienie do PR jako końcowe `(#N)`, a każde wcześniejsze `#N` jest odniesieniem do niezwiązanego issue lub wcześniejszego PR.
 
-Each PR title is classified by conventional-commit prefix:
+Każdy tytuł PR jest klasyfikowany według prefiksu conventional-commit:
 
-| Prefix | Category |
-|--------|----------|
-| `feat` | Added |
-| `fix` | Fixed |
-| `refactor` | Changed |
-| `perf` | Performance |
-| `docs`/`doc` | Documentation |
-| `chore`, `ci`, `build`, `test`, `style` | Maintenance |
-| `revert` | Reverted |
-| *(other)* | Other |
+| Prefiks | Kategoria |
+|---------|-----------|
+| `feat` | Dodano |
+| `fix` | Naprawiono |
+| `refactor` | Zmieniono |
+| `perf` | Wydajność |
+| `docs`/`doc` | Dokumentacja |
+| `chore`, `ci`, `build`, `test`, `style` | Utrzymanie |
+| `revert` | Cofnięto |
+| *(inne)* | Pozostałe |
 
-**Primary categories** (Added, Fixed, Changed, Performance) render above the fold. Secondary categories (Documentation, Maintenance, Reverted, Other) are collapsed into a `<details>` block to keep the release view scannable.
+**Kategorie główne** (Dodano, Naprawiono, Zmieniono, Wydajność) są renderowane powyżej zgięcia. Kategorie poboczne (Dokumentacja, Utrzymanie, Cofnięto, Pozostałe) są zwijane do bloku `<details>`, aby widok wydania pozostawał czytelny.
 
-#### Curated Prose Handling
+#### Obsługa Kuratowanej Prozy
 
-The `## [Unreleased]` section is drained via `drain_unreleased`: its body is lifted out verbatim (preserving subsection order and heading text), leaving behind an empty `## [Unreleased]` heading that survives the release so in-flight PRs can still append to it.
+Sekcja `## [Unreleased]` jest opróżniana poprzez `drain_unreleased`: jej treść jest podnoszona dosłownie (z zachowaniem kolejności podsekcji i tekstu nagłówków), zostawiając pusty nagłówek `## [Unreleased]`, który przetrwa wydanie, aby PR w toku mogły nadal do niego dołączać.
 
-Which PRs the curated prose documents determines which generated entries are suppressed — a PR documented by hand-written prose must not also appear as a generated title line. PR reference extraction from curated bullets uses the **last `(#N)` group on the last non-empty line** of each bullet, handling:
-- Multi-PR groups: `(#6594, #6595)`
-- Trailing bare cross-references: `(#6492): ... (the latter via #6441)` credits `#6492`, not `#6441`
-- Unreferenced bullets fail open **per bullet**: the bullet's own PR keeps its generated line, but does not disarm suppression for bullets that did carry references.
+Od tego, które PR dokumentuje skuratkowana proza, zależy, które generowane wpisy są pomijane — PR udokumentowany ręcznie nie może jednocześnie pojawić się jako generowana linia tytułu. Ekstrakcja odniesień do PR z kuratowanych punktów używa **ostatniej grupy `(#N)` na ostatniej niepustej linii** każdego punktu, obsługując:
+- Grupy wielo-PR: `(#6594, #6595)`
+- Kończące gołe odnośniki krzyżowe: `(#6492): ... (the latter via #6441)` przypisuje `#6492`, nie `#6441`
+- Punkty bez odniesień zawodzą otwarcie **per punkt**: własny PR punktu zachowuje swoją generowaną linię, ale nie wyłącza pomijania dla punktów, które niosły odnośniki.
 
-#### No-Loss Guards
+#### Zabezpieczenia Przed Utratą
 
-Two independent guards prevent silent prose loss:
+Dwa niezależne zabezpieczenia zapobiegają cichej utracie prozy:
 
-1. **`verify_no_curated_bullet_lost`** — runs before every write. Compares whole bullet blocks (marker line + all continuation lines) against the composed body. A `## [` in column 0 inside a bullet continuation truncates what `drain_unreleased` sees; this guard scans to the next *dated* heading instead and catches the truncation.
+1. **`verify_no_curated_bullet_lost`** — uruchamia się przed każdym zapisem. Porównuje całe bloki punktów (linia znacznika + wszystkie linie kontynuacji) ze skomponowaną treścią. `## [` w kolumnie 0 wewnątrz kontynuacji punktu obcina to, co widzi `drain_unreleased`; to zabezpieczenie skanuje do następnego *datowanego* nagłówka i wyłapuje obcięcie.
 
-2. **`prose_dropped_by_regeneration`** — fires when re-cutting a release for a version that already has a `## [VERSION]` section. After the first run drains `[Unreleased]`, a second run's `verify_no_curated_bullet_lost` is blind (it derives its expectation from the now-empty section). This second guard checks the existing `## [VERSION]` section for attributed bullets the regenerated body would drop.
+2. **`prose_dropped_by_regeneration`** — aktywuje się podczas ponownego wycinania wydania dla wersji, która ma już sekcję `## [WERSJA]`. Po pierwszym przebiegu opróżniającym `[Unreleased]`, `verify_no_curated_bullet_lost` drugiego przebiegu jest ślepy (pochodzi jego oczekiwanie z teraz pustej sekcji). To drugie zabezpieczenie sprawdza istniejącą sekcję `## [WERSJA]` pod kątem przypisanych punktów, które zregenerowana treść odrzuciłaby.
 
-Both guards **abort before writing anything**. The file is left untouched.
+Oba zabezpieczenia **przerywają przed zapisaniem czegokolwiek**. Plik pozostaje nietknięty.
 
-#### Highlights Generation
+#### Generowanie Podsumowań
 
-`generate_highlights` feeds the breaking-changes block plus the full classified output to the `claude` CLI (model `claude-sonnet-4-6`). It returns `None` on any failure — missing CLI, non-zero exit, empty response — and never gates the release. Highlights are deliberately generated from the **full** PR list, not the deduped one, so the summarizer sees the changes someone cared enough to write about.
+`generate_highlights` przekazuje blok zmian łamiących kompatybilność oraz pełny sklasyfikowany wynik do CLI `claude` (model `claude-sonnet-4-6`). Zwraca `None` w przypadku jakiejkolwiek awarii — brak CLI, niezerowy kod wyjścia, pusta odpowiedź — i nigdy nie blokuje wydania. Podsumowania są celowo generowane z **pełnej** listy PR, nie z dedupowanej, aby podsumowujący widział zmiany, na których ktoś wystarczająco mu zależało, by o nich pisać.
 
 ### `cargo xtask collect-fragments`
 
-**Entry point:** `changelog::collect_fragments(CollectFragmentsArgs)` → `collect_fragments_in`
+**Punkt wejścia:** `changelog::collect_fragments(CollectFragmentsArgs)` → `collect_fragments_in`
 
-Folds every `changelog.d/<section>/*.md` fragment into `## [Unreleased]`, then deletes the consumed files.
+Składa każdy fragment `changelog.d/<sekcja>/*.md` do `## [Unreleased]`, a następnie usuwa zużyte pliki.
 
-#### Fragment Directories
+#### Katalogi Fragmentów
 
 ```rust
 const FRAGMENT_SECTIONS: &[(&str, &str)] = &[
@@ -179,44 +179,44 @@ const FRAGMENT_SECTIONS: &[(&str, &str)] = &[
 ];
 ```
 
-The directory names are a cross-language contract with `scripts/check-changelog-attribution.py`. The test `fragment_sections_match_the_python_validator` enforces that both lists agree — a section added only to the Rust side would cause the Python validator to reject valid fragments, while a section added only to the validator would let fragments pass review then silently vanish at assembly time.
+Nazwy katalogów stanowią kontrakt między językami z `scripts/check-changelog-attribution.py`. Test `fragment_sections_match_the_python_validator` wymusza zgodność obu list — sekcja dodana tylko po stronie Rust spowodowałaby, że walidator Pythona odrzuciłby prawidłowe fragmenty, podczas gdy sekcja dodana tylko do walidatora pozwalałaby fragmentom przejść rewizję, a potem cichutko zniknąć w czasie składania.
 
-#### Fragment Rendering
+#### Renderowanie Fragmentów
 
-`render_fragment_bullet` converts a fragment body into a CHANGELOG bullet:
-- Leading/trailing blank lines stripped
-- First line gains the `- ` marker
-- A leading list marker (`- `, `* `, `+ `) the author wrote anyway is stripped to avoid `- - Fix foo`
-- Unindented continuation lines gain two-space indent; already-indented lines are copied verbatim
+`render_fragment_bullet` konwertuje treść fragmentu na punkt CHANGELOG:
+- Usuwane początkowe/końcowe puste linie
+- Pierwsza linia zyskuje znacznik `- `
+- Wiodący znacznik listy (`- `, `* `, `+ `), który autor i tak napisał, jest usuwany, aby uniknąć `- - Napraw foo`
+- Niezindentowane linie kontynuacji zyskują dwuspacjowe wcięcie; już zindentowane linie są kopiowane dosłownie
 
-Fragments are sorted by filename before assembly to ensure deterministic output regardless of filesystem `read_dir` order. Consumed fragments are deleted after the CHANGELOG is written; if a deletion fails, the error names the survivor so the operator can recover by hand — otherwise the next run would fold the same bullet in twice.
+Fragmenty są sortowane według nazwy pliku przed składaniem, aby zapewnić deterministyczny wynik niezależnie od kolejności `read_dir` systemu plików. Zużyte fragmenty są usuwane po zapisaniu CHANGELOG; jeśli usunięcie się nie powiedzie, błąd nazywa ocalałego, aby operator mógł odzyskać ręcznie — w przeciwnym razie następny przebieg złożyłby ten sam punkt podwójnie.
 
-#### Folding Mechanics
+#### Mechanika Składania
 
-`fold_fragments` appends fragment bullets to existing `### ` subsections under `[Unreleased]`, creating missing subsections at their canonical position. The canonical order is defined by `FRAGMENT_SECTIONS`: Added, Fixed, Changed, Security, Documentation. Unrecognised section directories (e.g., `changelog.d/fix/`) trigger a warning but are left in place, not deleted — the per-PR attribution gate is what rejects them before they reach a release.
+`fold_fragments` dołącza punkty fragmentów do istniejących podsekcji `### ` pod `[Unreleased]`, tworząc brakujące podsekcje w ich kanonicznej pozycji. Kanoniczna kolejność jest zdefiniowana przez `FRAGMENT_SECTIONS`: Added, Fixed, Changed, Security, Documentation. Nierozpoznane katalogi sekcji (np. `changelog.d/fix/`) wyzwalają ostrzeżenie, ale pozostają na miejscu, nieusunięte — per-PR brama atrybucji jest tym, co je odrzuca, zanim dotrą do wydania.
 
 ---
 
-## Shared Utilities
+## Narzędzia Współdzielone
 
 ### `common::repo_root()`
 
-Called by every subcommand to resolve the workspace root. All path construction branches from this single anchor point.
+Wywoływane przez każdą podkomendę do rozwiązania katalogu głównego workspace. Cała konstrukcja ścieżek rozgałęzia się od tego pojedynczego punktu kotwicy.
 
 ### `local_check_mode`
 
-Probes host resources (`detect_cpus`, memory) and exposes a `LocalCheckMode` enum. `detect()` returns `(mode, probe)` where mode is `Full` or `Throttled`. Used by `bench` to warn about unreliable numbers. `apply_for_subcommand` injects throttled cargo settings (`jobs=1`, `codegen-units=1`) for compilation-heavy tasks — but explicitly **not** for benchmarks.
+Bada zasoby hosta (`detect_cpus`, pamięć) i eksponuje enum `LocalCheckMode`. `detect()` zwraca `(mode, probe)`, gdzie mode to `Full` lub `Throttled`. Wykorzystywane przez `bench` do ostrzegania o niewiarygodnych liczbach. `apply_for_subcommand` wstrzykuje dławione ustawienia cargo (`jobs=1`, `codegen-units=1`) dla zadań obciążonych kompilacją — ale wyraźnie **nie** dla benchmarków.
 
 ---
 
-## Testing
+## Testowanie
 
-The `changelog` module carries the most extensive test suite in `xtask`. Tests use a `TmpTree` RAII guard that creates an isolated scratch directory with `CHANGELOG.md` and the five `changelog.d/` section directories, cleaning up on drop. A process-wide atomic counter (`SEQ`) prevents parallel test threads from sharing directories.
+Moduł `changelog` nosi najbardziej rozbudowany zestaw testów w `xtask`. Testy używają stražnika RAII `TmpTree`, który tworzy odizolowany katalog roboczy z `CHANGELOG.md` i pięcioma katalogami sekcji `changelog.d/`, sprzątając przy dropie. Atomowy licznik procesowy (`SEQ`) zapobiega współdzieleniu katalogów przez równoległe wątki testowe.
 
-Two tests run against the **repo's own `CHANGELOG.md`** (read-only):
-- `drains_the_repos_own_unreleased_section_without_tripping_the_guard` — exercises the drain against 160+ real hand-written bullets
-- `folds_into_the_repos_own_changelog` — folds a probe fragment into the real file's `[Unreleased]` section
+Dwa testy uruchamiają się przeciwko **własnemu `CHANGELOG.md` repozytorium** (tylko do odczytu):
+- `drains_the_repos_own_unreleased_section_without_tripping_the_guard` — wykonuje opróżnienie na 160+ rzeczywistych ręcznie pisanych punktach
+- `folds_into_the_repos_own_changelog` — składa fragment sondy w sekcję `[Unreleased]` rzeczywistego pliku
 
-Both use `repo_changelog_with_populated_unreleased`, which reconstitutes the pre-release shape on release branches where `[Unreleased]` has already been drained.
+Oba używają `repo_changelog_with_populated_unreleased`, który rekonstruuje kształt przed wydaniem na gałęziach wydania, gdzie `[Unreleased]` został już opróżniony.
 
-The `build_timings` module tests the two cargo report formats and snapshot roundtrip serialization in a temp directory.
+Moduł `build_timings` testuje dwa formaty raportów cargo oraz serializację rundtrip migawek w katalogu tymczasowym.

@@ -2,187 +2,187 @@
 
 # Root — `justfile`
 
-## Purpose
+## Przeznaczenie
 
-The `justfile` is the **canonical developer entry point** for the LibreFang monorepo. It provides a thin, human-friendly recipe layer over `cargo` and the `xtask` automation crate. Every common development workflow—building, testing, linting, releasing, running benchmarks, cutting changelogs—has a `just <recipe>` command that a developer can run from the repository root.
+Plik `justfile` to **kanoniczny punkt wejścia dewelopera** w monorepo LibreFang. Zapewnia cienką, przyjazną dla człowieka warstwę przepisów nałożoną na `cargo` i crate automatyzacji `xtask`. Każdy typowy przepływ pracy deweloperskiej — budowanie, testowanie, lintowanie, wydawanie wersji, uruchamianie benchmarków, tworzenie changelogów — ma odpowiadający mu polecenie `just <przepis>`, które deweloper może uruchomić z katalogu głównego repozytorium.
 
-The file itself is intentionally lean: it is a *dispatcher*, not an implementation surface. Complex multi-step logic lives in [`xtask/`](../xtask), and the justfile forwards arguments to it.
+Sam plik jest celowo zwięzły: jest to *dyspozytor*, a nie powierzchnia implementacyjna. Złożona logika wieloetapowa znajduje się w [`xtask/`](../xtask), a justfile przekazuje do niej argumenty.
 
 ---
 
-## Architecture: Two-Tier Dispatch Model
+## Architektura: Dwupoziomowy model dyspozycji
 
 ```mermaid
 graph TD
-    Dev["Developer runs<br/>just &lt;recipe&gt;"]
+    Dev["Deweloper uruchamia<br/>just &lt;przepis&gt;"]
     Dev --> Justfile["justfile"]
-    Justfile -->|"single-line cargo<br/>(build, test, fmt, check, …)"| Cargo["cargo"]
-    Justfile -->|"cargo xtask &lt;subcmd&gt;<br/>for complex flows"| Xtask["xtask crate"]
-    Justfile -->|"inline bash<br/>(dev, _dev-docker)"| Docker["Docker / shell"]
+    Justfile -->|"jednolinijkowe cargo<br/>(build, test, fmt, check, …)"| Cargo["cargo"]
+    Justfile -->|"cargo xtask &lt;podcmd&gt;<br/>dla złożonych przepływów"| Xtask["crate xtask"]
+    Justfile -->|"wbudowany bash<br/>(dev, _dev-docker)"| Docker["Docker / powłoka"]
 ```
 
-The division of labor follows a strict rule:
+Podział obowiązków opiera się na ścisłej regule:
 
-| Recipe type | Where it lives | Example |
+| Typ przepisu | Gdzie się znajduje | Przykład |
 |---|---|---|
-| **Pure single-line cargo** | Directly in `justfile` | `just build`, `just fmt`, `just lint` |
-| **Anything multi-step** | `xtask/`, forwarded here | `just ci`, `just release`, `just dist` |
-| **Multi-line `just` recipe** | **Code smell** — move to xtask | _(exceptions: `dev`, `_dev-docker`)_ |
+| **Czysty jednolinijkowy cargo** | Bezpośrednio w `justfile` | `just build`, `just fmt`, `just lint` |
+| **Cokolwiek wieloetapowego** | W `xtask/`, przekazywane stąd | `just ci`, `just release`, `just dist` |
+| **Wielolinijkowy przepis `just`** | **Zapach kodu** — przenieś do xtask | _(wyjątki: `dev`, `_dev-docker`)_ |
 
-If a recipe and its xtask counterpart ever drift, **xtask is authoritative**. The recipe should be updated to forward, not reimplemented.
-
----
-
-## Recipe Catalog
-
-### Core Build & Test
-
-| Recipe | Description |
-|---|---|
-| `just build` | Build all workspace libraries (`cargo build --workspace --lib`) |
-| `just test` | Run all workspace tests with `LIBREFANG_REGISTRY_OFFLINE=1` |
-| `just test 0` | Re-enable network registry refresh during tests |
-| `just check` | Type-check the workspace without producing binaries |
-| `just lint` | Clippy with `-D warnings` across all targets |
-| `just fmt` | Format all Rust code |
-| `just fmt-check` | Verify formatting without modifying files |
-| `just clean` | Remove `target/` build artifacts |
-| `just doc` | Build and open workspace documentation |
-
-### CI & Pre-Commit
-
-| Recipe | Description |
-|---|---|
-| `just ci` | Local CI simulation: build + test + clippy + web lint |
-| `just pre-commit` | Runs `xtask pre-commit` (fmt + clippy + test) |
-
-### Web & Desktop
-
-| Recipe | Description |
-|---|---|
-| `just build-web` | Build all frontend targets (dashboard, web, docs) |
-| `just dashboard-build` | Build React dashboard assets for `librefang-api` |
-| `just dash` | Start React dashboard in dev mode (requires API on `:4545`) |
-| `just desktop-build` | Build Tauri desktop app (builds dashboard assets first) |
-| `just desktop-dev` | Start Tauri desktop app in dev mode |
-
-### Release & Distribution
-
-| Recipe | Description |
-|---|---|
-| `just release` | Cut a release (Unix: falls back to Docker if cargo missing) |
-| `just dist` | Build release binaries for multiple platforms |
-| `just docker` | Build and optionally push Docker image |
-| `just changelog` | Generate CHANGELOG from merged PRs |
-| `just publish-sdks` | Publish SDKs to npm / PyPI / crates.io |
-| `just publish-npm-binaries` | Publish CLI binaries to npm |
-| `just publish-pypi-binaries` | Publish CLI wheels to PyPI |
-
-### Installation
-
-| Recipe | Description |
-|---|---|
-| `just install` | Build release CLI and install to `~/.librefang/bin` |
-| `just install-full` | Same as `install` plus fresh dashboard assets and version stamp |
-
-Both recipes are platform-aware (`[unix]` / `[windows]`).
-
-### Development Environment
-
-| Recipe | Description |
-|---|---|
-| `just dev` | Start dev environment (native or auto-detect Docker) |
-| `just dev --docker` | Force Docker-based dev environment |
-| `just dev --docker --port 4646` | Docker dev on a custom port |
-| `just setup` | One-time local development environment setup |
-| `just doctor` | Diagnose development environment issues |
-
-### Code Quality & Analysis
-
-| Recipe | Description |
-|---|---|
-| `just coverage` | Generate test coverage report |
-| `just deps` | Audit dependencies for vulnerabilities and updates |
-| `just license-check` | Check dependency licenses |
-| `just loc` | Code statistics (lines of code, dependency graph) |
-| `just update-deps` | Update Rust + web dependencies |
-| `just bench` | Run criterion benchmarks |
-| `just fmt-all` | Check/fix formatting across Rust + web |
-
-### Code Generation & Docs
-
-| Recipe | Description |
-|---|---|
-| `just codegen` | Run code generation (OpenAPI spec, etc.) |
-| `just api-docs` | Generate API docs from OpenAPI spec |
-| `just check-links` | Check for broken links in documentation |
-| `just contributors` | Generate contributors + star history SVGs |
-| `just sync-versions` | Synchronize crate versions across workspace |
-
-### Operations
-
-| Recipe | Description |
-|---|---|
-| `just db` | Database management (info, backup, reset) |
-| `just validate-config` | Validate `config.toml` |
-| `just migrate` | Migrate agents from other frameworks |
-| `just integration-test` | Run live integration tests |
-| `just clean-all` | Clean all build artifacts (broader than `just clean`) |
+Jeśli przepis i jego odpowiednik w xtask kiedykolwiek się rozejdą, **xtask jest autorytatywny**. Przepis powinien zostać zaktualizowany tak, aby przekazywać, a nie reimplementować.
 
 ---
 
-## Key Design Decisions
+## Katalog przepisów
+
+### Podstawowe budowanie i testowanie
+
+| Przepis | Opis |
+|---|---|
+| `just build` | Buduje wszystkie biblioteki w workspace (`cargo build --workspace --lib`) |
+| `just test` | Uruchamia wszystkie testy w workspace z `LIBREFANG_REGISTRY_OFFLINE=1` |
+| `just test 0` | Ponownie włącza odświeżanie rejestru z sieci podczas testów |
+| `just check` | Sprawdza typy w workspace bez produkowania binariów |
+| `just lint` | Uruchamia Clippy z `-D warnings` dla wszystkich targetów |
+| `just fmt` | Formatuje cały kod Rust |
+| `just fmt-check` | Sprawdza formatowanie bez modyfikacji plików |
+| `just clean` | Usuwa artefakty budowania z `target/` |
+| `just doc` | Buduje i otwiera dokumentację workspace |
+
+### CI i pre-commit
+
+| Przepis | Opis |
+|---|---|
+| `just ci` | Lokalna symulacja CI: budowanie + testy + clippy + lint web |
+| `just pre-commit` | Uruchamia `xtask pre-commit` (fmt + clippy + test) |
+
+### Web i desktop
+
+| Przepis | Opis |
+|---|---|
+| `just build-web` | Buduje wszystkie targety frontendu (dashboard, web, docs) |
+| `just dashboard-build` | Buduje zasoby dashboardu React dla `librefang-api` |
+| `just dash` | Uruchamia dashboard React w trybie dev (wymaga API na `:4545`) |
+| `just desktop-build` | Buduje aplikację desktopową Tauri (najpierw buduje zasoby dashboardu) |
+| `just desktop-dev` | Uruchamia aplikację desktopową Tauri w trybie dev |
+
+### Wydawanie wersji i dystrybucja
+
+| Przepis | Opis |
+|---|---|
+| `just release` | Wydaje nową wersję (Unix: wraca do Dockera, jeśli brak cargo) |
+| `just dist` | Buduje binaria wydania dla wielu platform |
+| `just docker` | Buduje i opcjonalnie wypycha obraz Dockera |
+| `just changelog` | Generuje CHANGELOG na podstawie scalonych PR-ów |
+| `just publish-sdks` | Publikuje SDK na npm / PyPI / crates.io |
+| `just publish-npm-binaries` | Publikuje binaria CLI na npm |
+| `just publish-pypi-binaries` | Publikuje paczki CLI (wheels) na PyPI |
+
+### Instalacja
+
+| Przepis | Opis |
+|---|---|
+| `just install` | Buduje CLI w wersji wydania i instaluje w `~/.librefang/bin` |
+| `just install-full` | To samo co `install` plus świeże zasoby dashboardu i oznaczenie wersji |
+
+Oba przepisy są świadome platformy (`[unix]` / `[windows]`).
+
+### Środowisko deweloperskie
+
+| Przepis | Opis |
+|---|---|
+| `just dev` | Uruchamia środowisko deweloperskie (natywne lub automatycznie wykrywa Dockera) |
+| `just dev --docker` | Wymusza środowisko deweloperskie oparte na Dockerze |
+| `just dev --docker --port 4646` | Środowisko deweloperskie Docker na niestandardowym porcie |
+| `just setup` | Jednorazowa konfiguracja lokalnego środowiska deweloperskiego |
+| `just doctor` | Diagnozuje problemy w środowisku deweloperskim |
+
+### Jakość kodu i analiza
+
+| Przepis | Opis |
+|---|---|
+| `just coverage` | Generuje raport pokrycia testów |
+| `just deps` | Audytuje zależności pod kątem luk i aktualizacji |
+| `just license-check` | Sprawdza licencje zależności |
+| `just loc` | Statystyki kodu (linie kodu, graf zależności) |
+| `just update-deps` | Aktualizuje zależności Rust + web |
+| `just bench` | Uruchamia benchmarki criterion |
+| `just fmt-all` | Sprawdza/naprawia formatowanie w Rust + web |
+
+### Generowanie kodu i dokumentacja
+
+| Przepis | Opis |
+|---|---|
+| `just codegen` | Uruchamia generowanie kodu (specyfikacja OpenAPI itd.) |
+| `just api-docs` | Generuje dokumentację API ze specyfikacji OpenAPI |
+| `just check-links` | Sprawdza, czy w dokumentacji nie ma uszkodzonych linków |
+| `just contributors` | Generuje SVG-ów z listą współtwórców i historią gwiazdek |
+| `just sync-versions` | Synchronizuje wersje crate-ów w całym workspace |
+
+### Operacje
+
+| Przepis | Opis |
+|---|---|
+| `just db` | Zarządzanie bazą danych (info, backup, reset) |
+| `just validate-config` | Waliduje `config.toml` |
+| `just migrate` | Migruje agentów z innych frameworków |
+| `just integration-test` | Uruchamia testy integracyjne na żywym systemie |
+| `just clean-all` | Czyści wszystkie artefakty budowania (szerszy zakres niż `just clean`) |
+
+---
+
+## Kluczowe decyzje projektowe
 
 ### `LIBREFANG_REGISTRY_OFFLINE`
 
-Several recipes (`test`, `ci`, `pre-commit`) export `LIBREFANG_REGISTRY_OFFLINE=1` by default. This prevents every test-booted kernel from fetching the content registry (git clone / tarball fallback), keeping the test suite hermetic and avoiding a git fork storm that exhausts container pid limits (issue #6404).
+Kilka przepisów (`test`, `ci`, `pre-commit`) domyślnie eksportuje `LIBREFANG_REGISTRY_OFFLINE=1`. Zapobiega to pobieraniu rejestru treści (git clone / powrót do tarballa) przez każdy kernel uruchamiany w teście, co utrzymuje test suite w izolacji i unika burdy forków git, która wyczerpałaby limity pid kontenerów (issue #6404).
 
-To opt back into network refresh:
+Aby wrócić do odświeżania z sieci:
 
 ```
 just test 0
 ```
 
-### Platform Handling
+### Obsługa platform
 
-The file declares `set windows-shell := ["cmd", "/c"]` and provides platform-specific recipes tagged `[unix]` and `[windows]` for `install`, `release`, and `pre-commit`. The `release` recipe on Unix uses a Docker fallback (`scripts/run-xtask.sh`) when cargo is missing; on Windows it requires a native toolchain because `cmd` cannot exec the bash-based Docker wrapper.
+Plik deklaruje `set windows-shell := ["cmd", "/c"]` i udostępnia przepisy specyficzne dla platform, oznaczone tagami `[unix]` i `[windows]`, dla `install`, `release` i `pre-commit`. Przepis `release` na Uniksie używa wrappera Dockera (`scripts/run-xtask.sh`) jako rezerwy, gdy brak cargo; na Windows wymaga natywnego toolchain, ponieważ `cmd` nie może wykonać opartego na bash wrappera Dockera.
 
-### `dev` Auto-Fallback Flow
+### Przepływ automatycznego powrotu `dev`
 
-The `just dev` recipe is the most complex in the file. It inspects arguments and environment to choose between two execution paths:
+Przepis `just dev` jest najbardziej złożonym w pliku. Inspekuje argumenty i środowisko, aby wybrać jedną z dwóch ścieżek wykonania:
 
 ```mermaid
 flowchart TD
-    Start["just dev"] --> CheckDocker{"--docker flag<br/>passed?"}
-    CheckDocker -->|Yes| Docker["_dev-docker: build & run<br/>inside librefang-rust-dev container"]
-    CheckDocker -->|No| CheckCargo{"cargo on PATH?"}
-    CheckCargo -->|Yes| Native["cargo xtask dev<br/>(native: cargo-watch hot-reload)"]
-    CheckCargo -->|No| Docker
+    Start["just dev"] --> CheckDocker{"flag --docker<br/>przekazany?"}
+    CheckDocker -->|Tak| Docker["_dev-docker: budowanie i uruchamianie<br/>wewnątrz kontenera librefang-rust-dev"}
+    CheckDocker -->|Nie| CheckCargo{"cargo na PATH?"}
+    CheckCargo -->|Tak| Native["cargo xtask dev<br/>(natywnie: hot-reload cargo-watch)"}
+    CheckCargo -->|Nie| Docker
 ```
 
-**Native mode** builds `librefang-cli` on the host and starts the daemon + dashboard with cargo-watch hot-reload. Requires a host Rust toolchain.
+**Tryb natywny** buduje `librefang-cli` na hoście i uruchamia demona + dashboard z hot-reloadem cargo-watch. Wymaga natywnego toolchain Rust na hoście.
 
-**Docker mode** (implemented in `_dev-docker`) builds the daemon and Telegram sidecar inside the `librefang-rust-dev:latest` container, using named volumes (`librefang-cargo`, `librefang-target`) for cache persistence. It bind-mounts `~/.librefang/` for config persistence, forwards the API port (default `4545`), and passes through provider API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, etc.) if set in the host environment. Dashboard and cargo-watch are not started in Docker mode—they belong on the host alongside the editor.
+**Tryb Docker** (zaimplementowany w `_dev-docker`) buduje demona i Telegram sidecar wewnątrz kontenera `librefang-rust-dev:latest`, używając nazwanych wolumenów (`librefang-cargo`, `librefang-target`) do utrzymania pamięci podręcznej. Bind-mountuje `~/.librefang/` dla utrzymania konfiguracji, przekierowuje port API (domyślnie `4545`) i przekazuje klucze API dostawców (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY` itd.), jeśli są ustawione w środowisku hosta. Dashboard i cargo-watch nie są uruchamiane w trybie Docker — należą do hosta obok edytora.
 
-The `_dev-docker` recipe also bootstraps `~/.librefang/config.toml` on first run via `librefang init --quick` and prints configuration instructions for adding the Rust Telegram sidecar.
+Przepis `_dev-docker` przy pierwszym uruchomieniu inicjalizuje również `~/.librefang/config.toml` za pomocą `librefang init --quick` i wyświetla instrukcje konfiguracji dotyczące dodawania Telegram sidecar Rust.
 
-### Adding a New Recipe
+### Dodawanie nowego przepisu
 
-1. Implement the logic in `xtask/src/` — add a new module and wire it into `xtask/src/main.rs`.
-2. Add a one-line forwarding recipe to the justfile:
+1. Zaimplementuj logikę w `xtask/src/` — dodaj nowy moduł i podepnij go w `xtask/src/main.rs`.
+2. Dodaj jednolinijkowy przepis przekazujący do justfile:
    ```
-   # Description of what it does
-   your-recipe *ARGS:
-       cargo xtask your-recipe {{ARGS}}
+   # Opis tego, co robi
+   twój-przepis *ARGS:
+       cargo xtask twój-przepis {{ARGS}}
    ```
-3. If the recipe needs platform variants or the `LIBREFANG_REGISTRY_OFFLINE` switch, follow the patterns established by `release`, `install`, or `pre-commit`.
+3. Jeśli przepis wymaga wariantów platformowych lub przełącznika `LIBREFANG_REGISTRY_OFFLINE`, podążaj za wzorcami ustalonymi przez `release`, `install` lub `pre-commit`.
 
-**Never** write a multi-line recipe that reimplements xtask logic. If you find yourself doing so, the logic belongs in xtask instead.
+**Nigdy** nie pisz wielolinijkowego przepisu reimplementującego logikę xtask. Jeśli masz ochotę to zrobić, logika powinna znaleźć się w xtask.
 
 ---
 
-## Conventions
+## Konwencje
 
-- **User-facing documentation** should always reference `just <recipe>`. Mentions of `cargo xtask <subcmd>` in external docs are a documentation bug.
-- Argument forwarding uses `*ARGS` and `{{ARGS}}` interpolation so that flags pass through transparently.
-- Recipe comments are shown by `just --list` and serve as inline documentation. Keep them concise but meaningful.
+- **Dokumentacja użytkownika** powinna zawsze odwoływać się do `just <przepis>`. Wzmianki o `cargo xtask <podcmd>` w dokumentacji zewnętrznej to błąd dokumentacji.
+- Przekazywanie argumentów używa interpolacji `*ARGS` i `{{ARGS}}`, aby flagi przechodziły przezroczystie.
+- Komentarze przepisów są wyświetlane przez `just --list` i służą jako dokumentacja wbudowana. Trzymaj je zwięzłe, ale znaczące.

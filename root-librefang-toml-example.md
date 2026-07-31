@@ -1,41 +1,41 @@
 # Root — librefang.toml.example
 
-# LibreFang Agent OS — Configuration Reference
+# LibreFang Agent OS — Dokumentacja konfiguracji
 
-The `librefang.toml.example` file is the canonical template for LibreFang daemon configuration. It ships with the repository and serves as a self-documenting reference for every configurable knob in the system.
+Plik `librefang.toml.example` to kanoniczny szablon konfiguracji demona LibreFang. Jest dostarczany z repozytorium i służy jako samodokumentująca referencja każdego konfigurowalnego parametru w systemie.
 
-## Getting Started
+## Wprowadzenie
 
-1. Copy the file to `~/.librefang/config.toml`
-2. Uncomment and modify the sections relevant to your deployment
-3. Place secrets in `~/.librefang/secrets.env` — never inline in the config
+1. Skopiuj plik do `~/.librefang/config.toml`
+2. Odkomentuj i zmodyfikuj sekcje dotyczące Twojego wdrożenia
+3. Umieść tajemnice w `~/.librefang/secrets.env` — nigdy bezpośrednio w konfiguracji
 
-The daemon validates configuration at startup. Certain combinations (e.g., binding to a non-loopback address without authentication) will cause the daemon to refuse to start unless explicitly overridden.
+Demon weryfikuje konfigurację przy uruchomieniu. Niektóre kombinacje (np. nasłuchiwanie na adresie spoza pętli zwrotnej bez uwierzytelniania) spowodują odmowę uruchomienia demona, chyba że zostaną jawnie nadpisane.
 
-## Configuration Topology
+## Topologia konfiguracji
 
 ```mermaid
 graph TD
-    subgraph Core
-        Server[Server Bind & Auth]
-        Model[Default LLM Provider]
-        Queue[Task Concurrency]
+    subgraph Rdzeń
+        Server[Nasłuchiwanie serwera i autoryzacja]
+        Model[Domyślny dostawca LLM]
+        Queue[Współbieżność zadań]
     end
-    subgraph Intelligence
-        Memory[Memory & Decay]
-        Proactive[Auto-Memorize/Retrieve]
-        Thinking[Extended Thinking]
+    subgraph Inteligencja
+        Memory[Pamięć i zanik]
+        Proactive[Automatyczne zapamiętywanie / odtwarzanie]
+        Thinking[Rozszerzone myślenie]
     end
-    subgraph Channels
-        Sidecar[Sidecar Adapters]
-        Inbox[File Inbox]
-        Web[Web Search/Fetch]
+    subgraph Kanały
+        Sidecar[Adaptery sidecar]
+        Inbox[Skrzynka plikowa]
+        Web[Wyszukiwanie / pobieranie z sieci]
     end
-    subgraph Security
-        ExecPolicy[Shell Exec Policy]
-        Approval[Tool Approval Gate]
-        Privacy[PII Filtering]
-        Budget[Cost Budgets]
+    subgraph Bezpieczeństwo
+        ExecPolicy[Zasady wykonywania powłoki]
+        Approval[Bramka zatwierdzania narzędzi]
+        Privacy[Filtrowanie danych osobowych]
+        Budget[Budżety kosztów]
     end
     Server --> Queue
     Model --> Memory
@@ -47,7 +47,7 @@ graph TD
 
 ---
 
-## Server & Authentication
+## Serwer i uwierzytelnianie
 
 ```toml
 api_listen = "127.0.0.1:4545"
@@ -55,69 +55,69 @@ log_level = "info"       # trace | debug | info | warn | error
 mode = "default"         # stable | default | dev
 ```
 
-**Loopback enforcement.** The daemon starts on `127.0.0.1` by default. Binding to any other address requires at least one authentication mechanism:
+**Wymuszanie pętli zwrotnej.** Demon domyślnie uruchamia się na `127.0.0.1`. Nasłuchiwanie na jakimkolwiek innym adresie wymaga co najmniej jednego mechanizmu uwierzytelniania:
 
-- A non-empty `api_key` for Bearer auth
-- Configured `dashboard_user` / `dashboard_pass` (or vault-stored password)
-- One or more `[[users]]` entries with `api_key_hash`
+- Niepusty `api_key` dla autoryzacji Bearer
+- Skonfigurowane `dashboard_user` / `dashboard_pass` (lub hasło przechowywane w magazynie)
+- Co najmniej jeden wpis `[[users]]` z `api_key_hash`
 
-If no auth is configured on a non-loopback bind, the daemon aborts startup. The `LIBREFANG_ALLOW_NO_AUTH=1` environment variable overrides this guard, but is strongly discouraged.
+Jeśli nie skonfigurowano uwierzytelniania przy nasłuchiwaniu na adresie spoza pętli zwrotnej, demon przerywa uruchamianie. Zmienna środowiskowa `LIBREFANG_ALLOW_NO_AUTH=1` nadpisuje to zabezpieczenie, ale jest to stanowczo odradzane.
 
-### Dashboard Credentials
+### Dane logowania panelu
 
-The dashboard ships with default credentials (`librefang` / `librefang`) that **must be changed** after first login. Two secure storage alternatives exist:
+Panel jest dostarczany z domyślnymi danymi logowania (`librefang` / `librefang`), które **należy zmienić** po pierwszym logowaniu. Istnieją dwie alternatywy bezpiecznego przechowywania:
 
-| Method | Syntax |
-|--------|--------|
-| Vault | `dashboard_pass = "vault:dashboard_password"` |
-| Environment | `LIBREFANG_DASHBOARD_PASS=your-secret` |
+| Metoda | Składnia |
+|--------|----------|
+| Magazyn | `dashboard_pass = "vault:dashboard_password"` |
+| Zmienna środowiskowa | `LIBREFANG_DASHBOARD_PASS=twój-sekret` |
 
 ---
 
-## Default LLM Model
+## Domyślny model LLM
 
 ```toml
 [default_model]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
-# base_url = ""   # override API endpoint
+# base_url = ""   # nadpisanie punktu końcowego API
 ```
 
-Supported providers include `anthropic`, `openai`, `gemini`, `groq`, `ollama`, and others registered in the provider registry. API keys are never stored directly — the config references an environment variable name, and the daemon resolves it at runtime.
+Obsługiwanymi dostawcami są m.in. `anthropic`, `openai`, `gemini`, `groq`, `ollama` oraz inni zarejestrowani w rejestrze dostawców. Klucze API nigdy nie są przechowywane bezpośrednio — konfiguracja odwołuje się do nazwy zmiennej środowiskowej, a demon rozwiązuje ją w czasie wykonywania.
 
-### Performance Toggles
+### Przełączniki wydajności
 
-| Key | Effect |
-|-----|--------|
-| `prompt_caching` | Enables Anthropic `cache_control` / OpenAI auto-cache |
-| `stable_prefix_mode` | Reorders context to improve cache hit rate |
-| `usage_footer` | Dashboard footer display: `off`, `tokens`, `cost`, or `full` |
+| Klucz | Efekt |
+|-------|-------|
+| `prompt_caching` | Włącza Anthropic `cache_control` / automatyczne buforowanie OpenAI |
+| `stable_prefix_mode` | Zmienia kolejność kontekstu w celu poprawy współczynnika trafień w pamięci podręcznej |
+| `usage_footer` | Wyświetlanie stopki panelu: `off`, `tokens`, `cost` lub `full` |
 
 ---
 
-## Memory System
+## System pamięci
 
-### Core Memory
+### Pamięć podstawowa
 
 ```toml
 [memory]
-decay_rate = 0.05       # confidence decay per cycle
+decay_rate = 0.05       # zanik ufności na cykl
 ```
 
-### Embedding Provider
+### Dostawca osadzeń
 
 ```toml
 [embedding]
 provider = "openai"
 model = "text-embedding-3-small"
 api_key_env = "OPENAI_API_KEY"
-# dimensions = 1536     # override auto-detected dimensions
+# dimensions = 1536     # nadpisanie automatycznie wykrytych wymiarów
 ```
 
-Bedrock is supported as a special case — `base_url` acts as a region override (e.g., `"eu-west-1"`) rather than a full URL, and credentials come from standard AWS environment variables.
+Bedrock jest obsługiwany jako przypadek szczególny — `base_url` działa jako nadpisanie regionu (np. `"eu-west-1"`) zamiast pełnego adresu URL, a poświadczenia pochodzą ze standardowych zmiennych środowiskowych AWS.
 
-### Time-Based Decay
+### Zanik oparty na czasie
 
 ```toml
 [memory.decay]
@@ -127,15 +127,15 @@ agent_ttl_days = 30
 decay_interval_hours = 1
 ```
 
-> **USER memories never decay.** Only SESSION and AGENT-scoped memories are eligible for time-based expiry.
+> **Pamięci USER nigdy nie wygasają.** Tylko pamięci w zakresie SESSION i AGENT podlegają wygasaniu na podstawie czasu.
 
-### Proactive Memory
+### Pamięć proaktywna
 
 ```toml
 [proactive_memory]
 enabled = true
-auto_memorize = true        # extract facts from conversations
-auto_retrieve = true        # recall relevant memories
+auto_memorize = true        # ekstrakcja faktów z rozmów
+auto_retrieve = true        # odtwarzanie istotnych wspomnień
 max_retrieve = 10
 # extraction_threshold = 0.7
 # duplicate_threshold = 0.5
@@ -144,18 +144,18 @@ max_retrieve = 10
 
 ---
 
-## Task Queue & Concurrency
+## Kolejka zadań i współbieżność
 
 ```toml
 [queue.concurrency]
-main_lane = 3       # user messages
-cron_lane = 2       # scheduled jobs
-subagent_lane = 3   # child agents
+main_lane = 3       # wiadomości użytkownika
+cron_lane = 2       # zaplanowane zadania
+subagent_lane = 3   # agenci podrzędni
 ```
 
-The daemon uses separate lanes to isolate workloads. Backpressure on one lane (e.g., a flood of user messages) does not starve scheduled jobs or subagent work.
+Demon używa oddzielnych pasm do izolacji obciążeń. Presja zwrotna na jednym pasmie (np. powódź wiadomości użytkownika) nie powoduje zagłodzenia zaplanowanych zadań ani pracy agentów podrzędnych.
 
-### Heartbeat Monitor
+### Monitor pulsowania
 
 ```toml
 [heartbeat]
@@ -164,11 +164,11 @@ default_timeout_secs = 60
 keep_recent = 10
 ```
 
-Autonomous agents are considered unresponsive after `default_timeout_secs` of inactivity.
+Agenci autonomiczni są uznawani za nieodpowiadających po `default_timeout_secs` braku aktywności.
 
 ---
 
-## Shell Execution Policy
+## Zasady wykonywania powłoki
 
 ```toml
 [exec_policy]
@@ -177,11 +177,11 @@ timeout_secs = 30
 max_output_bytes = 102400  # 100 KB
 ```
 
-Defaults to `deny` — agents cannot execute shell commands unless explicitly escalated. The `allowlist` mode permits only whitelisted commands; `full` grants unrestricted shell access.
+Wartość domyślna to `deny` — agenci nie mogą wykonywać poleceń powłoki, chyba że zostanie to jawnie podniesione. Tryb `allowlist` zezwala tylko na zlistowane polecenia; `full` nadaje nieograniczony dostęp do powłoki.
 
 ---
 
-## Tool Approval Gate
+## Bramka zatwierdzania narzędzi
 
 ```toml
 [approval]
@@ -189,10 +189,10 @@ require_approval = ["shell_exec"]
 timeout_secs = 60           # 10..=300
 auto_approve = false
 trusted_senders = ["admin_123", "ops_456"]
-second_factor = "none"      # "none" or "totp"
+second_factor = "none"      # "none" lub "totp"
 ```
 
-### Per-Channel Rules
+### Reguły dla poszczególnych kanałów
 
 ```toml
 [[approval.channel_rules]]
@@ -204,29 +204,29 @@ channel = "admin_cli"
 allowed_tools = ["shell_exec", "file_write", "file_delete"]
 ```
 
-A channel can use either `denied_tools` (block-list) or `allowed_tools` (allow-list), not both.
+Kanał może używać albo `denied_tools` (lista blokowania), albo `allowed_tools` (lista dozwolonych), ale nie obu jednocześnie.
 
-### TOTP Second Factor
+### Drugi czynnik TOTP
 
-When `second_factor = "totp"`, approving critical tools requires a 6-digit authenticator code. Setup is via the API endpoints `POST /api/approvals/totp/setup` and `POST /api/approvals/totp/confirm`. The `totp_grace_period_secs` window avoids re-prompting for every consecutive approval.
+Gdy `second_factor = "totp"`, zatwierdzenie krytycznych narzędzi wymaga 6-cyfrowego kodu z aplikacji uwierzytelniającej. Konfiguracja odbywa się poprzez punkty końcowe API `POST /api/approvals/totp/setup` i `POST /api/approvals/totp/confirm`. Okno `totp_grace_period_secs` pozwala uniknąć ponownego pytania o kod przy kolejnych zatwierdzeniach.
 
 ---
 
-## Sidecar Channel Adapters
+## Adaptery kanałów sidecar
 
-All messaging integrations run as **out-of-process Python sidecars** communicating via newline-delimited JSON-RPC over stdin/stdout. This architecture provides process isolation, language-agnostic adapter development, and crash recovery.
+Wszystkie integracje komunikacyjne działają jako **zewnętrzne procesy Python sidecar**, komunikujące się za pomocą JSON-RPC oddzielonego znakiem nowej linii przez stdin/stdout. Ta architektura zapewnia izolację procesów, niezależną od języka rozwój adapterów oraz odzyskiwanie po awariach.
 
-### Prerequisites
+### Wymagania wstępne
 
 ```bash
 pip install librefang-sdk
-# Verify resolution from the same python3 the daemon will invoke:
+# Weryfikacja rozwiązania z tego samego python3, którego użyje demon:
 python3 -c 'import librefang.sidecar; print(librefang.__file__)'
 ```
 
-> **Warning:** Daemons launched under `mise`, `pyenv`, or `conda` often resolve a different `python3` than your shell. Always verify the import path from the launch environment.
+> **Ostrzeżenie:** Demony uruchamiane pod `mise`, `pyenv` lub `conda` często rozwiązują inny `python3` niż powłoka użytkownika. Zawsze weryfikuj ścieżkę importu ze środowiska uruchomieniowego.
 
-### Adapter Block Structure
+### Struktura bloku adaptera
 
 ```toml
 [[sidecar_channels]]
@@ -238,35 +238,35 @@ channel_type = "telegram"
 TELEGRAM_BOT_TOKEN = "..."
 ```
 
-### Supervision & Restart Behavior
+### Nadzór i zachowanie restartowe
 
 ```toml
 # [[sidecar_channels]]
-restart = true                    # auto-restart on unexpected exit
-restart_initial_backoff_ms = 500  # doubles per consecutive failure
-restart_max_backoff_ms = 30000    # backoff cap
-restart_max_retries = 10          # circuit-break threshold
-restart_reset_after_secs = 60     # stable uptime resets the counter
-ready_timeout_secs = 30           # max wait for adapter's `ready` signal
-shutdown_grace_secs = 5           # SIGKILL grace period
-message_buffer = 256              # inbound backpressure buffer (min 1)
-overflow = "block"                # or "drop_newest" to shed load
+restart = true                    # automatyczny restart po nieoczekiwanym wyjściu
+restart_initial_backoff_ms = 500  # podwaja się przy każdym kolejnym niepowodzeniu
+restart_max_backoff_ms = 30000    # limit oczekiwania
+restart_max_retries = 10          # próg bezpiecznika
+restart_reset_after_secs = 60     # stabilny czas pracy resetuje licznik
+ready_timeout_secs = 30           # maksymalny czas oczekiwania na sygnał `ready` adaptera
+shutdown_grace_secs = 5           # okres karencji przed SIGKILL
+message_buffer = 256              # bufor presji zwrotnej przychodzących (min 1)
+overflow = "block"                # lub "drop_newest" w celu zrzucenia obciążenia
 ```
 
-### Secret Namespacing
+### Przestrzenie nazw tajemnic
 
-To run multiple instances of the same adapter (e.g., one Matrix bot per agent), prefix the environment variable with `<NAME>__` (uppercased, non-alphanumerics → `_`):
+Aby uruchomić wiele instancji tego samego adaptera (np. jeden bot Matrix na agenta), poprzedź zmienną środowiskową prefiksem `<NAZWA>__` (wielkimi literami, znaki niealfanumeryczne → `_`):
 
-- A block named `agent-a` reads `AGENT_A__MATRIX_ACCESS_TOKEN` as its instance-private `MATRIX_ACCESS_TOKEN`
-- Without a prefix, all instances share the global variable
-- `__` is reserved as the namespace delimiter — global secret keys containing `__` are treated as namespaced and withheld from children
+- Blok o nazwie `agent-a` odczytuje `AGENT_A__MATRIX_ACCESS_TOKEN` jako swój prywatny `MATRIX_ACCESS_TOKEN`
+- Bez prefiksu wszystkie instancje współdzielą zmienną globalną
+- `__` jest zarezerwowane jako ogranicznik przestrzeni nazw — globalne klucze tajemnic zawierające `__` są traktowane jako przestrzenne i nie są przekazywane potomkom
 
-Secrets belong in `~/.librefang/secrets.env`, not in this config file.
+Tajemnice należą do `~/.librefang/secrets.env`, nie do tego pliku konfiguracji.
 
-### Available Adapters
+### Dostępne adaptery
 
-| Adapter | Module Path | Key Environment Variables |
-|---------|------------|--------------------------|
+| Adapter | Ścieżka modułu | Kluczowe zmienne środowiskowe |
+|---------|----------------|------------------------------|
 | Bluesky | `...adapters.bluesky` | `BLUESKY_IDENTIFIER`, `BLUESKY_APP_PASSWORD` |
 | DingTalk | `...adapters.dingtalk` | `DINGTALK_APP_KEY`, `DINGTALK_APP_SECRET` |
 | Discord | `...adapters.discord` | `DISCORD_BOT_TOKEN` |
@@ -290,14 +290,14 @@ Secrets belong in `~/.librefang/secrets.env`, not in this config file.
 | Twitch | `...adapters.twitch` | `TWITCH_OAUTH_TOKEN`, `TWITCH_NICK`, `TWITCH_CHANNELS` |
 | Webex | `...adapters.webex` | `WEBEX_BOT_TOKEN` |
 | Webhook | `...adapters.webhook` | `WEBHOOK_SECRET` |
-| WeChat | `...adapters.wechat` | `WECHAT_BOT_TOKEN` (optional, QR login if absent) |
+| WeChat | `...adapters.wechat` | `WECHAT_BOT_TOKEN` (opcjonalny, logowanie QR jeśli brak) |
 | WeCom | `...adapters.wecom` | `WECOM_BOT_ID`, `WECOM_BOT_SECRET` |
-| WhatsApp | `...adapters.whatsapp` | Cloud API: `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN` — or — Baileys: `WHATSAPP_GATEWAY_URL` |
+| WhatsApp | `...adapters.whatsapp` | Cloud API: `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN` — lub — Baileys: `WHATSAPP_GATEWAY_URL` |
 | Zulip | `...adapters.zulip` | `ZULIP_SERVER_URL`, `ZULIP_BOT_EMAIL`, `ZULIP_API_KEY` |
 
-> All adapters were migrated from in-process channels to the sidecar architecture. Legacy `[channels.*]` table blocks are no longer recognized.
+> Wszystkie adaptery zostały przeniesione z kanałów wewnętrznych do architektury sidecar. Przestarzałe bloki tabel `[channels.*]` nie są już rozpoznawane.
 
-To inspect the full environment-variable inventory for any adapter:
+Aby sprawdzić pełną listę zmiennych środowiskowych dla dowolnego adaptera:
 
 ```bash
 python3 -m librefang.sidecar.adapters.<name> --describe
@@ -305,7 +305,7 @@ python3 -m librefang.sidecar.adapters.<name> --describe
 
 ---
 
-## Web Tools
+## Narzędzia sieciowe
 
 ```toml
 [web]
@@ -314,39 +314,39 @@ search_provider = "auto"   # Tavily → Brave → Jina → Perplexity → DuckDu
 [web.fetch]
 max_chars = 50000
 timeout_secs = 30
-readability = true         # HTML → readable text extraction
+readability = true         # ekstrakcja HTML → czytelny tekst
 ```
 
-`auto` selects the first available provider based on which API key environment variables are set. Jina requires a longer timeout (30+ seconds).
+`auto` wybiera pierwszego dostępnego dostawcę na podstawie ustawionych zmiennych środowiskowych z kluczami API. Jina wymaga dłuższego czasu oczekiwania (30+ sekund).
 
 ---
 
-## Session Management
+## Zarządzanie sesjami
 
-### Context Injection
+### Wstrzykiwanie kontekstu
 
 ```toml
 [[session.context_injection]]
 name = "project-rules"
-content = "Always follow the project coding standards."
+content = "Zawsze przestrzegaj standardów kodowania projektu."
 position = "system"       # "system" | "before_user" | "after_reset"
 condition = "agent.tags contains 'chat'"
 ```
 
-Multiple named injections are supported, each independently positioned and conditional. The `condition` field accepts simple tag-matching expressions.
+Obsługiwane jest wiele nazwanych wstrzyknięć, z których każde jest niezależnie pozycjonowane i warunkowe. Pole `condition` przyjmuje proste wyrażenia dopasowujące tagi.
 
-### Session Compaction
+### Kompakcja sesji
 
 ```toml
 [compaction]
-threshold = 80            # trigger when message count exceeds this
-keep_recent = 20          # recent messages preserved verbatim
-max_summary_tokens = 1024 # LLM summary budget for older context
+threshold = 80            # aktywacja gdy liczba wiadomości przekroczy tę wartość
+keep_recent = 20          # ostatnie wiadomości zachowane dosłownie
+max_summary_tokens = 1024 # budżet podsumowania LLM dla starszego kontekstu
 ```
 
 ---
 
-## Config Hot-Reload
+## Gorące przeładowanie konfiguracji
 
 ```toml
 [reload]
@@ -354,13 +354,13 @@ mode = "hybrid"     # off | restart | hot | hybrid
 debounce_ms = 500
 ```
 
-`hybrid` applies hot-reload to settings that support it (model config, memory tuning, etc.) and triggers a daemon restart for structural changes (new channels, queue lanes).
+`hybrid` stosuje gorące przeładowanie do ustawień, które je obsługują (konfiguracja modelu, dostrajanie pamięci itd.) i wymusza restart demona przy zmianach strukturalnych (nowe kanały, pasma kolejki).
 
 ---
 
-## Provider Routing
+## Trasowanie dostawców
 
-### Region Selection
+### Wybór regionu
 
 ```toml
 [provider_regions]
@@ -368,9 +368,9 @@ qwen = "intl"
 minimax = "china"
 ```
 
-Overrides a provider's `base_url` to a region-specific endpoint defined in the provider registry.
+Nadpisuje `base_url` dostawcy na punkt końcowy specyficzny dla regionu zdefiniowany w rejestrze dostawców.
 
-### URL & API Key Overrides
+### Nadpisywanie URL-i i kluczy API
 
 ```toml
 [provider_urls]
@@ -381,7 +381,7 @@ openai = "OPENAI_API_KEY"
 nvidia = "NVIDIA_API_KEY"
 ```
 
-### Fallback Chain
+### Łańcuch zapasowy
 
 ```toml
 [[fallback_providers]]
@@ -390,13 +390,13 @@ model = "gpt-4o"
 api_key_env = "OPENAI_API_KEY"
 ```
 
-Ordered list — the daemon tries each provider in sequence on failure.
+Lista uporządkowana — demon próbuje każdego dostawcy po kolei w przypadku niepowodzenia.
 
 ---
 
-## MCP Server Integration
+## Integracja serwerów MCP
 
-Three transport types are supported:
+Obsługiwane są trzy rodzaje transportu:
 
 ```toml
 # stdio
@@ -415,7 +415,7 @@ name = "remote-tools"
 type = "sse"
 url = "https://mcp.example.com/events"
 
-# HTTP-compatible (REST mapping)
+# HTTP-kompatybilny (mapowanie REST)
 [[mcp_servers]]
 name = "internal-http"
 [mcp_servers.transport]
@@ -429,25 +429,25 @@ request_mode = "query"
 response_mode = "json"
 ```
 
-The `http_compat` transport wraps arbitrary REST endpoints as MCP tools, with per-tool request/response mode mapping.
+Transport `http_compat` opakowuje dowolne punkty końcowe REST jako narzędzia MCP, z mapowaniem trybu żądania/odpowiedzi dla każdego narzędzia.
 
 ---
 
-## Extended Thinking & Structured Output
+## Rozszerzone myślenie i wyjście ustrukturyzowane
 
-### Chain-of-Thought
+### Łańcuch myślenia
 
 ```toml
 [thinking]
 budget_tokens = 10000
-stream_thinking = false   # stream thinking tokens to client
+stream_thinking = false   # przesyłanie strumieniowe tokenów myślenia do klienta
 ```
 
-Supported on Claude, DeepSeek, and other compatible models.
+Obsługiwane w modelach Claude, DeepSeek i innych kompatybilnych.
 
-### JSON / Schema-Constrained Output
+### Wyjście JSON / ograniczone schematem
 
-Configured per-agent:
+Konfigurowane dla poszczególnych agentów:
 
 ```toml
 [agents.my_agent.response_format]
@@ -462,11 +462,11 @@ properties.temperature.type = "number"
 required = ["location", "temperature"]
 ```
 
-OpenAI uses native structured output; Anthropic uses prompt injection to achieve schema enforcement.
+OpenAI używa natywnego wyjścia ustrukturyzowanego; Anthropic stosuje wstrzykiwanie promptów w celu wymuszenia schematu.
 
 ---
 
-## Budget & Cost Control
+## Budżet i kontrola kosztów
 
 ```toml
 [budget]
@@ -476,11 +476,11 @@ max_monthly_usd = 0.0
 alert_threshold = 0.8
 ```
 
-A value of `0` means unlimited. The daemon halts LLM calls when any limit is reached and emits alerts at the configured threshold percentage.
+Wartość `0` oznacza brak ograniczeń. Demon wstrzymuje wywołania LLM po osiągnięciu dowolnego limitu i wysyła alerty po przekroczeniu skonfigurowanego progu procentowego.
 
 ---
 
-## Privacy Controls
+## Kontrola prywatności
 
 ```toml
 [privacy]
@@ -488,27 +488,27 @@ mode = "pseudonymize"                  # "off" | "redact" | "pseudonymize"
 redact_patterns = ["\\bCUST-\\d{6}\\b"]
 ```
 
-PII filtering runs before prompts are sent to LLM providers. `pseudonymize` replaces entities with consistent placeholders so context is preserved across turns.
+Filtrowanie danych osobowych działa przed wysłaniem promptów do dostawców LLM. Tryb `pseudonymize` zastępuje jednostki spójnymi symbolami zastępczymi, aby kontekst był zachowywany między turami.
 
 ---
 
-## Additional Subsystems
+## Dodatkowe podsystemy
 
-| Subsystem | Table | Purpose |
-|-----------|-------|---------|
-| **Browser Automation** | `[browser]` | Headless browser sessions for web interaction |
-| **Docker Sandbox** | `[docker]` | Containerized code execution isolation |
-| **Text-to-Speech** | `[tts]` | Voice synthesis (OpenAI, ElevenLabs, Google) |
-| **P2P Federation** | `[network]` | Inter-daemon communication with shared secret auth |
-| **External Auth** | `[external_auth]` | OAuth2/OIDC identity provider integration |
-| **File Inbox** | `[inbox]` | Async agent commands via dropped text files |
-| **Vault** | `[vault]` | Encrypted credential storage (auto-detected) |
-| **Audit Logging** | `[audit]` | Tamper-evident operation logging with retention |
+| Podsystem | Tabela | Przeznaczenie |
+|----------|--------|---------------|
+| **Automatyzacja przeglądarki** | `[browser]` | Bezokienkowe sesje przeglądarki do interakcji z siecią |
+| **Sandbox Docker** | `[docker]` | Izolacja wykonania kodu w kontenerach |
+| **Synteza mowy** | `[tts]` | Synteza głosu (OpenAI, ElevenLabs, Google) |
+| **Federacja P2P** | `[network]` | Komunikacja między demonami z uwierzytelnianiem współdzielonym sekretem |
+| **Uwierzytelnianie zewnętrzne** | `[external_auth]` | Integracja dostawców tożsamości OAuth2/OIDC |
+| **Skrzynka plikowa** | `[inbox]` | Asynchroniczne polecenia agenta poprzez pliki tekstowe |
+| **Magazyn** | `[vault]` | Szyfrowane przechowywanie poświadczeń (wykrywany automatycznie) |
+| **Dziennik audytu** | `[audit]` | Odporny na manipulacje logowanie operacji z zasadami retencji |
 
-### Text-to-Speech Output Formats
+### Formaty wyjściowe syntezy mowy
 
-For ElevenLabs, the `output_format` matters for target platforms. WhatsApp PTT voice notes require `opus_48000_32`. Other options include `mp3_44100_128`, `mp3_22050_32`, `opus_24000_32`, `pcm_16000`, `pcm_44100`, and `ulaw_8000`.
+Dla ElevenLabs, `output_format` ma znaczenie dla platform docelowych. Wiadomości głosowe WhatsApp PTT wymagają `opus_48000_32`. Inne opcje to `mp3_44100_128`, `mp3_22050_32`, `opus_24000_32`, `pcm_16000`, `pcm_44100` i `ulaw_8000`.
 
-### File Inbox Directives
+### Dyrektywy skrzynki plikowej
 
-Dropped files may begin with `agent:<name>` on the first line to target a specific agent. Files without a directive route to `default_agent`. The daemon polls `directory` at `poll_interval_secs` and processes files atomically.
+Porzucone pliki mogą zaczynać się od `agent:<nazwa>` w pierwszej linii, aby celować w konkretnego agenta. Pliki bez dyrektywy są kierowane do `default_agent`. Demon odpytuje `directory` w odstępach `poll_interval_secs` i przetwarza pliki atomowo.

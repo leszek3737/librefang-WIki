@@ -1,88 +1,88 @@
 # articles
 
-# `articles/` Module
+# Moduł `articles/`
 
-A content directory holding Markdown articles published to external platforms (Dev.to, the project blog, etc.) to announce releases, launches, and milestones. These are **not** source code — they are publication-ready content with standardized YAML front matter consumed by an automated publishing pipeline.
+Katalog treści zawierający artykuły w formacie Markdown publikowane na zewnętrznych platformach (Dev.to, blog projektu itd.) w celu ogłaszania wydań, premier i kamieni milowych. To **nie jest** kod źródłowy — to treść gotowa do publikacji z ustandaryzowanym nagłówkiem YAML front matter, przetwarzaną przez zautomatyzowany potok publikacji.
 
-## Purpose
+## Cel
 
-The module serves three functions:
+Moduł pełni trzy funkcje:
 
-1. **Release announcements** — One article per release tag, mirroring the GitHub release notes in a more narrative, developer-facing voice. This is the dominant content type (18 of 20 files).
-2. **Launch / milestone posts** — Evergreen articles like `hello-librefang.md` (the project introduction) and `new-website-launch.md` (website redesign announcement).
-3. **External syndication source** — The front matter carries `canonical_url` and `tags` that downstream tooling (the Dev.to cross-post workflow referenced in `release-0.5.6.md`) reads to publish automatically.
+1. **Ogłoszenia wydań** — jeden artykuł na tag wydania, odzwierciedlający notatki z GitHub Release w bardziej narracyjnym, skierowanym do programistów tonie. To dominujący typ treści (18 z 20 plików).
+2. **Posty o premierach / kamieniach milowych** — artykuły typu evergreen, takie jak `hello-librefang.md` (wprowadzenie do projektu) i `new-website-launch.md` (ogłoszenie przebudowy strony).
+3. **Źródło syndykacji zewnętrznej** — nagłówek front matter zawiera `canonical_url` i `tags`, które są odczytywane przez narzędzia podrzędne (workflow cross-postowania na Dev.to, do którego odnosi się `release-0.5.6.md`), aby publikować automatycznie.
 
-The release notes mention "LibreFang now automatically generates Dev.to articles for releases" — these Markdown files are the input to that automation.
+Notatki z wydania wspominają, że „LibreFang teraz automatycznie generuje artykuły na Dev.to dla wydań" — te pliki Markdown są wejściem dla tej automatyzacji.
 
-## File Inventory
+## Inwentaryzacja plików
 
-| File | Type | Version scheme |
+| Plik | Typ | Schemat wersji |
 |------|------|----------------|
-| `hello-librefang.md` | Intro / evergreen | — |
-| `new-website-launch.md` | Launch announcement | — |
-| `release-0.5.6.md` → `release-0.7.0.md` | Release notes | SemVer (`0.x.y`) |
-| `release-2026.3.21.md` → `release-2026.7.31.md` | Release notes | CalVer (`YYYY.M.DD[HH]`) |
+| `hello-librefang.md` | Wprowadzenie / evergreen | — |
+| `new-website-launch.md` | Ogłoszenie premiery | — |
+| `release-0.5.6.md` → `release-0.7.0.md` | Notatki z wydania | SemVer (`0.x.y`) |
+| `release-2026.3.21.md` → `release-2026.7.31.md` | Notatki z wydania | CalVer (`YYYY.M.DD[HH]`) |
 
-The version-scheme split at `release-2026.3.21.md` reflects LibreFang's migration from SemVer to **Calendar Versioning (`YYYY.M.DDHH`)**, which is called out explicitly in the affected articles.
+Podział schematu wersjonowania przy `release-2026.3.21.md` odzwierciedla migrację LibreFang z SemVer na **Kalendarzowy Schemat Wersjonowania (`YYYY.M.DDHH`)**, co jest wyraźnie zaznaczone w artykułach dotkniętych zmianą.
 
-## Conventions
+## Konwencje
 
-Every file follows a shared contract. Drift from this contract will break the publishing pipeline.
+Każdy plik podąża za wspólną umową. Odchylenie od tej umowy spowoduje przerwanie potoku publikacji.
 
-### Front matter (required)
+### Front matter (wymagany)
 
 ```yaml
 ---
-title: "LibreFang <version> Released"        # or descriptive title
-published: true                               # all current files are published
-description: "<one-line summary>"
-tags: rust, ai, opensource[, release]         # release notes append `release`
+title: "LibreFang <version> Released"        # lub opisowy tytuł
+published: true                               # wszystkie obecne pliki są opublikowane
+description: "<jednolinijkowe podsumowanie>"
+tags: rust, ai, opensource[, release]         # notatki z wydania dodają `release`
 canonical_url: https://github.com/librefang/librefang/releases/tag/v<version>
 cover_image: https://raw.githubusercontent.com/librefang/librefang/main/public/assets/logo.png
 ---
 ```
 
-- `canonical_url` for release notes points at the GitHub release tag, not the Dev.to post.
-- `cover_image` is constant across every file — do not vary it.
-- The `release` tag is added only on release-note articles; evergreen posts use the base four tags.
+- `canonical_url` w notatkach z wydania wskazuje na tag wydania GitHub, nie na post na Dev.to.
+- `cover_image` jest stałe we wszystkich plikach — nie należy go zmieniać.
+- Tag `release` jest dodawany tylko w artykułach z notatkami z wydania; posty evergreen używają podstawowych czterech tagów.
 
-### Body structure (release notes)
+### Struktura treści (notatki z wydania)
 
-Release-note articles share a recognizable shape:
+Artykuły z notatkami z wydania mają rozpoznawalny kształt:
 
-1. **H1 title** matching the front-matter `title`.
-2. **One-paragraph lede** stating what the release is about.
-3. **Themed sections** (`## …`) grouping changes — feature highlights, security, bug fixes, etc. Emoji prefixes are conventional but not enforced.
-4. **`## Install / Upgrade`** — identical four-command block across every file (binary `curl|sh`, `cargo add`, `npm install`, `pip install`).
-5. **`## Links`** — Full Changelog, GitHub Release, GitHub repo, Discord, Contributing Guide.
+1. **Tytuł H1** zgodny z polem `title` w front matter.
+2. **Jednoparagrafowy lead** opisujący, o czym jest wydanie.
+3. **Sekcje tematyczne** (`## …`) grupujące zmiany — najważniejsze funkcje, bezpieczeństwo, poprawki błędów itd. Prefiksy emoji są konwencjonalne, ale nie wymagane.
+4. **`## Install / Upgrade`** — identyczny blok czterech poleceń w każdym pliku (binarny `curl|sh`, `cargo add`, `npm install`, `pip install`).
+5. **`## Links`** — Pełny Changelog, GitHub Release, repozytorium GitHub, Discord, Przewodnik współtwórców.
 
-The `Install / Upgrade` and `Links` sections are effectively copy-pasted verbatim between releases — only the version number in the GitHub Release URL changes.
+Sekcje `Install / Upgrade` i `Links` są w praktyce kopiowane dosłownie między wydaniami — jedyną zmienną jest numer wersji w URL GitHub Release.
 
-### Link drift to watch
+### Drift linków do obserwacji
 
-Older articles (`release-0.5.6` → `release-0.6.5`) point the Contributing Guide at `…/blob/main/CONTRIBUTING.md`. Newer articles (`release-2026.6.29` onward) point at `…/blob/main/docs/CONTRIBUTING.md`. When adding a new article, use the **`docs/`** path — the file moved.
+Starsze artykuły (`release-0.5.6` → `release-0.6.5`) wskazują Przewodnik współtwórców na `…/blob/main/CONTRIBUTING.md`. Nowsze artykuły (`release-2026.6.29` i nowsze) wskazują na `…/blob/main/docs/CONTRIBUTING.md`. Przy dodawaniu nowego artykułu używaj ścieżki **`docs/`** — plik został przeniesiony.
 
-## Content Patterns by Release Era
+## Wzorce treści według ery wydawniczej
 
-### SemVer era (`0.5.x`–`0.7.0`)
+### Era SemVer (`0.5.x`–`0.7.0`)
 
-Short, narrative-style notes. Each release typically covers a handful of themes with prose explanations. PR numbers are referenced inline (`#441`, `#317`) but not exhaustively listed.
+Krótkie notatki w stylu narracyjnym. Każde wydanie zazwyczaj obejmuje kilka tematów z opisami w formie prozy. Numery PR są podawane w tekście (`#441`, `#317`), ale nie wyczerpująco.
 
-### CalVer transition (`2026.3.21`, `2026.3.22`)
+### Przejście na CalVer (`2026.3.21`, `2026.3.22`)
 
-These two articles cover nearly identical content (the same release, narrated twice with different framing). They are the first to use CalVer and explicitly call out the versioning switch.
+Te dwa artykuły obejmują niemal identyczną treść (to samo wydanie, opowiedziane dwukrotnie w innej ramie narracyjnej). Są pierwszymi, które używają CalVer i wyraźnie zaznaczają zmianę schematu wersjonowania.
 
-### CalVer mature era (`2026.4.27` onward)
+### Dojrzała era CalVer (`2026.4.27` i dalej)
 
-Articles grow substantially longer. `release-2026.4.27.md` is the largest file in the module — it reproduces the full Keep-a-Changelog sections (`### Added`, `### Fixed`, `### Changed`, `### Documentation`, `### Maintenance`, `### Other`) with PR-numbered bullets and contributor attribution (`@username`). Later CalVer releases (`2026.7.21`, `2026.7.31`) continue this pattern, sometimes collapsing internal-only changes into `<details>` disclosure blocks.
+Artykuły stają się znacznie dłuższe. `release-2026.4.27.md` jest największym plikiem w module — reprodukuje pełne sekcje Keep-a-Changelog (`### Added`, `### Fixed`, `### Changed`, `### Documentation`, `### Maintenance`, `### Other`) z numerami PR w punktorach i przypisaniem autorstwa (`@username`). Późniejsze wydania CalVer (`2026.7.21`, `2026.7.31`) kontynuują ten wzorzec, czasem zwijając zmiany wewnętrzne w bloki ujawniania `<details>`.
 
-## Known File-Level Issues
+## Znane problemy na poziomie plików
 
-Two files in the module have defects that a maintainer should be aware of:
+Dwa pliki w module mają defekty, o których powinien wiedzieć opiekun:
 
-### `release-0.6.5.md` — malformed front matter
+### `release-0.6.5.md` — nieprawidłowo sformatowany front matter
 
-The file opens with a bare H1 *before* the YAML front matter:
+Plik otwiera się nagim H1 *przed* nagłówkiem YAML front matter:
 
 ```markdown
 # LibreFang 0.6.5 Released
@@ -93,37 +93,37 @@ title: "LibreFang 0.6.5 Released"
 ---
 ```
 
-This makes the YAML block parse as a second-level document section rather than metadata. Any front-matter parser expecting the `---` fence at byte zero will not pick up the metadata for this file.
+Powoduje to, że blok YAML jest parsowany jako sekcja dokumentu drugiego poziomu, a nie jako metadane. Każdy parser front matter oczekujący ogrodzenia `---` od bajtu zerowego nie wyłapie metadanych tego pliku.
 
-### `release-0.6.6.md` — contains editorial meta-commentary
+### `release-0.6.6.md` — zawiera redakcyjne metakomentarze
 
-The file includes reviewer/author notes outside the Markdown code fence ("Perfect! Now I'll rewrite the article…", "Key improvements in this rewrite:", a bulleted list of editorial goals). This content will be published verbatim unless stripped before syndication. The actual article is correctly fenced inside the markdown block following the commentary.
+Plik zawiera notatki recenzenta/autora poza ogrodzeniem kodu Markdown („Perfect! Now I'll rewrite the article…", „Key improvements in this rewrite:", punktowana lista celów redakcyjnych). Ta treść zostanie opublikowana dosłownie, jeśli nie zostanie usunięta przed syndykacją. Właściwy artykuł jest poprawnie ogrodzony w bloku markdown następującym po komentarzach.
 
-## How This Module Connects to the Rest of the Repo
+## Jak ten moduł łączy się z resztą repozytorium
 
-The articles directory is a **pure consumer of release artifacts** — it has no inbound or outbound code dependencies (confirmed by the call-graph data). Its inputs are:
+Katalog articles to **czysty konsument artefaktów wydań** — nie ma żadnych wejściowych ani wyjściowych zależności kodowych (potwierdzone przez dane grafu wywołań). Jego wejściami są:
 
-- **`CHANGELOG.md`** at the repo root — release-note prose is condensed from the Keep-a-Changelog sections there. `release-2026.4.27.md` links to it sectionally (`…/CHANGELOG.md#2026-4-27`).
-- **GitHub Releases** — the `canonical_url` and `Links → GitHub Release` entries point at `github.com/librefang/librefang/releases/tag/v<version>`.
-- **The release workflow** — referenced in `release-0.5.6.md` ("LibreFang now automatically generates Dev.to articles for releases"). The workflow that consumes these files lives outside this directory (likely under `.github/workflows/`).
+- **`CHANGELOG.md`** w katalogu głównym repozytorium — proza w notatkach z wydania jest kondensowana z sekcji Keep-a-Changelog tam zawartych. `release-2026.4.27.md` linkuje do niej sekcjonalnie (`…/CHANGELOG.md#2026-4-27`).
+- **GitHub Releases** — wpisy `canonical_url` oraz `Links → GitHub Release` wskazują na `github.com/librefang/librefang/releases/tag/v<version>`.
+- **Workflow wydania** — wspomniany w `release-0.5.6.md` („LibreFang teraz automatycznie generuje artykuły na Dev.to dla wydań"). Workflow, który konsumuje te pliki, znajduje się poza tym katalogiem (prawdopodobnie pod `.github/workflows/`).
 
-When a new release is cut, the typical contribution flow is:
+Po wydaniu nowej wersji typowy przepływ wkładu to:
 
 ```mermaid
 flowchart LR
-    A[CHANGELOG.md updated] --> B[GitHub Release published]
-    B --> C[New articles/release-X.Y.Z.md]
-    C --> D[Dev.to cross-post workflow]
-    D --> E[Public blog post]
+    A[CHANGELOG.md zaktualizowany] --> B[GitHub Release opublikowany]
+    B --> C[Nowy articles/release-X.Y.Z.md]
+    C --> D[Workflow cross-postu na Dev.to]
+    D --> E[Publiczny post na blogu]
 ```
 
-## Contribution Guidance
+## Wskazówki dotyczące wkładu
 
-When adding a new release article:
+Przy dodawaniu nowego artykułu o wydaniu:
 
-1. **Copy the most recent CalVer file** as a template — it will have the correct link paths, tag set, and section structure.
-2. **Update four locations with the new version**: the filename, the H1, the `title` in front matter, and the `canonical_url` release-tag segment.
-3. **Source the body from `CHANGELOG.md`** for the corresponding release section; do not invent PR numbers or contributor handles.
-4. **Keep the `Install / Upgrade` and `Links` blocks verbatim** — they are intentionally uniform.
-5. **Verify the front matter is the first thing in the file** — no leading H1, no commentary, no HTML. See `release-0.6.5.md` and `release-0.6.6.md` for what *not* to do.
-6. **For non-release content** (launch posts, deep dives), follow `hello-librefang.md` as the structural model: drop the `release` tag, drop the themed-section convention, but keep the front-matter fields and the closing Links section.
+1. **Skopiuj najnowszy plik CalVer** jako szablon — będzie miał poprawne ścieżki linków, zestaw tagów i strukturę sekcji.
+2. **Zaktualizuj cztery lokalizacje z nową wersją**: nazwę pliku, H1, pole `title` w front matter i segment tagu wydania w `canonical_url`.
+3. **Czerp treść z `CHANGELOG.md`** dla odpowiedniej sekcji wydania; nie wymyślaj numerów PR ani nazwisk współtwórców.
+4. **Zachowaj bloki `Install / Upgrade` i `Links` dosłownie** — są celowo jednolite.
+5. **Sprawdź, czy front matter jest pierwszą rzeczą w pliku** — bez wiodącego H1, bez komentarzy, bez HTML. Zobacz `release-0.6.5.md` i `release-0.6.6.md` jako przykład, jak **nie** należy tego robić.
+6. **Dla treści niebędących wydaniem** (posty o premierach, głębokie analizy), użyj `hello-librefang.md` jako modelu strukturalnego: usuń tag `release`, usuń konwencję sekcji tematycznych, ale zachowaj pola front matter i końcową sekcję Links.

@@ -1,29 +1,29 @@
 # Root — Dockerfile.rust-dev
 
-# Dockerfile.rust-dev — Developer Rust Toolchain Image
+# Dockerfile.rust-dev — Obraz narzędzi deweloperskich Rust
 
-## Purpose
+## Cel
 
-`Dockerfile.rust-dev` builds the `librefang-rust-dev` image: a full Rust development environment for contributors who don't have a native Rust toolchain on their host (e.g. macOS users running `cargo` through Docker). It is invoked by the `cargo` wrapper script at `scripts/.local/bin/cargo`.
+`Dockerfile.rust-dev` buduje obraz `librefang-rust-dev`: pełne środowisko deweloperskie Rust dla współtwórców, którzy nie mają natywnego łańcucha narzędzi Rust na swoim hoście (np. użytkownicy macOS uruchamiający `cargo` przez Docker). Jest wywoływany przez skrypt wrapper `cargo` w `scripts/.local/bin/cargo`.
 
-This image is **distinct** from the top-level `Dockerfile`, which produces the slim runtime release image. The two differ in important ways:
+Ten obraz jest **odrębny** od głównego `Dockerfile`, który produkuje złożony obraz uruchomieniowy do wydania. Różnią się one w ważnych aspektach:
 
-| Aspect | `Dockerfile.rust-dev` (this file) | `Dockerfile` (runtime) |
+| Aspekt | `Dockerfile.rust-dev` (ten plik) | `Dockerfile` (uruchomieniowy) |
 |---|---|---|
-| Use case | Local development, `cargo check` / `build` / `test` / `xtask` | Production runtime |
-| Base image | `rust:1-trixie` (glibc 2.39) | `rust:1.94-slim-bookworm` (glibc 2.36) |
-| GTK / WebKit dev libs | **Included** | Stripped out |
-| Source tree | Mounted at runtime via volumes | Not present |
-| `gh` CLI | **Included** | Not present |
-| Toolchain resolution | `rustup` downloads current stable on first run via `rust-toolchain.toml` | Pinned at build time |
+| Przypadek użycia | Lokalny rozwój, `cargo check` / `build` / `test` / `xtask` | Uruchomienie produkcyjne |
+| Obraz bazowy | `rust:1-trixie` (glibc 2.39) | `rust:1.94-slim-bookworm` (glibc 2.36) |
+| Biblioteki deweloperskie GTK / WebKit | **Dołączone** | Usunięte |
+| Drzewo źródłowe | Zamontowane w czasie uruchomienia przez wolumeny | Nieobecne |
+| CLI `gh` | **Dołączone** | Nieobecne |
+| Rozwiązywanie łańcucha narzędzi | `rustup` pobiera aktualną wersję stabilną przy pierwszym uruchomieniu przez `rust-toolchain.toml` | Przypięte w czasie budowy |
 
-## Build & Run
+## Budowa i uruchomienie
 
 ```bash
 docker build -t librefang-rust-dev:latest -f Dockerfile.rust-dev .
 ```
 
-Usage matches the wrapper script:
+Użycie odpowiada skryptowi wrapper:
 
 ```bash
 LIBREFANG_MOUNT_BASE=/path/to/workspace-parent \
@@ -31,79 +31,79 @@ LIBREFANG_RUST_IMAGE=librefang-rust-dev:latest \
     cargo check --workspace --lib
 ```
 
-The wrapper mounts the workspace and sets `CARGO_HOME` to `/usr/local/cargo` via named volumes. The Dockerfile does not pre-create these directories — they are established by the wrapper at container start.
+Wrapper montuje obszar roboczy i ustawia `CARGO_HOME` na `/usr/local/cargo` przez nazwane wolumeny. Dockerfile nie tworzy z góry tych katalogów — są one tworzone przez wrapper przy starcie kontenera.
 
-## Why Trixie (Not Bookworm)
+## Dlaczego Trixie (a nie Bookworm)
 
-`rust-toolchain.toml` pins `channel = "stable"`, meaning rustup downloads the current stable release on first container start. rust-lang.org publishes `aarch64-unknown-linux-gnu` stable artifacts compiled against glibc 2.39 (trixie). Running them inside a bookworm container (glibc 2.36) crashes every build script:
+`rust-toolchain.toml` przypina `channel = "stable"`, co oznacza, że rustup pobiera aktualne wydanie stabilne przy pierwszym starcie kontenera. rust-lang.org publikuje artefakty stabilne `aarch64-unknown-linux-gnu` skompilowane względem glibc 2.39 (trixie). Uruchomienie ich wewnątrz kontenera bookworm (glibc 2.36) powoduje awarię każdego skryptu budowania:
 
 ```
 /lib/.../libc.so.6: version `GLIBC_2.39' not found
 ```
 
-The runtime Dockerfile avoids this by using `rust:1.94-slim-bookworm` — it links a specific toolchain at image build time and never invokes rustup later. The dev image takes the opposite approach: track trixie so the image stays compatible with future stable rustup rolls without rebuilding.
+Uruchomieniowy Dockerfile unika tego, używając `rust:1.94-slim-bookworm` — łączy konkretny łańcuch narzędzi w czasie budowy obrazu i nigdy później nie wywołuje rustup. Obraz deweloperski podchodzi do tego odwrotnie: śledzi trixie, aby obraz pozostał kompatybilny z przyszłymi stabilnymi aktualizacjami rustup bez konieczności przebudowy.
 
-## System Dependencies
+## Zależności systemowe
 
-Installed in three `RUN` layers, each serving a different invalidation profile.
+Zainstalowane w trzech warstwach `RUN`, z których każda służy innemu profilowi unieważniania.
 
-### Layer 1 — Core Build & Tauri Dependencies
+### Warstwa 1 — Podstawowe zależności budowania i Tauri
 
-| Package | Purpose |
+| Pakiet | Cel |
 |---|---|
-| `build-essential` | Core compilation toolchain |
-| `pkg-config` | Required by native build scripts |
-| `libssl-dev` | TLS for the daemon |
-| `libdbus-1-dev` | Dragged in by `keyring`'s `sync-secret-service` feature (see #3180, #3259) |
-| `libsecret-1-dev` | Secret storage backend |
-| `perl` | Build-time scripting dependency |
-| `ca-certificates` | TLS certificate store |
-| `libwebkit2gtk-4.1-dev` | Tauri 2's `wry` webview backend on Linux |
-| `libgtk-3-dev` | `gdk-sys` / `gtk-sys` for Tauri |
-| `librsvg2-dev` | SVG icon rasterization in Tauri |
-| `patchelf` | Tauri bundler post-processing step |
-| `mold` | Fast linker (see below) |
+| `build-essential` | Podstawowy łańcuch narzędzi kompilacji |
+| `pkg-config` | Wymagany przez natywne skrypty budowania |
+| `libssl-dev` | TLS dla demona |
+| `libdbus-1-dev` | Wciągnięty przez funkcję `sync-secret-service` z `keyring` (patrz #3180, #3259) |
+| `libsecret-1-dev` | Backend magazynu sekretów |
+| `perl` | Zależność skryptowania w czasie budowania |
+| `ca-certificates` | Magazyn certyfikatów TLS |
+| `libwebkit2gtk-4.1-dev` | Backend webview `wry` w Tauri 2 na Linuksie |
+| `libgtk-3-dev` | `gdk-sys` / `gtk-sys` dla Tauri |
+| `librsvg2-dev` | Rasteryzacja ikon SVG w Tauri |
+| `patchelf` | Krok postprocessingu bundlera Tauri |
+| `mold` | Szybki linker (patrz niżej) |
 
-#### Why GTK/WebKit libs are needed at check time
+#### Dlaczego biblioteki GTK/WebKit są potrzebne w czasie check
 
-`cargo check --workspace --lib` descends into `librefang-desktop`, which depends on `tauri = "2"`. On Linux, Tauri 2 unconditionally pulls in `wry → webkit2gtk-sys` and `gdk-sys` / `gtk-sys`. Their build scripts execute `pkg-config gdk-3.0` and `webkit2gtk-4.1` during the check phase — not just at link time. Without the dev libraries, the workspace check fails:
+`cargo check --workspace --lib` schodzi do `librefang-desktop`, który zależy od `tauri = "2"`. Na Linuksie Tauri 2 bezwarunkowo ciągnie `wry → webkit2gtk-sys` oraz `gdk-sys` / `gtk-sys`. Ich skrypty budowania wykonują `pkg-config gdk-3.0` i `webkit2gtk-4.1` w fazie check — nie tylko w czasie linkowania. Bez bibliotek deweloperskich sprawdzenie obszaru roboczego kończy się niepowodzeniem:
 
 ```
 system library `gdk-3.0` was not found
 ```
 
-#### Why `mold`
+#### Dlaczego `mold`
 
-The dev wrapper invokes `mold -run cargo …`, which intercepts the child `ld` invocation without modifying `RUSTFLAGS`. This means cached `target/` artifacts remain valid. `mold` has no effect on `cargo check` (no link step occurs), but it accelerates the link phase of `cargo build` and `cargo test` — the per-iteration cost that even cached incremental builds pay on every change.
+Wrapper deweloperski wywołuje `mold -run cargo …`, co przechwytuje podrzędne wywołanie `ld` bez modyfikowania `RUSTFLAGS`. Dzięki temu buforowane artefakty `target/` pozostają ważne. `mold` nie ma wpływu na `cargo check` (nie następuje krok linkowania), ale przyspiesza fazę linkowania `cargo build` i `cargo test` — koszt każdej iteracji, który nawet buforowane budowanie przyrostowe ponosi przy każdej zmianie.
 
-### Layer 2 — GitHub CLI
+### Warstwa 2 — GitHub CLI
 
-`gh` is required by several `cargo xtask` commands:
+`gh` jest wymagany przez kilka poleceń `cargo xtask`:
 
-- `cargo xtask release` — hard-fails at `xtask/src/changelog.rs:421` with `"gh CLI required"` if absent
+- `cargo xtask release` — twardo kończy się niepowodzeniem w `xtask/src/changelog.rs:421` z komunikatem `"gh CLI required"`, jeśli jest nieobecny
 - `cargo xtask changelog`
-- `release.rs` (version-bump PR creation)
-- `cargo xtask contributors` (GitHub-API-backed contributor list)
+- `release.rs` (tworzenie PR z podwyższeniem wersji)
+- `cargo xtask contributors` (lista współtwórców oparta na GitHub-API)
 
-It is installed from GitHub's official apt repository so the version tracks upstream stable rather than the Debian archive's potentially older package. The release wrapper at `scripts/run-xtask.sh` forwards `GH_TOKEN` from the host, so `gh` authenticates without running `gh auth login` inside the container.
+Jest instalowany z oficjalnego repozytorium apt GitHuba, aby wersja śledziła nadrzędną stabilną zamiast potencjalnie starszego pakietu z archiwum Debiana. Wrapper wydania w `scripts/run-xtask.sh` przekazuje `GH_TOKEN` z hosta, więc `gh` uwierzytelnia się bez konieczności uruchamiania `gh auth login` wewnątrz kontenera.
 
-`curl` and `gnupg` are bootstrap-only dependencies in this layer (used for the apt-key fetch). They live in the same `RUN` block that consumes them so that changes to the Layer 1 package list don't invalidate the `gh` installation layer.
+`curl` i `gnupg` to zależności wyłącznie startowe w tej warstwie (używane do pobrania apt-key). Mieszkają w tym samym bloku `RUN`, który je zużywa, aby zmiany na liście pakietów warstwy 1 nie unieważniały warstwy instalacji `gh`.
 
-## Connection to the Rest of the Codebase
+## Powiązanie z resztą bazy kodu
 
 ```mermaid
 graph LR
-  W["cargo wrapper<br/>scripts/.local/bin/cargo"] --> IMG["librefang-rust-dev<br/>(this image)"]
+  W["cargo wrapper<br/>scripts/.local/bin/cargo"] --> IMG["librefang-rust-dev<br/>(ten obraz)"]
   IMG --> RTC["rust-toolchain.toml<br/>channel = stable"]
-  W --> MT["Mounts workspace<br/>+ CARGO_HOME volume"]
-  CI["CI: ci.yml,<br/>release-desktop.yml"] -.->|"sync GTK deps"| IMG
-  RT["Dockerfile<br/>(runtime)"] -.->|"parallel, not<br/>shared base"| IMG
-  XT["scripts/run-xtask.sh<br/>forwards GH_TOKEN"] --> IMG
+  W --> MT["Montuje obszar roboczy<br/>+ wolumen CARGO_HOME"]
+  CI["CI: ci.yml,<br/>release-desktop.yml"] -.->|"synchronizacja zależności GTK"| IMG
+  RT["Dockerfile<br/>(uruchomieniowy)"] -.->|"równoległy, nie<br/>współdzielona baza"| IMG
+  XT["scripts/run-xtask.sh<br/>przekazuje GH_TOKEN"] --> IMG
 ```
 
-Key relationships to keep in sync:
+Kluczowe relacje do utrzymania w synchronizacji:
 
-- **CI parity**: The package list in Layer 1 mirrors what `.github/workflows/ci.yml` and `.github/workflows/release-desktop.yml` install for the Linux Tauri build. If CI's GTK package list grows, this image must be updated to match.
-- **`rust-toolchain.toml`**: Dictates that rustup fetches current stable — the reason for the trixie base.
-- **Runtime Dockerfile**: Separate base image and toolchain strategy (see comparison table above). Changes to one do not imply changes to the other.
-- **`scripts/run-xtask.sh`**: Forwards `GH_TOKEN` from the host (extracted from macOS Keychain when needed) so the in-container `gh` authenticates transparently.
+- **Równoważność CI**: Lista pakietów w warstwie 1 odzwierciedla to, co `.github/workflows/ci.yml` i `.github/workflows/release-desktop.yml` instalują dla budowania Tauri na Linuksie. Jeśli lista pakietów GTK w CI wzrośnie, ten obraz musi zostać zaktualizowany w celu dopasowania.
+- **`rust-toolchain.toml`**: Dyktuje, że rustup pobiera aktualną wersję stabilną — powód wyboru bazy trixie.
+- **Uruchomieniowy Dockerfile**: Oddzielny obraz bazowy i strategia łańcucha narzędzi (patrz tabela porównawcza wyżej). Zmiany w jednym nie pociągają za sobą zmian w drugim.
+- **`scripts/run-xtask.sh`**: Przekazuje `GH_TOKEN` z hosta (pobrany z macOS Keychain w razie potrzeby), aby in-containerowe `gh` uwierzytelniało się w sposób przezroczysty.

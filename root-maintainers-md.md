@@ -2,78 +2,78 @@
 
 # MAINTAINERS.md
 
-## Purpose
+## Cel
 
-`MAINTAINERS.md` is the governance file of record for who maintains the LibreFang repository and what those maintainers are expected to do. It is not executable code — it functions as a contract between the project's contributors, admins, and any automated tooling that references maintainer responsibilities.
+`MAINTAINERS.md` to plik rządzący, który stanowi rejestr osób utrzymujących repozytorium LibreFang oraz określa, czego się od nich oczekuje. Nie jest to kod wykonywalny — pełni funkcję umowy między współtwórcami projektu, administratorami i wszelkimi zautomatyzowanymi narzędziami, które odwołują się do obowiązków opiekunów.
 
-The file serves three audiences:
+Plik służy trzem grupom odbiorców:
 
-- **Contributors** — to know who reviews their work and what standards apply.
-- **Maintainers / admins** — to have a written, agreed-upon set of responsibilities.
-- **AI-assisted maintainers** — as a pointer to role-specific prompt checklists that encode the same responsibilities in machine-actionable form.
+- **Współtwórcom** — aby wiedzieli, kto recenzuje ich pracę i jakie standardy ich obowiązują.
+- **Opiekunom / administratorom** — aby mieli pisemny, uzgodniony zestaw obowiązków.
+- **Opiekunom wspieranym przez AI** — jako wskazówka do promptów-checklist specyficznych dla ról, które kodują te same obowiązki w formie zdatnej do przetwarzania przez maszynę.
 
-## Current Governance State
+## Obecny stan zarządzania
 
-LibreFang is described as being mid-transition from a fork into a standalone community project. During this interim period, **repository admins are acting as the de facto maintainer set**. No individual maintainers are listed by name or handle in the file itself; instead, the document defers to the admin role until a broader group is formally published.
+LibreFang jest opisywany jako projekt w połowie transformacji z forka w niezależny projekt społecznościowy. W tym okresie przejściowym **administratorzy repozytorium pełnią de facto rolę opiekunów**. W pliku nie ma wymienionych z imienia ani po pseudonimie poszczególnych opiekunów — dokument odsyła do roli administratora do czasu formalnego opublikowania szerszej grupy.
 
-This means:
+Oznacza to:
 
-- There is no named maintainer list to parse or depend on programmatically today.
-- Any tooling that reads `MAINTAINERS.md` for CODEOWNERS-style logic should fall back to admin-level access.
-- The file is expected to change when the transition completes.
+- Obecnie nie istnieje nazwana lista opiekunów, którą można by przetworzyć programowo.
+- Każde narzędzie czytające `MAINTAINERS.md` w celu logiki w stylu CODEOWNERS powinno odwoływać się do dostępu na poziomie administratora.
+- Oczekuje się, że plik ulegnie zmianie po zakończeniu transformacji.
 
-## Maintainer Responsibilities
+## Obowiązki opiekunów
 
-The file defines four core duties:
+Plik definiuje cztery główne obowiązki:
 
-| Responsibility | Description |
+| Odpowiedzialność | Opis |
 |---|---|
-| **Pull request review** | Reviews should happen in a timely manner. No specific SLA is codified in the file. |
-| **Attribution preservation** | When maintainers accept or adapt community work, original authorship must be retained. |
-| **Documentation accuracy** | Release notes and governance documents must be kept current. |
-| **Security & regression triage** | Reports of security issues or regressions must be triaged quickly. |
+| **Recenzja pull requestów** | Recenzje powinny odbywać się w terminowym trybie. Nie określono konkretnego SLA w pliku. |
+| **Zachowanie atrybucji** | Gdy opiekunowie przyjmują lub adaptują prace społeczności, oryginalne autorstwo musi zostać zachowane. |
+| **Dokładność dokumentacji** | Notki wydania i dokumenty zarządzające muszą być aktualne. |
+| **Triaging bezpieczeństwa i regresji** | Zgłoszenia problemów bezpieczeństwa lub regresji muszą być szybko przyporządkowane. |
 
-### AI-Assisted Maintenance Hooks
+### Haczyki wspomagane przez AI do utrzymania
 
-Each responsibility maps to a self-contained prompt checklist under `.claude/prompts/`. These prompts are intended for AI-assisted maintainers (e.g., a Claude-based agent operating in a maintainer role):
+Każda odpowiedzialność odpowiada samodzielnemu promptowi-checkliście w katalogu `.claude/prompts/`. Te prompty przeznaczone są dla opiekunów wspomaganych przez AI (np. agenta opartego na Claude działającego w roli opiekuna):
 
-| Prompt | Responsibility |
+| Prompt | Odpowiedzialność |
 |---|---|
-| `pr-maintainer` | Pull request review workflow |
-| `release-maintainer` | Release notes and governance doc upkeep |
-| `ghsa-maintainer` | Security/advisory (GHSA) triage |
+| `pr-maintainer` | Przepływ pracy recenzji pull requestów |
+| `release-maintainer` | Notki wydania i utrzymanie dokumentów zarządzających |
+| `ghsa-maintainer` | Triaging bezpieczeństwa/doradców (GHSA) |
 
-The file directs readers to `AGENTS.md → Maintainer prompts` for details on how these prompts are structured and invoked.
+Plik odsyła czytelników do `AGENTS.md → Maintainer prompts` w celu uzyskania szczegółów na temat struktury i wywoływania tych promptów.
 
-## Adding New Maintainers
+## Dodawanie nowych opiekunów
 
-The file defines a lightweight, PR-based onboarding process:
+Plik definiuje uproszczony proces dołączania oparty na pull requestach:
 
-1. A candidate must demonstrate a history of **constructive reviews**, **merged contributions**, and **reliable follow-through on user-facing issues**.
-2. A nomination is made by opening a pull request that **updates this very file**.
-3. The PR is reviewed under the same standards as any other contribution.
+1. Kandydat musi wykazać się historią **konstruktywnych recenzji**, **scalonych kontrybucji** oraz **niezawodnego doprowadzania do końca zgłoszeń użytkowników**.
+2. Nominacja następuje poprzez otwarcie pull requesta, który **aktualizuje właśnie ten plik**.
+3. PR jest recenzowany według tych samych standardów co każda inna kontrybucja.
 
-There is no separate nomination form, voting mechanism, or off-repo process described. Governance change is itself a code change.
+Nie opisano oddzielnego formularza nominacji, mechanizmu głosowania ani procesu poza repozytorium. Zmiana zarządzania jest sama w sobie zmianą w kodzie.
 
-## Relationship to Other Files
+## Relacje z innymi plikami
 
 ```mermaid
 flowchart LR
-    A[MAINTAINERS.md] -- references --> B[.claude/prompts/]
-    A -- references --> C[AGENTS.md]
-    A -- updated via PR --> A
-    B -- invoked by --> D[AI-assisted maintainers]
-    C -- documents --> B
+    A[MAINTAINERS.md] -- odwołuje się do --> B[.claude/prompts/]
+    A -- odwołuje się do --> C[AGENTS.md]
+    A -- aktualizowany przez PR --> A
+    B -- wywoływane przez --> D[Opiekunowie wspomagani przez AI]
+    C -- dokumentuje --> B
 ```
 
-The file has no runtime dependencies, no imports, and no callers. Its connections are purely documentary:
+Plik nie ma zależności wykonawczych, importów ani wywołań. Jego połączenia mają charakter wyłącznie dokumentacyjny:
 
-- **`.claude/prompts/`** — contains the three named prompt checklists (`pr-maintainer`, `release-maintainer`, `ghsa-maintainer`).
-- **`AGENTS.md`** — the canonical documentation for how maintainer prompts are structured and used; `MAINTAINERS.md` is an entry point that defers detail there.
-- **Itself** — the file is self-modifying by design; the accepted mechanism for changing governance is a PR that edits `MAINTAINERS.md`.
+- **`.claude/prompts/`** — zawiera trzy nazwane prompty-checklisty (`pr-maintainer`, `release-maintainer`, `ghsa-maintainer`).
+- **`AGENTS.md`** — kanoniczna dokumentacja opisująca strukturę i sposób użycia promptów opiekunów; `MAINTAINERS.md` jest punktem wejścia, który odsyła do szczegółów w tym pliku.
+- **Sam plik** — plik jest z założenia samomodyfikujący; akceptowany mechanizm zmiany zarządzania to PR edytujący `MAINTAINERS.md`.
 
-## Practical Notes for Contributors
+## Wskazówki praktyczne dla współtwórców
 
-- **Don't expect a named maintainer list yet.** If you need a reviewer, ping the repo admins directly.
-- **Security reports** should follow whatever disclosure process is documented elsewhere (e.g., a `SECURITY.md`); `MAINTAINERS.md` only commits maintainers to *triaging quickly*, not to a specific intake channel.
-- **If you're an AI agent**, read `AGENTS.md` before acting on anything referenced here. The prompt checklists, not this file, are the operational source of truth for automated maintenance workflows.
+- **Nie spodziewaj się jeszcze nazwanej listy opiekunów.** Jeśli potrzebujesz recenzenta, oznacz bezpośrednio administratorów repozytorium.
+- **Zgłoszenia bezpieczeństwa** powinny być kierowane zgodnie z procesem ujawniania udokumentowanym gdzie indziej (np. w pliku `SECURITY.md`); `MAINTAINERS.md` zobowiązuje opiekunów jedynie do *szybkiego triagingu*, a nie do określonego kanału przyjmowania zgłoszeń.
+- **Jeśli jesteś agentem AI**, przeczytaj `AGENTS.md` przed podjęciem działań związanych z czegokolwiek, do czego odsyła ten plik. Prompty-checklisty, a nie ten plik, są operacyjnym źródłem prawdy dla zautomatyzowanych przepływów pracy utrzymania.

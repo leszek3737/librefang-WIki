@@ -2,47 +2,47 @@
 
 # packages
 
-The `packages` directory contains the distributable artifacts for the LibreFang Agent OS ecosystem. Each sub-package is independently versioned and serves a distinct deployment target — one for end-user CLI installation, one for running a persistent messaging gateway.
+Katalog `packages` zawiera dystrybuowalne artefakty dla ekosystemu LibreFang Agent OS. Każdy podpakiet ma niezależne wersjonowanie i służy odrębnemu celowi wdrożeniowemu — jeden do instalacji CLI dla użytkownika końcowego, drugi do uruchamiania trwałej bramy komunikatów.
 
-## Sub-Modules
+## Podmoduły
 
-| Package | Role | Runtime Model |
+| Pakiet | Rola | Model wykonawczy |
 |---|---|---|
-| [cli-npm](cli-npm.md) | npm shim that installs the correct platform-native binary and delegates execution to it | Short-lived process; dispatched per invocation |
-| [whatsapp-gateway](whatsapp-gateway.md) | Bridges WhatsApp chats to the LibreFang kernel via the Baileys library | Long-lived process, managed by PM2 |
+| [cli-npm](cli-npm.md) | Shim npm, który instaluje właściwy binarny plik natywny dla danej platformy i deleguje do niego wykonanie | Krótkotrwały proces; uruchamiany przy każdym wywołaniu |
+| [whatsapp-gateway](whatsapp-gateway.md) | Łączy czaty WhatsApp z jądrem LibreFang za pomocą biblioteki Baileys | Długotrwały proces, zarządzany przez PM2 |
 
-## How They Relate
+## Powiązania między nimi
 
-Both packages sit at the **edge** of the LibreFang system — they are the user-facing or integration-facing surfaces that route work *into* the kernel:
+Oba pakiety znajdują się na **krawędzi** systemu LibreFang — stanowią powierzchnie widoczne dla użytkownika lub integracji, które kierują zadania *do* jądra:
 
 ```mermaid
 flowchart LR
-    User1[User Terminal] -->|npm install -g| CLI[cli-npm shim]
-    CLI -->|delegates to| NativeBin[Platform Binary]
-    NativeBin -->|interacts with| Kernel[(LibreFang Kernel)]
+    User1[Terminal użytkownika] -->|npm install -g| CLI[shim cli-npm]
+    CLI -->|deleguje do| NativeBin[Binaria platformy]
+    NativeBin -->|wchodzi w interakcję z| Kernel[(Jądro LibreFang)]
 
-    Phone[WhatsApp Users] <-->|Baileys socket| GW[whatsapp-gateway]
+    Phone[Użytkownicy WhatsApp] <-->|gniazdo Baileys| GW[whatsapp-gateway]
     GW -->|POST /api/agents/chat| Kernel
-    Kernel -->|SSE stream| GW
+    Kernel -->|strumień SSE| GW
     GW -->|SQLite WAL| DB[(messages.db)]
 ```
 
-The CLI provides interactive command-line access for operators and developers, while the gateway provides always-on message ingestion from WhatsApp. Neither package contains core agent logic — both depend on the LibreFang kernel to execute agents and tools.
+CLI zapewnia interaktywny dostęp z wiersza poleceń dla operatorów i deweloperów, natomiast brama zapewnia stały odbiór komunikatów z WhatsApp. Żaden z pakietów nie zawiera logiki agenta — oba zależą od jądra LibreFang, aby wykonywać agentów i narzędzia.
 
-## Key Workflows
+## Kluczowe przepływy pracy
 
-### CLI Installation Flow
+### Przepływ instalacji CLI
 
-The [cli-npm](cli-npm.md) package uses npm's `optionalDependencies` so that a single `npm install -g @librefang/cli` pulls only the relevant platform binary. The shim itself contains no application code; it dispatches to the native binary at run time.
+Pakiet [cli-npm](cli-npm.md) wykorzystuje `optionalDependencies` npm, dzięki czemu pojedyncze `npm install -g @librefang/cli` pobiera tylko właściwy binarny plik dla danej platformy. Sam shim nie zawiera kodu aplikacji; w czasie wykonania przekazuje sterowanie do binarnego pliku natywnego.
 
-### WhatsApp Message Relay
+### Przekazywanie komunikatów WhatsApp
 
-The [whatsapp-gateway](whatsapp-gateway.md) handles a multi-stage pipeline for each inbound message:
+Brama [whatsapp-gateway](whatsapp-gateway.md) obsługuje wieloetapowy potok dla każdej przychodzącej wiadomości:
 
-1. **Identity & dedup** — Messages pass through `normalizeDeviceScopedJid` / `isLidJid` (from `lib/identity.js`) and a dedup tracker to filter echoes and repeats.
-2. **Session resolution** — `buildSessionKey` (from `lib/session-key.js`) scopes the conversation, and `resolveAgentId` selects the target agent.
-3. **Kernel handoff** — `forwardToLibreFang` / `forwardToLibreFangStreaming` POSTs to the kernel's `/api/agents/chat` endpoint and consumes the SSE response stream.
-4. **Response delivery** — The gateway edits the sent message in-place as tokens stream back, using `markdownToWhatsApp` for formatting. Image responses go through `sendImage`.
-5. **State persistence** — A SQLite database (`messages.db`) records processed message IDs and a LID cache (`lib/lid-cache.js`) maps phone-scoped JIDs to stable identities.
+1. **Tożsamość i deduplikacja** — Wiadomości przechodzą przez `normalizeDeviceScopedJid` / `isLidJid` (z `lib/identity.js`) oraz tracker deduplikacji, aby odfiltrować echa i powtórzenia.
+2. **Rozwiązanie sesji** — `buildSessionKey` (z `lib/session-key.js`) określa zakres konwersacji, a `resolveAgentId` wybiera docelowego agenta.
+3. **Przekazanie do jądra** — `forwardToLibreFang` / `forwardToLibreFangStreaming` wysyła POST do endpointu jądra `/api/agents/chat` i konsumuje strumień odpowiedzi SSE.
+4. **Dostarczenie odpowiedzi** — Brama edytuje wysłaną wiadomość w miejscu, gdy tokeny wracają w strumieniu, używając `markdownToWhatsApp` do formatowania. Odpowiedzi obrazowe przechodzą przez `sendImage`.
+5. **Trwałość stanu** — Baza danych SQLite (`messages.db`) rejestruje identyfikatory przetworzonych wiadomości, a pamięć podręczna LID (`lib/lid-cache.js`) mapuje JID-om związanym z numerami telefonu na stabilne tożsamości.
 
-Reconnection, catch-up sweeps (`runCatchUpSweep`), and escalation debouncing (`shouldDebounceEscalation`) keep the gateway resilient during network interruptions.
+Ponowne łączenie, skanowanie nadrabiania (`runCatchUpSweep`) oraz wygaszanie eskalacji (`shouldDebounceEscalation`) zapewniają bramie odporność podczas przerw w łączności sieciowej.

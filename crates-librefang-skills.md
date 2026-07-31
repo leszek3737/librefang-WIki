@@ -2,34 +2,34 @@
 
 # librefang-skills
 
-Skill system for LibreFang — registry, loader, marketplace client, OpenClaw compatibility layer, and agent-driven self-evolution. This crate is the backbone of how skills are discovered, installed, executed, mutated, and secured.
+System umiejętności dla LibreFang — rejestr, loader, klient marketplace, warstwa kompatybilności z OpenClaw oraz agentowo napędzana samoewolucja. Ten crate jest kręgosłupem sposobu, w jaki umiejętności są odkrywane, instalowane, wykonywane, mutowane i zabezpieczane.
 
-## Architecture Overview
+## Przegląd architektury
 
 ```mermaid
 graph TB
-    subgraph "Installation & Discovery"
+    subgraph "Instalacja i odkrywanie"
         CH[ClawHub Client]
         OC[OpenClaw Compat]
         MKT[Marketplace Bundles]
-        REG[Registry]
+        REG[Rejestr]
     end
 
-    subgraph "Execution"
+    subgraph "Wykonywanie"
         LDR[Loader / Tool Runner]
-        CFG[Config Injection]
+        CFG[Wstrzykiwanie konfiguracji]
     end
 
-    subgraph "Self-Evolution"
-        EVO[Evolution Engine]
-        LOCK[Per-Skill Locking]
-        VER[Version History]
+    subgraph "Samoewolucja"
+        EVO[Silnik ewolucji]
+        LOCK[Blokowanie na umiejętność]
+        VER[Historia wersji]
     end
 
-    subgraph "Security"
+    subgraph "Bezpieczeństwo"
         VR[SkillVerifier]
-        SC[Supply-Chain Audit]
-        TP[Threat Patterns]
+        SC[Audit łańcucha dostaw]
+        TP[Wzorce zagrożeń]
     end
 
     CH --> OC
@@ -44,200 +44,200 @@ graph TB
     VR --> TP
 ```
 
-## Crate Layout
+## Układ crate'a
 
-| Module | Responsibility |
+| Moduł | Odpowiedzialność |
 |---|---|
-| `clawhub` | ClawHub marketplace API client — search, browse, download, install with checksum validation |
-| `marketplace` | Local marketplace bundle extraction with decompression-bomb guards |
-| `openclaw_compat` | Detect and convert SKILL.md / package.json / OpenClaw skill formats to LibreFang manifests |
-| `loader` | Execute skill tools (shell, Python), validate input/output against schemas, enforce env-var passthrough policy |
-| `registry` | Track installed skills, manage enable/disable state, skill freezing |
-| `evolution` | Agent-driven skill creation, fuzzy patching, version history, rollback, supporting-file management |
-| `config_injection` | Collect `[[config_vars]]` declarations from enabled skills and resolve them into a system-prompt section |
-| `verify` | `SkillVerifier` — prompt-injection scanning via Aho-Corasick threat patterns, manifest security scans |
-| `supply_chain` | Scan skill directories for dangerous file types (`.pth`, etc.) before promotion |
-| `http_client` | Shared reqwest builders with rustls TLS and optional dangerous verification bypass |
+| `clawhub` | Klient API marketplace ClawHub — wyszukiwanie, przeglądanie, pobieranie, instalacja z walidacją sumy kontrolnej |
+| `marketplace` | Lokalna ekstrakcja paczek marketplace z zabezpieczeniem przed bombą dekompresyjną |
+| `openclaw_compat` | Wykrywanie i konwersja formatów SKILL.md / package.json / OpenClaw skill na manifesty LibreFang |
+| `loader` | Wykonywanie narzędzi umiejętności (shell, Python), walidacja wejścia/wyjścia względem schematów, wymuszanie polityki przekazywania zmiennych środowiskowych |
+| `registry` | Śledzenie zainstalowanych umiejętności, zarządzanie stanem włączania/wyłączania, zamrażanie umiejętności |
+| `evolution` | Agentowo napędzane tworzenie umiejętności, rozmyte łatki, historia wersji, wycofywanie, zarządzanie plikami pomocniczymi |
+| `config_injection` | Zbieranie deklaracji `[[config_vars]]` z włączonych umiejętności i resolves ich do sekcji promptu systemowego |
+| `verify` | `SkillVerifier` — skanowanie pod kątem wstrzykiwania promptu za pomocą wzorców zagrożeń Aho-Corasick, skany bezpieczeństwa manifestu |
+| `supply_chain` | Skanowanie katalogów umiejętności w poszukiwaniu niebezpiecznych typów plików (`.pth` itd.) przed promocją |
+| `http_client` | Udostępniane buildery reqwest z TLS rustls i opcjonalnym niebezpiecznym obejściem weryfikacji |
 
 ---
 
-## ClawHub Marketplace Client (`clawhub`)
+## Klient marketplace ClawHub (`clawhub`)
 
-The `ClawHubClient` provides typed access to the ClawHub API (`https://clawhub.ai/api/v1`). All HTTP calls flow through `get_with_retry`, which handles rate-limit (429) and server-error (5xx) responses with exponential backoff and `Retry-After` header support.
+`ClawHubClient` zapewnia typowany dostęp do API ClawHub (`https://clawhub.ai/api/v1`). Wszystkie wywołania HTTP przechodzą przez `get_with_retry`, który obsługuje odpowiedzi z limitem zapytań (429) i błędami serwera (5xx) z wykładniczym wycofywaniem i obsługą nagłówka `Retry-After`.
 
-### API Methods
+### Metody API
 
-| Method | Endpoint | Returns |
+| Metoda | Endpoint | Zwraca |
 |---|---|---|
-| `search(query, limit)` | `GET /search?q=...` | `ClawHubSearchResponse` (root key: `results`) |
-| `browse(sort, limit, cursor)` | `GET /skills?sort=...` | `ClawHubBrowseResponse` (root key: `items`) |
-| `get_skill(slug)` | `GET /skills/{slug}` | `ClawHubSkillDetail` with owner, version info, `expected_sha256` |
-| `get_file(slug, path)` | `GET /skills/{slug}/file?path=...` | Raw file text |
+| `search(query, limit)` | `GET /search?q=...` | `ClawHubSearchResponse` (klucz główny: `results`) |
+| `browse(sort, limit, cursor)` | `GET /skills?sort=...` | `ClawHubBrowseResponse` (klucz główny: `items`) |
+| `get_skill(slug)` | `GET /skills/{slug}` | `ClawHubSkillDetail` z właścicielem, informacjami o wersji, `expected_sha256` |
+| `get_file(slug, path)` | `GET /skills/{slug}/file?path=...` | Surowy tekst pliku |
 | `install(slug, target_dir)` | `GET /download?slug=...` | `ClawHubInstallResult` |
 
-### Retry Strategy
+### Strategia ponowień
 
-Constants governing retry behavior:
+Stałe sterujące zachowaniem ponowień:
 
-- **MAX_RETRIES**: 5 attempts (including the first)
-- **BASE_DELAY_MS**: 1,500ms, doubled per attempt
-- **MAX_DELAY_MS**: 30,000ms cap
-- Jitter: 0–25% added via system-clock nanos to avoid thundering herd
+- **MAX_RETRIES**: 5 prób (wliczając pierwszą)
+- **BASE_DELAY_MS**: 1500 ms, podwajane przy każdej próbie
+- **MAX_DELAY_MS**: limit 30 000 ms
+- Jitter: 0–25% dodawane za pomocą nanosekund zegara systemowego w celu uniknięcia efektu stada
 
-The `Retry-After` header is respected (capped at `MAX_DELAY_MS`) when the server provides it.
+Nagłówek `Retry-After` jest respektowany (z limitem do `MAX_DELAY_MS`), gdy serwer go dostarcza.
 
-### Installation Pipeline
+### Potok instalacji
 
 ```mermaid
 flowchart LR
-    A[Fetch detail<br/>for expected_sha256] --> B[Download zip]
-    B --> C[SHA256 verify]
-    C --> D[Staging dir<br/>extract in blocking thread]
+    A[Pobierz szczegóły<br/>dla expected_sha256] --> B[Pobierz zip]
+    B --> C[Weryfikacja SHA256]
+    C --> D[Katalog tymczasowy<br/>ekstrakcja w wątku blokującym]
     D --> E{Format?}
-    E -->|SKILL.md| F[OpenClaw convert]
-    E -->|package.json| G[OpenClaw convert]
-    F --> H[Prompt injection scan]
-    H --> I[Manifest security scan]
-    I --> J[Supply-chain audit]
-    J --> K[Atomic rename<br/>to skill dir]
+    E -->|SKILL.md| F[Konwersja OpenClaw]
+    E -->|package.json| G[Konwersja OpenClaw]
+    F --> H[Skan wstrzykiwania promptu]
+    H --> I[Skan bezpieczeństwa manifestu]
+    I --> J[Audit łańcucha dostaw]
+    J --> K[Atomowe zmiana nazwy<br/>na katalog umiejętności]
 ```
 
-Key design decisions in the install path:
+Kluczowe decyzje projektowe w ścieżce instalacji:
 
-- **Staging directory**: Content is extracted into `.staging-{slug}-{pid}-{seq}` and only atomically renamed to the final skill directory after all security checks pass. A partially downloaded or rejected skill never reaches the live skill directory.
-- **Blocking extraction**: Zip decompression runs on `spawn_blocking` so the tokio worker is not stalled on unbounded I/O.
-- **Decompression-bomb guards**: Archive entry count is capped at `marketplace::MAX_ENTRIES`, and per-entry uncompressed size is tracked via `write_zip_entry_capped`.
-- **Checksum validation**: When the registry provides `expected_sha256`, the computed digest must match *before* any directories are created. A mismatch returns `SkillError::SecurityBlocked` immediately.
-- **Supply-chain audit**: `supply_chain::scan()` runs as the final gate before promotion — e.g., `.pth` files trigger a `SecurityBlocked` error.
+- **Katalog tymczasowy**: Treść jest ekstrahowana do `.staging-{slug}-{pid}-{seq}` i dopiero atomowo zmieniana na docelowy katalog umiejętności po przejściu wszystkich kontroli bezpieczeństwa. Częściowo pobrana lub odrzucona umiejętność nigdy nie trafia do aktywnego katalogu.
+- **Blokująca ekstrakcja**: Dekompresja zip uruchamiana przez `spawn_blocking`, aby tokio worker nie był blokowany przez nieograniczony I/O.
+- **Zabezpieczenie przed bombą dekompresyjną**: Liczba wpisów archiwum jest ograniczona do `marketplace::MAX_ENTRIES`, a nieskompresowany rozmiar każdego wpisu jest śledzony przez `write_zip_entry_capped`.
+- **Walidacja sumy kontrolnej**: Gdy rejestr dostarcza `expected_sha256`, obliczona wartość musi się zgadzać *przed* utworzeniem jakichkolwiek katalogów. Niedopasowanie natychmiast zwraca `SkillError::SecurityBlocked`.
+- **Audit łańcucha dostaw**: `supply_chain::scan()` uruchamiany jako ostatnia brama przed promocją — np. pliki `.pth` wyzwalają błąd `SecurityBlocked`.
 
-The `ClawHubInstallResult` includes all security warnings, tool name translations (OpenClaw → LibreFang), and whether the skill is prompt-only.
+`ClawHubInstallResult` zawiera wszystkie ostrzeżenia bezpieczeństwa, translacje nazw narzędzi (OpenClaw → LibreFang) oraz informację, czy umiejętność jest typu prompt-only.
 
-### TLS Configuration
+### Konfiguracja TLS
 
-By default, the client uses rustls with native CA roots. Setting the environment variable `LIBREFANG_DANGEROUSLY_SKIP_TLS_VERIFICATION=true` (or `1`) switches to the dangerous client builder — intended only for testing against servers with expired certificates.
+Domyślnie klient używa rustls z natywnymi korzeniami CA. Ustawienie zmiennej środowiskowej `LIBREFANG_DANGEROUSLY_SKIP_TLS_VERIFICATION=true` (lub `1`) przełącza na niebezpieczny builder klienta — przeznaczony wyłącznie do testowania przeciwko serwerom z wygasłymi certyfikatami.
 
 ---
 
-## Skill Self-Evolution (`evolution`)
+## Samoewolucja umiejętności (`evolution`)
 
-This module lets agents autonomously create, update, and refine skills based on execution experience. All mutations are:
+Ten moduł pozwala agentom autonomicznie tworzyć, aktualizować i udoskonalać umiejętności na podstawie doświadczeń z wykonania. Wszystkie mutacje są:
 
-- **Locked**: Per-skill exclusive file locks (`fs2` flock on Unix, LockFileEx on Windows) prevent concurrent corruption.
-- **Atomic**: All writes go through temp-file-then-rename.
-- **Versioned**: Every mutation records a version entry in `.evolution.json`.
-- **Secured**: Prompt content and descriptions pass through `SkillVerifier::scan_prompt_content`.
+- **Zablokowane**: Ekskluzywne blokady plików na umiejętność (`fs2` flock na Unix, LockFileEx na Windows) zapobiegają współbieżnemu uszkodzeniu.
+- **Atomowe**: Wszystkie zapisy przechodzą przez schemat plik-tymczasowy-then-zmiana-nazwy.
+- **Wersjonowane**: Każda mutacja rejestruje wpis wersji w `.evolution.json`.
+- **Zabezpieczone**: Treść promptu i opisy przechodzą przez `SkillVerifier::scan_prompt_content`.
 
-### Core Operations
+### Operacje podstawowe
 
-| Function | Purpose |
+| Funkcja | Cel |
 |---|---|
-| `create_skill` | Create a new PromptOnly skill from scratch |
-| `update_skill` | Full rewrite of `prompt_context.md` |
-| `patch_skill` | Fuzzy find-and-replace within existing content |
-| `delete_skill` | Remove agent-evolved skill (only `Local`/`Native` source) |
-| `uninstall_skill` | User-initiated removal of any skill regardless of source |
-| `rollback_skill` | Revert to a previous version snapshot |
-| `write_supporting_file` | Write to `references/`, `templates/`, `scripts/`, or `assets/` |
-| `remove_supporting_file` | Remove a supporting file and prune empty parent dirs |
-| `record_skill_usage` | Increment use counter after successful tool invocation |
+| `create_skill` | Utworzenie nowej umiejętności PromptOnly od zera |
+| `update_skill` | Pełny nadpis `prompt_context.md` |
+| `patch_skill` | Rozmyte znajdowanie i zamiana w istniejącej treści |
+| `delete_skill` | Usunięcie umiejętności wyewoluowanej przez agenta (tylko ze źródła `Local`/`Native`) |
+| `uninstall_skill` | Inicjowane przez użytkownika usunięcie dowolnej umiejętności niezależnie od źródła |
+| `rollback_skill` | Powrót do poprzedniej migawki wersji |
+| `write_supporting_file` | Zapis do `references/`, `templates/`, `scripts/` lub `assets/` |
+| `remove_supporting_file` | Usunięcie pliku pomocniczego i usunięcie pustych katalogów nadrzędnych |
+| `record_skill_usage` | Inkrementacja licznika użycia po pomyślnym wywołaniu narzędzia |
 
-### Lock File Placement
+### Umiejscowienie plików blokad
 
-Lock files live at `{skills_dir}/.evolution-locks/{skill_name}.lock` — *outside* the skill directory. This allows `delete_skill` and `uninstall_skill` to hold the lock across `remove_dir_all` on Windows, where open file handles inside a directory would block deletion.
+Pliki blokad znajdują się w `{skills_dir}/.evolution-locks/{skill_name}.lock` — *poza* katalogiem umiejętności. Pozwala to `delete_skill` i `uninstall_skill` utrzymać blokadę przez `remove_dir_all` na Windows, gdzie otwarte uchwyty plików wewnątrz katalogu blokowałyby usunięcie.
 
-### Atomic Writes
+### Zapisy atomowe
 
-`atomic_write` generates unique temp filenames using pid, thread ID, a monotonic `AtomicU64` counter, and nanosecond timestamp. This prevents collisions even when multiple threads target the same final path.
+`atomic_write` generuje unikalne nazwy plików tymczasowych używając pid, ID wątku, monotonicznego licznika `AtomicU64` i znacznika czasu w nanosekundach. Zapobiega to kolizjom nawet gdy wiele wątków celuje w tę samą docelową ścieżkę.
 
-### Version Management
+### Zarządzanie wersjami
 
-- **`.evolution.json`**: Stores `versions` (max 10 entries), `use_count`, `evolution_count` (total version writes including create), and `mutation_count` (changes after create).
-- **Rollback snapshots**: Stored in `.rollback/` with nanosecond-precision filenames; old snapshots are pruned to `MAX_VERSION_HISTORY`.
-- **Version bumping**: `bump_patch_version` uses the `semver` crate, correctly handling pre-release tags and build metadata.
+- **`.evolution.json`**: Przechowuje `versions` (max 10 wpisów), `use_count`, `evolution_count` (łączna liczba zapisów wersji wliczając utworzenie) oraz `mutation_count` (zmiany po utworzeniu).
+- **Migawki wycofywania**: Przechowywane w `.rollback/` z nazwami plików w precyzji nanosekundowej; stare migawki są przycinane do `MAX_VERSION_HISTORY`.
+- **Inkrementacja wersji**: `bump_patch_version` używa crate'a `semver`, poprawnie obsługując tagi pre-release i metadane kompilacji.
 
-### Fuzzy Matching Strategies
+### Strategie dopasowania rozmytego
 
-`fuzzy_find_and_replace` tries six strategies in order (strict → loose) and reports which one succeeded:
+`fuzzy_find_and_replace` próbuje sześciu strategii po kolei (ścisła → luźna) i raportuje, która się powiodła:
 
-1. **Exact** — literal substring match
-2. **LineTrimmed** — per-line whitespace trimmed
-3. **WhitespaceNormalized** — whitespace runs collapsed to single space
-4. **IndentFlexible** — leading whitespace stripped from all lines
-5. **BlockAnchor** — first+last line match, middle ≥60% similar
-6. **WhitespaceStripped** — all whitespace removed (CJK-friendly fallback)
+1. **Exact** — dosłowne dopasowanie podciągu
+2. **LineTrimmed** — białe znaki przycięte per linia
+3. **WhitespaceNormalized** — sekwencje białych znaków zwinięte do pojedynczej spacji
+4. **IndentFlexible** — wiodące białe znaki usunięte ze wszystkich linii
+5. **BlockAnchor** — dopasowanie pierwszej i ostatniej linii, środek ≥60% podobny
+6. **WhitespaceStripped** — wszystkie białe znaki usunięte (odpowiednik awaryjny przyjazny dla CJK)
 
-The `MatchStrategy` is returned in `EvolutionResult.match_strategy` so callers can distinguish strategies programmatically.
+`MatchStrategy` jest zwracany w `EvolutionResult.match_strategy`, aby wywołujący mogli programowo rozróżniać strategie.
 
-When all strategies fail, the error message includes the closest matching lines (by character-overlap similarity) so the agent can self-correct.
+Gdy wszystkie strategie zawiodą, komunikat błędu zawiera najbardziej zbliżone pasujące linie (według podobieństwa nakładania znaków), aby agent mógł samodzielnie się poprawić.
 
-### Supporting File Constraints
+### Ograniczenia plików pomocniczych
 
-- Allowed subdirectories: `references`, `templates`, `scripts`, `assets`
-- Max file size: 1 MiB (`MAX_SUPPORTING_FILE_SIZE`)
-- Path traversal (`..`), absolute paths, and symlink escapes are blocked
-- Canonicalization verifies the resolved path stays within the skill directory
+- Dozwolone podkatalogi: `references`, `templates`, `scripts`, `assets`
+- Maksymalny rozmiar pliku: 1 MiB (`MAX_SUPPORTING_FILE_SIZE`)
+- Przechodzenie ścieżek (`..`), ścieżki bezwzględne i ucieczki symlinków są blokowane
+- Kanonizacja weryfikuje, że rozwiązana ścieżka pozostaje w katalogu umiejętności
 
 ---
 
-## Config Variable Injection (`config_injection`)
+## Wstrzykiwanie zmiennych konfiguracyjnych (`config_injection`)
 
-Skills declare configuration dependencies via `[[config_vars]]` in their `skill.toml`. This module collects, resolves, and formats those declarations for injection into the system prompt.
+Umiejętności deklarują zależności konfiguracyjne za pomocą `[[config_vars]]` w swoim `skill.toml`. Ten moduł zbiera, resolves i formatuje te deklaracje do wstrzykiwania w prompt systemowy.
 
-### Storage Convention
+### Konwencja przechowywania
 
-A logical key `wiki.base_url` is stored in `~/.librefang/config.toml` at:
+Logiczny klucz `wiki.base_url` jest przechowywany w `~/.librefang/config.toml` pod adresem:
 
 ```toml
 [skills.config.wiki]
 base_url = "https://wiki.corp.example.com"
 ```
 
-### Resolution Flow
+### Przepływ rozwiązywania
 
-1. **`collect_config_vars(skills)`** — Gathers declarations from enabled skills, deduplicating by key (first wins). Incomplete entries (empty key or description) are silently skipped.
+1. **`collect_config_vars(skills)`** — Zbiera deklaracje z włączonych umiejętności, deduplikując po kluczu (pierwszy wygrywa). Niekompletne wpisy (pusty klucz lub opis) są cicho pomijane.
 
-2. **`resolve_config_vars(vars, config_toml)`** — Walks the dotted path `skills.config.<logical-key>` through the TOML tree. Falls back to the declared `default` when the config value is absent or empty. Variables with neither value nor default are omitted.
+2. **`resolve_config_vars(vars, config_toml)`** — Przechodzi kropkowaną ścieżkę `skills.config.<klucz-logiczny>` przez drzewo TOML. Fallback do zadeklarowanego `default`, gdy wartość konfiguracji jest nieobecna lub pusta. Zmienne bez wartości i domyślnej są pomijane.
 
-3. **`format_config_section(resolved)`** — Produces:
+3. **`format_config_section(resolved)`** — Produkuje:
 
 ```text
-## Skill Config Variables
+## Zmienne konfiguracyjne umiejętności
 wiki.base_url = https://wiki.corp.example.com
 db.host = localhost
 ```
 
-Returns an empty string when there are no resolved vars, so callers can cheaply guard with `is_empty()`.
+Zwraca pusty ciąg, gdy brak rozdzielonych zmiennych, więc wywołujący mogą tanio pilnować przez `is_empty()`.
 
 ---
 
-## Security Scanning (`verify`)
+## Skanowanie bezpieczeństwa (`verify`)
 
-All evolution operations and marketplace installs route through `SkillVerifier`. The prompt-injection scanner (`scan_prompt_content`) uses pre-compiled Aho-Corasick threat patterns built by `build_threat_patterns`. A global `ScannerState` holds the compiled patterns for reuse.
+Wszystkie operacje ewolucji i instalacje z marketplace przechodzą przez `SkillVerifier`. Skaner wstrzykiwania promptu (`scan_prompt_content`) używa prekompilowanych wzorców zagrożeń Aho-Corasick budowanych przez `build_threat_patterns`. Globalny `ScannerState` przechowuje skompilowane wzorce do ponownego użycia.
 
-Warnings carry a `WarningSeverity` level:
-- **Critical** — blocks the operation entirely (`SkillError::SecurityBlocked`)
-- **Warning** — recorded in the result but does not block
+Ostrzeżenia niosą poziom `WarningSeverity`:
+- **Critical** — blokuje operację całkowicie (`SkillError::SecurityBlocked`)
+- **Warning** — zarejestrowane w wyniku, ale nie blokuje
 
-Every evolution entry point (`create_skill`, `update_skill`, `patch_skill`, `rollback_skill`, `write_supporting_file`) calls `validate_prompt_content` before writing, which enforces both size limits (160,000 chars ≈ 55k tokens) and the injection scan.
+Każdy punkt wejścia ewolucji (`create_skill`, `update_skill`, `patch_skill`, `rollback_skill`, `write_supporting_file`) wywołuje `validate_prompt_content` przed zapisem, który wymusza zarówno limity rozmiaru (160 000 znaków ≈ 55k tokenów), jak i skan wstrzykiwania.
 
 ---
 
-## Integration Points
+## Punkty integracji
 
-### Callers from the Rest of the Codebase
+### Wywołujący z reszty bazy kodu
 
-- **Tool runner** (`src/tool_runner/skill.rs`): Exposes evolution operations as agent tools — `create`, `update`, `patch`, `rollback`, `delete`, `write_file`, `remove_file`. Each tool calls `load_installed_skill_from_disk` to get a fresh skill snapshot before mutating.
-- **Tool dispatch** (`src/tool_runner/dispatch.rs`): Calls `execute_skill_tool` from the loader and `record_skill_usage` after successful execution.
-- **Skill workshop** (`src/skill_workshop/storage.rs`): Uses `create_skill` and `update_skill` to promote approved candidate skills.
-- **Background skill review** (`src/kernel/tools_and_skills.rs`): Autonomous patching via `fuzzy_find_and_replace` and `update_skill`.
-- **HTTP routes** (`src/routes/skills/clawhub.rs`): ClawHub browse/search/detail use `ClawHubClient::with_url` to support regional mirrors.
-- **Kernel controlled evolution** (`src/kernel/tests.rs`): `update_skill` for the controlled evolution path with proposed version tracking.
-- **Injection guard** (`librefang-runtime/src/injection_guard.rs`): Calls `scan_prompt_content` on tool execution results.
-- **Registry checks** (`src/tool_runner/skill.rs`): `is_frozen` from the registry gates whether evolution operations are permitted on a skill.
+- **Tool runner** (`src/tool_runner/skill.rs`): Eksponuje operacje ewolucji jako narzędzia agenta — `create`, `update`, `patch`, `rollback`, `delete`, `write_file`, `remove_file`. Każde narzędzie wywołuje `load_installed_skill_from_disk`, aby pobrać świeżą migawkę umiejętności przed mutacją.
+- **Tool dispatch** (`src/tool_runner/dispatch.rs`): Wywołuje `execute_skill_tool` z loadera i `record_skill_usage` po pomyślnym wykonaniu.
+- **Skill workshop** (`src/skill_workshop/storage.rs`): Używa `create_skill` i `update_skill` do promowania zatwierdzonych kandydujących umiejętności.
+- **Tło przeglądu umiejętności** (`src/kernel/tools_and_skills.rs`): Autonomiczne łatanie przez `fuzzy_find_and_replace` i `update_skill`.
+- **Trasy HTTP** (`src/routes/skills/clawhub.rs`): ClawHub browse/search/detail używają `ClawHubClient::with_url` do obsługi regionalnych mirrorów.
+- **Kontrolowana ewolucja jądra** (`src/kernel/tests.rs`): `update_skill` dla ścieżki kontrolowanej ewolucji z proponowanym śledzeniem wersji.
+- **Strażnik wstrzykiwania** (`librefang-runtime/src/injection_guard.rs`): Wywołuje `scan_prompt_content` na wynikach wykonania narzędzia.
+- **Kontrole rejestru** (`src/tool_runner/skill.rs`): `is_frozen` z rejestru warunkuje, czy operacje ewolucji są dozwolone na umiejętności.
 
-### Dependencies on Other Crates
+### Zależności od innych crate'ów
 
-- **librefang-types**: Capability types (`glob_matches` for env-var passthrough policy)
-- **librefang-hands**: TLS provider for `http_client::client_builder`
-- **librefang-runtime**: File I/O primitives (used transitively)
-- **librefang-subprocess**: Process spawning in evolution concurrency tests
+- **librefang-types**: Typy możliwości (`glob_matches` dla polityki przekazywania zmiennych środowiskowych)
+- **librefang-hands**: Dostawca TLS dla `http_client::client_builder`
+- **librefang-runtime**: Podstawowe operacje I/O na plikach (używane przechodnio)
+- **librefang-subprocess**: Uruchamianie procesów w testach współbieżności ewolucji

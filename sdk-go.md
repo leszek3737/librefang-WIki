@@ -2,56 +2,56 @@
 
 # LibreFang Go SDK
 
-Auto-generated Go client for the LibreFang Agent OS REST API. The entire SDK lives in a single file (`librefang.go`) and is regenerated from `openapi.json` by `scripts/codegen-sdks.py` — manual edits will be overwritten.
+Automatycznie generowany klient Go dla REST API LibreFang Agent OS. Cały SDK znajduje się w jednym pliku (`librefang.go`) i jest odtwarzany z `openapi.json` przez `scripts/codegen-sdks.py` — ręczne edycje zostaną nadpisane.
 
-## Module Layout
+## Układ modułu
 
 ```
 sdk/go/
-├── go.mod              # module github.com/librefang/librefang/sdk/go (Go 1.21)
-├── librefang.go        # generated client — all resources and transports
-├── README.md           # quick-start (note: some method names there are stale)
+├── go.mod              # moduł github.com/librefang/librefang/sdk/go (Go 1.21)
+├── librefang.go        # wygenerowany klient — wszystkie zasoby i transporty
+├── README.md           # szybki start (uwaga: niektóre nazwy metod są nieaktualne)
 └── examples/
-    ├── basic.go        # health check, list/spawn agent, send message
-    ├── streaming.go    # SSE streaming via SendMessageStream
-    └── test_apis.go    # smoke-test Skills/Models/Providers listings
+    ├── basic.go        # sprawdzenie kondycji, lista/uruchomienie agenta, wysłanie wiadomości
+    ├── streaming.go    # strumieniowanie SSE przez SendMessageStream
+    └── test_apis.go    # testy dymne listowania Skills/Models/Providers
 ```
 
-The example files use `//go:build ignore` so they don't compile as part of the module — run them explicitly with `go run examples/basic.go`.
+Pliki przykładów używają `//go:build ignore`, więc nie kompilują się jako część modułu — uruchamiaj je jawnie za pomocą `go run examples/basic.go`.
 
-## Architecture
+## Architektura
 
 ```mermaid
 flowchart LR
-    App[Your Go code] --> Client
-    Client["Client<br/>BaseURL, Headers, HTTP"] --> Res["Resource structs<br/>Agents, Models, Workflows, ..."]
+    App[Twoj kod Go] --> Client
+    Client["Client<br/>BaseURL, Headers, HTTP"] --> Res["Struktury zasobow<br/>Agents, Models, Workflows, ..."]
     Res -->|sync| Request["request()<br/>JSON ↔ interface{}"]
     Res -->|SSE| Stream["stream()<br/>chan map[string]{}"]
     Request --> API[(LibreFang REST API)]
     Stream --> API
 ```
 
-Every public method on a resource struct delegates to one of two private transports on `Client`: `request()` for synchronous JSON calls, or `stream()` for Server-Sent Events.
+Każda publiczna metoda w strukturze zasobu deleguje do jednego z dwóch prywatnych transportów w `Client`: `request()` dla synchronicznych wywołań JSON, lub `stream()` dla zdarzeń Server-Sent Events.
 
-## Client Construction
+## Tworzenie klienta
 
 ```go
 client := librefang.New("http://localhost:4545")
 ```
 
-`New(baseURL)` performs three things:
+`New(baseURL)` wykonuje trzy czynności:
 
-1. Strips any trailing `/` from `baseURL`.
-2. Initializes `Headers` with `Content-Type: application/json`.
-3. Wires up all 25 resource structs (`Agents`, `Models`, `Workflows`, `System`, etc.) with back-references to the client.
+1. Usuwa ewentualny końcowy `/` z `baseURL`.
+2. Inicjalizuje `Headers` z `Content-Type: application/json`.
+3. Podłącza wszystkie 25 struktur zasobów (`Agents`, `Models`, `Workflows`, `System` itd.) z referencjami zwrotnymi do klienta.
 
-The `Client` struct exposes injectable fields for advanced use:
+Struktura `Client` udostępnia wstrzykiwalne pola do zaawansowanego użytku:
 
-| Field    | Purpose                                                        |
-|----------|----------------------------------------------------------------|
-| `BaseURL` | Override after construction (no trailing slash).              |
-| `Headers` | Add auth tokens or custom headers applied to every request.  |
-| `HTTP`    | Replace the default `*http.Client` for timeouts, transports. |
+| Pole     | Przeznaczenie                                                       |
+|----------|---------------------------------------------------------------------|
+| `BaseURL` | Nadpisanie po utworzeniu (bez końcowego ukośnika).                 |
+| `Headers` | Dodanie tokenów autoryzacyjnych lub niestandardowych nagłówków.   |
+| `HTTP`    | Zastąpienie domyślnego `*http.Client` dla limitów czasowych.       |
 
 ```go
 client := librefang.New(os.Getenv("LIBREFANG_URL"))
@@ -59,19 +59,19 @@ client.Headers["Authorization"] = "Bearer " + token
 client.HTTP = &http.Client{Timeout: 30 * time.Second}
 ```
 
-## Request Handling
+## Obsługa żądań
 
-### Synchronous: `request()`
+### Synchroniczne: `request()`
 
-All non-streaming resource methods funnel through `Client.request(method, path, body, query)`. Response parsing is dynamic and ordered:
+Wszystkie niestrumieniowe metody zasobów przechodzą przez `Client.request(method, path, body, query)`. Analizowanie odpowiedzi jest dynamiczne i uporządkowane:
 
-1. If the body parses as a JSON array → returns `[]json.RawMessage` (preserves raw bytes for lazy decoding).
-2. Else if it parses as a JSON object → returns `map[string]interface{}`.
-3. Otherwise → returns the raw body as `string`.
+1. Jeśli treść analizuje się jako tablica JSON → zwraca `[]json.RawMessage` (zachowuje surowe bajty do leniwego dekodowania).
+2. W przeciwnym razie, jeśli analizuje się jako obiekt JSON → zwraca `map[string]interface{}`.
+3. W przeciwnym razie → zwraca surową treść jako `string`.
 
-HTTP statuses `>= 400` produce a `*LibreFangError` containing `Status`, `Message`, and `Body`. Methods return it directly as `error`, so a standard `if err != nil` check is sufficient.
+Kody statusu HTTP `>= 400` tworzą `*LibreFangError` zawierający `Status`, `Message` i `Body`. Metody zwracają go bezpośrednio jako `error`, więc standardowe sprawdzenie `if err != nil` jest wystarczające.
 
-### Streaming: `stream()`
+### Strumieniowe: `stream()`
 
 ```go
 for event := range client.Agents.SendMessageStream(agentID, payload) {
@@ -81,95 +81,95 @@ for event := range client.Agents.SendMessageStream(agentID, payload) {
 }
 ```
 
-`stream()` returns `<-chan map[string]interface{}` immediately and processes the response body on a goroutine. Event parsing rules:
+`stream()` natychmiast zwraca `<-chan map[string]interface{}` i przetwarza treść odpowiedzi w goroutine. Reguły analizowania zdarzeń:
 
-- Sets `Accept: text/event-stream`.
-- Reads lines from a 64 KiB `bufio.Reader`; only `data: …` lines are decoded.
-- A `data: [DONE]` sentinel closes the channel.
-- Non-JSON `data:` payloads are forwarded as `{"raw": data}`.
-- Errors (transport failure, HTTP >= 400) arrive as a single `{"error": ..., "status": ...}` event before the channel closes.
+- Ustawia `Accept: text/event-stream`.
+- Czyta linie z 64 KiB `bufio.Reader`; dekodowane są tylko linie `data: …`.
+- Znacznik `data: [DONE]` zamyka kanał.
+- Nie-JSON ładunki `data:` są przekazywane jako `{"raw": data}`.
+- Błędy (awaria transportu, HTTP >= 400) przychodzą jako pojedyncze zdarzenie `{"error": ..., "status": ...}` przed zamknięciem kanału.
 
-**Memory safety:** Individual SSE lines are capped at `maxSSELine = 8 MiB`. A line exceeding that emits an error event and terminates the stream, preventing unbounded buffer growth from malformed input.
+**Bezpieczeństwo pamięci:** Pojedyncze linie SSE są ograniczone do `maxSSELine = 8 MiB`. Linia przekraczająca ten limit emituje zdarzenie błędu i kończy strumień, zapobiegając nieograniczonemu wzrostowi bufora z powodu zniekształconego wejścia.
 
-Three endpoints currently expose streaming:
+Trzy endpointy obecnie udostępniają strumieniowanie:
 
-| Resource | Method | Endpoint |
-|----------|--------|----------|
-| `Agents` | `SendMessageStream` | `POST /api/agents/{id}/message/stream` |
-| `Agents` | `AttachSessionStream` | `GET /api/agents/{id}/sessions/{sid}/stream` |
-| `Network` | `CommsEventsStream` | `GET /api/comms/events/stream` |
-| `System` | `LogsStream` | `GET /api/logs/stream` |
+| Zasób    | Metoda               | Endpoint                                              |
+|----------|----------------------|-------------------------------------------------------|
+| `Agents` | `SendMessageStream`  | `POST /api/agents/{id}/message/stream`               |
+| `Agents` | `AttachSessionStream` | `GET /api/agents/{id}/sessions/{sid}/stream`       |
+| `Network` | `CommsEventsStream` | `GET /api/comms/events/stream`                        |
+| `System` | `LogsStream`         | `GET /api/logs/stream`                                |
 
-## Response Helpers
+## Funkcje pomocnicze odpowiedzi
 
-Because responses are dynamically typed, the SDK ships two helpers that examples rely on heavily:
+Ponieważ odpowiedzi są typowane dynamicznie, SDK dostarcza dwie funkcje pomocnicze, na których przykładach silnie się opierają:
 
 ```go
-// Coerce any response into a map (empty map on failure).
+// Wymusza konwersję dowolnej odpowiedzi na mapę (pusta mapa w razie niepowodzenia).
 m := librefang.ToMap(resp)
 
-// Coerce a list response into []map[string]interface{}.
-// Handles both []json.RawMessage and []interface{} shapes.
+// Wymusza konwersję odpowiedzi listy na []map[string]interface{}.
+// Obsługuje zarówno kształty []json.RawMessage, jak i []interface{}.
 agents := librefang.ToSlice(client.Agents.ListAgents(nil))
 ```
 
-`ToSlice` is the important one — `request()` returns `[]json.RawMessage` for arrays, which won't type-assert directly to `[]map[string]interface{}`. Always route list responses through `ToSlice`.
+`ToSlice` jest ważniejsza — `request()` zwraca `[]json.RawMessage` dla tablic, co nie asertuje się bezpośrednio do `[]map[string]interface{}`. Zawsze kieruj odpowiedzi listowe przez `ToSlice`.
 
-## Resource Map
+## Mapa zasobów
 
-The client exposes 25 resource structs. Each is a thin wrapper that builds a path and delegates to `Client.request` or `Client.stream`. The naming convention is verb + noun (e.g. `SpawnAgent`, `KillAgent`, `SendMessageStream`) rather than REST verbs — this avoids collisions when one resource maps many endpoints with the same HTTP verb.
+Klient udostępnia 25 struktur zasobów. Każda z nich jest cienką otoką, która buduje ścieżkę i deleguje do `Client.request` lub `Client.stream`. Konwencja nazewnictwa to czasownik + rzeczownik (np. `SpawnAgent`, `KillAgent`, `SendMessageStream`) zamiast czasowników REST — pozwala to uniknąć kolizji, gdy jeden zasób mapuje wiele endpointów z tym samym czasownikiem HTTP.
 
-| Resource | Coverage |
-|----------|----------|
-| `Agents` | Largest surface — CRUD, sessions, files, skills, tools, MCP servers, metrics, streaming |
-| `Approvals` | Human-in-the-loop request queue, batch resolve, audit log |
-| `Auth` | OAuth callbacks, passkey registration/authentication, dashboard login |
-| `AutoDream` | Background reflection loop: trigger, abort, enable per agent |
-| `Budget` | Per-agent / provider / user spend caps; usage stats and rankings |
-| `Channels` | Sidecar channels (WhatsApp, Telegram, etc.), QR pairing |
-| `Extensions` | Install/uninstall extensions |
-| `Goals` | Goal templates listing |
-| `Hands` | Computer-use "hands": install, activate, pause, manifest editing |
-| `Inbox` | Inbox status |
-| `Mcp` | MCP server registry, auth flows, taint rules |
-| `Memory` | Agent KV store plus import/export |
-| `Models` | Model catalog, aliases, custom models, provider keys, Copilot OAuth |
-| `Network` | Peer-to-peer comms: topology, events, send/task, trusted peers |
-| `Pairing` | Device pairing lifecycle |
-| `Plugins` | Plugin lifecycle, lint, sign, scaffold, context-engine introspection |
-| `ProactiveMemory` | Full proactive memory store: CRUD, decay, consolidate, relations |
-| `Sessions` | Cross-agent session search, labels, cleanup |
-| `Skills` | Skill registry, Clawhub marketplace, evolve/patch/rollback |
-| `System` | Health, config, backups, audit, migrations, templates, metrics |
-| `Tools` | Invoke named tools |
-| `Users` | User CRUD, policies, per-provider keys, key rotation |
-| `Webhooks` | Agent/wake inbound webhook endpoints |
-| `Workflows` | Workflows, runs, schedules, triggers, cron jobs, templates |
-| `A2A` | Agent-to-agent discovery and messaging with external networks |
+| Zasób             | Zakres                                                                |
+|-------------------|-----------------------------------------------------------------------|
+| `Agents`          | Największa powierzchnia — CRUD, sesje, pliki, skille, narzędzia, serwery MCP, metryki, strumieniowanie |
+| `Approvals`       | Kolejka żądań human-in-the-loop, masowe rozwiązywanie, dziennik audytu |
+| `Auth`            | Wywołania zwrotne OAuth, rejestracja/uwierzytelnianie passkey, logowanie do dashboardu |
+| `AutoDream`       | Pętla refleksji w tle: wyzwalanie, przerywanie, włączanie dla agenta |
+| `Budget`          | Limity wydatków per agent / dostawca / użytkownik; statystyki i rankingi |
+| `Channels`        | Kanały boczne (WhatsApp, Telegram itd.), parowanie QR              |
+| `Extensions`      | Instalacja/deinstalacja rozszerzeń                                  |
+| `Goals`           | Lista szablonów celów                                               |
+| `Hands`           | Komputerowe "ręce": instalacja, aktywacja, pauza, edycja manifestu |
+| `Inbox`           | Status skrzynki odbiorczej                                          |
+| `Mcp`             | Rejestr serwerów MCP, przepływy autoryzacji, reguły taint           |
+| `Memory`          | Magazyn KV agenta oraz import/eksport                               |
+| `Models`          | Katalog modeli, aliasy, modele niestandardowe, klucze dostawców, OAuth Copilot |
+| `Network`         | Komunikacja peer-to-peer: topologia, zdarzenia, send/task, zaufani peerzy |
+| `Pairing`         | Cykl życia parowania urządzeń                                      |
+| `Plugins`         | Cykl życia wtyczek, lint, podpisywanie, rusztowanie, introspekcja silnika kontekstowego |
+| `ProactiveMemory` | Pełny magazyn proaktywnej pamięci: CRUD, zanikanie, konsolidacja, relacje |
+| `Sessions`        | Wyszukiwanie sesji między agentami, etykiety, czyszczenie           |
+| `Skills`          | Rejestr skilli, marketplace Clawhub, ewolucja/poprawka/wycofanie    |
+| `System`          | Kondycja, konfiguracja, kopie zapasowe, audyt, migracje, szablony, metryki |
+| `Tools`           | Wywoływanie nazwanych narzędzi                                     |
+| `Users`           | CRUD użytkowników, polityki, klucze per dostawca, rotacja kluczy  |
+| `Webhooks`        | Endpointy webhooków przychodzących agent/wake                      |
+| `Workflows`       | Workflows, uruchomienia, harmonogramy, wyzwalacze, cron, szablony |
+| `A2A`             | Odkrywanie i komunikacja agent-do-agenta z zewnętrznymi sieciami  |
 
-### Method signatures
+### Sygnatury metod
 
-Most methods follow one of four shapes:
+Większość metod podąża za jednym z czterech wzorców:
 
 ```go
-// No-path-param GET
+// GET bez parametru ścieżki
 ListX() (interface{}, error)
 
-// Path-param GET/DELETE
+// GET/DELETE z parametrem ścieżki
 GetX(id string) (interface{}, error)
 
-// Body payload POST/PUT/PATCH
+// POST/PUT/PATCH z ładunkiem
 CreateX(data map[string]interface{}) (interface{}, error)
 
-// Query-string variants (e.g. filtering/pagination)
+// Warianty z łańcuchem zapytania (np. filtrowanie/paginacja)
 ListX(query map[string]string) (interface{}, error)
 ```
 
-Body payloads are always `map[string]interface{}` — the SDK does not model request structs. Consult the OpenAPI spec (or `openapi.json` in the repo root) for the expected keys per endpoint.
+Ładunki są zawsze `map[string]interface{}` — SDK nie modeluje struktur żądań. Konsultuj specyfikację OpenAPI (lub `openapi.json` w katalogu głównym repozytorium) dla oczekiwanych kluczy per endpoint.
 
-## Error Handling
+## Obsługa błędów
 
-`*LibreFangError` captures everything you need to retry or surface to users:
+`*LibreFangError` przechwytuje wszystko, czego potrzebujesz do ponowienia lub wyświetlenia użytkownikowi:
 
 ```go
 reply, err := client.Agents.SendMessage(id, payload)
@@ -182,13 +182,13 @@ if err != nil {
 }
 ```
 
-Note that the `stream()` transport does **not** return errors via `error` — they arrive inside the channel as `{"error": "...", "status": N}`. Always check for the `error` key when iterating events.
+Należy zauważyć, że transport `stream()` **nie** zwraca błędów przez `error` — docierają one wewnątrz kanału jako `{"error": "...", "status": N}`. Zawsze sprawdzaj klucz `error` przy iteracji zdarzeń.
 
-## Common Patterns
+## Typowe wzorce
 
-### Spawn-then-talk-then-cleanup
+### Uruchom, rozmawiaj, posprzątaj
 
-The canonical agent lifecycle shown in `examples/basic.go`:
+Kanoniczny cykl życia agenta pokazany w `examples/basic.go`:
 
 ```go
 raw, _   := client.Agents.ListAgents(nil)
@@ -210,7 +210,7 @@ defer func() {
 }()
 ```
 
-### Streaming with terminal-event detection
+### Strumieniowanie z wykrywaniem zdarzenia końcowego
 
 ```go
 for ev := range client.Agents.SendMessageStream(id, payload) {
@@ -226,16 +226,16 @@ for ev := range client.Agents.SendMessageStream(id, payload) {
 }
 ```
 
-## Regenerating
+## Odtwarzanie
 
-This file is generated, not hand-edited. After changing the server's OpenAPI spec:
+Ten plik jest generowany, nie edytowany ręcznie. Po zmianie specyfikacji OpenAPI serwera:
 
 ```bash
 python3 scripts/codegen-sdks.py
 ```
 
-The generator emits one `XxxResource` struct per API tag and one method per operation, then injects the resource fields into `Client` and constructors into `New()`. If you need a new endpoint exposed, update the spec and regenerate — do not patch `librefang.go` directly.
+Generator emituje jedną strukturę `XxxResource` na tag API i jedną metodę na operację, a następnie wstrzykuje pola zasobów do `Client` i konstruktory do `New()`. Jeśli potrzebujesz nowego endpointu, zaktualizuj specyfikację i wygeneruj ponownie — nie łataj `librefang.go` bezpośrednio.
 
-## README Caveat
+## Uwaga dotycząca README
 
-The bundled `README.md` documents an older, simplified API (`Agents.Create`, `Agents.Delete`, `Agents.Message`, `Agents.Stream`). Those names do not exist in the generated code. The authoritative method names are `SpawnAgent`, `KillAgent`, `SendMessage`, and `SendMessageStream`; rely on this document and the source rather than the README until the README is regenerated alongside the next codegen pass.
+Dołączony `README.md` dokumentuje starsze, uproszczone API (`Agents.Create`, `Agents.Delete`, `Agents.Message`, `Agents.Stream`). Te nazwy nie istnieją w wygenerowanym kodzie. Autorytatywne nazwy metod to `SpawnAgent`, `KillAgent`, `SendMessage` i `SendMessageStream`; polegaj na tym dokumencie i kodzie źródłowym, a nie na README, dopóki README nie zostanie wygenerowany ponownie przy kolejnym przejściu codegen.

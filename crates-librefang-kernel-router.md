@@ -2,14 +2,14 @@
 
 # librefang-kernel-router
 
-Keyword and semantic routing engine for the LibreFang kernel. Given an inbound message, it selects the most appropriate **hand** (specialized agent) or **template** (agent definition) to handle the request, using weighted keyword matching and optional embedding-based similarity scoring.
+Silnik routingu słów kluczowych i semantycznego dla jądra LibreFang. Na podstawie wiadomości przychodzącej wybiera najbardziej odpowiednią **rękojęść** (specjalistyczny agent) lub **szablon** (definicję agenta) do obsłużenia żądania, wykorzystując ważone dopasowywanie słów kluczowych i opcjonalne ocenianie podobieństwa na podstawie osadzeń (embeddings).
 
-## How It Fits In
+## Jak to pasuje do całości
 
-The router sits between message intake and agent dispatch. The kernel's assistant routing layer calls `auto_select_template` and `auto_select_hand` to decide which specialist to invoke. The router is a pure routing decision-maker — it returns a selection result and never spawns agents itself.
+Router znajduje się pomiędzy odbiorem wiadomości a wysyłaniem agentów. Warstwa routingu asystenta jądra wywołuje `auto_select_template` i `auto_select_hand`, aby zdecydować, jakiego specjalistę wywołać. Router jest czystym podejmującym decyzje — zwraca wynik wyboru i nigdy nie tworzy sam agentów.
 
 ```
-Inbound message
+Wiadomość przychodząca
        │
        ▼
 ┌──────────────┐     auto_select_template()     ┌─────────────────┐
@@ -18,59 +18,59 @@ Inbound message
 │              │ ──────────────────────────────► │ HandSelection   │
 └──────────────┘                                 └─────────────────┘
        │
-       │  Caller (assistant_routing.rs) then:
-       │  1. Uses selection to resolve or spawn the specialist
-       │  2. Loads manifest via load_template_manifest()
+       │  Wywołujący (assistant_routing.rs) następnie:
+       │  1. Używa wyboru do rozpoznania lub utworzenia specjalisty
+       │  2. Ładuje manifest za pomocą load_template_manifest()
 ```
 
-## Scoring Model
+## Model oceniania
 
-Every routing candidate accumulates a score from multiple signal types. Higher score wins; ties break by number of matched hits, then by file order for template rules.
+Każdy kandydat routingu akumuluje wynik z wielu typów sygnałów. Wygrywa wyższy wynik; remisy rozstrzyga się liczbą dopasowań, a następnie kolejnością plików dla reguł szablonów.
 
-| Signal | Weight | Source |
+| Sygnał | Waga | Źródło |
 |---|---|---|
-| Explicit alias / strong keyword | 6 | `HAND.toml [routing] aliases`, `agent.toml [metadata.routing] aliases`, template rule `strong` patterns |
-| Generated phrase | 2 | Derived from template name, tags, description |
-| Weak alias / weak keyword | 1 | `HAND.toml weak_aliases`, `agent.toml weak_aliases`, template rule `weak` patterns |
-| Semantic bonus | 0–5 (rounded) | `similarity * MAX_SEMANTIC_BONUS` from caller-supplied embedding scores |
+| Jawny alias / silne słowo kluczowe | 6 | `HAND.toml [routing] aliases`, `agent.toml [metadata.routing] aliases`, wzorce `strong` w regułach szablonu |
+| Wygenerowana fraza | 2 | Pochodna nazwy szablonu, tagów, opisu |
+| Słaby alias / słabe słowo kluczowe | 1 | `HAND.toml weak_aliases`, `agent.toml weak_aliases`, wzorce `weak` w regułach szablonu |
+| Bonus semantyczny | 0–5 (zaokrąglone) | `similarity * MAX_SEMANTIC_BONUS` z wyników osadzeń dostarczonych przez wywołującego |
 
-### Thresholds
+### Progi
 
-- **Hands**: minimum score of `MIN_HAND_SCORE` (2). A single weak hit (score 1) is rejected as too noisy. Either one strong hit (6) or two weak hits (2) clears the bar.
-- **Templates**: any score > 0 qualifies. If no keyword match is found, semantic-only matching kicks in at `SEMANTIC_ONLY_THRESHOLD` (0.55) similarity.
-- **Orchestrator fallback**: if two or more templates score equally and the message contains multi-domain triggers (`同时`, `分别`, `协作`, `多个`, `multi`, `together`), routing escalates to the `orchestrator` template instead of picking one specialist.
+- **Rękojeści**: minimalny wynik `MIN_HAND_SCORE` (2). Pojedyncze słabe dopasowanie (wynik 1) jest odrzucane jako zbyt hałaśliwe. Wymagane jest jedno silne dopasowanie (6) lub dwa słabe (2), aby przekroczyć próg.
+- **Szablony**: dowolny wynik > 0 kwalifikuje. Jeśli nie znaleziono dopasowania słów kluczowych, włącza się dopasowanie wyłącznie semantyczne przy podobieństwie `SEMANTIC_ONLY_THRESHOLD` (0.55).
+- **Awaryjny orchestrator**: jeśli co najmniej dwa szablony uzyskają równy wynik, a wiadomość zawiera wyzwalacze wielodomenowe (`同时`, `分别`, `协作`, `多个`, `multi`, `together`), routing zostaje podniesiony do szablonu `orchestrator` zamiast wyboru jednego specjalisty.
 
-## Hand Routing
+## Routing rękojeści
 
-`auto_select_hand(message, semantic_scores)` routes to hands defined in `HAND.toml` files.
+`auto_select_hand(message, semantic_scores)` kieruje do rękojeści zdefiniowanych w plikach `HAND.toml`.
 
-### Candidate Construction
+### Budowa kandydatów
 
-Hand route candidates are built from `HAND.toml` files discovered in two directories (in precedence order):
+Kandydaci tras routingu rękojeści są budowani z plików `HAND.toml` odkrytych w dwóch katalogach (w kolejności pierwszeństwa):
 
-1. Operator override dir: `<home>/hands/` (via `librefang_hands::registry::hand_override_dir`)
-2. Registry checkout: `<home>/registry/hands/`
+1. Katalog nadpisań operatora: `<home>/hands/` (przez `librefang_hands::registry::hand_override_dir`)
+2. Kopia rejestru: `<home>/registry/hands/`
 
-A hand in the override dir shadows one with the same ID in the registry — matching the behavior of `librefang_hands::registry::scan_hands_dir`.
+Rękojeść w katalogu nadpisań przesłania tę o tym samym identyfikatorze w rejestrze — zgodnie z zachowaniem `librefang_hands::registry::scan_hands_dir`.
 
-For each hand, phrases are extracted from its `HandDefinition`:
+Dla każdej rękojeści frazy są wydobywane z jej `HandDefinition`:
 
-- **Strong phrases**: explicit `[routing] aliases` + description-derived phrases
-- **Weak phrases**: explicit `weak_aliases` + ID tokens (split on `-`/`_`, filtered to length ≥ 3, excluding generic English words like "assistant", "helper", "expert")
+- **Silne frazy**: jawne `[routing] aliases` + frazy pochodne z opisu
+- **Słabe frazy**: jawne `weak_aliases` + tokeny identyfikatora (podzielone po `-`/`_`, przefiltrowane do długości ≥ 3, z wykluczeniem ogólnych angielskich słów takich jak „assistant", „helper", „expert")
 
-Description-derived phrases go through `description_phrases()`, which splits on punctuation and CJK separators, strips generic English filler words, and produces content-bearing keywords for both ASCII and Unicode text.
+Frazy pochodne z opisu przechodzą przez `description_phrases()`, który dzieli po znakach interpunkcyjnych i separatorach CJK, usuwa ogólne angielskie słowa wypełniające i tworzy znaczące słowa kluczowe zarówno dla tekstu ASCII, jak i Unicode.
 
-### Semantic Fallback
+### Awaryjne dopasowanie semantyczne
 
-English keyword matching alone cannot route non-English messages. Callers can pass `semantic_scores: Option<&HashMap<String, f32>>` — a map of hand ID to cosine similarity — to blend embedding-based matching. The semantic bonus is added to the keyword score. When keyword matching returns nothing, a high enough similarity (≥ 0.55 implicit via score threshold) can still route.
+Samo angielskie dopasowywanie słów kluczowych nie może kierować wiadomości nieanglojęzycznych. Wywołujący mogą przekazać `semantic_scores: Option<&HashMap<String, f32>>` — mapę identyfikatora rękojeści do podobieństwa cosinusowego — aby połączyć dopasowywanie na podstawie osadzeń. Bonus semantyczny jest dodawany do wyniku słów kluczowych. Gdy dopasowywanie słów kluczowych nic nie zwraca, wystarczająco wysokie podobieństwo (≥ 0.55 niejawne poprzez próg wyniku) nadal może przekierować.
 
-## Template Routing
+## Routing szablonów
 
-`auto_select_template(message, agents_dir, semantic_scores)` routes to agent templates using two parallel systems whose results are merged.
+`auto_select_template(message, agents_dir, semantic_scores)` kieruje do szablonów agentów przy użyciu dwóch równoległych systemów, których wyniki są scalane.
 
-### System 1: Curated Rule Set
+### System 1: Katalogowa zbiórka reguł
 
-Built-in rules live in `default_routing.toml`, embedded into the binary via `include_str!`. Each `[[template]]` entry defines a target template and `strong`/`weak` labeled regex patterns:
+Wbudowane reguły znajdują się w `default_routing.toml`, osadzonym w binarium przez `include_str!`. Każdy wpis `[[template]]` definiuje szablon docelowy i wzorce regex oznaczone jako `strong`/`weak`:
 
 ```toml
 [[template]]
@@ -84,57 +84,57 @@ weak = [
 ]
 ```
 
-The bundled set covers 30 specialist templates (coder, debugger, architect, security-auditor, etc.) with bilingual English/Chinese patterns. Regexes are matched case-insensitively.
+Dołączony zestaw obejmuje 30 szablonów specjalistycznych (coder, debugger, architect, security-auditor itd.) z dwujęzycznymi wzorcami angielsko-chińskimi. Wyrażenia regularne są dopasowywane bez uwzględniania wielkości liter.
 
-### System 2: Manifest Metadata
+### System 2: Metadane manifestu
 
-For each template in `agents_dir`, the router reads `agent.toml` and builds phrases from:
+Dla każdego szablonu w `agents_dir` router odczytuje `agent.toml` i buduje frazy z:
 
-- `[metadata.routing] aliases` / `strong_aliases` → explicit aliases (weight 6)
-- Template name variants, tags, description → generated phrases (weight 2)
-- `weak_aliases` + template name tokens → weak phrases (weight 1)
+- `[metadata.routing] aliases` / `strong_aliases` → jawne aliasy (waga 6)
+- Warianty nazwy szablonu, tagi, opis → wygenerowane frazy (waga 2)
+- `weak_aliases` + tokeny nazwy szablonu → słabe frazy (waga 1)
 
-A template can opt out of auto-generated phrases by setting `exclude_generated = true` in `[metadata.routing]`.
+Szablon może zrezygnować z automatycznie generowanych fraz, ustawiając `exclude_generated = true` w `[metadata.routing]`.
 
-### Merge Logic
+### Logika scalania
 
-Both systems score independently. The final selection:
+Oba systemy oceniają niezależnie. Wybór końcowy:
 
-1. If the rule set produces matches, the top rule wins by default.
-2. The manifest match can override the rule match only if it has a meaningfully higher score (≥ 2 points more, or the rule score is ≤ 1).
-3. If neither system matches and semantic scores exist, semantic-only fallback applies.
-4. If nothing matches at all, routing defaults to the `orchestrator` template.
+1. Jeśli zbiórka reguł wyprodukuje dopasowania, zwycięża najwyższa reguła domyślnie.
+2. Dopasowanie manifestu może nadpisać dopasowanie reguły tylko wtedy, gdy ma znacząco wyższy wynik (≥ 2 punkty więcej, lub wynik reguły wynosi ≤ 1).
+3. Jeśli żaden system nie dopasuje i istnieją wyniki semantyczne, stosuje się awaryjne dopasowanie wyłącznie semantyczne.
+4. Jeśli nic się nie dopasuje, routing domyślnie kieruje do szablonu `orchestrator`.
 
-## Rule Override System
+## System nadpisywania reguł
 
-Operators override bundled template rules by placing a `routing.toml` at:
+Operatorzy nadpisują dołączone reguły szablonów umieszczając `routing.toml` w:
 
 ```
 $LIBREFANG_HOME/registry/templates/routing.toml
 ```
 
-Overrides merge by `target`:
+Nadpisania scalają się po `target`:
 
-| Override entry | Effect |
+| Wpis nadpisania | Efekt |
 |---|---|
-| Same `target`, `enabled = true` (default) | **Replaces** the default rule in place (preserves position for tie-breaking) |
-| Same `target`, `enabled = false` | **Removes** the default rule |
-| New `target`, `enabled = true` | **Appends** a new rule at the end |
-| New `target`, `enabled = false` | No-op |
+| Ten sam `target`, `enabled = true` (domyślnie) | **Zastępuje** regułę domyślną w miejscu (zachowuje pozycję do rozstrzygania remisów) |
+| Ten sam `target`, `enabled = false` | **Usuwa** regułę domyślną |
+| Nowy `target`, `enabled = true` | **Dołącza** nową regułę na końcu |
+| Nowy `target`, `enabled = false` | Brak operacji |
 
-Overrides take effect on config reload (`POST /api/config/reload`) or daemon restart — the rule set is cached and not hot-reloaded on file change alone.
+Nadpisania wchodzą w życie przy przeładowaniu konfiguracji (`POST /api/config/reload`) lub restarcie demona — zbiórka reguł jest buforowana i nie jest przeładowywana automatycznie przy samej zmianie pliku.
 
-### Fail-Soft Behavior
+### Zachowanie awaryjne
 
-- Missing override file → defaults used unchanged
-- Unreadable or unparseable override file → WARN logged, defaults used
-- Invalid regex in an override → the pattern compiles to `None` in the regex cache (never matches), but loading succeeds
+- Brakujący plik nadpisań → domyślne pozostają bez zmian
+- Nieczytelny lub niespójny plik nadpisań → zapisane ostrzeżenie, domyślne pozostają w użyciu
+- Nieprawidłowe wyrażenie regularne w nadpisaniu → wzorzec kompiluje się do `None` w pamięci podręcznej regex (nigdy się nie dopasuje), ale ładowanie się udaje
 
-Routing never fails closed on a bad configuration.
+Routing nigdy nie kończy się awaryjnie z powodu złej konfiguracji.
 
-## Regex Cache
+## Pamięć podręczna wyrażeń regularnych
 
-Template rule patterns and ASCII phrase matching both compile regexes through a global bounded cache (`REGEX_CACHE`). This avoids recompiling the same patterns on every inbound message.
+Wzorce reguł szablonów i dopasowywanie fraz ASCII kompilują wyrażenia regularne przez globalną ograniczoną pamięć podręczną (`REGEX_CACHE`). Zapobiega to ponownemu kompilowaniu tych samych wzorców przy każdej wiadomości przychodzącej.
 
 ```mermaid
 flowchart LR
@@ -152,21 +152,21 @@ flowchart LR
     I -- None --> K[return false]
 ```
 
-The cache is capped at `MAX_REGEX_CACHE_ENTRIES` (4096) with FIFO eviction. Compilation failures are cached as `None` so a flood of invalid patterns doesn't repeatedly invoke the regex compiler. Each entry is low single-digit KB, keeping worst-case memory in the low tens of MB.
+Pamięć podręczna jest ograniczona do `MAX_REGEX_CACHE_ENTRIES` (4096) z ewikcją FIFO. Błędy kompilacji są buforowane jako `None`, aby gwałtowny napływ nieprawidłowych wzorców nie powtarzał wywołań kompilatora regex. Każdy wpis zajmuje małe pojedyncze cyfrowe kilobajty, co utrzymuje najgorszy przypadek zużycia pamięci w dolnych dziesiątkach megabajtów.
 
-## Caching Strategy
+## Strategia buforowania
 
-Three independent caches, all using `OnceLock<Mutex<Option<...>>>` with `Arc` for cheap per-message refcount bumps:
+Trzy niezależne pamięci podręczne, wszystkie wykorzystujące `OnceLock<Mutex<Option<...>>>` z `Arc` do taniego zwiększania licznika referencji dla każdej wiadomości:
 
-| Cache | Static | Key | Contents |
+| Pamięć podręczna | Statyczna | Klucz | Zawartość |
 |---|---|---|---|
-| `HAND_ROUTE_CACHE` | `hand_route_candidates()` | Home dir string | `Vec<HandRouteCandidate>` from parsed HAND.toml files |
-| `TEMPLATE_RULE_CACHE` | `template_rules()` | Home dir string | `Vec<RouteRule>` from merged default + override TOML |
-| `MANIFEST_CACHE` | `manifest_route_candidates()` | Agents dir path | `Vec<ManifestRouteCandidate>` from agent.toml files |
+| `HAND_ROUTE_CACHE` | `hand_route_candidates()` | Ciąg katalogu domowego | `Vec<HandRouteCandidate>` ze sparsowanych plików HAND.toml |
+| `TEMPLATE_RULE_CACHE` | `template_rules()` | Ciąg katalogu domowego | `Vec<RouteRule>` ze scalonych domyślnych + nadpisanych TOML |
+| `MANIFEST_CACHE` | `manifest_route_candidates()` | Ścieżka katalogu agentów | `Vec<ManifestRouteCandidate>` z plików agent.toml |
 
-### Cache Invalidation
+### Unieważnianie pamięci podręcznej
 
-All three caches must be invalidated together on config changes. The kernel's config reload handler (`config_reload_ops.rs`) calls:
+Wszystkie trzy pamięci podręczne muszą być unieważnione razem przy zmianach konfiguracji. Obsługa przeładowania konfiguracji jądra (`config_reload_ops.rs`) wywołuje:
 
 ```rust
 invalidate_manifest_cache();
@@ -174,11 +174,11 @@ invalidate_hand_route_cache();
 invalidate_template_rule_cache();
 ```
 
-The home directory is set once at boot via `set_hand_route_home_dir()` and can also fall back to the `LIBREFANG_HOME` environment variable or `~/.librefang`.
+Katalog domowy jest ustawiany raz przy uruchomieniu przez `set_hand_route_home_dir()` i może również używać zmiennej środowiskowej `LIBREFANG_HOME` lub `~/.librefang`.
 
-## Public API
+## Publiczne API
 
-### Selection Functions
+### Funkcje wyboru
 
 ```rust
 pub fn auto_select_hand(
@@ -193,40 +193,40 @@ pub fn auto_select_template(
 ) -> TemplateSelection
 ```
 
-Both return a struct with the selected ID, a human-readable reason string, and the numeric score. `HandSelection.hand_id` is `None` when no candidate clears the threshold.
+Obie zwracają strukturę z wybranym identyfikatorem, czytelnym dla człowieka ciągiem powodu i numerycznym wynikiem. `HandSelection.hand_id` wynosi `None`, gdy żaden kandydat nie przekroczy progu.
 
-### Manifest Loading
+### Ładowanie manifestu
 
 ```rust
 pub fn load_template_manifest(home_dir: &Path, template: &str) -> Result<AgentManifest, String>
 ```
 
-Loads `agent.toml` from `<home_dir>/workspaces/agents/<template>/agent.toml`. Template names are validated to contain only `[a-zA-Z0-9_-]` characters.
+Ładuje `agent.toml` z `<home_dir>/workspaces/agents/<template>/agent.toml`. Nazwy szablonów są walidowane tak, aby zawierały tylko znaki `[a-zA-Z0-9_-]`.
 
-### Embedding Support
+### Obsługa osadzeń
 
 ```rust
 pub fn all_template_descriptions(agents_dir: &Path) -> Vec<(String, String)>
 ```
 
-Returns `(template_name, embed_text)` pairs for all routable templates (excluding the `assistant` template). The embed text format is `"name: description. Tags: tag1, tag2"`. The kernel uses this to compute embedding cosine similarities, which are then passed back into the selection functions as `semantic_scores`.
+Zwraca pary `(template_name, embed_text)` dla wszystkich kierujących szablonów (z wyłączeniem szablonu `assistant`). Format tekstu osadzenia to `"name: description. Tags: tag1, tag2"`. Jądro używa tego do obliczenia podobieństw cosinusowych osadzeń, które są następnie przekazywane z powrotem do funkcji wyboru jako `semantic_scores`.
 
-## Template Name Safety
+## Bezpieczeństwo nazw szablonów
 
-`is_safe_template_name()` enforces that template names contain only ASCII alphanumeric characters, hyphens, and underscores. This guard runs on both directory scanning and manifest loading, preventing path traversal through crafted template names.
+`is_safe_template_name()` wymusza, aby nazwy szablonów zawierały tylko znaki alfanumeryczne ASCII, myślniki i podkreślenia. Ta ochrona jest uruchamiana zarówno przy skanowaniu katalogów, jak i ładowaniu manifestu, zapobiegając traversowaniu ścieżek przez spreparowane nazwy szablonów.
 
-## Excluded Templates
+## Wykluczone szablony
 
-The `assistant` template is excluded from routing candidates (`ROUTING_EXCLUDED_TEMPLATES`). It handles routing itself via LLM tools rather than being a routing target.
+Szablon `assistant` jest wykluczony z kandydatów routingu (`ROUTING_EXCLUDED_TEMPLATES`). Sam obsługuje routing za pomocą narzędzi LLM, zamiast być celem routingu.
 
-## Constants Reference
+## Odniesienie stałych
 
-| Constant | Value | Purpose |
+| Stała | Wartość | Przeznaczenie |
 |---|---|---|
-| `EXPLICIT_ALIAS_WEIGHT` | 6 | Score per strong/explicit alias hit |
-| `GENERATED_PHRASE_WEIGHT` | 2 | Score per auto-generated phrase hit |
-| `WEAK_PHRASE_WEIGHT` | 1 | Score per weak alias/keyword hit |
-| `MAX_SEMANTIC_BONUS` | 5.0 | Maximum points from embedding similarity |
-| `SEMANTIC_ONLY_THRESHOLD` | 0.55 | Minimum similarity for semantic-only fallback |
-| `MIN_HAND_SCORE` | 2 | Minimum score for a hand match to qualify |
-| `MAX_REGEX_CACHE_ENTRIES` | 4096 | Hard cap on cached compiled regex patterns |
+| `EXPLICIT_ALIAS_WEIGHT` | 6 | Wynik za trafienie jawnego/silnego aliasu |
+| `GENERATED_PHRASE_WEIGHT` | 2 | Wynik za trafienie automatycznie wygenerowanej frazy |
+| `WEAK_PHRASE_WEIGHT` | 1 | Wynik za trafienie słabego aliasu/słowa kluczowego |
+| `MAX_SEMANTIC_BONUS` | 5.0 | Maksymalna liczba punktów z podobieństwa osadzeń |
+| `SEMANTIC_ONLY_THRESHOLD` | 0.55 | Minimalne podobieństwo dla awaryjnego dopasowania wyłącznie semantycznego |
+| `MIN_HAND_SCORE` | 2 | Minimalny wynik kwalifikujący dopasowanie rękojeści |
+| `MAX_REGEX_CACHE_ENTRIES` | 4096 | Twardy limit skompilowanych wzorców regex w pamięci podręcznej |

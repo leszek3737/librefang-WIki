@@ -2,9 +2,9 @@
 
 # librefang-llm-drivers
 
-Concrete LLM provider driver implementations for LibreFang. This crate bridges the abstract `librefang-llm-driver` trait to real HTTP/CLI backends — Anthropic, OpenAI, Gemini, Groq, Ollama, Aider, Claude Code, Codex CLI, Copilot, and others — and layers cross-cutting infrastructure on top: credential pooling, fallback chains, retry/backoff, rate-limit observability, and stream handling.
+Konkretne implementacje sterowników dostawców LLM dla LibreFang. Ten crate łączy abstrakcyjną cechę `librefang-llm-driver` z rzeczywistymi backendami HTTP/CLI — Anthropic, OpenAI, Gemini, Groq, Ollama, Aider, Claude Code, Codex CLI, Copilot i innymi — oraz nakłada na to infrastrukturę przekrojową: pulowanie poświadczeń, łańcuchy awaryjne, ponowienia/wycofanie, observowalność limitów zapytań i obsługę strumieni.
 
-## Architecture Overview
+## Przegląd architektury
 
 ```mermaid
 graph TD
@@ -20,71 +20,71 @@ graph TD
     FC -->|all entries fail| ERR[LlmError + FailoverReason]
 ```
 
-Every driver implements the `LlmDriver` trait from `librefang-llm-driver`, which defines `complete()` and `stream()`. The crate re-exports that trait and its error types (`llm_driver`, `llm_errors`, `FailoverReason`) so downstream code can depend on this one crate alone.
+Każdy sterownik implementuje cechę `LlmDriver` z `librefang-llm-driver`, która definiuje `complete()` i `stream()`. Crate reeksportuje tę cechę i jej typy błędów (`llm_driver`, `llm_errors`, `FailoverReason`), dzięki czemu kod podrzędny może zależeć tylko od tego jednego crate'a.
 
-## Provider Drivers (`drivers/`)
+## Sterowniki dostawców (`drivers/`)
 
-Each driver lives in its own submodule under `src/drivers/`. They fall into two categories:
+Każdy sterownik znajduje się we własnym submodule w `src/drivers/`. Dzielą się na dwie kategorie:
 
-### HTTP-based drivers
+### Sterowniki oparte na HTTP
 
-**Anthropic** (`drivers/anthropic.rs`) — The most feature-complete driver. Supports the Messages API with tool use, system prompt extraction, extended thinking (`budget_tokens`), prompt caching with configurable breakpoint strategies (`SystemOnly`, `SystemAndN`), and image inputs. The `build_anthropic_request` helper is shared between `complete()` and `stream()` and handles cache-control marker placement, max_tokens normalization for thinking budgets, and response_format injection into the system prompt.
+**Anthropic** (`drivers/anthropic.rs`) — Najbardziej kompletny funkcyjnie sterownik. Obsługuje Messages API z użyciem narzędzi, ekstrakcją promptu systemowego, rozszerzonym myśleniem (`budget_tokens`), buforowaniem promptów z konfigurowalnymi strategiami punktów przerwania (`SystemOnly`, `SystemAndN`) oraz wejściami obrazowymi. Helper `build_anthropic_request` jest współdzielony między `complete()` i `stream()` i obsługuje umieszczanie znaczników cache-control, normalizację max_tokens dla budżetów myślenia oraz wstrzykiwanie response_format do promptu systemowego.
 
-**OpenAI** (`drivers/openai.rs`) — OpenAI Chat Completions / Responses API. Includes `parse_tool_args` and `malformed_tool_input` helpers reused by other drivers for tool-call argument validation.
+**OpenAI** (`drivers/openai.rs`) — OpenAI Chat Completions / Responses API. Zawiera helpery `parse_tool_args` i `malformed_tool_input` reused przez inne sterowniki do walidacji argumentów wywołań narzędzi.
 
-Other HTTP drivers include **Gemini**, **Groq**, **Ollama**, **ChatGPT** (Responses API with session token management), **Copilot** (GitHub Copilot token exchange), **Vertex AI**, **Qwen Code**, and **CodeWhale**.
+Inne sterowniki HTTP obejmują **Gemini**, **Groq**, **Ollama**, **ChatGPT** (Responses API z zarządzaniem tokenem sesji), **Copilot** (wymianę tokenów GitHub Copilot), **Vertex AI**, **Qwen Code** i **CodeWhale**.
 
-### CLI-based drivers
+### Sterowniki oparte na CLI
 
-These spawn a subprocess rather than making HTTP calls:
+Te uruchamiają proces podrzędny zamiast wykonywać wywołania HTTP:
 
-- **Aider** (`drivers/aider.rs`) — Spawns `aider --message ... --yes-always --no-git`. Provider auth is delegated to environment variables. Includes `AiderDriver::detect()` and the `aider_available()` convenience function.
-- **Claude Code** (`drivers/claude_code.rs`) — Manages credential files, MCP config, environment filtering, and stdin/stdout streaming.
-- **Codex CLI** (`drivers/codex_cli.rs`) — Parses model from banner output, manages config directory.
+- **Aider** (`drivers/aider.rs`) — Uruchamia `aider --message ... --yes-always --no-git`. Uwierzytelnienie dostawcy jest delegowane do zmiennych środowiskowych. Zawiera `AiderDriver::detect()` oraz wygodną funkcję `aider_available()`.
+- **Claude Code** (`drivers/claude_code.rs`) — Zarządza plikami poświadczeń, konfiguracją MCP, filtrowaniem środowiska oraz strumieniowaniem stdin/stdout.
+- **Codex CLI** (`drivers/codex_cli.rs`) — Parsuje model z danych wyjściowych banera, zarządza katalogiem konfiguracji.
 
-### Driver module registry (`drivers/mod.rs`)
+### Rejestr modułów sterowników (`drivers/mod.rs`)
 
-The `mod.rs` file provides provider-detection helpers used by the runtime:
+Plik `mod.rs` dostarcza helpery detekcji dostawców używane przez runtime:
 
-- `create_driver(...)` — Factory function called by `librefang-runtime` to instantiate a driver from resolved configuration.
-- `provider_api_format(...)` — Returns the wire format identifier for a provider.
-- `is_cli_provider(...)` / `cli_provider_available(...)` — Used by `model_catalog.rs` and route handlers to detect whether a provider requires a local CLI binary and whether it's installed.
-- `detect_available_provider(...)` — Used during quick-init to find a working provider.
+- `create_driver(...)` — Funkcja fabryczna wywoływana przez `librefang-runtime` do tworzenia instancji sterownika z rozwiązanej konfiguracji.
+- `provider_api_format(...)` — Zwraca identyfikator formatu przesyłu dla dostawcy.
+- `is_cli_provider(...)` / `cli_provider_available(...)` — Używane przez `model_catalog.rs` i handlery tras do wykrywania, czy dostawca wymaga lokalnego binary CLI i czy jest zainstalowany.
+- `detect_available_provider(...)` — Używane podczas szybkiej inicjalizacji do znalezienia działającego dostawcy.
 
-## Credential Pool (`credential_pool.rs`)
+## Pula poświadczeń (`credential_pool.rs`)
 
-A thread-safe pool of API keys for a single provider, designed to be shared behind an `Arc` (`ArcCredentialPool`).
+Wątkowo-bezpieczna pula kluczy API dla pojedynczego dostawcy, zaprojektowana do współdzielenia za `Arc` (`ArcCredentialPool`).
 
-### Selection strategies
+### Strategie wyboru
 
-| Strategy | Behavior |
+| Strategia | Zachowanie |
 |---|---|
-| `FillFirst` | Always picks the highest-priority available key. Maximizes premium key utilization. |
-| `RoundRobin` (default) | Cycles through available keys in priority order. Load-balancing. |
-| `Random` | Picks a random available key using a lightweight LCG (no `rand` dependency). |
-| `LeastUsed` | Picks the key with the lowest `request_count`. |
+| `FillFirst` | Zawsze wybiera najwyższy-priorytetowo dostępny klucz. Maksymalizuje wykorzystanie kluczy premium. |
+| `RoundRobin` (domyślna) | Przechodzi przez dostępne klucze w kolejności priorytetu. Balansowanie obciążenia. |
+| `Random` | Wybiera losowy dostępny klucz za pomocą lekkiego LCG (bez zależności `rand`). |
+| `LeastUsed` | Wybiera klucz z najniższym `request_count`. |
 
-All mutable state is behind a single `Mutex<CredentialPoolInner>`, so the round-robin cursor and credential list are always read/written atomically — eliminating TOCTOU between index reads and credential selection.
+Cały stan mutowalny znajduje się za pojedynczym `Mutex<CredentialPoolInner>`, dzięki czemu kursor round-robin i lista poświadczeń są zawsze odczytywane/zapisywane atomowo — eliminując TOCTOU między odczytami indeksu a wyborem poświadczeń.
 
-### Cooldown tracking
+### Śledzenie cooldownu
 
-Credentials can be marked into three cooldown states:
+Poświadczenia mogą być oznaczone jednym z trzech stanów cooldownu:
 
-- `mark_exhausted` — 429 rate-limit. Default cooldown: 1 hour (`DEFAULT_EXHAUSTED_TTL`).
-- `mark_credit_exhausted` — 402 quota exhausted. Default cooldown: 24 hours (`DEFAULT_CREDIT_EXHAUSTED_TTL`).
-- `mark_permanent` — Auth failure. Effectively permanent (100-year sentinel timestamp).
-- `mark_success` — Clears any exhaustion marker immediately and increments `request_count`.
+- `mark_exhausted` — Limit zapytań 429. Domyślny cooldown: 1 godzina (`DEFAULT_EXHAUSTED_TTL`).
+- `mark_credit_exhausted` — Wyczerpanie limitu 402. Domyślny cooldown: 24 godziny (`DEFAULT_CREDIT_EXHAUSTED_TTL`).
+- `mark_permanent` — Błąd autoryzacji. Efektywnie permanentny (setna roczna wartość sentynelowa).
+- `mark_success` — Natychmiast czyści wszelkie znaczniki wyczerpania i inkrementuje `request_count`.
 
-### Construction
+### Konstrukcja
 
 ```rust
-// Simple — keys carry empty labels:
+// Prosta — klucze niosą puste etykiety:
 let pool = CredentialPool::new(
     vec![("sk-key-a".to_string(), 10), ("sk-key-b".to_string(), 5)],
     PoolStrategy::RoundRobin,
 );
 
-// With operator-facing labels (preferred at boot — see #5260):
+// Z etykietami operacyjnymi (preferowane przy starcie — patrz #5260):
 let pool = CredentialPool::new_with_labels(
     vec![
         ("sk-high".to_string(), "Primary".to_string(), 10),
@@ -93,25 +93,25 @@ let pool = CredentialPool::new_with_labels(
     PoolStrategy::FillFirst,
 );
 
-// Arc handle for sharing across async tasks:
+// Uchwyt Arc do współdzielenia między zadaniami async:
 let pool = new_arc_pool_with_labels(keys, PoolStrategy::RoundRobin);
 ```
 
-Labels are carried inside each `PooledCredential` and surfaced via `snapshot()` — never reconstructed by positional indexing into the original config, which would lose alignment when boot skips a key whose env var is unset.
+Etykiety są przenoszone wewnątrz każdego `PooledCredential` i udostępniane przez `snapshot()` — nigdy nie są rekonstruowane przez pozycyjne indeksowanie do oryginalnej konfiguracji, co spowodowałoby utratę wyrównania, gdy boot pomija klucz, którego zmienna env jest nieustawiona.
 
-### Diagnostics
+### Diagnostyka
 
-`snapshot()` returns `Vec<CredentialSnapshot>` — a fully redacted view with `key_hint` (`****abcd`), priority, request count, exhaustion status, and remaining cooldown seconds. Safe for HTTP/CLI/dashboard rendering. The `redact_key_hint` helper is Unicode-safe (counts by `char`, never by byte boundary).
+`snapshot()` zwraca `Vec<CredentialSnapshot>` — w pełni zanonimizowany widok z `key_hint` (`****abcd`), priorytetem, liczbą zapytań, statusem wyczerpania i pozostałymi sekundami cooldownu. Bezpieczny dla renderowania HTTP/CLI/dashboardu. Helper `redact_key_hint` jest bezpieczny dla Unicode (liczy przez `char`, nigdy przez granice bajtów).
 
-## Fallback Chain (`drivers/fallback.rs`, `drivers/fallback_chain.rs`)
+## Łańcuch awaryjny (`drivers/fallback.rs`, `drivers/fallback_chain.rs`)
 
-Composes multiple `ChainEntry` (each wrapping a driver + optional credential pool) into a failover sequence. When a driver returns an error, the chain classifies it via `FailoverReason` and decides whether to try the next entry or propagate. This is the outer retry layer; per-driver in-driver retries (see below) run inside each chain entry.
+Komponuje wiele `ChainEntry` (każde zawijające sterownik + opcjonalną pulę poświadczeń) w sekwencję failover. Gdy sterownik zwraca błąd, łańcuch klasyfikuje go przez `FailoverReason` i decyduje, czy spróbować następny wpis, czy propagować. Jest to zewnętrzna warstwa ponowień; wewnątrzsterownikowe ponowienia (patrz poniżej) działają wewnątrz każdego wpisu łańcucha.
 
-The runtime's `aux_client.rs` resolves configured providers into `ChainEntry` instances and wraps them in a `FallbackChain`.
+Runtime'owy `aux_client.rs` rozwiązuje skonfigurowanych dostawców na instancje `ChainEntry` i zawija je w `FallbackChain`.
 
-## Backoff and Retry (`backoff.rs`)
+## Wycofanie i ponowienia (`backoff.rs`)
 
-### Jittered exponential backoff
+### Wycofanie wykładnicze z jitterem
 
 ```rust
 pub fn jittered_backoff(
@@ -123,91 +123,91 @@ pub fn jittered_backoff(
 ) -> Duration
 ```
 
-Formula: `max(base * 2^(attempt-1), floor) + jitter`, where `jitter ∈ [0, jitter_ratio * base_for_jitter]`.
+Formuła: `max(base * 2^(attempt-1), floor) + jitter`, gdzie `jitter ∈ [0, jitter_ratio * base_for_jitter]`.
 
-Key properties:
-- All exponential computation happens in `f64` space and is clamped before constructing a `Duration`, avoiding overflow panics at high attempt counts.
-- The `floor` parameter (capped at 300 s) honours server-supplied `Retry-After` values deterministically, regardless of jitter.
-- Non-finite `jitter_ratio` (NaN, Infinity) is coerced to `0.0` rather than panicking.
-- The PRNG seed combines wall-clock nanoseconds with a process-global Weyl-sequence counter (`JITTER_COUNTER`), ensuring diversity across concurrent retry loops.
+Kluczowe właściwości:
+- Całe obliczenie wykładnicze dzieje się w przestrzeni `f64` i jest clampowane przed konstrukcją `Duration`, unikając panik przepełnienia przy wysokich numerach prób.
+- Parametr `floor` (ograniczony do 300 s) honoruje wartości `Retry-After` dostarczone przez serwer deterministycznie, niezależnie od jittera.
+- Nieskończony `jitter_ratio` (NaN, Infinity) jest wymuszany do `0.0` zamiast powodowania paniki.
+- Ziarno PRNG łączy nanosekundy zegara ściennego z globalnym procesowo licznikiem sekwencji Weyla (`JITTER_COUNTER`), zapewniając różnorodność między współbieżnymi pętlami ponowień.
 
-Pre-built profiles:
+Wstępnie zbudowane profile:
 
-| Function | Base | Cap | Jitter |
+| Funkcja | Baza | Limit | Jitter |
 |---|---|---|---|
 | `standard_retry_delay(attempt, floor)` | 2 s | 60 s | 50% |
 | `tool_use_retry_delay(attempt)` | 1.5 s | 60 s | 50% |
 
-### Transport error classification
+### Klasyfikacja błędów transportu
 
-`transport_error_is_retryable(&reqwest::Error)` determines whether a pre-response network failure (connection refused, TLS hiccup, read timeout) is safe to retry. Uses reqwest's structured predicates (`is_timeout`, `is_connect`, `is_request`) first, then falls back to `llm_errors::is_transient` for substring matching. This ensures a single network hiccup on a single-provider deployment doesn't fail the turn outright.
+`transport_error_is_retryable(&reqwest::Error)` określa, czy awaria sieciowa przed odpowiedzią (odmowa połączenia, błąd TLS, timeout odczytu) jest bezpieczna do ponowienia. Używa najpierw strukturalnych predykatów reqwesta (`is_timeout`, `is_connect`, `is_request`), a następnie przechodzi do `llm_errors::is_transient` dla dopasowywania podciągów. Zapewnia to, że pojedynczy zakłócenie sieciowe na wdrożeniu z pojedynczym dostawcą nie spowoduje całkowitego niepowodzenia tury.
 
-### Test support
+### Obsługa testów
 
-`enable_test_zero_backoff()` returns a `ZeroBackoffGuard` that makes all backoff delays zero for the duration of the guard. Used by integration tests to avoid real sleeps.
+`enable_test_zero_backoff()` zwraca `ZeroBackoffGuard`, który zeruje wszystkie opóźnienia wycofania na czas trwania guarda. Używane przez testy integracyjne do unikania rzeczywistych usypian.
 
-## Rate-Limit Infrastructure
+## Infrastruktura limitów zapytań
 
-### Rate-limit header tracking (`rate_limit_tracker.rs`)
+### Śledzenie nagłówków limitów zapytań (`rate_limit_tracker.rs`)
 
-`RateLimitSnapshot::from_headers()` parses provider-specific rate-limit headers (e.g. Anthropic's `anthropic-ratelimit-*` family, OpenAI's `x-ratelimit-*`). When a warning threshold is detected, the snapshot is logged at `WARN` level with a human-readable `display()`.
+`RateLimitSnapshot::from_headers()` parsuje specyficzne dla dostawcy nagłówki limitów zapytań (np. rodzinę `anthropic-ratelimit-*` Anthropic, `x-ratelimit-*` OpenAI). Gdy wykryty zostanie próg ostrzeżenia, snapshot jest logowany na poziomie `WARN` z czytelnym dla człowieka `display()`.
 
-### Shared rate guard (`shared_rate_guard.rs`)
+### Współdzielona straż limitów (`shared_rate_guard.rs`)
 
-Cross-process 429 lockout persistence. When a provider returns HTTP 429, the key is recorded with its `Retry-After` value so subsequent requests with the same key short-circuit via `pre_request_check()` without burning a network round-trip. Only 429s trigger lockouts — 529 (overloaded) is a server-capacity issue, not account-level.
+Międzyprocesowa persystencja blokad 429. Gdy dostawca zwraca HTTP 429, klucz jest rejestrowany z wartością `Retry-After`, tak że kolejne żądania z tym samym kluczem skracają drogę przez `pre_request_check()` bez zużywania rundy sieciowej. Tylko 429 wyzwalają blokady — 529 (przeciążenie) to problem wydajności serwera, nie na poziomie konta.
 
-Key identifiers are hashed via `key_id_hash()` so raw API keys never touch disk.
+Identyfikatory kluczy są haszowane przez `key_id_hash()`, tak że surowe klucze API nigdy nie trafiają na dysk.
 
-### Retry-After parsing (`retry_after.rs`)
+### Parsowanie Retry-After (`retry_after.rs`)
 
-Parses the HTTP `Retry-After` header in both delta-seconds and HTTP-date formats. `duration_to_ms_or_fallback()` converts to milliseconds with a caller-supplied fallback when the header is absent, invalid, or already elapsed.
+Parsuje nagłówek HTTP `Retry-After` w formatach delta-sekund i HTTP-date. `duration_to_ms_or_fallback()` konwertuje do milisekund z dostarczonym przez wywołującego fallbackiem, gdy nagłówek jest nieobecny, nieprawidłowy lub już upłynął.
 
-## Stream Handling
+## Obsługa strumieni
 
-### Backpressure (`stream_backpressure.rs`)
+### Ciśnienie wsteczne (`stream_backpressure.rs`)
 
-Drivers that support streaming use `tokio::sync::mpsc::Sender<StreamEvent>` to push deltas to the consumer. The `send_or_mark_dropped!` macro detects when the receiver is dropped (consumer cancelled) and aborts the upstream SSE connection rather than continuing to fetch responses for nobody.
+Sterowniki obsługujące strumieniowanie używają `tokio::sync::mpsc::Sender<StreamEvent>` do wypychania delt do konsumenta. Makro `send_or_mark_dropped!` wykrywa, gdy odbiornik został porzucony (konsument anulował), i przerywa nadrzędne połączenie SSE zamiast kontynuować pobieranie odpowiedzi dla nikogo.
 
-### UTF-8 stream decoding (`utf8_stream.rs`)
+### Dekodowanie strumieni UTF-8 (`utf8_stream.rs`)
 
-`Utf8StreamDecoder` buffers partial UTF-8 codepoints across SSE chunk boundaries. HTTP response chunks can split a multi-byte character, so raw `String::push_str` would panic or lose data. The decoder is also reused outside the LLM path — e.g. `librefang-runtime-media` uses it for MiniMax audio decode, and `password_hash.rs` uses `decode()` for SHA-256 token verification.
+`Utf8StreamDecoder` buforuje częściowe codepointy UTF-8 pomiędzy granicami fragmentów SSE. Fragmenty odpowiedzi HTTP mogą podzielić znak wielobajtowy, więc surowe `String::push_str` spowodowałoby panikę lub utratę danych. Dekoder jest również reużywany poza ścieżką LLM — np. `librefang-runtime-media` używa go do dekodowania audio MiniMax, a `password_hash.rs` używa `decode()` do weryfikacji tokenów SHA-256.
 
-### Think filtering (`think_filter.rs`)
+### Filtrowanie myślenia (`think_filter.rs`)
 
-Filters extended-thinking blocks from responses when the caller has not opted into receiving them.
+Filtruje bloki rozszerzonego myślenia z odpowiedzi, gdy wywołujący nie wyraził na nie zgody.
 
-## Prompt Caching (Anthropic)
+## Buforowanie promptów (Anthropic)
 
-The Anthropic driver supports configurable cache breakpoint strategies via `PromptCacheStrategy`:
+Sterownik Anthropic obsługuje konfigurowalne strategie punktów przerwania buforowania przez `PromptCacheStrategy`:
 
-- `Disabled` — No markers. Master switch (`request.prompt_caching = false`) overrides everything.
-- `SystemOnly` — Single marker on the system prompt block.
-- `SystemAndN` — System prompt + last tool + rolling window of the last N messages. Capped at Anthropic's 4-breakpoint limit, with system and tools taking priority.
+- `Disabled` — Brak znaczników. Główny przełącznik (`request.prompt_caching = false`) nadpisuje wszystko.
+- `SystemOnly` — Pojedynczy znacznik na bloku promptu systemowego.
+- `SystemAndN` — Prompt systemowy + ostatnie narzędzie + przesuwna okno ostatnich N wiadomości. Ograniczone do limitu 4 punktów przerwania Anthropic, z priorytetem dla systemu i narzędzi.
 
-The 1-hour cache TTL requires the `anthropic-beta: extended-cache-ttl-2025-04-11` header, which is conditionally emitted via `request_uses_1h_cache()`.
+1-godzinny TTL bufora wymaga nagłówka `anthropic-beta: extended-cache-ttl-2025-04-11`, który jest emitowany warunkowo przez `request_uses_1h_cache()`.
 
-## Caller Trace Headers (`drivers/trace_headers.rs`)
+## Nagłówki śledzenia wywołującego (`drivers/trace_headers.rs`)
 
-Builds the `x-librefang-{agent,session,step}-id` header set from `CompletionRequest` fields. Controlled per-driver via `with_emit_caller_trace_headers(bool)` (mirrors `KernelConfig.telemetry.emit_caller_trace_headers`). Non-trace `extra_headers` are unaffected by this flag.
+Buduje zestaw nagłówków `x-librefang-{agent,session,step}-id` z pól `CompletionRequest`. Kontrolowany per-sterownik przez `with_emit_caller_trace_headers(bool)` (odzwierciedla `KernelConfig.telemetry.emit_caller_trace_headers`). Nieśledzące `extra_headers` nie są dotknięte przez tę flagę.
 
-## Token Rotation (`drivers/token_rotation.rs`)
+## Rotacja tokenów (`drivers/token_rotation.rs`)
 
-`advance()` rotates OAuth tokens (used by Copilot, ChatGPT) on expiry. Called from `workflow.rs` in the kernel, which tests cancellation behavior during the rotation sleep.
+`advance()` rotuje tokeny OAuth (używane przez Copilot, ChatGPT) przy wygaśnięciu. Wywoływane z `workflow.rs` w jądrze, które testuje zachowanie anulowania podczas usypiania rotacji.
 
-## Error Handling
+## Obsługa błędów
 
-The crate re-exports `LlmError` from `librefang-llm-driver` with rich variants:
+Crate reeksportuje `LlmError` z `librefang-llm-driver` z bogatymi wariantami:
 
-- `RateLimited { retry_after_ms, message }` — HTTP 429, with server-supplied delay.
-- `Overloaded { retry_after_ms }` — HTTP 529 (Anthropic capacity).
-- `Api { status, message, code }` — Non-success status, with optional `ProviderErrorCode` for typed classification.
-- `Http(String)` — Transport-level failure.
+- `RateLimited { retry_after_ms, message }` — HTTP 429, z opóźnieniem dostarczonym przez serwer.
+- `Overloaded { retry_after_ms }` — HTTP 529 (wydajność Anthropic).
+- `Api { status, message, code }` — Status nie będący sukcesem, z opcjonalnym `ProviderErrorCode` dla typowanej klasyfikacji.
+- `Http(String)` — Awaria na poziomie transportu.
 
-`ProviderErrorCode` (in `llm_errors`) enables `FailoverReason` classification without substring-matching human-readable error messages. The Anthropic driver's `anthropic_error_code()` maps provider-specific `error.type` discriminants to these codes.
+`ProviderErrorCode` (w `llm_errors`) umożliwia klasyfikację `FailoverReason` bez dopasowywania podciągów czytelnych dla człowieka komunikatów błędów. Funkcja `anthropic_error_code()` sterownika Anthropic mapuje dyskryminanty specyficzne dla dostawcy `error.type` na te kody.
 
-## Example: Token Estimation Corpus Capture
+## Przykład: Przechwytywanie korpusu szacowania tokenów
 
-The `examples/capture_token_truth.rs` binary is a human-run tool for building the token-estimation benchmark ground truth. It reads the committed corpus, sends each sample with `max_tokens = 1` and prompt caching disabled, and records the provider-reported `usage.input_tokens`. Never run in CI.
+Binary `examples/capture_token_truth.rs` jest narzędziem uruchamianym przez człowieka do budowania truth ground dla benchmarku szacowania tokenów. Czyta zatwierdzony korpus, wysyła każdy próbkę z `max_tokens = 1` i wyłączonym buforowaniem promptów, i rejestruje zgłaszane przez dostawcę `usage.input_tokens`. Nigdy nie uruchamiać w CI.
 
 ```bash
 OPENAI_API_KEY=<key> cargo run -p librefang-llm-drivers \
@@ -216,14 +216,14 @@ OPENAI_API_KEY=<key> cargo run -p librefang-llm-drivers \
   --out crates/librefang-runtime/tests/fixtures/token_estimation/tokens_truth.json
 ```
 
-## Key Dependencies
+## Kluczowe zależności
 
-| Crate | Role |
+| Crate | Rola |
 |---|---|
-| `librefang-llm-driver` | Trait definitions, error types, request/response types |
-| `librefang-types` | Domain types (`Message`, `ContentBlock`, `TokenUsage`, `ToolDefinition`, config enums) |
-| `librefang-http` | Shared HTTP client with proxy support (`proxied_client`, `proxied_client_fallback`) |
-| `reqwest` | HTTP transport |
-| `tokio` | Async runtime, subprocess management, MPSC channels |
-| `futures` | Stream combinators for SSE parsing |
-| `zeroize` | API key memory scrubbing (`Zeroizing<String>`) |
+| `librefang-llm-driver` | Definicje cech, typy błędów, typy żądań/odpowiedzi |
+| `librefang-types` | Typy domenowe (`Message`, `ContentBlock`, `TokenUsage`, `ToolDefinition`, enumy konfiguracji) |
+| `librefang-http` | Współdzielony klient HTTP z obsługą proxy (`proxied_client`, `proxied_client_fallback`) |
+| `reqwest` | Transport HTTP |
+| `tokio` | Runtime asynchroniczny, zarządzanie procesami podrzędnymi, kanały MPSC |
+| `futures` | Kombinatory strumieniowe do parsowania SSE |
+| `zeroize` | Czyszczenie pamięci kluczy API (`Zeroizing<String>`) |
